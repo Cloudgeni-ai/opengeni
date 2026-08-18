@@ -475,3 +475,22 @@ export function customApiPreviewDiff(
     unchangedTools: [...after].filter((tool) => before.has(tool)).length,
   };
 }
+
+/**
+ * The installed custom-API instances a search should still show. A blank query
+ * keeps every instance; otherwise the same words the connector search uses are
+ * matched against the account's name, its provider domain, and its base URL, so
+ * searching for one connector never leaves the whole custom list on screen.
+ */
+export function filterCustomApiInstances(
+  instances: ApiIntegrationInstallationSummary[],
+  query: string,
+): ApiIntegrationInstallationSummary[] {
+  const term = query.trim().toLowerCase();
+  if (!term) return instances;
+  return instances.filter((instance) =>
+    [instance.displayName, instance.name, instance.providerDomain, instance.baseUrl]
+      .filter((value): value is string => typeof value === "string")
+      .some((value) => value.toLowerCase().includes(term)),
+  );
+}

@@ -1,5 +1,5 @@
 import { FolderIcon, Loader2Icon } from "lucide-react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import {
   IntegrationChipView,
@@ -45,16 +45,30 @@ export function IntegrationSheet({
   model,
   open,
   onOpenChange,
+  restoreFocusRef,
 }: {
   model: IntegrationViewModel | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * The element that opened this sheet, captured synchronously by the route.
+   * The sheet is controlled and has no Radix trigger, so without this the
+   * closing focus scope has nothing to return to and focus falls to the body.
+   */
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         className="flex w-full flex-col gap-0 border-border bg-bg p-0 sm:max-w-[32rem]"
         aria-labelledby={model ? `integration-sheet-title-${model.id}` : undefined}
+        onCloseAutoFocus={(event) => {
+          const opener = restoreFocusRef?.current ?? null;
+          if (restoreFocusRef) restoreFocusRef.current = null;
+          if (!opener?.isConnected) return;
+          event.preventDefault();
+          opener.focus();
+        }}
       >
         {model ? <IntegrationSheetBody model={model} /> : null}
       </SheetContent>
@@ -193,7 +207,12 @@ function ConnectionFacts({ facts }: { facts: IntegrationFact[] }) {
 }
 
 function AccessBlock({ access }: { access: IntegrationAccess }) {
-  const itemKeys = contentKeys(access.items.map((item) => `${item.name}:${item.meta ?? ""}`));
+  // Prefer the entry's own stable identity; only content-derived keys need the
+  // duplicate suffix. Keying an account row on its instance key keeps it
+  // mounted when its status text flips, so focus never jumps off its action.
+  const itemKeys = contentKeys(
+    access.items.map((item) => item.id ?? `${item.name}:${item.meta ?? ""}`),
+  );
   return (
     <Block
       title={access.title}
@@ -222,32 +241,72 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
             return (
               <li
                 key={itemKey}
-                className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs"
+                data-integration-access-item={item.id ?? item.name}
+                className="rounded-lg border border-border bg-surface px-3 py-2 text-xs"
               >
-                {item.status ? (
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      "size-1.5 shrink-0 rounded-full",
-                      item.status === "ok" ? "bg-status-idle" : "bg-status-waiting",
+                <div className="flex items-center gap-2.5">
+                  {item.status ? (
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "size-1.5 shrink-0 rounded-full",
+                        item.status === "ok" ? "bg-status-idle" : "bg-status-waiting",
+                      )}
+                    />
+                  ) : (
+                    <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
+                  {item.meta ? (
+                    <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
+                  ) : null}
+                  {(item.actions ?? []).map((itemAction) => (
+                    <button
+                      key={itemAction.label}
+                      type="button"
+                      onClick={itemAction.onClick}
+                      disabled={itemAction.disabled}
+                      aria-describedby={describedBy(itemAction.disclosureId)}
+                      className={cn(
+                        "shrink-0 rounded-sm text-2xs font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
+                        itemAction.destructive
+                          ? "text-fg-muted hover:text-status-failed"
+                          : "text-brand",
+                      )}
+                    >
+                      {itemAction.label}
+                    </button>
+                  ))}
+                </div>
+                {item.subItems && item.subItems.length === 0 && item.subItemsEmptyMessage ? (
+                  <p className="mt-1.5 border-t border-border/60 pt-1.5 pl-4 text-2xs leading-4 text-fg-muted">
+                    {item.subItemsEmptyMessage}
+                  </p>
+                ) : null}
+                {item.subItems && item.subItems.length > 0 ? (
+                  <ul className="mt-1.5 space-y-1 border-t border-border/60 pt-1.5">
+                    {contentKeys(item.subItems.map((sub) => `${sub.name}:${sub.meta ?? ""}`)).map(
+                      (subKey, subIndex) => {
+                        const sub = item.subItems![subIndex]!;
+                        return (
+                          <li key={subKey} className="flex items-center gap-2 pl-4">
+                            <FolderIcon
+                              className="size-3 shrink-0 text-fg-subtle"
+                              aria-hidden="true"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-2xs text-fg-muted">
+                              {sub.name}
+                            </span>
+                            {sub.meta ? (
+                              <span className="shrink-0 text-2xs text-fg-subtle">{sub.meta}</span>
+                            ) : null}
+                          </li>
+                        );
+                      },
                     )}
-                  />
-                ) : (
-                  <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
-                )}
-                <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
-                {item.meta ? (
-                  <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
+                  </ul>
                 ) : null}
-                {item.action ? (
-                  <button
-                    type="button"
-                    onClick={item.action.onClick}
-                    className="shrink-0 text-2xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm"
-                  >
-                    {item.action.label}
-                  </button>
-                ) : null}
+                {item.detail ?? null}
               </li>
             );
           })}

@@ -174,7 +174,9 @@ describe("useOutlookMailIntegration", () => {
       expect(model?.access?.editLabel).toBe("+ Add account");
       expect(model?.access?.items).toHaveLength(1);
       expect(model?.access?.items[0]).toMatchObject({ name: "ana@acme.com", status: "ok" });
-      expect(model?.access?.items[0]?.action).toBeUndefined();
+      // A healthy account offers no Reconnect, but always a per-instance Remove:
+      // a connected curated account must never be un-removable.
+      expect(model?.access?.items[0]?.actions?.map((entry) => entry.label)).toEqual(["Remove"]);
       expect(model?.footer.kind).toBe("locked");
       expect(model?.tools?.tools).toEqual(["mail.list", "mail.send"]);
     } finally {
@@ -182,7 +184,7 @@ describe("useOutlookMailIntegration", () => {
     }
   });
 
-  test("an unhealthy account rolls the row chip up to warn and offers an inline Reconnect", async () => {
+  test("an unhealthy account rolls the row chip up to warn and offers Reconnect plus Remove", async () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
@@ -194,13 +196,16 @@ describe("useOutlookMailIntegration", () => {
     try {
       expect(model?.chip).toEqual({ label: "Needs attention", tone: "warn" });
       expect(model?.access?.items[0]).toMatchObject({ status: "warn" });
-      expect(model?.access?.items[0]?.action?.label).toBe("Reconnect");
+      expect(model?.access?.items[0]?.actions?.map((entry) => entry.label)).toEqual([
+        "Reconnect",
+        "Remove",
+      ]);
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("two accounts stay one row: the healthy one carries no action, the unhealthy one does", async () => {
+  test("two accounts stay one row, each with its own removal affordance", async () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
@@ -219,6 +224,12 @@ describe("useOutlookMailIntegration", () => {
     try {
       expect(model?.id).toBe("outlook-mail");
       expect(model?.access?.items).toHaveLength(2);
+      expect(model?.access?.items.map((entry) => entry.id)).toEqual(["account-1", "account-2"]);
+      expect(model?.access?.items[0]?.actions?.map((entry) => entry.label)).toEqual(["Remove"]);
+      expect(model?.access?.items[1]?.actions?.map((entry) => entry.label)).toEqual([
+        "Reconnect",
+        "Remove",
+      ]);
       expect(model?.chip.tone).toBe("warn");
     } finally {
       await rendered.unmount();

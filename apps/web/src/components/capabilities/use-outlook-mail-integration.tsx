@@ -11,19 +11,28 @@ export function useOutlookMailIntegration({
   workspaceId,
   definitions,
   instances,
+  refresh,
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
     id: "outlook-mail",
     name: "Outlook Mail",
     description: "Read, send, and organize mail in a connected Outlook mailbox.",
-    mark: { monogram: "OM" },
+    mark: { icon: "mail" },
     definitionId: OUTLOOK_MAIL_DEFINITION_ID,
     workspaceId,
     definitions,
     instances,
+    ...(refresh ? { refresh } : {}),
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 }

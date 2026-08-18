@@ -96,24 +96,32 @@ describe("IntegrationRow", () => {
       const rowContainers = [...rendered.container.querySelectorAll("[data-integration-row]")];
       expect(rowContainers).toHaveLength(3);
       // Every row's body-open button is a real sibling of the state indicator,
-      // never nested inside it - one clean click target per row.
+      // never nested inside it - one clean click target per row. Its accessible
+      // name carries the connection state, so the state is never colour-only.
       for (const row of rowContainers) {
         expect(row.tagName).not.toBe("BUTTON");
-        const openButton = row.querySelector('button[aria-label$=" details"]');
+        const openButton = row.querySelector("button");
         expect(openButton).not.toBeNull();
         expect(openButton?.querySelector("button")).toBeNull();
       }
       expect(rowContainers[0]?.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Slack details",
+        "Slack. Connected",
       );
       expect(rowContainers[1]?.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "GitHub details",
+        "GitHub. Not connected",
       );
+      expect(rowContainers[2]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Google Drive. Set up by an admin",
+      );
+      // The indicator itself is decorative, so each row still exposes its state
+      // as text for assistive tech and forced-colours users.
+      expect(rowContainers[0]?.textContent).toContain("Connected");
+      expect(rowContainers[2]?.textContent).toContain("Set up by an admin");
       for (const row of rowContainers) {
         expect(row.textContent).not.toContain("scope");
       }
       const openButtons = rowContainers.map(
-        (row) => row.querySelector('button[aria-label$=" details"]') as HTMLButtonElement,
+        (row) => row.querySelector("button") as HTMLButtonElement,
       );
       await act(async () => openButtons[1]!.click());
       expect(onOpen).toHaveBeenCalledTimes(1);
@@ -378,7 +386,7 @@ describe("IntegrationSheet", () => {
                   name: "ben@acme.com",
                   status: "warn",
                   meta: "Needs attention",
-                  action: { label: "Reconnect", onClick: onReconnect },
+                  actions: [{ label: "Reconnect", onClick: onReconnect }],
                 },
               ],
             },

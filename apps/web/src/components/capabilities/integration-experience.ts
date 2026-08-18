@@ -1,5 +1,3 @@
-import type { IntegrationDefinitionSummary } from "@/types";
-
 export type IntegrationExperienceIcon = "calendar" | "cloud" | "contacts" | "files" | "mail";
 
 export type IntegrationExperienceCapability = {
@@ -10,26 +8,6 @@ export type IntegrationExperienceCapability = {
 export type IntegrationExperiencePermission = {
   label: string;
   description: string;
-};
-
-export type IntegrationExperienceDescriptor = {
-  serviceName: string;
-  providerName: string;
-  icon: IntegrationExperienceIcon;
-  introduction: string;
-  capabilities: IntegrationExperienceCapability[];
-  permissionSummary: string;
-  permissions: IntegrationExperiencePermission[];
-  technicalDetails: {
-    providerDomain: string;
-    oauthScopes: string[];
-  };
-};
-
-type PresentationDefinition = Pick<IntegrationDefinitionSummary, "id" | "name" | "summary"> & {
-  provider: { id: string; domain: string };
-  authentication: { scopes: string[] };
-  presentation?: IntegrationPresentationCopy | undefined;
 };
 
 /**
@@ -68,52 +46,6 @@ const COMMON_SCOPE_LABELS: Readonly<Record<string, { label: string; description:
     description: "Show which Microsoft account is connected.",
   },
 };
-
-const PROVIDER_NAMES: Readonly<Record<string, string>> = {
-  discord: "Discord",
-  google: "Google",
-  hubspot: "HubSpot",
-  microsoft: "Microsoft",
-  notion: "Notion",
-  stripe: "Stripe",
-};
-
-/**
- * Builds presentation-only copy from a Definition. Reviewed copy arrives on
- * the definition's server-supplied `presentation`; every fallback below keeps
- * an uncurated definition rendering exactly as before. The returned metadata
- * never grants a scope, selects a Connection, or replaces server-side
- * authorization.
- */
-export function integrationExperience(
-  definition: PresentationDefinition,
-): IntegrationExperienceDescriptor {
-  const reviewed = definition.presentation;
-  const providerName = reviewed?.providerName ?? friendlyProviderName(definition.provider);
-  return {
-    serviceName: definition.name,
-    providerName,
-    icon: reviewed?.icon ?? "cloud",
-    introduction:
-      reviewed?.introduction ?? `Let agents use ${definition.name} through the account you choose.`,
-    capabilities: reviewed?.capabilities ?? [
-      {
-        title: `Use ${definition.name} with agents`,
-        description:
-          definition.summary.trim() ||
-          "Use the reviewed tools published by this integration without exposing credentials.",
-      },
-    ],
-    permissionSummary:
-      reviewed?.permissionSummary ??
-      `${providerName} will show the exact access request before you approve it. OpenGeni uses that access only through this integration's reviewed tools.`,
-    permissions: presentationPermissions(definition.authentication.scopes, reviewed),
-    technicalDetails: {
-      providerDomain: definition.provider.domain,
-      oauthScopes: [...definition.authentication.scopes],
-    },
-  };
-}
 
 /**
  * Human labels for the scopes a connect will request: the provider-neutral
@@ -186,27 +118,6 @@ export function capabilityPresentation(metadata: unknown): IntegrationPresentati
     if (Object.keys(scopeLabels).length > 0) copy.scopeLabels = scopeLabels;
   }
   return Object.keys(copy).length > 0 ? copy : undefined;
-}
-
-function friendlyProviderName(provider: { id: string; domain: string }): string {
-  const id = provider.id.trim();
-  const reviewedName = PROVIDER_NAMES[id.toLowerCase()];
-  if (reviewedName) return reviewedName;
-  if (id) return titleCase(id.replaceAll(/[-_]+/g, " "));
-  const domainPart = provider.domain
-    .replace(/^www\./, "")
-    .split(".")
-    .filter(Boolean)
-    .at(-2);
-  return domainPart ? titleCase(domainPart) : "the provider";
-}
-
-function titleCase(value: string): string {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`)
-    .join(" ");
 }
 
 function deduplicatePermissions(

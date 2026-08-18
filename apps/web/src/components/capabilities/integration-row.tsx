@@ -1,20 +1,37 @@
 import {
   AlertTriangleIcon,
+  CalendarIcon,
   CheckIcon,
   ChevronRightIcon,
+  CloudIcon,
+  ContactIcon,
+  FilesIcon,
   Loader2Icon,
+  MailIcon,
   PlusIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ComponentType } from "react";
 
 import type {
   IntegrationChip,
   IntegrationMark,
+  IntegrationMarkIcon,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { cn } from "@/lib/utils";
 
-/** Provider mark: the hosted logo when we have one, otherwise a monogram. */
+const MARK_ICONS: Record<IntegrationMarkIcon, ComponentType<{ className?: string }>> = {
+  mail: MailIcon,
+  calendar: CalendarIcon,
+  contacts: ContactIcon,
+  files: FilesIcon,
+  cloud: CloudIcon,
+};
+
+/**
+ * Provider mark: the hosted logo when we have one, then the named product
+ * glyph, and a monogram only as the last resort.
+ */
 export function IntegrationMarkView({
   mark,
   name,
@@ -29,6 +46,14 @@ export function IntegrationMarkView({
     "grid shrink-0 place-items-center overflow-hidden rounded-lg border border-border bg-bg",
     size === "md" ? "size-10" : "size-8",
   );
+  if ("icon" in mark) {
+    const Icon = MARK_ICONS[mark.icon];
+    return (
+      <span className={cn(box, "text-fg-muted")} aria-hidden="true" title={name}>
+        <Icon className={size === "md" ? "size-5" : "size-4"} />
+      </span>
+    );
+  }
   if ("logoSrc" in mark && !failed) {
     return (
       <span className={box} aria-hidden="true">
@@ -82,6 +107,10 @@ export function IntegrationChipView({ chip }: { chip: IntegrationChip }) {
  * only interactive one - the caller wires `onQuickConnect` for it - every
  * other tone renders as a decorative, non-interactive mark. `loading`
  * (undefined tone lookup) is handled by the caller passing `busy`.
+ *
+ * The glyph itself is always `aria-hidden`, so every non-interactive state
+ * carries the chip label as visually hidden text: colour and shape are never
+ * the only way to tell Connected from Needs attention (WCAG 1.1.1, 1.4.1).
  */
 export function IntegrationStateIndicator({
   chip,
@@ -94,20 +123,20 @@ export function IntegrationStateIndicator({
   onQuickConnect?: () => void;
 }) {
   const circle = "grid size-7 shrink-0 place-items-center rounded-full border";
+  const label = <span className="sr-only">{busy ? "Working" : chip.label}</span>;
   if (busy) {
     return (
-      <span className={cn(circle, "border-border bg-surface text-fg-subtle")} aria-hidden="true">
-        <Loader2Icon className="size-3.5 animate-spin" />
+      <span className={cn(circle, "border-border bg-surface text-fg-subtle")}>
+        <Loader2Icon className="size-3.5 animate-spin" aria-hidden="true" />
+        {label}
       </span>
     );
   }
   if (chip.tone === "ok") {
     return (
-      <span
-        className={cn(circle, "border-status-idle/30 bg-status-idle/10 text-status-idle")}
-        aria-hidden="true"
-      >
-        <CheckIcon className="size-3.5" />
+      <span className={cn(circle, "border-status-idle/30 bg-status-idle/10 text-status-idle")}>
+        <CheckIcon className="size-3.5" aria-hidden="true" />
+        {label}
       </span>
     );
   }
@@ -115,9 +144,9 @@ export function IntegrationStateIndicator({
     return (
       <span
         className={cn(circle, "border-status-waiting/30 bg-status-waiting/10 text-status-waiting")}
-        aria-hidden="true"
       >
-        <AlertTriangleIcon className="size-3.5" />
+        <AlertTriangleIcon className="size-3.5" aria-hidden="true" />
+        {label}
       </span>
     );
   }
@@ -137,19 +166,16 @@ export function IntegrationStateIndicator({
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
         )}
       >
-        <PlusIcon className="size-3.5" />
+        <PlusIcon className="size-3.5" aria-hidden="true" />
       </button>
     );
   }
-  // idle without a quick-connect action, or plain (admin-managed): a plain
-  // decorative mark, never a dead click target.
+  // idle without a quick-connect action, or plain (admin-managed): the neutral
+  // dot, never a plus that looks like the interactive one but does nothing.
   return (
-    <span className={cn(circle, "border-border text-fg-subtle")} aria-hidden="true">
-      {chip.tone === "idle" ? (
-        <PlusIcon className="size-3.5" />
-      ) : (
-        <span className="size-1.5 rounded-full bg-fg-subtle/50" />
-      )}
+    <span className={cn(circle, "border-border text-fg-subtle")}>
+      <span className="size-1.5 rounded-full bg-fg-subtle/50" aria-hidden="true" />
+      {label}
     </span>
   );
 }
@@ -164,11 +190,14 @@ export function IntegrationRow({
   model,
   onOpen,
   onQuickConnect,
+  busy = false,
 }: {
   model: Pick<IntegrationViewModel, "id" | "name" | "description" | "mark" | "chip">;
   onOpen: () => void;
   /** Only passed when a fast one-click/one-dialog connect action exists for the current state. */
   onQuickConnect?: () => void;
+  /** True while this integration has a real mutation in flight (its adapter says so). */
+  busy?: boolean;
 }) {
   return (
     <div
@@ -181,7 +210,7 @@ export function IntegrationRow({
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`${model.name} details`}
+        aria-label={`${model.name}. ${model.chip.label}`}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left",
           "hover:bg-accent",
@@ -199,8 +228,8 @@ export function IntegrationRow({
       <span className="flex shrink-0 items-center">
         <IntegrationStateIndicator
           chip={model.chip}
-          busy={model.chip.tone === "plain" && model.chip.label === "Loading"}
-          onQuickConnect={onQuickConnect}
+          busy={busy || (model.chip.tone === "plain" && model.chip.label === "Loading")}
+          {...(onQuickConnect ? { onQuickConnect } : {})}
         />
       </span>
     </div>

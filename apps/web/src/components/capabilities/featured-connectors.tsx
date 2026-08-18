@@ -98,7 +98,7 @@ export function FeaturedConnectorTile({
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`${item.name} details`}
+        aria-label={`${item.name}. ${chip.label}`}
         className="flex min-w-0 flex-col gap-2.5 rounded-lg text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         <span className="flex min-w-0 items-center gap-2.5">
@@ -141,7 +141,7 @@ export function FeaturedConnectorTile({
         ) : null}
       </button>
       <span className="flex shrink-0 items-center justify-end">
-        <IntegrationStateIndicator chip={chip} onQuickConnect={onQuickConnect} />
+        <IntegrationStateIndicator chip={chip} {...(onQuickConnect ? { onQuickConnect } : {})} />
       </span>
     </div>
   );

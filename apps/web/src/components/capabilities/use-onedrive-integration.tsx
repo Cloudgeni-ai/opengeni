@@ -11,19 +11,28 @@ export function useOneDriveIntegration({
   workspaceId,
   definitions,
   instances,
+  refresh,
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
     id: "onedrive",
     name: "OneDrive",
     description: "Files, folders, and sharing links in a connected OneDrive account.",
-    mark: { monogram: "OD" },
+    mark: { icon: "cloud" },
     definitionId: ONEDRIVE_DEFINITION_ID,
     workspaceId,
     definitions,
     instances,
+    ...(refresh ? { refresh } : {}),
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 }

@@ -7,6 +7,7 @@ import {
   capabilityCuration,
   capabilityItemKindLabel,
   capabilityStateChip,
+  type ConnectionHealth,
 } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
@@ -20,17 +21,20 @@ import type { CapabilityCatalogItem } from "@/types";
 export const CapabilityTile = memo(function CapabilityTile({
   item,
   logoSrc,
+  health,
   onOpen,
   onQuickConnect,
 }: {
   item: CapabilityCatalogItem;
   logoSrc: string | null;
+  /** Connection health, so an enabled-but-broken connector never renders as a green check. */
+  health?: ConnectionHealth;
   onOpen: () => void;
   onQuickConnect?: () => void;
 }) {
   const authHint = capabilityAuthHint(item);
   const curation = capabilityCuration(item);
-  const chip = capabilityStateChip(item);
+  const chip = capabilityStateChip(item, health);
   return (
     <div
       data-capability-catalog-tile={item.id}
@@ -42,7 +46,7 @@ export const CapabilityTile = memo(function CapabilityTile({
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`${item.name} details`}
+        aria-label={`${item.name}. ${chip.label}`}
         className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
@@ -76,7 +80,7 @@ export const CapabilityTile = memo(function CapabilityTile({
         </div>
       </button>
       <span className="flex shrink-0 items-center">
-        <IntegrationStateIndicator chip={chip} onQuickConnect={onQuickConnect} />
+        <IntegrationStateIndicator chip={chip} {...(onQuickConnect ? { onQuickConnect } : {})} />
       </span>
     </div>
   );

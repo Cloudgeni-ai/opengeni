@@ -200,7 +200,14 @@ Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
 Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
-identity. These definitions are adapter-owned and cannot be invented or
+identity. In the web app these live in
+`apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
+per account entry inside the integration sheet's **Connected accounts** block
+through the lazy `integration-account-facets.tsx` boundary (which also carries
+the provider-specific Google Drive knowledge-source dialog). The panel is
+scoped to exactly one `capabilityId`/`instanceKey`/`instanceVersion` and is
+omitted entirely for a definition that publishes no facets. These definitions
+are adapter-owned and cannot be invented or
 rewritten by a browser request. Operators configure only a definition's bounded
 schema on one exact Integration instance, inheriting that instance's exact
 Connection and Personal/workspace authority. Configure, pause, resume, and
@@ -235,12 +242,12 @@ rich schemas cannot be submitted as silently incomplete primitive config.
 The Definition inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable facet
 schemas/capability facts). Deployment OAuth client identifiers, secrets, and
-provider cursors never cross this boundary. `/capabilities`
-renders that inventory as one service card per immutable definition and one
-independent row per named account instance; “Add another account” always creates
-a new Connection/binding instead of replacing a sibling.
+provider cursors never cross this boundary. `/capabilities` renders that
+inventory as exactly one provider row per integration, with every named account
+instance folded into that row's **Connected accounts** block; “+ Add account”
+always creates a new Connection/binding instead of replacing a sibling.
 
-X and Reddit use the same multi-account control-center model through a
+X and Reddit use the same multi-account model through a
 first-party social provider adapter. Their catalog cards are
 `provider_integration` projections derived from every visible Personal or
 workspace `social_connections` row, not from one preferred singleton. The safe
@@ -264,10 +271,16 @@ The web route keeps orchestration separate from catalog presentation.
 `capability-catalog-sections.tsx` owns the typed discovery controls, Enabled
 section, Browse states, registry fallback, and incremental window sentinel;
 provider, source-package, Pack, and connection workflows remain in their owning
-components/hooks. Browse renders at most 48 catalog tiles initially and advances
-in bounded windows near the scroll edge. Logos stay lazy, integration/source
-control centers are code-split, and filtering/searching remains client-local and
-deterministic after the single catalog projection arrives. Browser acceptance
+components/hooks. The whole workspace-scoped data load lives in
+`use-capabilities-catalog.tsx`, which fences every response on the exact client
+and workspace it was requested for, so switching workspaces mid-flight can never
+populate the new workspace with the previous one's connections, definitions, or
+installed instances. Browse renders at most 48 catalog tiles initially and
+advances in bounded windows near the scroll edge. Logos stay lazy, the custom-API
+wizard, the Drive folder picker, and the per-account facets panel are code-split,
+and filtering/searching remains client-local and deterministic after the single
+catalog projection arrives - including the Custom APIs list, which answers the
+same query as every other connector instead of ignoring it. Browser acceptance
 exercises a delayed 5,000-row response, proves the initial window bound, and
 checks responsive filtering alongside 320/375/768/1280/1440 light/dark,
 forced-colors, reduced-motion, keyboard, coarse-pointer, and Axe states.
@@ -484,22 +497,35 @@ branch; every account/provider difference lives in the adapters.
 
 - Each row shows mark, name, one-line description, and a compact circular
   connection-state indicator in place of a text chip: a filled check for
-  `Connected`, a triangle for `Needs attention`, a plus for `Not connected`, a
-  muted dot for `Set up by an admin`, and a spinner while `Loading`. The click
-  target is split: the large body button opens the detail sheet (the full
-  sheet when connected, a lightweight read-only preview otherwise); the small
-  trailing indicator is a separate sibling button that is the one fast
-  connect path when the current state is `Not connected` and a dialog-free or
-  one-dialog connect action exists - for every other state it is purely
-  decorative, never a dead click target. No inline scope text or per-provider
-  buttons on the row itself.
+  `Connected`, a triangle for `Needs attention`, a plus for `Not connected`
+  *when a fast connect path exists*, a muted dot for every other
+  non-interactive state (`Set up by an admin`, and `Not connected` with no
+  fast path), and a spinner while `Loading` or while that row's own mutation
+  is in flight. The click target is split: the large body button opens the
+  detail sheet, and its accessible name is `"<name>. <state>"`; the small
+  trailing indicator is a separate sibling button that is the one fast connect
+  path when the current state is `Not connected`, a dialog-free or one-dialog
+  connect action exists, and nothing is already running (guarding on that
+  in-flight state is what stops a double click from starting two redirects) -
+  for every other state it is purely decorative, never a dead click target,
+  and carries its state as visually hidden text so colour and shape are never
+  the only signal. There is one sheet, always the same one; there is no
+  lightweight preview variant. No inline scope text or per-provider buttons on
+  the row itself.
 - The detail sheet is a fixed frame with blocks in fixed order, empty blocks
   omitted. **Connection** is label/value facts; **Access** is the scoped
   resources (channels, repositories, folders, projects and spaces) with
   exactly one edit affordance - for a multi-account provider this block
-  becomes **Connected accounts**: one entry per account with a status dot
-  (`ok`/`warn`), optional meta text, and an optional inline per-item action
-  (e.g. `Reconnect`), plus a `+ Add account` edit-link in the block header;
+  becomes **Connected accounts**: one entry per account, keyed on its own
+  `instanceKey` so a status change never remounts the row and steals focus,
+  with a status dot (`ok`/`warn`), optional meta text, its own inline
+  per-item actions (`Reconnect` only when that account is unhealthy,
+  `Remove` always, confirmed before it destroys anything), and its
+  per-instance **Facets** panel (below) expanded in place under the entry.
+  Google Drive's primary knowledge connection is one such entry, and the
+  folders it contributes stay visible as its sub-entries rather than
+  disappearing when a second Drive account exists. A `+ Add account`
+  edit-link sits in the block header;
   **Options** are switches (and, where a setting is a choice, a compact
   select); **Tools** is a flat, purely informational, monospace chip grid of
   the tool/function names the connection actually publishes (no toggles, no
@@ -545,7 +571,14 @@ behavioral difference the connect flow needs, so Custom API connectors use the
 exact same click-split/quick-connect treatment as any other Connector.
 Connection setup defaults to workspace-owned; a personal connection requires
 the explicit **Connect only for me** choice (official Gmail and Slack's hosted
-MCP are the personal-only exceptions).
+MCP are the personal-only exceptions). The row-icon fast path resolves that
+ownership through exactly the same rule as the detail sheet
+(`capabilityQuickConnectPlan` in `apps/web/src/lib/capabilities.ts`), so a
+one-click connect can never start a workspace-owned binding for a personal-only
+connector. It also stores an api-key credential under the field's **wire header
+name**, never its human label, and declines the fast path entirely for a
+connector declaring more than one required header - a single-field dialog would
+otherwise store half a credential that only fails later as a 401.
 A **Featured** strip of tiles driven by curated `metadata.curation.featured`
 leads, followed by the searchable long tail: the enabled catalog strip, then a
 **Custom APIs** list of already-installed workspace-defined instances

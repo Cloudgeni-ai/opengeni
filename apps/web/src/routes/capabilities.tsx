@@ -35,7 +35,6 @@ import {
 } from "@/components/capabilities/capability-catalog-sections";
 import {
   CapabilityDetailSheet,
-  DEFAULT_CONNECTION_OWNERSHIP,
   type ConnectAction,
 } from "@/components/capabilities/capability-detail-sheet";
 import {
@@ -45,6 +44,7 @@ import {
   customApiInstallValidationError,
   customApiProviderDomain,
   customApiSourceFromDraft,
+  filterCustomApiInstances,
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
@@ -62,6 +62,7 @@ import {
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
+import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
 import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
@@ -79,11 +80,12 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
   apiKeyConnectionRef,
+  apiKeyCredential,
   capabilityConnectPlan,
   capabilityCounts,
-  capabilityCuration,
   capabilityErrorToast,
   capabilityInputFromForm,
+  capabilityQuickConnectPlan,
   connectionHealth,
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
@@ -99,6 +101,7 @@ import {
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
+  type RequiredHeaderField,
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
@@ -116,6 +119,8 @@ const CustomApiSetupDialog = lazy(async () => {
   return { default: module.CustomApiSetupDialog };
 });
 
+import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+
 import type {
   AccessContext,
   ApiIntegrationInstallationSummary,
@@ -123,12 +128,9 @@ import type {
   CapabilityPack,
   ConnectionMetadata,
   ConnectionOwnership,
-  IntegrationDefinitionSummary,
   PackInstallationPreview,
   PackUninstallPreview,
   SkillUninstallPreview,
-  SlackInstallationBinding,
-  SocialConnection,
 } from "@/types";
 
 const PAGE_SIZE = 48;
@@ -156,30 +158,24 @@ export function CapabilitiesRoute({
     [context, workspaceId],
   );
 
-  const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
-  // null = connections have not loaded (or the load failed, e.g. the grant lacks
-  // connections:read); an array = loaded, even when empty. Health must not treat a
-  // failed load as "every connection was deleted".
-  const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
-  // True when the last connections fetch failed. Combined with a still-null
-  // `connections`, the integration adapters surface a visible failure with a
-  // retry instead of pinning their tiles at Loading forever.
-  const [connectionsLoadFailed, setConnectionsLoadFailed] = useState(false);
-  // The curated multi-account ApiIntegration catalog (Outlook Mail/Calendar/
-  // Contacts, OneDrive, extra Drive accounts) plus every workspace's installed
-  // instances of it, curated and custom alike.
-  const [apiIntegrationDefinitions, setApiIntegrationDefinitions] = useState<
-    IntegrationDefinitionSummary[]
-  >([]);
-  const [apiIntegrationInstances, setApiIntegrationInstances] = useState<
-    ApiIntegrationInstallationSummary[]
-  >([]);
-  const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
-  const [slackInstallationBindings, setSlackInstallationBindings] = useState<
-    SlackInstallationBinding[]
-  >([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<Error | null>(null);
+  // The whole workspace-scoped data load lives in one hook that fences every
+  // response on the exact client + workspace it was requested for.
+  const catalogData = useCapabilitiesCatalog(workspaceId);
+  const {
+    items,
+    setItems,
+    connections,
+    connectionsLoadFailed,
+    replaceConnection,
+    adoptConnections,
+    apiIntegrationDefinitions,
+    apiIntegrationInstances,
+    socialConnections,
+    slackInstallationBindings,
+    loading,
+    loadError,
+    refresh,
+  } = catalogData;
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
@@ -195,6 +191,9 @@ export function CapabilitiesRoute({
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
   const sheetOpenerRef = useRef<HTMLElement | null>(null);
+  // The element that opened the integration sheet, captured synchronously so
+  // closing it returns focus to that row instead of dropping it on the body.
+  const integrationOpenerRef = useRef<HTMLElement | null>(null);
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -281,21 +280,18 @@ export function CapabilitiesRoute({
   const showPacks = filter === "all" || filter === "pack";
   const showSourcePackages = filter === "all" || filter === "skill" || filter === "plugin";
   const showCatalog = filter !== "pack";
+  // Custom APIs answer the same search as every other connector: a query that
+  // matches nothing here must not still list every workspace-defined API.
+  const visibleCustomApiInstances = useMemo(
+    () => filterCustomApiInstances(customApiInstances, query),
+    [customApiInstances, query],
+  );
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath),
     [client],
   );
   const connectionsLoaded = connections !== null;
-  const replaceConnection = useCallback((updated: ConnectionMetadata) => {
-    setConnections((current) =>
-      current
-        ? current.some((entry) => entry.id === updated.id)
-          ? current.map((entry) => (entry.id === updated.id ? updated : entry))
-          : [...current, updated]
-        : [updated],
-    );
-  }, []);
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
@@ -328,6 +324,8 @@ export function CapabilitiesRoute({
     replaceConnection,
     definitions: apiIntegrationDefinitions,
     instances: apiIntegrationInstances,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const atlassian = useAtlassianIntegration({
     workspaceId,
@@ -346,21 +344,33 @@ export function CapabilitiesRoute({
     workspaceId,
     definitions: apiIntegrationDefinitions,
     instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const outlookCalendar = useOutlookCalendarIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
     instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const outlookContacts = useOutlookContactsIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
     instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const oneDrive = useOneDriveIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
     instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
   });
   const integrations = [
     slack,
@@ -473,42 +483,6 @@ export function CapabilitiesRoute({
   // still matching the live query so an old search never renders against a new
   // one (invalidation without a clearing effect that flashes stale tiles first).
   const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
-
-  async function refresh() {
-    if (!workspaceId) return;
-    setLoading(true);
-    try {
-      const [catalog, conns, socials, slackBindings, apiDefinitions, apiInstances] =
-        await Promise.all([
-          client.listCapabilities(workspaceId),
-          // null (not []) on failure so health can tell "didn't load" from "loaded empty".
-          client.listConnections(workspaceId).catch(() => null),
-          client.listSocialConnections(workspaceId).catch(() => null),
-          client.listSlackInstallationBindings(workspaceId).catch(() => null),
-          client.listIntegrationDefinitions(workspaceId).catch(() => null),
-          client.listApiIntegrations(workspaceId).catch(() => null),
-        ]);
-      setItems(catalog.items);
-      // Don't clobber previously-loaded connections with null on a failed refetch
-      // (that would flip healthy items to "unverified" until the next reload); a
-      // first-load failure leaves the prior null = "not loaded", which is correct.
-      // The failure itself is tracked so the integrations can say so and retry.
-      if (conns !== null) setConnections(conns);
-      setConnectionsLoadFailed(conns === null);
-      if (socials !== null) setSocialConnections(socials);
-      if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
-      if (apiDefinitions !== null) setApiIntegrationDefinitions(apiDefinitions.definitions);
-      if (apiInstances !== null) setApiIntegrationInstances(apiInstances.integrations);
-      setLoadError(null);
-    } catch (error) {
-      setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load capabilities", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
 
   function refreshAll() {
     void refresh();
@@ -726,35 +700,34 @@ export function CapabilitiesRoute({
   // uses for the full sheet, just without requiring the sheet to be open first.
 
   function capabilityQuickConnectAction(item: CapabilityCatalogItem): (() => void) | undefined {
-    const plan = capabilityConnectPlan(item);
+    const plan = capabilityQuickConnectPlan(item);
+    // No fast path: "dedicated" lifecycles (Skills, Plugins, first-party
+    // Fiken/social), "social_oauth", and any api-key connector needing more
+    // than one header - the full sheet owns those.
+    if (!plan) return undefined;
     if (plan.mode === "enable") {
       return () => void quickEnable(item);
     }
     if (plan.mode === "oauth") {
-      return capabilityCuration(item).official
-        ? () => void quickOAuth(item, plan.providerDomain, plan.mcpUrl)
-        : () =>
+      return plan.confirm
+        ? () =>
             setQuickConnectRequest({
               authKind: "oauth2_unreviewed",
               itemName: item.name,
               providerDomain: plan.providerDomain,
-              onConnect: () => quickOAuth(item, plan.providerDomain, plan.mcpUrl),
-            });
+              onConnect: () => quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership),
+            })
+        : () => void quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership);
     }
-    if (plan.mode === "api_key") {
-      const fieldLabel = plan.fields[0]?.label ?? "API key";
-      return () =>
-        setQuickConnectRequest({
-          authKind: "api_key",
-          itemName: item.name,
-          providerDomain: plan.providerDomain,
-          fieldLabel,
-          onConnect: (value) => quickApiKey(item, plan.providerDomain, fieldLabel, value),
-        });
-    }
-    // "dedicated" (Skills, Plugins, first-party Fiken/social) and
-    // "social_oauth" own dedicated controls in the full sheet; no fast path.
-    return undefined;
+    return () =>
+      setQuickConnectRequest({
+        authKind: "api_key",
+        itemName: item.name,
+        providerDomain: plan.providerDomain,
+        fieldLabel: plan.field.label,
+        onConnect: (value) =>
+          quickApiKey(item, plan.providerDomain, plan.field, plan.ownership, value),
+      });
   }
 
   async function quickEnable(item: CapabilityCatalogItem) {
@@ -777,6 +750,7 @@ export function CapabilitiesRoute({
     item: CapabilityCatalogItem,
     providerDomain: string,
     mcpUrl: string | null,
+    ownership: ConnectionOwnership,
   ) {
     setBusyId(item.id);
     try {
@@ -785,7 +759,7 @@ export function CapabilitiesRoute({
       const response = await startMcpOAuthWithTimeout(client, workspaceId, {
         ...(mcpUrl ? { mcpUrl } : {}),
         ...(providerDomain ? { providerDomain } : {}),
-        ownership: DEFAULT_CONNECTION_OWNERSHIP,
+        ownership,
         returnPath,
       });
       if (!response.authorizationUrl) {
@@ -803,37 +777,36 @@ export function CapabilitiesRoute({
   async function quickApiKey(
     item: CapabilityCatalogItem,
     providerDomain: string,
-    fieldLabel: string,
+    field: RequiredHeaderField,
+    ownership: ConnectionOwnership,
     value: string,
   ) {
-    if (!value) throw new Error(`Enter ${fieldLabel.toLowerCase()}.`);
+    if (!value) throw new Error(`Enter ${field.label.toLowerCase()}.`);
     setBusyId(item.id);
     try {
       const persisted = await persistIfRegistry(item, false);
-      const headers = { [fieldLabel]: value };
+      // The credential is stored under the WIRE header name the broker injects,
+      // never the human label ("API key" is not even a legal header token).
+      const credential = apiKeyCredential(field, value);
       const reuseId = connectionToReuseForApiKey(
         persisted,
         connections ?? [],
         providerDomain,
-        DEFAULT_CONNECTION_OWNERSHIP,
+        ownership,
       );
       const connection = reuseId
         ? await client.updateConnection(workspaceId, reuseId, {
-            credential: { headers },
+            credential,
             status: "active",
           })
         : await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
-            ownership: DEFAULT_CONNECTION_OWNERSHIP,
-            credential: { headers },
+            ownership,
+            credential,
           });
       await client.enableCapability(workspaceId, persisted.id, {
-        connectionRef: apiKeyConnectionRef(
-          DEFAULT_CONNECTION_OWNERSHIP,
-          connection.id,
-          connection.providerDomain,
-        ),
+        connectionRef: apiKeyConnectionRef(ownership, connection.id, connection.providerDomain),
       });
       await refresh();
       onRuntimeChanged();
@@ -1321,10 +1294,7 @@ export function CapabilitiesRoute({
       setItems(catalog.items);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
-      if (conns !== null) {
-        setConnections(conns);
-        setConnectionsLoadFailed(false);
-      }
+      if (conns !== null) adoptConnections(conns);
       const item =
         (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
@@ -1674,26 +1644,30 @@ export function CapabilitiesRoute({
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>
-            {integrations.map((adapter) => (
-              <IntegrationRow
-                key={adapter.model.id}
-                model={adapter.model}
-                onOpen={() => setOpenIntegration(adapter.model.id)}
-                onQuickConnect={
-                  adapter.model.chip.tone === "idle" &&
-                  adapter.model.footer.kind === "setup" &&
-                  !adapter.model.footer.disabled
-                    ? adapter.model.footer.onSetup
-                    : undefined
-                }
-              />
-            ))}
+            {integrations.map((adapter) => {
+              const quickConnect = integrationQuickConnect(adapter.model);
+              return (
+                <IntegrationRow
+                  key={adapter.model.id}
+                  model={adapter.model}
+                  onOpen={() => {
+                    const active = document.activeElement;
+                    integrationOpenerRef.current =
+                      active instanceof HTMLElement && active !== document.body ? active : null;
+                    setOpenIntegration(adapter.model.id);
+                  }}
+                  busy={integrationRowBusy(adapter.model)}
+                  {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
+                />
+              );
+            })}
           </div>
         </section>
 
         <IntegrationSheet
           model={openIntegrationModel}
           open={openIntegrationModel !== null}
+          restoreFocusRef={integrationOpenerRef}
           onOpenChange={(open) => {
             if (!open) setOpenIntegration(null);
           }}
@@ -1760,9 +1734,11 @@ export function CapabilitiesRoute({
             />
           ) : null}
 
-          {showCatalog && (query.trim().length === 0 || filter === "all" || filter === "api") ? (
+          {showCatalog &&
+          (filter === "all" || filter === "api") &&
+          (query.trim().length === 0 || visibleCustomApiInstances.length > 0) ? (
             <CustomApiSection
-              instances={customApiInstances}
+              instances={visibleCustomApiInstances}
               connections={connections}
               canManage={canManageApiIntegrationInstances}
               busyKey={customApiBusyKey}
@@ -1826,6 +1802,7 @@ export function CapabilitiesRoute({
               registrySearched={registrySearched}
               registryResults={visibleRegistry}
               logoUrl={logoUrl}
+              health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
               onRetry={() => void refresh()}
               onOpen={openItem}
               onOpenRegistry={(item) => openItem(item, true)}
@@ -1923,6 +1900,30 @@ export function CapabilitiesRoute({
       </Suspense>
     </div>
   );
+}
+
+/**
+ * True while this integration has a real mutation in flight, from the adapter's
+ * own footer state - never inferred from a chip label.
+ */
+export function integrationRowBusy(model: Pick<IntegrationViewModel, "footer">): boolean {
+  return model.footer.kind !== "locked" && model.footer.busy === true;
+}
+
+/**
+ * The row-icon quick-connect action for an integration: only when it is
+ * genuinely not connected, its adapter offers a one-click setup, and that
+ * setup is neither disabled nor already running. Guarding on `busy` here is
+ * what stops a double click from starting two OAuth redirects with two
+ * different minted instance keys.
+ */
+export function integrationQuickConnect(
+  model: Pick<IntegrationViewModel, "chip" | "footer">,
+): (() => void) | undefined {
+  const { chip, footer } = model;
+  if (chip.tone !== "idle" || footer.kind !== "setup") return undefined;
+  if (footer.disabled === true || footer.busy === true) return undefined;
+  return footer.onSetup;
 }
 
 function metadataString(value: unknown): string | null {

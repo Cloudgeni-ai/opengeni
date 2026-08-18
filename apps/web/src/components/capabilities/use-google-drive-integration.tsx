@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { request as apiRequest } from "@/api";
@@ -11,12 +11,16 @@ import {
   saveGoogleDriveSources,
 } from "@/components/capabilities/google-drive-sources";
 import type {
+  IntegrationAccessItem,
   IntegrationChip,
   IntegrationFooter,
   IntegrationOption,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
-import { useApiIntegrationAccounts } from "@/components/capabilities/use-api-integration-accounts";
+import {
+  useApiIntegrationAccounts,
+  type IntegrationAdapter,
+} from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
@@ -53,11 +57,6 @@ const GoogleDriveFolderDialog = lazy(async () => {
 export const GOOGLE_DRIVE_LOGO_URL =
   "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png";
 
-export type IntegrationAdapter = {
-  model: IntegrationViewModel;
-  dialogs: ReactNode;
-};
-
 /**
  * The curated `google-drive` ApiIntegration definition id: extra Drive
  * accounts beyond the primary knowledge connection use this same multi-account
@@ -76,6 +75,8 @@ export function useGoogleDriveIntegration({
   replaceConnection,
   definitions = [],
   instances = [],
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
@@ -87,6 +88,8 @@ export function useGoogleDriveIntegration({
   /** The curated ApiIntegration catalog, for extra (non-primary) Drive accounts. */
   definitions?: IntegrationDefinitionSummary[];
   instances?: ApiIntegrationInstallationSummary[];
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
   const client = context.client;
@@ -139,6 +142,9 @@ export function useGoogleDriveIntegration({
     definitions,
     instances,
     canManage: canWrite,
+    refresh,
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 
   useEffect(() => {
@@ -291,10 +297,16 @@ export function useGoogleDriveIntegration({
   // A failed connection-list load means the state is unknown, not "still
   // loading": say so, offer a retry, and keep the Connect affordance usable.
   const loadFailed = accountState.state === "unverified" && connectionsLoadFailed;
-  const chip: IntegrationChip =
+  const primaryChip: IntegrationChip =
     canRead && loadFailed
       ? { label: "Needs attention", tone: "warn" }
       : googleDriveChip(accountState.state, canRead, canWrite);
+  // One row, every Drive account. A healthy primary connection must never roll
+  // an extra account that needs reauth up into a green "Connected".
+  const chip: IntegrationChip =
+    canRead && extraAccounts.needsAttention
+      ? { label: "Needs attention", tone: "warn" }
+      : primaryChip;
   const stateNotice: IntegrationViewModel["notice"] = loadFailed
     ? {
         tone: "failed",
@@ -419,6 +431,42 @@ export function useGoogleDriveIntegration({
             }
           : { kind: "locked" };
 
+  // The primary knowledge connection as one account entry, used only when extra
+  // accounts turn the Access block account-scoped. Its folders remain visible as
+  // sub-entries so the folder list never vanishes just because a second Drive
+  // account exists.
+  const folderAction = canReadSources
+    ? { label: "Change folders", onClick: () => setFolderDialogOpen(true) }
+    : {
+        label: "Allow folder access",
+        onClick: () => void connect(true, "source_read"),
+        // Google limited-use disclosure: this action asks Google for more access.
+        disclosureId: "google-drive-access",
+      };
+  const primaryAccessItems: IntegrationAccessItem[] =
+    connected && metadata
+      ? [
+          {
+            id: connection?.id ?? "google-drive-primary",
+            name: metadata.googleDisplayName
+              ? `${metadata.googleDisplayName} (${metadata.googleEmail})`
+              : metadata.googleEmail,
+            meta: "Primary",
+            status:
+              accountState.state === "connected" || accountState.state === "paused"
+                ? ("ok" as const)
+                : ("warn" as const),
+            subItems: savedSources.map((source) => ({
+              name: googleDriveBoundaryLabel(source),
+              meta: source.syncEnabled ? "syncing" : "on request",
+            })),
+            subItemsEmptyMessage:
+              "No folders selected yet. Agents cannot read Drive until you choose some.",
+            ...(canChange ? { actions: [{ ...folderAction, disabled: busy }] } : {}),
+          },
+        ]
+      : [];
+
   const model: IntegrationViewModel = {
     id: "google-drive",
     name: "Google Drive",
@@ -433,39 +481,17 @@ export function useGoogleDriveIntegration({
               ? {
                   // At least one extra account: the block becomes account-scoped.
                   // The primary account keeps its "Change folders" action inline
-                  // on its own row instead of as the block's single edit affordance.
+                  // on its own row, and the folders it contributes stay visible
+                  // as its sub-entries instead of disappearing with the block.
                   title: "Connected accounts",
-                  items: [
-                    ...(connected && metadata
-                      ? [
-                          {
-                            name: metadata.googleDisplayName
-                              ? `${metadata.googleDisplayName} (${metadata.googleEmail})`
-                              : metadata.googleEmail,
-                            meta: "Primary",
-                            status:
-                              accountState.state === "connected" || accountState.state === "paused"
-                                ? ("ok" as const)
-                                : ("warn" as const),
-                            ...(canChange
-                              ? {
-                                  action: {
-                                    label: canReadSources
-                                      ? "Change folders"
-                                      : "Allow folder access",
-                                    onClick: canReadSources
-                                      ? () => setFolderDialogOpen(true)
-                                      : () => void connect(true, "source_read"),
-                                  },
-                                }
-                              : {}),
-                          },
-                        ]
-                      : []),
-                    ...extraAccounts.accessItems,
-                  ],
+                  items: [...primaryAccessItems, ...extraAccounts.accessItems],
                   ...(canChange
-                    ? { editLabel: "+ Add account", onEdit: extraAccounts.addAccount }
+                    ? {
+                        editLabel: "+ Add account",
+                        onEdit: extraAccounts.addAccount,
+                        editDisabled: extraAccounts.busy,
+                        editDisclosureId: "google-drive-access",
+                      }
                     : {}),
                 }
               : {
@@ -502,6 +528,7 @@ export function useGoogleDriveIntegration({
 
   const dialogs = canRead ? (
     <>
+      {extraAccounts.dialogs}
       <ConfirmDialog
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}

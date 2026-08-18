@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type {
@@ -8,8 +8,9 @@ import type {
   IntegrationMark,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -25,6 +26,15 @@ import type {
  * adapter that folds N accounts into one row builds on it.
  */
 
+// The per-account facets surface is a large, rarely-opened control plane
+// (Knowledge sources, Inbound triggers, Delivery destinations, Identity links)
+// plus its Google Drive knowledge-source dialog. Keep it out of the
+// Capabilities route's first chunk.
+const IntegrationAccountFacets = lazy(async () => {
+  const module = await import("@/components/capabilities/integration-account-facets");
+  return { default: module.IntegrationAccountFacets };
+});
+
 const CALLBACK_KEYS = [
   "integration_oauth",
   "api_integration_definition",
@@ -36,7 +46,7 @@ const CALLBACK_KEYS = [
   "reason",
 ] as const;
 
-type PendingApiIntegrationOAuth = {
+export type PendingApiIntegrationOAuth = {
   definitionId: string;
   instanceKey: string;
   displayName: string;
@@ -44,7 +54,13 @@ type PendingApiIntegrationOAuth = {
   expectedInstanceVersion?: number;
 };
 
-function apiIntegrationOAuthReturnPath(
+/**
+ * The return path an ApiIntegration OAuth redirect comes back to: the current
+ * route with every stale callback parameter replaced, so an interrupted
+ * previous attempt can never be re-read as this one's result. Unrelated route
+ * state is preserved untouched.
+ */
+export function apiIntegrationOAuthReturnPath(
   pathname: string,
   currentSearch: string,
   pending: PendingApiIntegrationOAuth,
@@ -62,7 +78,13 @@ function apiIntegrationOAuthReturnPath(
   return `${pathname}${query ? `?${query}` : ""}`;
 }
 
-function pendingApiIntegrationOAuth(search: string):
+/**
+ * Parses one complete ApiIntegration OAuth callback out of a URL query. Every
+ * required field must be present and `ownership` must be exactly one of the two
+ * known values - a URL-supplied ownership is never coerced or defaulted, and a
+ * malformed optimistic version is dropped rather than sent to the API.
+ */
+export function pendingApiIntegrationOAuth(search: string):
   | (PendingApiIntegrationOAuth & {
       outcome: string;
       connectionId: string | null;
@@ -186,13 +208,17 @@ export type ApiIntegrationAccountsController = {
   addAccount: () => void;
   /** Every account's currently discovered tool names, deduplicated. */
   tools: string[];
+  /** Confirm-before-destroy dialog for per-account removal; render once per adapter. */
+  dialogs: ReactNode;
 };
 
 /**
  * One provider's account roster folded from the curated ApiIntegration
  * mechanism: N `ApiIntegrationInstallationSummary` rows sharing one
  * `definitionId` become one row's rolled-up chip plus one "Connected
- * accounts" Access-block item per account.
+ * accounts" Access-block item per account. Each account entry keeps its own
+ * Reconnect, Remove, and per-instance facets surface, all scoped to exactly
+ * that `instanceKey`.
  */
 export function useApiIntegrationAccounts({
   workspaceId,
@@ -201,6 +227,9 @@ export function useApiIntegrationAccounts({
   instances,
   canManage,
   ownership = "workspace",
+  refresh,
+  onRuntimeChanged,
+  refreshRevision = 0,
 }: {
   workspaceId: string;
   definitionId: string;
@@ -208,15 +237,35 @@ export function useApiIntegrationAccounts({
   instances: ApiIntegrationInstallationSummary[];
   canManage: boolean;
   ownership?: ConnectionOwnership;
+  /** Reload the workspace catalog after a mutation. */
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  /** Bumped by the owning route after every successful catalog load. */
+  refreshRevision?: number;
 }): ApiIntegrationAccountsController {
   const context = useAppContext();
   const client = context.client;
   const [busy, setBusy] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<{
+    instance: ApiIntegrationInstallationSummary;
+    removesDefinition: boolean;
+  } | null>(null);
   const definition = definitions.find((candidate) => candidate.id === definitionId) ?? null;
   const accounts = instances.filter((instance) => instance.definitionId === definitionId);
 
+  const workspaceGrant = context.accessContext?.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManagePersonalDestination = Boolean(
+    workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
+  );
+  const canManageOrganizationDestination = Boolean(
+    workspaceGrant &&
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
+
   async function startAdd(existing: ApiIntegrationInstallationSummary | null) {
-    if (!definition || !canManage) return;
+    if (!definition || !canManage || busy) return;
     setBusy(true);
     try {
       const instanceKey = existing?.instanceKey ?? `account-${crypto.randomUUID()}`;
@@ -252,16 +301,121 @@ export function useApiIntegrationAccounts({
     }
   }
 
+  // Removal is per exact instance: the preview says whether the now-unused
+  // shared definition goes with it, and the authenticated Connection is always
+  // retained so another instance (or a reconnect) can still use it.
+  async function previewRemove(instance: ApiIntegrationInstallationSummary) {
+    if (!canManage || busy) return;
+    setBusy(true);
+    try {
+      const preview = await client.previewApiIntegrationUninstall(
+        workspaceId,
+        instance.capabilityId,
+        instance.instanceKey,
+      );
+      setRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
+    } catch (error) {
+      toast.error("Couldn't inspect removal impact", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeAccount(): Promise<boolean> {
+    if (!removeTarget) return false;
+    const { instance } = removeTarget;
+    setBusy(true);
+    try {
+      await client.uninstallApiIntegration(
+        workspaceId,
+        instance.capabilityId,
+        instance.instanceKey,
+        {
+          expectedInstallationVersion: instance.installationVersion,
+          expectedInstanceVersion: instance.instanceVersion,
+        },
+      );
+      setRemoveTarget(null);
+      await refresh?.();
+      onRuntimeChanged?.();
+      toast.success(`${instance.displayName} removed`, {
+        description: "Its Connection was retained and can be reused or disconnected separately.",
+      });
+      return true;
+    } catch (error) {
+      toast.error("Couldn't remove this account", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const facetCount = definition?.facets.length ?? 0;
+
   const accessItems: IntegrationAccessItem[] = accounts.map((account) => ({
+    id: account.instanceKey,
     name: account.displayName,
     meta: account.connected ? undefined : "Needs attention",
     status: account.connected ? "ok" : "warn",
-    ...(canManage && !account.connected
-      ? { action: { label: "Reconnect", onClick: () => void startAdd(account) } }
+    ...(canManage
+      ? {
+          actions: [
+            ...(account.connected
+              ? []
+              : [{ label: "Reconnect", onClick: () => void startAdd(account), disabled: busy }]),
+            {
+              label: "Remove",
+              onClick: () => void previewRemove(account),
+              disabled: busy,
+              destructive: true,
+            },
+          ],
+        }
+      : {}),
+    ...(facetCount > 0
+      ? {
+          detail: (
+            <Suspense fallback={null}>
+              <IntegrationAccountFacets
+                client={client}
+                workspaceId={workspaceId}
+                instance={account}
+                facetCount={facetCount}
+                canManage={canManage}
+                canManagePersonalDestination={canManagePersonalDestination}
+                canManageWorkspaceDestination={canManage}
+                canManageOrganizationDestination={canManageOrganizationDestination}
+                refreshRevision={refreshRevision}
+              />
+            </Suspense>
+          ),
+        }
       : {}),
   }));
 
   const tools = [...new Set(accounts.flatMap((account) => account.allowedTools))];
+
+  const dialogs = (
+    <ConfirmDialog
+      open={removeTarget !== null}
+      onOpenChange={(open) => {
+        if (!open) setRemoveTarget(null);
+      }}
+      title={removeTarget ? `Remove ${removeTarget.instance.displayName}?` : "Remove account?"}
+      description={
+        removeTarget
+          ? `This removes only this named account${removeTarget.removesDefinition ? " and its now-unused shared definition" : ""}. The authenticated Connection remains intact.`
+          : ""
+      }
+      confirmLabel="Remove account"
+      destructive
+      onConfirm={removeAccount}
+    />
+  );
 
   return {
     accounts,
@@ -271,6 +425,7 @@ export function useApiIntegrationAccounts({
     busy,
     addAccount: () => void startAdd(null),
     tools,
+    dialogs,
   };
 }
 
@@ -281,8 +436,9 @@ export type IntegrationAdapter = { model: IntegrationViewModel; dialogs: ReactNo
  * {@link useApiIntegrationAccounts} for a curated multi-account definition
  * that has no other integration-specific state (Outlook Mail/Calendar/
  * Contacts, OneDrive). Every account lives in the "Connected accounts" Access
- * block; once at least one account exists the footer defers to it instead of
- * offering an ambiguous whole-row Reconnect/Disconnect.
+ * block with its own Reconnect/Remove and facets; once at least one account
+ * exists the footer defers to it instead of offering an ambiguous whole-row
+ * Reconnect/Disconnect.
  */
 export function useIntegrationDefinitionRow({
   id,
@@ -293,6 +449,9 @@ export function useIntegrationDefinitionRow({
   workspaceId,
   definitions,
   instances,
+  refresh,
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   id: string;
   name: string;
@@ -302,6 +461,9 @@ export function useIntegrationDefinitionRow({
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
@@ -311,6 +473,9 @@ export function useIntegrationDefinitionRow({
     definitions,
     instances,
     canManage,
+    ...(refresh ? { refresh } : {}),
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 
   const chip: IntegrationChip =
@@ -361,5 +526,5 @@ export function useIntegrationDefinitionRow({
     ...(controller.tools.length > 0 ? { tools: { tools: controller.tools } } : {}),
   };
 
-  return { model, dialogs: null };
+  return { model, dialogs: controller.dialogs };
 }

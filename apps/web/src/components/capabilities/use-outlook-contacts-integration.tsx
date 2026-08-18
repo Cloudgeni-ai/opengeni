@@ -11,19 +11,28 @@ export function useOutlookContactsIntegration({
   workspaceId,
   definitions,
   instances,
+  refresh,
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
     id: "outlook-contacts",
     name: "Outlook Contacts",
     description: "Read and manage contacts in a connected Outlook account.",
-    mark: { monogram: "OP" },
+    mark: { icon: "contacts" },
     definitionId: OUTLOOK_CONTACTS_DEFINITION_ID,
     workspaceId,
     definitions,
     instances,
+    ...(refresh ? { refresh } : {}),
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 }

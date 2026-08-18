@@ -11,19 +11,28 @@ export function useOutlookCalendarIntegration({
   workspaceId,
   definitions,
   instances,
+  refresh,
+  onRuntimeChanged,
+  refreshRevision,
 }: {
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  refresh?: () => Promise<void>;
+  onRuntimeChanged?: () => void;
+  refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
     id: "outlook-calendar",
     name: "Outlook Calendar",
     description: "Read and schedule events on a connected Outlook calendar.",
-    mark: { monogram: "OC" },
+    mark: { icon: "calendar" },
     definitionId: OUTLOOK_CALENDAR_DEFINITION_ID,
     workspaceId,
     definitions,
     instances,
+    ...(refresh ? { refresh } : {}),
+    ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
+    ...(refreshRevision !== undefined ? { refreshRevision } : {}),
   });
 }

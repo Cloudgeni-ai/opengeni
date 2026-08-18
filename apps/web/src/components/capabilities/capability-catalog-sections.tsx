@@ -131,6 +131,7 @@ export function CapabilityBrowseSection({
   registrySearched,
   registryResults,
   logoUrl,
+  health,
   onRetry,
   onOpen,
   onOpenRegistry,
@@ -149,6 +150,8 @@ export function CapabilityBrowseSection({
   registrySearched: string | null;
   registryResults: CapabilityCatalogItem[];
   logoUrl: (item: CapabilityCatalogItem) => string | null;
+  /** Connection health per item, so an enabled-but-broken row never reads as connected. */
+  health?: (item: CapabilityCatalogItem) => ConnectionHealth;
   onRetry: () => void;
   onOpen: (item: CapabilityCatalogItem) => void;
   onOpenRegistry: (item: CapabilityCatalogItem) => void;
@@ -188,6 +191,7 @@ export function CapabilityBrowseSection({
                 key={item.id}
                 item={item}
                 logoSrc={logoUrl(item)}
+                {...(health ? { health: health(item) } : {})}
                 onOpen={() => onOpen(item)}
                 onQuickConnect={onQuickConnect?.(item)}
               />
