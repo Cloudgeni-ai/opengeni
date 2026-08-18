@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0289_confirm_time_rule_rebaseline.sql")) {
+      if (migrations.has("0293_confirm_time_rule_rebaseline.sql")) {
         return includesActivation
-          ? "2f9f15d09983b852d4a648f5392cb005ccdd34f133e000ccddf0764740e989af"
-          : "abfa6253daf2698a65ac87a95b44d9f998680374852d23358d374f2b235fa058";
+          ? "4110510383f4a8f74752fbe2cfe85985fa0cb32996e05cd2a17385497ed996d3"
+          : "a63b5870372f149b017e8f5565c819e55b418e5616e0a2025fa2278ef2868655";
       }
       if (migrations.has("0288_attached_browser_reenrollment.sql")) {
         return includesActivation
@@ -1032,7 +1032,7 @@ describe("release schema contract", () => {
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
         (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
-        (migrations.has("0289_confirm_time_rule_rebaseline.sql") ? 1 : 0),
+        (migrations.has("0293_confirm_time_rule_rebaseline.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1067,8 +1067,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0289_confirm_time_rule_rebaseline.sql")
-        ? "0289_confirm_time_rule_rebaseline.sql"
+      migrations.has("0293_confirm_time_rule_rebaseline.sql")
+        ? "0293_confirm_time_rule_rebaseline.sql"
         : migrations.has("0288_attached_browser_reenrollment.sql")
           ? "0288_attached_browser_reenrollment.sql"
           : migrations.has("0287_open_suffix_pending_tool_calls.sql")
