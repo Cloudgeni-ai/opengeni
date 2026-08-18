@@ -310,6 +310,20 @@ DO $tenancy_inventory_grant$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT EXECUTE ON FUNCTION inventory_organization_tenancy(uuid) TO opengeni_app;
+    -- The predicate is harmless to expose (a read-only boolean over a
+    -- transaction-local bookkeeping row, never data) and MUST be independently
+    -- grantable here: an ordinary opengeni_app-effective role touching ANY
+    -- table this capability protects (e.g. sessions, via session_reference_
+    -- visible's inlined SQL body evaluating every PERMISSIVE policy) needs
+    -- EXECUTE on every predicate function those policies reference, or the
+    -- unrelated read fails closed with a permission error instead of the
+    -- policy simply evaluating false. Matches 0254's identical explicit grant
+    -- for variable_set_authority_capability_active - relying solely on
+    -- provisionRoles' blanket schema-wide sweep is not sufficient for a
+    -- database whose test/deploy path never runs that step.
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.organization_tenancy_inventory_capability_active()
+      TO opengeni_app;
   END IF;
 END
 $tenancy_inventory_grant$;

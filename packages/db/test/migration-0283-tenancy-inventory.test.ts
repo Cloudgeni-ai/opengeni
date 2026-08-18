@@ -2,13 +2,18 @@
 // every legacy-attribution population the backfill/parity program gates on -
 // integers only, exact-organization scoped, application-role executable.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireBlankTestDatabase,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {
   createDb,
   createSession,
   inventoryOrganizationTenancy,
+  migrate,
   type Database,
   type DbClient,
 } from "../src";
@@ -81,6 +86,48 @@ describe("migration 0283 tenancy inventory", () => {
     // workspace/organization documents are required to have a NULL
     // authority_id forever and must never be miscounted as unmigrated.
     expect(source).toContain("d.authority_kind = 'personal' AND d.authority_id IS NULL");
+    // The inner predicate must be independently EXECUTE-granted to
+    // opengeni_app (0254's exact pattern) - relying solely on provisionRoles'
+    // blanket schema-wide sweep is not sufficient: an ordinary opengeni_app
+    // read of ANY table this capability protects (e.g. sessions, reached
+    // through session_reference_visible's inlined SQL body evaluating every
+    // PERMISSIVE policy) needs execute privilege on every predicate function
+    // those policies reference, even when that policy's own OR-branch would
+    // ultimately evaluate false for the caller.
+    expect(source).toContain(
+      "GRANT EXECUTE ON FUNCTION\n" +
+        "      opengeni_private.organization_tenancy_inventory_capability_active()\n" +
+        "      TO opengeni_app;",
+    );
+  });
+
+  test("opengeni_app holds EXECUTE on the inner capability predicate under migrate() ALONE (no provisionRoles)", async () => {
+    // The real-world regression this test pins: acquireBlankTestDatabase +
+    // migrate() alone (the exact pattern migration-0252's suite uses to drive
+    // fencing tests, and some production migration-owner topologies) never
+    // runs provisionRoles' blanket schema-wide EXECUTE sweep. The predicate
+    // must still be independently usable by an opengeni_app-effective role
+    // reading ANY table this capability protects, even without that sweep -
+    // relying on it alone silently breaks every such caller.
+    const blank = await acquireBlankTestDatabase("migration-0283-no-provision-roles");
+    if (!blank) return;
+    try {
+      await migrate(blank.databaseUrl);
+      const probe = postgres(blank.databaseUrl, { max: 1 });
+      try {
+        const [row] = await probe<Array<{ appCanExecute: boolean }>>`
+          select has_function_privilege(
+            'opengeni_app',
+            'opengeni_private.organization_tenancy_inventory_capability_active()',
+            'EXECUTE'
+          ) as "appCanExecute"`;
+        expect(row?.appCanExecute).toBe(true);
+      } finally {
+        await probe.end().catch(() => undefined);
+      }
+    } finally {
+      await blank.release();
+    }
   });
 
   test("counts the legacy populations for exactly the requested organization", async () => {
