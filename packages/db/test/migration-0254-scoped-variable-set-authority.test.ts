@@ -369,6 +369,8 @@ describe("migration 0254 scoped variable-set authority", () => {
           createdBy: { kind: "subject", subjectId: ownerSubject },
           subjectId: ownerSubject,
           model: "test-model",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
           sandboxBackend: "modal",
           variableSetId: ownerSet.variableSetId,
           firstPartyMcpTools: [],

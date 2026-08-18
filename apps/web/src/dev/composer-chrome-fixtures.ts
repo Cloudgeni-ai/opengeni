@@ -65,6 +65,8 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     createdBy: { kind: "subject", subjectId: "user:gallery" },
     createdByContext: {},
     model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     sandboxOs: "linux",
     sandboxGroupId: GALLERY_SESSION_ID,

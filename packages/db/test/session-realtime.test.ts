@@ -64,6 +64,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return {
@@ -374,6 +376,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
             resources: [],
             model: "scripted-model",
             reasoningEffort: "low",
+            latencyMode: "standard",
           }),
         ),
       ),

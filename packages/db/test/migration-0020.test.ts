@@ -124,6 +124,8 @@ describe("migration 0020 (session_recordings)", () => {
             resources: [],
             metadata: {},
             model: "gpt-5",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
             sandboxBackend: "modal",
           })
         ).id;

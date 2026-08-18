@@ -785,6 +785,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       variableSetId: environmentId,
       sandboxGroupId: a.sandboxGroupId,
@@ -1015,6 +1017,8 @@ async function seedWarmBox(
     resources: [],
     metadata: {},
     model: "m",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "local",
   });
   const sandboxGroupId = session.sandboxGroupId;
@@ -1091,6 +1095,8 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       resources: [],
       metadata: {},
       model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "local",
     });
     const acquired = await acquireLease(db, {
@@ -1437,6 +1443,8 @@ describe("P1.4 GATED live-Modal viewer-keep-warm (opt-in)", () => {
         resources: [],
         metadata: {},
         model: "m",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "modal",
       });
 

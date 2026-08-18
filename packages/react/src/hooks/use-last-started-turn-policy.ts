@@ -33,7 +33,7 @@ function policyFromTurn(turn: SessionTurn | null | undefined): LastStartedTurnPo
   return {
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
-    latencyMode: turn.latencyMode ?? "standard",
+    latencyMode: turn.latencyMode,
     turnId: turn.id,
   };
 }

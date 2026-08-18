@@ -1142,7 +1142,8 @@ async function admitRealtimeDelegationInTransaction(
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
-  const reasoning = ReasoningEffort.safeParse(session.metadata.reasoningEffort);
+  const sessionReasoning = ReasoningEffort.parse(session.reasoningEffort);
+  const sessionLatency = LatencyMode.parse(session.latencyMode);
   const [latestStarted] = await db
     .select({
       model: schema.sessionTurns.model,
@@ -1195,13 +1196,9 @@ async function admitRealtimeDelegationInTransaction(
     },
     resources: [],
     model: latestStarted?.model ?? session.model,
-    reasoningEffort: latestReasoning.success
-      ? latestReasoning.data
-      : reasoning.success
-        ? reasoning.data
-        : "medium",
-    latencyMode: latestLatency.success ? latestLatency.data : "standard",
-    reasoningEffortFallback: reasoning.success ? reasoning.data : "medium",
+    reasoningEffort: latestReasoning.success ? latestReasoning.data : sessionReasoning,
+    latencyMode: latestLatency.success ? latestLatency.data : sessionLatency,
+    reasoningEffortFallback: sessionReasoning,
     turnMetadata: {
       realtimeDelegation: { ...provenance, inputTranscript },
     },

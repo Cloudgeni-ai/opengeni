@@ -150,6 +150,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -232,6 +234,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -355,6 +359,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -530,6 +536,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -649,6 +657,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const invalidatedAt = new Date();
@@ -735,6 +745,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const attachmentRefs = [{ kind: "file", fileId: "00000000-0000-4000-8000-000000000081" }];
@@ -833,6 +845,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -988,6 +1002,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1128,6 +1144,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(client.db, {
@@ -1263,6 +1281,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1568,6 +1588,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1653,6 +1675,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -1753,6 +1777,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1830,6 +1856,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1909,6 +1937,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -2043,6 +2073,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -2149,6 +2181,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItem = {

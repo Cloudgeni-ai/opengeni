@@ -61,6 +61,8 @@ async function fixture(execute: (signal: AbortSignal | undefined) => Promise<str
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const started = await initializeSessionStartAtomically(client.db, {

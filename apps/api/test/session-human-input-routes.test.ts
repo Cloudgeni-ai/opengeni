@@ -91,6 +91,8 @@ async function frozenFixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId!, subjectId, (db) =>
@@ -195,6 +197,8 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const [source] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
@@ -327,6 +331,8 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const token = await signDelegatedAccessToken(DELEGATION_SECRET, {

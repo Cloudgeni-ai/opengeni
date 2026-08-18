@@ -6014,7 +6014,7 @@ export const SessionTurn = z
     toolsProvided: z.boolean().optional(),
     model: z.string().min(1),
     reasoningEffort: ReasoningEffort,
-    latencyMode: LatencyMode.default("standard"),
+    latencyMode: LatencyMode,
     sandboxBackend: SandboxBackend,
     // Per-turn OS override. NULL = inherit the session's sandboxOs.
     sandboxOs: SandboxOs.nullable(),
@@ -6115,7 +6115,7 @@ export const ComposerDraft = z.object({
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   sourceTurnId: z.string().uuid().nullable(),
   sourceTurnVersion: z.number().int().positive().nullable(),
   updatedAt: z.string().nullable(),
@@ -6162,6 +6162,29 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 /**
+ * Submit one exact established-session draft. Content is repeated only as an
+ * integrity fence for outcome-unknown idempotent replay; the matching durable
+ * draft revision remains authoritative and is atomically rotated on acceptance.
+ */
+export const SubmitComposerDraftRequest = ComposerDraft.pick({
+  text: true,
+  annotations: true,
+  resources: true,
+  model: true,
+  reasoningEffort: true,
+  latencyMode: true,
+}).extend({
+  expectedDraftRevision: z.number().int().positive(),
+  clientEventId: SessionOperationKey,
+  delivery: z.enum(["send", "steer"]),
+  controlEtag: z.string().min(1).optional(),
+  modelContext: z.string().trim().min(1).max(32768).optional(),
+  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+});
+export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
+
+/**
  * Create-only options saved with an actor's private pre-session draft. This is
  * deliberately narrower than CreateSessionRequest: idempotency/event keys and
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
@@ -6188,7 +6211,7 @@ export const NewSessionDraft = z.object({
   toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   options: NewSessionDraftOptions,
   updatedAt: z.string().nullable(),
 });
@@ -9771,6 +9794,8 @@ export const Session = z.object({
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
   model: z.string(),
+  reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode,
   sandboxBackend: SandboxBackend,
   // The OS the session's box runs. Defaults to 'linux' (today's only OS).
   sandboxOs: SandboxOs,
@@ -12575,6 +12600,15 @@ export const SteerSessionMessageResponse = z.object({
   turn: SessionTurn,
 });
 export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
+
+export const SubmitComposerDraftResponse = z.object({
+  accepted: SessionEvent,
+  turn: SessionTurn,
+  draft: ComposerDraft,
+  interruptionCount: z.number().int().nonnegative(),
+  replay: z.boolean(),
+});
+export type SubmitComposerDraftResponse = z.infer<typeof SubmitComposerDraftResponse>;
 
 export const SessionBusMessage = z.object({
   workspaceId: z.string().uuid(),

@@ -645,6 +645,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
@@ -655,6 +657,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
@@ -665,6 +669,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
@@ -675,6 +681,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
@@ -685,6 +693,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: descendant.id,
       });
@@ -863,6 +873,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
           parentSessionId: manager.id,
         });
@@ -878,6 +890,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: childSessionIds[0]!,
       });
@@ -891,6 +905,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: grandchild.id,
       });

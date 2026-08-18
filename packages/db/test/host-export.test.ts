@@ -60,6 +60,8 @@ async function createStartedSession(label: string) {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
     createdBy: { kind: "subject", subjectId, label: `User ${label}` },
     createdByContext: { label: `User ${label}` },
@@ -166,6 +168,8 @@ describe("durable host export (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: active.session.id,
       createdBy: { kind: "subject", subjectId: active.subjectId },
@@ -295,6 +299,8 @@ describe("durable host export (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const foreignStarted = await initializeSessionStartAtomically(app.db, {

@@ -862,6 +862,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ...(run ? { scheduledTaskRunId: run.id } : {}),
                 },
                 model,
+                reasoningEffort,
+                latencyMode: "standard",
                 sandboxBackend,
                 sandboxOs: "linux",
                 variableSetId: task.variableSetId ?? null,
@@ -1757,6 +1759,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         scheduledTaskRunId: input.run.id,
       },
       model: input.acceptedExecution.resolvedModel,
+      reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
+      latencyMode: input.acceptedExecution.resolvedLatencyMode,
       sandboxBackend: input.acceptedExecution.resolvedSandboxBackend,
       sandboxOs: input.acceptedExecution.resolvedSandboxOs,
       variableSetId: variableSet?.id ?? null,
@@ -1890,6 +1894,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         (session.metadata.scheduledTaskRunId !== input.run.id ||
           session.createdByContext.scheduledTaskRunId !== input.run.id)) ||
       session.model !== input.acceptedExecution.resolvedModel ||
+      session.reasoningEffort !== input.acceptedExecution.resolvedReasoningEffort ||
+      session.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
       session.sandboxBackend !== input.acceptedExecution.resolvedSandboxBackend ||
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
       stableJson(session.resources) !== stableJson(task.agentConfig.resources) ||

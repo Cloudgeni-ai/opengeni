@@ -87,6 +87,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return {
@@ -1618,6 +1620,8 @@ describe("browser auth and network resources", () => {
         opengeniSiteAuthMaintenanceOperationId: reclaimed!.operationId,
       },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId: "site-auth-maintenance",
       createIdempotencyKey: `site-auth-maintenance:${reclaimed!.operationId}`,
@@ -1721,6 +1725,8 @@ describe("browser auth and network resources", () => {
         opengeniSiteAuthMaintenanceOperationId: repair!.operationId,
       },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId: "site-auth-maintenance",
       beforeCreateCommit: async (tx, sessionId) => {
@@ -1818,6 +1824,8 @@ describe("browser auth and network resources", () => {
           opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
         },
         model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId: "site-auth-maintenance",
         beforeCreateCommit: async (tx, sessionId) => {
@@ -1865,6 +1873,8 @@ describe("browser auth and network resources", () => {
         opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
       },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId: "site-auth-maintenance",
       beforeCreateCommit: async (tx, sessionId) => {
@@ -1961,6 +1971,8 @@ describe("browser auth and network resources", () => {
         opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
       },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId: "site-auth-maintenance",
       beforeCreateCommit: async (tx, sessionId) => {

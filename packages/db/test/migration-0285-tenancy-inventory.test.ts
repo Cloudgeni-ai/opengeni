@@ -177,6 +177,8 @@ describe("migration 0285 tenancy inventory", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     // A session in ANOTHER organization must not leak into the counts.
@@ -187,6 +189,8 @@ describe("migration 0285 tenancy inventory", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
 

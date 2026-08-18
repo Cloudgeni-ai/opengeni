@@ -29,7 +29,7 @@ import {
   useInlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import { isIntelligenceEffort, labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
+import { labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
 import type { LatencyMode, Session } from "@/types";
 
 export function SessionHeader({
@@ -99,15 +99,8 @@ export function SessionHeader({
   const resolvedBilling: BillingClass =
     billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
   const resolvedModel = modelLabel?.trim() || displayModel(modelId);
-  const sessionEffort = session.metadata.reasoningEffort;
-  const displayEffort: IntelligenceEffort =
-    lastStartedReasoningEffort ?? (isIntelligenceEffort(sessionEffort) ? sessionEffort : "low");
-  const sessionLatency = session.metadata.latencyMode;
-  const displayLatency: LatencyMode =
-    lastStartedLatencyMode ??
-    (sessionLatency === "fast" || sessionLatency === "priority" || sessionLatency === "standard"
-      ? sessionLatency
-      : "standard");
+  const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
+  const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
   // Codex → clickable account chip. Other rails → static provider icon only
   // (never invent a text "OpenGeni"/"BYOK" word). Don't key off `codexSlot != null`.
   const isCodexRail = resolvedBilling === "codex_subscription";
