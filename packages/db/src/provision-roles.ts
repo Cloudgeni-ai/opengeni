@@ -568,7 +568,7 @@ BEGIN
         );
       END IF;
     END LOOP;
-    -- Migration 0294's session ownership seams have the same shape: their own
+    -- Migration 0297's session ownership seams have the same shape: their own
     -- conditional GRANT block is skipped whenever opengeni_app does not yet
     -- exist, and they live in the data schema rather than opengeni_private, so
     -- the blanket sweep above never reaches them. (Their inner capability

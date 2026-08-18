@@ -442,7 +442,7 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
-#### Session ownership (migration 0294)
+#### Session ownership (migration 0297)
 
 Sessions are **not** an undifferentiated ownerless backlog. Migration 0225's
 `guard_session_authority_write` trigger already derives session ownership on

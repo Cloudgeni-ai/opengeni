@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0294: session ownership classification plus the one deterministic
+-- Migration 0297: session ownership classification plus the one deterministic
 -- backfill (OPE-204 phase D, slice 6).
 --
 -- THE PREMISE THIS SLICE WAS SCOPED ON WAS WRONG

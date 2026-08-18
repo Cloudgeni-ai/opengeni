@@ -1,4 +1,4 @@
-// Migration 0294: OPE-204 phase D session ownership classification and the one
+// Migration 0297: OPE-204 phase D session ownership classification and the one
 // deterministic backfill.
 //
 // The load-bearing claims under test are:
@@ -34,7 +34,7 @@ let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0294-session-ownership");
+  shared = await acquireSharedTestDatabase("migration-0297-session-ownership");
   if (!shared) {
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
     return;
@@ -60,7 +60,7 @@ type Fixture = {
 
 async function seedOrganization(label: string): Promise<Fixture> {
   const [account] = await admin<{ id: string }[]>`
-    insert into managed_accounts (name) values (${`0294-${label}`}) returning id
+    insert into managed_accounts (name) values (${`0297-${label}`}) returning id
   `;
   const organizationId = account!.id;
   const workspace = async (name: string): Promise<string> => {
@@ -131,7 +131,7 @@ async function insertSession(
     id,
     account_id: fixture.organizationId,
     workspace_id: workspaceId,
-    initial_message: "0294 fixture",
+    initial_message: "0297 fixture",
     model: "gpt-5",
     sandbox_backend: "none",
     sandbox_group_id: id,
@@ -213,7 +213,7 @@ async function backfill(
   })) as unknown as BackfillReport;
 }
 
-describe("migration 0294 session ownership", () => {
+describe("migration 0297 session ownership", () => {
   test("measured population: which shapes migration 0225 actually attributes", async () => {
     if (!shared) return;
     const fixture = await seedOrganization("population");

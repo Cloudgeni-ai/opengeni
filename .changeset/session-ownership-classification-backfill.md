@@ -2,7 +2,7 @@
 "@opengeni/db": minor
 ---
 
-Add the OPE-204 phase D session ownership classification and backfill seam (migration 0294, rolling), plus `bun run db:backfill-session-ownership`.
+Add the OPE-204 phase D session ownership classification and backfill seam (migration 0297, rolling), plus `bun run db:backfill-session-ownership`.
 
 The slice was scoped on a false premise. Sessions are not 100% owner-NULL: migration 0225's `guard_session_authority_write` trigger already derives session ownership on every INSERT, and `session_visibility_isolation` is live. 0285's `sessions.ownerless` count is the residue of that trigger's two INSERT-only branches, not a migration backlog - and part of it grows with every API-key or scheduled session.
 

@@ -1,5 +1,5 @@
 // OPE-204 phase D session ownership classification and backfill (migration
-// 0294). Usage:
+// 0297). Usage:
 //
 //   # classify only - never writes a session row
 //   bun run db:backfill-session-ownership --organization-id <uuid> --classify
@@ -14,7 +14,7 @@
 //     --limit 500 --max-batches 200 --run-key <key>
 //
 // The backfill repairs ONLY the two deterministic populations described in
-// migration 0294: a session in exactly one active organization membership's
+// migration 0297: a session in exactly one active organization membership's
 // personal workspace whose creator subject is that same membership, and the
 // parent-inheritance closure migration 0225's own trigger would have produced.
 // Everything else is recorded unresolved by `--classify`, never guessed.
