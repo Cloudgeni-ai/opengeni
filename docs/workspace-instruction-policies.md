@@ -117,6 +117,12 @@ explicit target, and caller-supplied active-head revision/version baseline. Its
 draft records `knowledge_proposal` provenance with the Knowledge proposal UUID
 as source ID; the proposal source version is the exact content hash.
 
+Because it inherits that lifecycle, it also inherits the per-baseline proposal
+identity described above: one Knowledge proposal may own more than one inactive
+instruction-policy proposal, at most one per baseline activation version, which
+is what lets `remember_confirm` rebaseline a human's confirmation onto a head
+that moved underneath it.
+
 Migration `0255_company_brain_governed_write_proposals.sql` extends the existing
 database validator to require that the Knowledge proposal has workspace scope,
 the same workspace, `instruction_policy` target kind, exact normalized target
