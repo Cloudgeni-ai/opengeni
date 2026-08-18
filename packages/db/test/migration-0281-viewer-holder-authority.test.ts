@@ -43,9 +43,7 @@ describe("migration 0281 viewer holder authority claims", () => {
     // Guarded add + full validation (the rolling re-apply window).
     expect(source).toContain("conrelid = 'sandbox_lease_holders'::regclass");
     expect(source).toContain("NOT VALID");
-    expect(source).toContain(
-      'VALIDATE CONSTRAINT "sandbox_lease_holders_viewer_authority_check"',
-    );
+    expect(source).toContain('VALIDATE CONSTRAINT "sandbox_lease_holders_viewer_authority_check"');
     expect(source).not.toMatch(/\bDROP\b/u);
   });
 
