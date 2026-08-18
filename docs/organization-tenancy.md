@@ -556,6 +556,175 @@ Only after all writers/readers are activated and audited may legacy
 workspace-owned assumptions be removed. Resource FKs are never destructively
 rewritten in the same release that first activates user authority.
 
+## Rollback boundary and canonical activation
+
+This section is the canonical home for what is reversible before canonical
+tenancy authority activation and what becomes forward-recovery-only after it.
+The operator procedure that executes an activation lives in
+[`deployment.md`](deployment.md) with the other maintenance cutovers.
+
+**Canonical tenancy authority activation** is a phase-F event for one subsystem:
+the point at which that subsystem's access decision is made by
+organization/membership authority ids under exact organization+subject+workspace
+RLS instead of the legacy workspace-owned lane. Activation is per subsystem, and
+each activation is one way.
+
+### Where the boundary sits today
+
+The program is deliberately not one global switch, so "rollback is explicit
+before canonical activation" is a per-subsystem statement:
+
+- **Rolling, application-reversible.** `0218_organization_tenancy_foundation`,
+  `0219_organization_tenancy_managed_human_provisioning`,
+  `0222_session_visibility_authority_epochs`,
+  `0235_canonical_human_login_bindings`,
+  `0253_common_user_resource_authority_lifecycle`,
+  `0258_three_scope_document_knowledge_authority`,
+  `0262_scoped_connected_machines_and_rigs`,
+  `0263_organization_membership_lifecycle`, `0277`–`0282`, and
+  `0285_organization_tenancy_inventory` all declare
+  `-- deployment-mode: rolling`. Their tenancy columns keep non-authority
+  defaults (`visibility = 'workspace_shared'`, `authority_epoch = 1`, null owner
+  membership, null fork provenance, `authority_scope = 'workspace'`), so a
+  compatible earlier application image can still read and write them and an
+  image rollback remains an ordinary deployment decision.
+- **Already one way.** Two tenancy migrations declare
+  `-- deployment-mode: maintenance` and have already crossed their boundary.
+  - `0264_connection_authority_runtime_activation.sql` proves there are no other
+    `opengeni_app` sessions both before and after taking `ACCESS EXCLUSIVE` locks
+    on `sessions`, `session_turns`, `session_system_updates`,
+    `session_system_update_outbox`, `scheduled_tasks`, and `connections`, rejects
+    a live application with SQLSTATE `55000`, and additionally rejects every
+    executable pre-activation common-user Connection source as a durable data
+    fence. Old workers neither materialize accepted connection authority nor
+    carry the exact attempt/use fences, so after 0264 commits the Connection
+    surface has no rollback boundary left - only forward recovery.
+  - `0275_scheduled_connection_authority.sql` repeats that shape for scheduled
+    work: the same `pg_stat_activity` drain guard and SQLSTATE `55000`, then
+    `ACCESS EXCLUSIVE` locks on `sessions`, `session_turns`,
+    `session_system_updates`, `scheduled_tasks`, `scheduled_task_runs`,
+    `connections`, and `organization_user_resource_grants`. It freezes
+    common-user Connection authority on scheduled-task revisions, admits one
+    immutable copy per stable occurrence, and rejects every remaining
+    queued/dispatched agent run, every active task carrying activated Connection
+    delegation, and every active personal-resource task whose creator is not an
+    active organization member. An old writer must never be restarted after it
+    either; see [`architecture.md`](architecture.md) and
+    [`deployment.md`](deployment.md).
+
+The remaining phase-F work named in [F. Activate](#f-activate) has therefore not
+crossed its boundary yet.
+
+### Reversible before activation
+
+While a subsystem is pre-activation:
+
+- an application/image rollback to a compatible earlier digest is permitted, and
+  the legacy workspace-owned path stays byte-identical;
+- tenancy columns and authority/grant rows are additive facts, not the access
+  decision, so an earlier writer that ignores them is not producing wrong
+  authority;
+- the four foundation authority/grant tables stay FORCE-RLS with zero direct
+  application-role DML, so no legacy writer can widen access through them;
+- backfill classifications and inventory reads are content-free and idempotent;
+  re-running them changes no authorization outcome.
+
+### Forward-recovery-only after activation
+
+Once an activation migration commits for a subsystem:
+
+- there is no down-migration and no mixed-version rolling rollback;
+- an earlier image must never be started again - it strips or ignores the
+  authority the activated subsystem now depends on;
+- recovery is forward only: fix the new runtime and roll forward, remaining in
+  maintenance while doing so.
+
+### Preconditions for permitting an activation
+
+All of the following must hold, per organization, before an activation migration
+is run:
+
+1. **Complete backfill.** `bun run db:inventory-tenancy --organization-id <uuid>`
+   (migration 0285) must report zero for every population the activated subsystem
+   consumes: `organizationMemberships.activeWithoutPersonalWorkspace`,
+   `workspaceMemberSubjectsWithoutMembershipAnchor`, `sessions.ownerless`,
+   `documents.legacyPersonalNullAuthority`,
+   `codexCredentials.unattributedConnector`,
+   `workspaceWriters.admissions.legacyUnattributed`, and
+   `workspaceWriters.retainedProcesses.legacyUnattributed`. A single non-zero
+   counter for a consumed population is a blocker.
+   Variable Sets, Rigs, and Connected Machines contribute no drain-to-zero
+   counter here, and one must not be invented: nothing in their schema separates
+   an unmigrated legacy row from a deliberately organization- or
+   workspace-scoped one, so no truthful unmigrated-population count exists for
+   them (see [D. Backfill](#d-backfill)). Reconcile those three families through
+   their `byScope` breakdown against the reviewed classification instead -
+   `byScope` reports every authority distinction the schema can truthfully make,
+   and any non-user-scoped total is derivable from it.
+2. **Parity evidence.** The phase-E read-only shadow comparison shows the
+   proposed effective scope equals the legacy effective scope for every compared
+   read. No mismatch may be resolved by falling back to user authority.
+3. **Cross-organization and RLS evidence.** Exact organization+subject+workspace
+   policies deny every cross-organization read and write, and missing or
+   mismatched transaction-local identity fails closed rather than widening.
+4. **Immediate-revocation tests.** Suspension, offboarding, and single-workspace
+   membership removal take effect before the next read on the activated surface,
+   including buffered/replayed SSE frames, and revoked or suspended grants fence
+   new mutations before any generation is consumed.
+5. **Zero incompatible writers.** `pg_stat_activity` shows no `opengeni_app`
+   session other than the migration connection. The in-migration guard is the
+   durable fence, not a courtesy check.
+
+### The pre-activation opt-out switch
+
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`
+(`organizationTenancyCanonicalActivationEnabled` in `@opengeni/config`) is the
+named deployment-level switch for declining or deferring canonical activation.
+It defaults to `false` - the reversible pre-activation posture - and is parsed
+with the config library's `EnvBoolean`, so an operator writing `false` out
+explicitly stays declined rather than being coerced into activation.
+
+- `false` (default): this deployment declines/defers activation. No phase-F
+  slice may switch a subsystem's access decision to authority ids.
+- `true`: the operator states that the preconditions above were proven for this
+  deployment and that the one-way boundary is accepted.
+
+What the switch is not:
+
+- **not a kill switch and not a rollback.** After an activation migration has
+  committed, setting it back to `false` does not restore legacy authority. The
+  switch only governs whether the boundary may be crossed, never whether it can
+  be uncrossed;
+- **not an authorization decision.** It grants and revokes nothing by itself;
+  every membership, grant, epoch, and RLS fence keeps its own authority;
+- **not a data migration toggle.** Rolling tenancy migrations are applied
+  independently of it.
+
+As of the slice that introduced it, no runtime path reads the switch: canonical
+activation is unshipped, so it reserves the name, pins the safe default in the
+chart and `.env.example`, and gives every future activation slice one gate to
+consult.
+
+### What an operator must not do
+
+- Do not restart a pre-activation image after an activation migration has
+  committed, and do not attempt a mixed-version rolling rollback across one.
+  This already applies to `0264` and `0275`.
+- Do not run an activation migration with a live application. The
+  `opengeni_app` session guard aborts with SQLSTATE `55000` and rolls its
+  transaction back cleanly; treat that as the contract, not as a race to retry.
+- Do not hand-edit `organization_memberships`,
+  `organization_user_resource_authorities`,
+  `organization_user_resource_grants`, or session tenancy columns to "undo" an
+  activation. Those tables have zero direct application-role DML by design, and
+  lifecycle evidence is immutable.
+- Do not treat flipping
+  `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` back to `false`
+  as a rollback, or as a way to re-open a crossed boundary.
+- Do not infer user authority for an unresolved backfill row in order to clear a
+  precondition counter. Ownership is never guessed from `created_by`, connection
+  attribution, a default workspace, resource name, or current access.
+
 ## Remaining non-goals
 
 - member-management UI and provider invitation email;

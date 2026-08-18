@@ -402,9 +402,17 @@ authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice
 does not change resource FKs, RLS read policies, APIs, workers, sharing/forking,
 execution fencing, or resource materialization. Activation is staged through
-dual-write, backfill, validation, and subsystem-by-subsystem cutover. See
-[`organization-tenancy.md`](organization-tenancy.md) and the accepted
-[ADR](design/organization-tenancy-slice-a-2026-08-11.md).
+dual-write, backfill, validation, and subsystem-by-subsystem cutover. Each
+subsystem's cutover is one way: before it, an application/image rollback is an
+ordinary decision and the legacy workspace-owned lane stays byte-identical;
+after it, only forward recovery is permitted and a pre-activation image must
+never restart. `0264_connection_authority_runtime_activation.sql` has already
+crossed that boundary for the Connection surface. The named pre-activation
+opt-out is `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`
+(default off). See
+[`organization-tenancy.md`](organization-tenancy.md) for the boundary and its
+preconditions, [`deployment.md`](deployment.md) for the operator procedure, and
+the accepted [ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
 Migration 0223 adds organization-independent canonical human identity and
 verified login-binding authority. Each Better Auth user converges on one
@@ -1429,7 +1437,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`transcription.md`](transcription.md)                           | Composer voice-input trust boundary, local capture, resumable server manifests/chunks/segmentation/provider pinning, retention cleanup, one-shot compatibility, provider registry, and workspace toggle. |
 | [`workspace-instruction-policies.md`](workspace-instruction-policies.md) | Immutable workspace charter/policy revisions, activation heads and audit events, rollback/conflict semantics, RBAC, and exact legacy fallback.                                                    |
 | [`company-profile.md`](company-profile.md) | Organization-scoped concise company identity/goals authority, revisions, audit/rollback, durable-learning adapter seam, exact-attempt snapshots, and prompt precedence. |
-| [`organization-tenancy.md`](organization-tenancy.md) | Organization → Workspace → User authority foundation, personal-workspace lifecycle metadata, user-resource/grant identity, session visibility/epoch/fork provenance, legacy defaults, and staged activation plan. |
+| [`organization-tenancy.md`](organization-tenancy.md) | Organization → Workspace → User authority foundation, personal-workspace lifecycle metadata, user-resource/grant identity, session visibility/epoch/fork provenance, legacy defaults, the staged activation plan, and the activation/rollback boundary with its pre-activation opt-out switch. |
 | [`scoped-knowledge.md`](scoped-knowledge.md)                     | Fixed organization/workspace/initiating-user authority, provider/source/version ledgers, normalized entities/facts/claims, immutable evidence/reviews, ACL intersection, lifecycle fencing, legacy non-widening, and proposal-only policy/preference linkage. |
 | [`knowledge-retrieval.md`](knowledge-retrieval.md)               | Permission-first agent Knowledge search/get/browse across organization, current-workspace, and exact-granted initiating-user Documents; strict projection, cursor binding, provenance, and revocation fencing.       |
 | [`company-brain-write-routing.md`](company-brain-write-routing.md) | Destination/authority matrix; bounded root-task-tree coordination notes; and exact-attempt, workspace-local governed Knowledge/correction/inactive instruction-policy/preference proposal routing with explicit activation and surface exclusions. |
