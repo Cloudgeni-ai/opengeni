@@ -30,7 +30,6 @@ import {
   type EditableArtifactMaterializationProfilePort,
 } from "@opengeni/core/editable-artifacts";
 import {
-  EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION,
   EditableArtifactApplication,
   EditableArtifactCompatibilityError,
   EditableArtifactLiveServer,
@@ -41,6 +40,7 @@ import {
   type EditableArtifactLiveAuthorizationInvalidationPort,
   type EditableArtifactLiveCompatibilityPort,
 } from "@opengeni/core/editable-artifact-live";
+import { currentEditableArtifactCompatibility } from "@opengeni/contracts/editable-artifacts";
 import {
   PostgresEditableArtifactLiveReadStore,
   PostgresEditableArtifactLiveTicketStore,
@@ -194,10 +194,14 @@ export async function createStandaloneEditableArtifactApplication(input: {
     assertCompatible(
       request: Parameters<EditableArtifactLiveCompatibilityPort["assertCompatible"]>[0],
     ) {
+      const current = currentEditableArtifactCompatibility(request.artifact.modality);
       if (
-        request.protocolVersion !== EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION ||
-        request.modelSchemaVersion !== 1 ||
-        request.kernelVersion !== runtime.buildIdentity
+        request.modality !== request.artifact.modality ||
+        request.liveProtocolVersion !== current.liveProtocolVersion ||
+        request.modelSchemaVersion !== current.modelSchemaVersion ||
+        request.snapshotVersion !== current.snapshotVersion ||
+        request.commandProtocolVersion !== current.commandProtocolVersion ||
+        request.committedTransactionProtocolVersion !== current.committedTransactionProtocolVersion
       ) {
         throw new EditableArtifactCompatibilityError();
       }
@@ -334,14 +338,16 @@ class RandomEditableArtifactDurableExportIds implements EditableArtifactDurableE
 function materializationProfiles(
   capabilities: EditableArtifactNativeMaterializerCapabilities,
 ): EditableArtifactMaterializationProfilePort {
+  const spreadsheetCompatibility = currentEditableArtifactCompatibility("spreadsheet");
   if (
     capabilities.protocol !== "OGAMC001" ||
     capabilities.runtimeKind !== "native" ||
     capabilities.maxOutputBytes !== EDITABLE_ARTIFACT_EXPORT_MAX_DOWNLOAD_BYTES ||
     capabilities.codecVersions["opengeni.xlsx"] === undefined ||
-    !capabilities.supportedModelSchemaVersions.includes(1) ||
-    !capabilities.supportedOperationProtocolVersions.includes(1) ||
-    !capabilities.supportedSnapshotProtocolVersions.includes(1)
+    capabilities.supportedModelSchemaVersions[0] !== spreadsheetCompatibility.modelSchemaVersion ||
+    capabilities.supportedOperationProtocolVersions[0] !==
+      spreadsheetCompatibility.committedTransactionProtocolVersion ||
+    capabilities.supportedSnapshotProtocolVersions[0] !== spreadsheetCompatibility.snapshotVersion
   ) {
     throw new Error("Verified artifact materializer profile is incompatible");
   }

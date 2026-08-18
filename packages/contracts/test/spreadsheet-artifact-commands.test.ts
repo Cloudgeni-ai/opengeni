@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import fixture from "./fixtures/editable-artifact-spreadsheet-v1.json";
+import fixture from "./fixtures/editable-artifact-spreadsheet-current.json";
 import {
   SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS,
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
@@ -29,7 +29,15 @@ const batch = (
   commands,
 });
 
-describe("canonical identity-free OGASC001 spreadsheet commands", () => {
+describe("canonical identity-free OGASC002 spreadsheet commands", () => {
+  test("rejects the previous command magic without a legacy decoder", () => {
+    const previous = encodeSpreadsheetArtifactCommandBatch(
+      batch([{ kind: "sheet.delete", sheet: concreteSheet }]),
+    ).slice();
+    previous.set(new TextEncoder().encode("OGASC001"), 0);
+    expect(() => decodeSpreadsheetArtifactCommandBatch(previous)).toThrow(/magic/u);
+  });
+
   test("matches the shared TypeScript/Rust golden vector and nests exactly in OGATX001", () => {
     const semantic = fixture.commandBatch as unknown as SpreadsheetArtifactCommandBatch;
     const encoded = encodeSpreadsheetArtifactCommandBatch(semantic);
@@ -107,7 +115,7 @@ describe("canonical identity-free OGASC001 spreadsheet commands", () => {
         columns: 4,
         cells: [
           { date: "2026-08-09T12:34:56.789Z" },
-          { formula: "=DATE(2026,8,9)", cached: { date: "2026-08-09T00:00:00.000Z" } },
+          { formula: "=DATE(2026,8,9)" },
           { date: "-271821-04-20T00:00:00.000Z" },
           { date: "+275760-09-13T00:00:00.000Z" },
         ],
@@ -260,11 +268,34 @@ describe("canonical identity-free OGASC001 spreadsheet commands", () => {
             anchor: { row: 0, column: 0 },
             rows: 1,
             columns: 1,
-            cells: [{ formula: "", cached: null }],
+            cells: [{ formula: "" }],
           },
         ]),
       ),
     ).toThrow(/nonempty/u);
+    let getterCalls = 0;
+    const accessorError = Object.defineProperty({}, "error", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "must not execute";
+      },
+    });
+    expect(() =>
+      encodeSpreadsheetArtifactCommandBatch(
+        batch([
+          {
+            kind: "cells.set",
+            sheet: concreteSheet,
+            anchor: { row: 0, column: 0 },
+            rows: 1,
+            columns: 1,
+            cells: [accessorError as never],
+          },
+        ]),
+      ),
+    ).toThrow(/data propert/iu);
+    expect(getterCalls).toBe(0);
     expect(() =>
       encodeSpreadsheetArtifactCommandBatch(
         batch([
@@ -347,7 +378,7 @@ describe("canonical identity-free OGASC001 spreadsheet commands", () => {
   test("enforces command, cell, and strict-string bounds before allocation-heavy work", () => {
     expect(() =>
       encodeSpreadsheetArtifactCommandBatch({
-        version: 1,
+        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
         commands: new Array(SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS + 1).fill({
           kind: "sheet.delete",
           sheet: concreteSheet,

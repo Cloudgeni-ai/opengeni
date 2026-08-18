@@ -26,10 +26,11 @@ describe("editable artifact binary live wire", () => {
   test("round-trips a one-use open frame without putting its token in a URL", () => {
     const encoded = encodeEditableArtifactLiveOpenWireFrame({
       type: "open",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       token: "t".repeat(43),
       resume: {
+        modality: "spreadsheet",
         localCursor: 3,
         localStateHash: stateHash,
         localCausalFrontier: [{ replicaId, counter: 3 }],
@@ -39,10 +40,11 @@ describe("editable artifact binary live wire", () => {
 
     expect(decodeEditableArtifactLiveClientWireFrame(encoded)).toEqual({
       type: "open",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       token: "t".repeat(43),
       resume: {
+        modality: "spreadsheet",
         localCursor: 3,
         localStateHash: stateHash,
         localCausalFrontier: [{ replicaId, counter: 3 }],
@@ -55,8 +57,8 @@ describe("editable artifact binary live wire", () => {
     const authored = hashEditableArtifactMutationIntent({
       envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
       protocolVersion: 1,
-      modelSchemaVersion: 1,
-      commandProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      commandProtocolVersion: 2,
       artifactId,
       clientTransactionId: "client-1",
       replicaId,
@@ -69,7 +71,7 @@ describe("editable artifact binary live wire", () => {
     });
     const encoded = encodeEditableArtifactLiveMutationWireFrame({
       type: "mutation",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: "live_epoch_1",
       requestHash: editableArtifactRequestHash(authored.requestHash),
@@ -93,7 +95,7 @@ describe("editable artifact binary live wire", () => {
   test("rejects trailing bytes, noncanonical metadata, and payload-bearing ACKs", () => {
     const applied = encodeEditableArtifactLiveAppliedWireFrame({
       type: "applied",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: "live_epoch_1",
       sequence: 0,
@@ -119,7 +121,7 @@ describe("editable artifact binary live wire", () => {
     const transactionBytes = new Uint8Array([0x4f, 0x47, 0x41, 0x43, 0x4f, 1, 2, 3]);
     const frame: EditableArtifactLiveServerFrame = {
       type: "transaction",
-      protocolVersion: 1,
+      protocolVersion: 2,
       artifactId,
       streamEpoch: "live_epoch_1",
       transaction: {
@@ -131,7 +133,7 @@ describe("editable artifact binary live wire", () => {
         priorStateHash: `sha256:${"3".repeat(64)}` as never,
         stateHash,
         causalFrontier: [{ replicaId, counter: 1 }],
-        protocolVersion: 1,
+        operationProtocolVersion: 2,
         committedTransactionBytes: transactionBytes,
       },
     };

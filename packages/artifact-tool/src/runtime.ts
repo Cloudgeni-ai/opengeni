@@ -1,3 +1,12 @@
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+  SPREADSHEET_KERNEL_COMMAND_VERSION,
+  SPREADSHEET_KERNEL_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
+
 /**
  * Exact artifact-kernel distribution and runtime boundary.
  *
@@ -163,13 +172,14 @@ export type ArtifactRuntimeKernelDependencies = Pick<
 export type ArtifactKernelCapabilities = {
   readonly abiVersion: 1;
   readonly buildIdentityFormat: "utf8";
-  readonly commandSchemaVersion: 1;
-  readonly spreadsheetCommandVersion: 1;
-  readonly kernelSnapshotVersion: 1;
+  readonly commandSchemaVersion: typeof SPREADSHEET_KERNEL_COMMAND_VERSION;
+  readonly spreadsheetCommandVersion: typeof SPREADSHEET_ARTIFACT_COMMAND_VERSION;
+  readonly spreadsheetModelSchemaVersion: typeof SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION;
+  readonly kernelSnapshotVersion: typeof SPREADSHEET_KERNEL_SNAPSHOT_VERSION;
   readonly receiptSchemaVersion: 1;
-  readonly collaborationSnapshotVersion: 1;
+  readonly collaborationSnapshotVersion: typeof SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION;
   readonly editableArtifactIntentVersion: 1;
-  readonly committedTransactionVersion: 1;
+  readonly committedTransactionVersion: typeof COMMITTED_TRANSACTION_PROTOCOL_VERSION;
   readonly queryVersion: 1;
   readonly queryResponseVersion: 1;
   readonly collaboration: true;
@@ -237,6 +247,7 @@ export type ArtifactRuntimeErrorCode =
   | "ARTIFACT_RUNTIME_INCOMPATIBLE"
   | "ARTIFACT_RUNTIME_INTEGRITY"
   | "ARTIFACT_RUNTIME_MANIFEST_INVALID"
+  | "ARTIFACT_RUNTIME_PROJECTION_PARITY"
   | "ARTIFACT_RUNTIME_UNAVAILABLE"
   | "ARTIFACT_RUNTIME_UNSUPPORTED_TARGET";
 
@@ -1208,13 +1219,14 @@ function parseCapabilities(value: unknown): ArtifactKernelCapabilities {
   const required = {
     abiVersion: 1,
     buildIdentityFormat: "utf8",
-    commandSchemaVersion: 1,
-    spreadsheetCommandVersion: 1,
-    kernelSnapshotVersion: 1,
+    commandSchemaVersion: SPREADSHEET_KERNEL_COMMAND_VERSION,
+    spreadsheetCommandVersion: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+    spreadsheetModelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+    kernelSnapshotVersion: SPREADSHEET_KERNEL_SNAPSHOT_VERSION,
     receiptSchemaVersion: 1,
-    collaborationSnapshotVersion: 1,
+    collaborationSnapshotVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
     editableArtifactIntentVersion: 1,
-    committedTransactionVersion: 1,
+    committedTransactionVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
     queryVersion: 1,
     queryResponseVersion: 1,
     collaboration: true,

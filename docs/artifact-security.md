@@ -31,6 +31,10 @@ The non-negotiable invariants are:
    publishes atomically only after decode, validation, apply, and verification.
 7. Authorization derives from the authenticated artifact principal, never from
    document metadata, relationship ids, actor ids, or client operation bytes.
+8. Spreadsheet integrity hashes cover authored and causal state only. Formula
+   results, render products, layout caches, and indexes are recalculable
+   projections and must never affect snapshot, transaction, collaboration, or
+   optimistic-concurrency identity.
 
 ## Trust boundaries
 
@@ -51,10 +55,20 @@ untrusted bytes / agent commands / browser edits
 - The facade validates types and cheap limits; it is not the security authority.
 - Native and WASM kernels implement identical semantic limits and reject unknown
   schema/features. Production has no permissive TypeScript fallback.
+- Stored state is admitted by explicit current modality/schema/protocol facts,
+  not equality with its producer build string. Build identity remains a
+  fail-closed package-installation and materialization boundary and audit fact.
 - Production runtime installation requires one canonical complete eight-target
   release manifest. Every native asset is executed on its exact OS/CPU/libc
   before its canonical receipt is accepted; aggregation rejects mixed build
-  identities, missing targets, altered package metadata, or altered bytes.
+  identities, missing targets, altered package metadata, altered bytes, or a
+  different executed spreadsheet formula-projection corpus digest.
+- Live tickets admit only the exact current modality/live/model/snapshot/
+  command/committed-transaction tuple. Client build identity is bounded
+  diagnostic metadata and cannot grant or deny stored-state compatibility.
+- Workbook-open diagnostics expose only a bounded stable error code and failure
+  category. They never copy snapshot bytes, formula source, cell values, or raw
+  exception messages into logs or metrics.
 - The local current-host development bundle is a separate manifest mode. Its
   loader rejects production, mixed production/development configuration,
   noncanonical receipts, symlink escapes, and post-manifest tampering. Local
@@ -153,7 +167,7 @@ RTD, VBA/UDFs, cube/external-workbook functions, and arbitrary plugins return a
 typed unsupported/name error. Volatile functions require an explicit seeded
 evaluation context. Parsing and evaluation consume source, node, depth,
 reference-area, dependency-edge, allocation, and instruction fuel. Exceeding a
-budget returns a typed limit error; it never partially commits cached values.
+budget returns a typed limit error; it never partially commits projected values.
 
 CSV/TSV exports must defend spreadsheet-formula injection as an export policy:
 cells beginning with `=`, `+`, `-`, `@`, tab, or carriage return are quoted or

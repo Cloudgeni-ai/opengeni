@@ -9,6 +9,8 @@ export * from "./presentation-artifact-commands";
 export * from "./editable-artifact-codec-registry";
 
 export const EDITABLE_ARTIFACT_INTENT_VERSION = 1 as const;
+/** Semantic protocol carried inside the unchanged OGATX001 envelope. */
+export const EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION = 1 as const;
 export const EDITABLE_ARTIFACT_INTENT_MAX_BYTES = 5 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_COMMAND_MAX_BYTES = 4 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES = 512;

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
 
 import type {
   BoundedImmutableObjectWritePort,
@@ -128,9 +133,9 @@ export type NativeEditableArtifactMaterializerIdentity = Readonly<{
   fontRegistryHash: string;
   policyHash: string;
   runtimeTarget: string;
-  supportedModelSchemaVersions: readonly number[];
-  supportedOperationProtocolVersions: readonly number[];
-  supportedSnapshotProtocolVersions: readonly number[];
+  supportedModelSchemaVersions: readonly [typeof SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION];
+  supportedOperationProtocolVersions: readonly [typeof COMMITTED_TRANSACTION_PROTOCOL_VERSION];
+  supportedSnapshotProtocolVersions: readonly [typeof SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION];
 }>;
 
 export type NativeEditableArtifactMaterializationResult = Readonly<{
@@ -894,19 +899,25 @@ function assertNativeKernelIdentity(
     boundedText(codecId, "codec id", 128);
     boundedText(version, "codec version", 128);
   }
-  for (const [label, values] of [
-    ["model schema versions", identity.supportedModelSchemaVersions],
-    ["operation protocol versions", identity.supportedOperationProtocolVersions],
-    ["snapshot protocol versions", identity.supportedSnapshotProtocolVersions],
+  for (const [label, values, expected] of [
+    [
+      "model schema versions",
+      identity.supportedModelSchemaVersions,
+      SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+    ],
+    [
+      "operation protocol versions",
+      identity.supportedOperationProtocolVersions,
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+    ],
+    [
+      "snapshot protocol versions",
+      identity.supportedSnapshotProtocolVersions,
+      SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+    ],
   ] as const) {
-    if (!Array.isArray(values) || values.length === 0 || values.length > 64) {
-      throw new Error(`Editable artifact kernel ${label} are invalid`);
-    }
-    const unique = new Set<number>();
-    for (const value of values) {
-      positiveInteger(value, label);
-      if (unique.has(value)) throw new Error(`Editable artifact kernel ${label} repeat`);
-      unique.add(value);
+    if (!Array.isArray(values) || values.length !== 1 || values[0] !== expected) {
+      throw new Error(`Editable artifact kernel ${label} are not current-only`);
     }
   }
 }
@@ -920,9 +931,9 @@ function assertJobKernelCompatibility(
     identity.codecVersions[job.codecId] === job.codecVersion &&
     identity.fontRegistryHash === job.fontRegistryHash &&
     identity.policyHash === job.policyHash &&
-    identity.supportedModelSchemaVersions.includes(job.modelSchemaVersion) &&
-    identity.supportedOperationProtocolVersions.includes(job.operationProtocolVersion) &&
-    identity.supportedSnapshotProtocolVersions.includes(job.snapshotProtocolVersion);
+    job.modelSchemaVersion === identity.supportedModelSchemaVersions[0] &&
+    job.operationProtocolVersion === identity.supportedOperationProtocolVersions[0] &&
+    job.snapshotProtocolVersion === identity.supportedSnapshotProtocolVersions[0];
   if (!compatible) throw new EditableArtifactMaterializerPermanentError("kernel_incompatible");
 }
 

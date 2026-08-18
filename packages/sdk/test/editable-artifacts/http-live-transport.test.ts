@@ -29,9 +29,13 @@ test("serialized resume requires cursor/hash/native revision as one exact tuple"
   const transport = createEditableArtifactHttpLiveTransport({
     baseUrl: "https://api.example.test",
     workspaceId: "workspace-1",
-    protocolVersion: 1,
+    modality: "document",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-test",
     modelSchemaVersion: 1,
+    snapshotVersion: 1,
+    commandProtocolVersion: 1,
+    committedTransactionProtocolVersion: 1,
     webSocketFactory: () => {
       sockets += 1;
       throw new Error("resume validation must run before socket creation");
@@ -43,7 +47,7 @@ test("serialized resume requires cursor/hash/native revision as one exact tuple"
     replicaId: REPLICA_ID,
     token: "one_use_serialized_resume_ticket",
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    protocolVersion: 1,
+    protocolVersion: 2,
   } as const;
   const signal = new AbortController().signal;
 
@@ -77,9 +81,13 @@ test("fails before sending a ticket when the WebSocket subprotocol is not negoti
   const transport = createEditableArtifactHttpLiveTransport({
     baseUrl: "https://api.example.test",
     workspaceId: "workspace-1",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
     webSocketFactory: () => socket,
   });
   const abort = new AbortController();
@@ -90,7 +98,7 @@ test("fails before sending a ticket when the WebSocket subprotocol is not negoti
       replicaId: REPLICA_ID,
       token: "one_use_ticket_bad_protocol",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      protocolVersion: 1,
+      protocolVersion: 2,
     },
     after: 0,
     stateHash: STATE_ZERO,
@@ -107,14 +115,18 @@ test("fails before sending a ticket when the WebSocket subprotocol is not negoti
 test("bounds the full open/bootstrap handshake instead of hanging after server open", async () => {
   const socket = new FakeSocket(
     "wss://api.example.test/v1/editable-artifacts/live",
-    "opengeni-artifact-v1",
+    "opengeni-artifact-v2",
   );
   const transport = createEditableArtifactHttpLiveTransport({
     baseUrl: "https://api.example.test",
     workspaceId: "workspace-1",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
     handshakeTimeoutMs: 5,
     webSocketFactory: () => socket,
   });
@@ -126,7 +138,7 @@ test("bounds the full open/bootstrap handshake instead of hanging after server o
       replicaId: REPLICA_ID,
       token: "one_use_ticket_stalled_bootstrap",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      protocolVersion: 1,
+      protocolVersion: 2,
     },
     after: 0,
     stateHash: STATE_ZERO,
@@ -138,7 +150,8 @@ test("bounds the full open/bootstrap handshake instead of hanging after server o
   socket.open();
   socket.server({
     type: "open",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-stalled",
     writable: true,
@@ -170,9 +183,13 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   const transport = createEditableArtifactHttpLiveTransport({
     baseUrl: "https://api.example.test/opengeni-api",
     workspaceId: "workspace-1",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
     apiKey: "long-lived-http-key",
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       requests.push({ url: String(input), init: init ?? {} });
@@ -182,7 +199,7 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
         replicaId: REPLICA_ID,
         token: "one_use_ticket_1",
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        protocolVersion: 1,
+        protocolVersion: 2,
       });
     }) as typeof fetch,
     webSocketFactory: (url, protocol) => {
@@ -206,6 +223,16 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   expect(new Headers(requests[0]?.init.headers).get(OPENGENI_API_CONTRACT_HEADER)).toBe(
     OPENGENI_API_CONTRACT_REVISION,
   );
+  expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+    replicaId: REPLICA_ID,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
+    kernelVersion: "artifact-kernel-test",
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
+  });
 
   const messages: EditableArtifactLiveMessage[] = [];
   const opening = transport.openLive({
@@ -221,7 +248,7 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   expect(socket.url).toBe("wss://api.example.test/opengeni-api/v1/editable-artifacts/live");
   expect(socket.url).not.toContain(ticket.token);
   expect(socket.url).not.toContain("long-lived-http-key");
-  expect(socket.protocol).toBe("opengeni-artifact-v1");
+  expect(socket.protocol).toBe("opengeni-artifact-v2");
   socket.open();
   const clientOpen = decodeEditableArtifactLiveClientWireFrame(socket.sent[0]!);
   expect(clientOpen).toMatchObject({
@@ -232,7 +259,8 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   });
   socket.server({
     type: "open",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-1",
     writable: true,
@@ -259,15 +287,18 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   });
   socket.server({
     type: "snapshot",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-1",
     sequence: 0,
     stateHash: STATE_ZERO,
     causalFrontier: [],
+    operationProtocolVersion: 2,
+    snapshotVersion: 2,
     digest: DIGEST_ZERO,
     kernelVersion: "artifact-kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
     offset: 0,
     totalBytes: 1,
     final: true,
@@ -275,7 +306,7 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   });
   socket.server({
     type: "barrier",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-1",
     sequence: 0,
@@ -314,7 +345,7 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   });
   socket.server({
     type: "mutationAccepted",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-1",
     requestHash: pending.requestHash,
@@ -326,7 +357,7 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
   });
   socket.server({
     type: "transaction",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-1",
     transaction: committed,
@@ -357,14 +388,18 @@ test("public transport keeps auth in HTTP/ticket bytes and maps one exact binary
 test("streamed commits become bounded replay pages and advance only after exact applied ACKs", async () => {
   const socket = new FakeSocket(
     "wss://api.example.test/v1/editable-artifacts/live",
-    "opengeni-artifact-v1",
+    "opengeni-artifact-v2",
   );
   const transport = createEditableArtifactHttpLiveTransport({
     baseUrl: "https://api.example.test",
     workspaceId: "workspace-1",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    liveProtocolVersion: 2,
     kernelVersion: "artifact-kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
+    snapshotVersion: 2,
+    commandProtocolVersion: 2,
+    committedTransactionProtocolVersion: 2,
     fetch: globalThis.fetch,
     webSocketFactory: () => socket,
   });
@@ -377,7 +412,7 @@ test("streamed commits become bounded replay pages and advance only after exact 
       replicaId: REPLICA_ID,
       token: "one_use_ticket_2",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      protocolVersion: 1,
+      protocolVersion: 2,
     },
     after: 0,
     stateHash: STATE_ZERO,
@@ -389,7 +424,8 @@ test("streamed commits become bounded replay pages and advance only after exact 
   socket.open();
   socket.server({
     type: "open",
-    protocolVersion: 1,
+    modality: "spreadsheet",
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-2",
     writable: true,
@@ -432,7 +468,7 @@ test("streamed commits become bounded replay pages and advance only after exact 
   });
   socket.server({
     type: "transaction",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-2",
     transaction: first,
@@ -460,14 +496,14 @@ test("streamed commits become bounded replay pages and advance only after exact 
   const retrying = connection.submit({ transaction: retriedPending, signal: abort.signal });
   socket.server({
     type: "transaction",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-2",
     transaction: first,
   });
   socket.server({
     type: "mutationAccepted",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-2",
     requestHash: retriedPending.requestHash,
@@ -495,7 +531,7 @@ test("streamed commits become bounded replay pages and advance only after exact 
   });
   socket.server({
     type: "transaction",
-    protocolVersion: 1,
+    protocolVersion: 2,
     artifactId: ARTIFACT_ID,
     streamEpoch: "epoch-2",
     transaction: second,

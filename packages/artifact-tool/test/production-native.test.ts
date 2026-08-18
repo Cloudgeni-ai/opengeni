@@ -65,10 +65,10 @@ describe("production facade over the real native addon", () => {
       expect(spreadsheet).toMatchObject({
         schemaVersion: 1,
         modality: "spreadsheet",
-        modelSchemaVersion: 1,
-        snapshotVersion: 1,
-        operationProtocolVersion: 1,
-        crdtStateVersion: 1,
+        modelSchemaVersion: 2,
+        snapshotVersion: 2,
+        operationProtocolVersion: 2,
+        crdtStateVersion: 2,
       });
       if (spreadsheet.modality !== "spreadsheet") throw new Error("Unexpected modality");
       expect(
@@ -140,7 +140,7 @@ describe("production facade over the real native addon", () => {
     const diagnostics = getArtifactCompositeDiagnostics(workbook);
     expect(diagnostics.modality).toBe("spreadsheet");
     expect(diagnostics.nativeStateHash).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(diagnostics.nativeSnapshot.slice(0, 8)).toEqual(new TextEncoder().encode("OGACRD01"));
+    expect(diagnostics.nativeSnapshot.slice(0, 8)).toEqual(new TextEncoder().encode("OGACRD02"));
     const reopened = NativeSpreadsheetSession.open(
       productionTestRuntime(),
       diagnostics.nativeSnapshot,
