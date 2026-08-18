@@ -293,6 +293,7 @@ export type {
   DeactivatePreferenceRegistryRequest,
   PreferenceRegistryConflictStrategy,
   PreferenceRegistryDescriptor,
+  PreferenceRegistryActivationAuthority,
   PreferenceRegistryDescriptorProvenance,
   PreferenceRegistryDetailResponse,
   PreferenceRegistryEvent,

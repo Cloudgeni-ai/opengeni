@@ -655,6 +655,21 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0289 creates this definer accessor before opengeni_app may
+    -- exist, so its migration-time GRANT is skipped on the supported
+    -- migrate-then-provision order. Re-converge it here.
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_activation_authority(uuid,uuid[])',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_activation_authority(uuid, uuid[]) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.preference_registry_create_knowledge_proposal_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text)',

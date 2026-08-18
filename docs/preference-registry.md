@@ -152,6 +152,15 @@ retrieval handle. Descriptor text strips controls, invisible formatting, line
 breaks, and prompt-like delimiter characters into one deterministic plain line.
 Full preference content is never embedded in a descriptor.
 
+A descriptor also carries `activationAuthority` (`human_confirmed`,
+`automatic`, or null), read from the governed-learning activation receipt that
+activated the exact active revision. This is deliberately separate from
+`provenance.trust`, which is the frozen creation-time fact and stays
+`untrusted_proposal` for anything an agent proposed no matter who later
+approved it. Null means no governed-learning receipt describes the current
+activation - either the revision was activated through the ordinary registry
+lifecycle, its activation was undone, or the descriptor predates the field.
+
 Descriptor snapshots are deterministic and bounded to 64 entries and 16 KiB of
 canonical UTF-8 JSON. Ordering is organization, workspace, user; precedence
 rank descending within a tier; then stable key and preference ID by code-point
