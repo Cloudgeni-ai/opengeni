@@ -203,6 +203,16 @@ CREATE TRIGGER guard_tenancy_backfill_unresolved_row
 -- Idempotent: a resumed sweep re-adopts its own open receipt and never opens a
 -- second one. Re-opening a settled receipt is refused rather than silently
 -- reviving it, because its counts are already evidence.
+--
+-- Idempotency is CONCURRENT, not merely serial. `SELECT ... FOR UPDATE` locks
+-- nothing when no row exists yet, so two sweeps opening the same run key would
+-- both fall through to the INSERT and one would surface a raw `23505` instead
+-- of adopting its peer's receipt. The insert therefore yields to the unique
+-- index (`ON CONFLICT DO NOTHING`) and re-selects the winner's row under the
+-- same lock. Under READ COMMITTED, PostgreSQL's speculative insertion has
+-- already waited for the conflicting transaction, so the re-select either sees
+-- the committed winner or (if that peer rolled back) the retried insert
+-- succeeded and there is nothing to re-read.
 CREATE OR REPLACE FUNCTION open_tenancy_backfill_receipt(
   p_account_id uuid,
   p_resource_family text,
@@ -213,12 +223,23 @@ SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $$
 DECLARE
+  previous_lifecycle_marker text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
   receipt_id uuid;
   receipt_status text;
 BEGIN
   IF p_account_id IS NULL OR p_resource_family IS NULL OR p_run_key IS NULL THEN
     RAISE EXCEPTION 'tenancy backfill receipt requires organization, family, and run key'
       USING ERRCODE = '22004';
+  END IF;
+
+  IF p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), ''
+    )::uuid
+  THEN
+    RAISE EXCEPTION 'tenancy backfill ledger scope mismatch'
+      USING ERRCODE = '42501';
   END IF;
 
   PERFORM pg_catalog.set_config(
@@ -232,18 +253,38 @@ BEGIN
     AND existing.run_key = p_run_key
   FOR UPDATE;
 
-  IF receipt_id IS NOT NULL THEN
-    IF receipt_status <> 'open' THEN
-      RAISE EXCEPTION 'tenancy backfill receipt % is already settled', receipt_id
-        USING ERRCODE = '55000';
+  IF receipt_id IS NULL THEN
+    INSERT INTO tenancy_backfill_receipts (account_id, resource_family, run_key)
+    VALUES (p_account_id, p_resource_family, p_run_key)
+    ON CONFLICT ("account_id", "resource_family", "run_key") DO NOTHING
+    RETURNING id, status INTO receipt_id, receipt_status;
+
+    IF receipt_id IS NULL THEN
+      -- A concurrent opener committed the same run key first: adopt its row.
+      SELECT existing.id, existing.status INTO receipt_id, receipt_status
+      FROM tenancy_backfill_receipts existing
+      WHERE existing.account_id = p_account_id
+        AND existing.resource_family = p_resource_family
+        AND existing.run_key = p_run_key
+      FOR UPDATE;
+
+      IF receipt_id IS NULL THEN
+        RAISE EXCEPTION 'tenancy backfill receipt for run key % could not be opened or adopted',
+          p_run_key
+          USING ERRCODE = '40001';
+      END IF;
     END IF;
-    RETURN receipt_id;
   END IF;
 
-  INSERT INTO tenancy_backfill_receipts (account_id, resource_family, run_key)
-  VALUES (p_account_id, p_resource_family, p_run_key)
-  RETURNING id INTO receipt_id;
+  IF receipt_status <> 'open' THEN
+    RAISE EXCEPTION 'tenancy backfill receipt % is already settled', receipt_id
+      USING ERRCODE = '55000';
+  END IF;
 
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    coalesce(previous_lifecycle_marker, ''), true
+  );
   RETURN receipt_id;
 END;
 $$;
@@ -262,6 +303,9 @@ SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $$
 DECLARE
+  previous_lifecycle_marker text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
   receipt_row record;
   inserted_count integer;
 BEGIN
@@ -284,6 +328,13 @@ BEGIN
     RAISE EXCEPTION 'tenancy backfill receipt % does not exist', p_receipt_id
       USING ERRCODE = '23503';
   END IF;
+  IF receipt_row.account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), ''
+    )::uuid
+  THEN
+    RAISE EXCEPTION 'tenancy backfill ledger scope mismatch'
+      USING ERRCODE = '42501';
+  END IF;
   IF receipt_row.status <> 'open' THEN
     RAISE EXCEPTION 'tenancy backfill receipt % is already settled', p_receipt_id
       USING ERRCODE = '55000';
@@ -304,6 +355,11 @@ BEGIN
     SET unresolved_count = unresolved_count + 1, updated_at = now()
     WHERE id = receipt_row.id;
   END IF;
+
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    coalesce(previous_lifecycle_marker, ''), true
+  );
 END;
 $$;
 
@@ -321,7 +377,11 @@ SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $$
 DECLARE
+  previous_lifecycle_marker text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
   receipt_status text;
+  receipt_account_id uuid;
 BEGIN
   IF p_receipt_id IS NULL OR p_classified_count IS NULL OR p_skipped_count IS NULL THEN
     RAISE EXCEPTION 'tenancy backfill completion requires receipt and counts'
@@ -340,7 +400,7 @@ BEGIN
     'opengeni.organization_tenancy_lifecycle', 'tenancy_backfill_ledger', true
   );
 
-  SELECT receipt.status INTO receipt_status
+  SELECT receipt.status, receipt.account_id INTO receipt_status, receipt_account_id
   FROM tenancy_backfill_receipts receipt
   WHERE receipt.id = p_receipt_id
   FOR UPDATE;
@@ -348,6 +408,13 @@ BEGIN
   IF receipt_status IS NULL THEN
     RAISE EXCEPTION 'tenancy backfill receipt % does not exist', p_receipt_id
       USING ERRCODE = '23503';
+  END IF;
+  IF receipt_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), ''
+    )::uuid
+  THEN
+    RAISE EXCEPTION 'tenancy backfill ledger scope mismatch'
+      USING ERRCODE = '42501';
   END IF;
   IF receipt_status <> 'open' THEN
     RAISE EXCEPTION 'tenancy backfill receipt % is already settled', p_receipt_id
@@ -361,6 +428,11 @@ BEGIN
       completed_at = now(),
       updated_at = now()
   WHERE id = p_receipt_id;
+
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    coalesce(previous_lifecycle_marker, ''), true
+  );
 END;
 $$;
 

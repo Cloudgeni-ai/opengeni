@@ -51,6 +51,57 @@ async function expectRejection(run: () => Promise<unknown>, pattern: RegExp): Pr
   expect(String((captured as Error)?.message ?? captured)).toMatch(pattern);
 }
 
+// Every lifecycle seam is tenant-fenced on `opengeni.account_id`, so calls must
+// carry the organization context the same way real callers do (withRlsContext).
+// Deliberately one transaction per call so idempotency is proven ACROSS
+// transactions rather than inside a single uncommitted one.
+async function asOrg<T>(
+  organizationId: string,
+  run: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return (await admin.begin(async (tx) => {
+    await tx`SELECT set_config('opengeni.account_id', ${organizationId}, true)`;
+    return run(tx as postgres.TransactionSql);
+  })) as T;
+}
+
+async function openReceipt(
+  organizationId: string,
+  resourceFamily: string,
+  runKey: string,
+): Promise<string> {
+  return asOrg(organizationId, async (tx) => {
+    const [row] = await tx<{ open_tenancy_backfill_receipt: string }[]>`
+      SELECT open_tenancy_backfill_receipt(${organizationId}, ${resourceFamily}, ${runKey})
+    `;
+    return row!.open_tenancy_backfill_receipt;
+  });
+}
+
+async function recordUnresolved(
+  organizationId: string,
+  receiptId: string,
+  resourceId: string,
+  reasonCode: string,
+): Promise<void> {
+  await asOrg(organizationId, async (tx) => {
+    await tx`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${resourceId}, ${reasonCode})`;
+  });
+}
+
+async function completeReceipt(
+  organizationId: string,
+  receiptId: string,
+  classifiedCount: number,
+  skippedCount: number,
+  status: string,
+): Promise<void> {
+  await asOrg(organizationId, async (tx) => {
+    await tx`SELECT complete_tenancy_backfill_receipt(
+      ${receiptId}, ${classifiedCount}, ${skippedCount}, ${status})`;
+  });
+}
+
 async function seedOrganization(label: string): Promise<string> {
   const rows = await admin<{ id: string }[]>`
     INSERT INTO managed_accounts (name) VALUES (${`ledger-${label}`}) RETURNING id
@@ -124,41 +175,37 @@ describe("migration 0288 tenancy backfill ledger", () => {
     ]);
   }, 180_000);
 
-  test("opengeni_app holds no direct DML on either ledger table", async () => {
-    if (!available) return;
-    for (const table of ["tenancy_backfill_receipts", "tenancy_backfill_unresolved_rows"]) {
-      for (const privilege of ["INSERT", "UPDATE", "DELETE", "SELECT"]) {
-        const [row] = await admin<{ granted: boolean }[]>`
-          SELECT has_table_privilege('opengeni_app', ${table}, ${privilege}) AS granted
-        `;
-        expect({ table, privilege, granted: row!.granted }).toEqual({
-          table,
-          privilege,
-          granted: false,
-        });
-      }
-    }
-  }, 180_000);
+  // NOTE: the "opengeni_app holds no direct DML" assertion deliberately does NOT
+  // live here, against the shared harness database. provisionRoles re-normalizes
+  // the whole schema's ACLs (REVOKE ALL ON ALL TABLES, then GRANT to an explicit
+  // allowlist) AFTER migrate(), so on that database the assertion is true no
+  // matter what this migration does - adding a GRANT here still passes. That was
+  // sabotage-confirmed. The privilege claim is therefore asserted below on a
+  // migrate()-ONLY database, where the migration's own REVOKE/GRANT block is the
+  // only thing that can decide the answer.
 
   test("a receipt opens idempotently and counts unresolved rows exactly once", async () => {
     if (!available) return;
     const organizationId = await seedOrganization("idempotent");
 
-    const [opened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${organizationId}, 'sessions', 'run-a')
-    `;
-    const receiptId = opened!.open_tenancy_backfill_receipt;
+    const receiptId = await openReceipt(organizationId, "sessions", "run-a");
 
     // Re-opening the same run adopts the same receipt rather than forking one.
-    const [reopened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${organizationId}, 'sessions', 'run-a')
-    `;
-    expect(reopened!.open_tenancy_backfill_receipt).toBe(receiptId);
+    expect(await openReceipt(organizationId, "sessions", "run-a")).toBe(receiptId);
+
+    // Two sweeps racing on the same run key must both adopt one receipt rather
+    // than one of them surfacing a raw duplicate-key error.
+    const raced = await Promise.all([
+      openReceipt(organizationId, "sessions", "run-race"),
+      openReceipt(organizationId, "sessions", "run-race"),
+      openReceipt(organizationId, "sessions", "run-race"),
+    ]);
+    expect(new Set(raced).size).toBe(1);
 
     const resourceId = Bun.randomUUIDv7();
-    await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${resourceId}, 'no_deterministic_evidence')`;
+    await recordUnresolved(organizationId, receiptId, resourceId, "no_deterministic_evidence");
     // A resumed sweep re-observing the same row must not inflate the count.
-    await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${resourceId}, 'no_deterministic_evidence')`;
+    await recordUnresolved(organizationId, receiptId, resourceId, "no_deterministic_evidence");
 
     const [receipt] = await admin<{ unresolved_count: string; status: string }[]>`
       SELECT unresolved_count, status FROM tenancy_backfill_receipts WHERE id = ${receiptId}
@@ -175,12 +222,9 @@ describe("migration 0288 tenancy backfill ledger", () => {
   test("unresolved evidence is append-only and a settled receipt refuses new work", async () => {
     if (!available) return;
     const organizationId = await seedOrganization("append-only");
-    const [opened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${organizationId}, 'rigs', 'run-b')
-    `;
-    const receiptId = opened!.open_tenancy_backfill_receipt;
+    const receiptId = await openReceipt(organizationId, "rigs", "run-b");
     const resourceId = Bun.randomUUIDv7();
-    await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${resourceId}, 'ambiguous_candidate_authority')`;
+    await recordUnresolved(organizationId, receiptId, resourceId, "ambiguous_candidate_authority");
 
     await expectRejection(
       () => admin`
@@ -194,7 +238,7 @@ describe("migration 0288 tenancy backfill ledger", () => {
       /append-only/u,
     );
 
-    await admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 5, 2, 'completed')`;
+    await completeReceipt(organizationId, receiptId, 5, 2, "completed");
     const [settled] = await admin<
       { status: string; classified_count: string; completed_at: Date | null }[]
     >`
@@ -209,15 +253,20 @@ describe("migration 0288 tenancy backfill ledger", () => {
     // rows nor be re-opened nor be settled twice.
     await expectRejection(
       () =>
-        admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`,
+        recordUnresolved(
+          organizationId,
+          receiptId,
+          Bun.randomUUIDv7(),
+          "no_deterministic_evidence",
+        ),
       /already settled/u,
     );
     await expectRejection(
-      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'completed')`,
+      () => completeReceipt(organizationId, receiptId, 1, 1, "completed"),
       /already settled/u,
     );
     await expectRejection(
-      () => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'rigs', 'run-b')`,
+      () => openReceipt(organizationId, "rigs", "run-b"),
       /already settled/u,
     );
   }, 180_000);
@@ -225,16 +274,23 @@ describe("migration 0288 tenancy backfill ledger", () => {
   test("the caller cannot understate its own outstanding obligations", async () => {
     if (!available) return;
     const organizationId = await seedOrganization("obligations");
-    const [opened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${organizationId}, 'documents', 'run-c')
-    `;
-    const receiptId = opened!.open_tenancy_backfill_receipt;
-    await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'external_lane_owns_row')`;
-    await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'external_lane_owns_row')`;
+    const receiptId = await openReceipt(organizationId, "documents", "run-c");
+    await recordUnresolved(
+      organizationId,
+      receiptId,
+      Bun.randomUUIDv7(),
+      "external_lane_owns_row",
+    );
+    await recordUnresolved(
+      organizationId,
+      receiptId,
+      Bun.randomUUIDv7(),
+      "external_lane_owns_row",
+    );
 
     // completion takes classified/skipped only - unresolved_count is owned by
     // the append path, so settling cannot zero it out.
-    await admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 0, 0, 'completed')`;
+    await completeReceipt(organizationId, receiptId, 0, 0, "completed");
     const [receipt] = await admin<{ unresolved_count: string }[]>`
       SELECT unresolved_count FROM tenancy_backfill_receipts WHERE id = ${receiptId}
     `;
@@ -246,34 +302,39 @@ describe("migration 0288 tenancy backfill ledger", () => {
     const organizationId = await seedOrganization("fail-closed");
 
     await expectRejection(
-      () => admin`SELECT open_tenancy_backfill_receipt(NULL, 'sessions', 'run-d')`,
-      /.*/u,
+      () =>
+        asOrg(
+          organizationId,
+          (tx) => tx`SELECT open_tenancy_backfill_receipt(NULL, 'sessions', 'run-d')`,
+        ),
+      /requires organization, family, and run key/u,
     );
     await expectRejection(
-      () => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'not_a_family', 'run-d')`,
-      /.*/u,
+      () => openReceipt(organizationId, "not_a_family", "run-d"),
+      /tenancy_backfill_receipt_family_chk/u,
     );
 
-    const [opened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${organizationId}, 'sessions', 'run-d')
-    `;
-    const receiptId = opened!.open_tenancy_backfill_receipt;
+    const receiptId = await openReceipt(organizationId, "sessions", "run-d");
     await expectRejection(
-      () =>
-        admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'invented_reason')`,
-      /.*/u,
+      () => recordUnresolved(organizationId, receiptId, Bun.randomUUIDv7(), "invented_reason"),
+      /tenancy_backfill_unresolved_reason_chk/u,
     );
     await expectRejection(
-      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'half_done')`,
+      () => completeReceipt(organizationId, receiptId, 1, 1, "half_done"),
       /completed or failed/u,
     );
     await expectRejection(
-      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, -1, 0, 'completed')`,
+      () => completeReceipt(organizationId, receiptId, -1, 0, "completed"),
       /non-negative/u,
     );
     await expectRejection(
       () =>
-        admin`SELECT record_tenancy_backfill_unresolved(${Bun.randomUUIDv7()}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`,
+        recordUnresolved(
+          organizationId,
+          Bun.randomUUIDv7(),
+          Bun.randomUUIDv7(),
+          "no_deterministic_evidence",
+        ),
       /does not exist/u,
     );
   }, 180_000);
@@ -282,13 +343,9 @@ describe("migration 0288 tenancy backfill ledger", () => {
     if (!available) return;
     const first = await seedOrganization("org-one");
     const second = await seedOrganization("org-two");
-    const [a] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${first}, 'machines', 'shared-run-key')
-    `;
-    const [b] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
-      SELECT open_tenancy_backfill_receipt(${second}, 'machines', 'shared-run-key')
-    `;
-    expect(a!.open_tenancy_backfill_receipt).not.toBe(b!.open_tenancy_backfill_receipt);
+    const a = await openReceipt(first, "machines", "shared-run-key");
+    const b = await openReceipt(second, "machines", "shared-run-key");
+    expect(a).not.toBe(b);
 
     const rows = await admin<{ account_id: string }[]>`
       SELECT account_id FROM tenancy_backfill_receipts
@@ -297,11 +354,13 @@ describe("migration 0288 tenancy backfill ledger", () => {
     expect(new Set(rows.map((row) => row.account_id))).toEqual(new Set([first, second]));
   }, 180_000);
 
-  test("the lifecycle seam is executable by opengeni_app under migrate() ALONE", async () => {
+  test("under migrate() ALONE the seam is executable and neither table is directly writable", async () => {
     // Mirrors the 0285 regression: acquireBlankTestDatabase + migrate() never
     // runs provisionRoles' blanket schema-wide EXECUTE sweep, so the
-    // migration's own explicit grants must be sufficient on their own.
-    const blank = await acquireBlankTestDatabase("migration-0286-no-provision-roles");
+    // migration's own explicit grants must be sufficient on their own. That
+    // also makes this the only place where "no direct DML" is a real assertion
+    // about THIS migration rather than about provisionRoles.
+    const blank = await acquireBlankTestDatabase("migration-0288-no-provision-roles");
     if (!blank) return;
     try {
       await migrate(blank.databaseUrl);
@@ -316,6 +375,19 @@ describe("migration 0288 tenancy backfill ledger", () => {
             SELECT has_function_privilege('opengeni_app', ${signature}, 'EXECUTE') AS granted
           `;
           expect({ signature, granted: row!.granted }).toEqual({ signature, granted: true });
+        }
+
+        for (const table of ["tenancy_backfill_receipts", "tenancy_backfill_unresolved_rows"]) {
+          for (const privilege of ["INSERT", "UPDATE", "DELETE", "SELECT"]) {
+            const [row] = await probe<{ granted: boolean }[]>`
+              SELECT has_table_privilege('opengeni_app', ${table}, ${privilege}) AS granted
+            `;
+            expect({ table, privilege, granted: row!.granted }).toEqual({
+              table,
+              privilege,
+              granted: false,
+            });
+          }
         }
       } finally {
         await probe.end().catch(() => undefined);
@@ -332,7 +404,7 @@ describe("migration 0288 tenancy backfill ledger", () => {
     // no lifecycle GUC set, and a naive "is the parent gone" probe answers
     // "gone" while the receipt is alive - letting any nested delete
     // (pg_trigger_depth() > 1) erase append-only evidence.
-    const blank = await acquireBlankTestDatabase("migration-0286-nonsuperuser-owner");
+    const blank = await acquireBlankTestDatabase("migration-0288-nonsuperuser-owner");
     if (!blank) return;
     try {
       await migrate(blank.databaseUrl);
@@ -350,6 +422,9 @@ describe("migration 0288 tenancy backfill ledger", () => {
 
         const [org] = await probe<{ id: string }[]>`
           INSERT INTO managed_accounts (name) VALUES ('nonsuperuser-owner') RETURNING id`;
+        // This probe drives the seams directly rather than through asOrg, so it
+        // carries the same tenant fence on its own session.
+        await probe`SELECT set_config('opengeni.account_id', ${org!.id}, false)`;
         const [opened] = await probe<{ open_tenancy_backfill_receipt: string }[]>`
           SELECT open_tenancy_backfill_receipt(${org!.id}, 'sessions', 'owner-run')`;
         const receiptId = opened!.open_tenancy_backfill_receipt;
@@ -395,4 +470,47 @@ describe("migration 0288 tenancy backfill ledger", () => {
       await blank.release();
     }
   }, 300_000);
+  test("one organization cannot open, append to, or settle another organization's receipt", async () => {
+    // Reproduced by review: without a tenant fence an opengeni_app session whose
+    // opengeni.account_id was the attacker's org could open, append to and settle
+    // a receipt owned by the victim's org - polluting phase-D evidence and, worse,
+    // making the victim's in-flight backfill fail `already settled`.
+    if (!available) return;
+    const victim = await seedOrganization("victim");
+    const attacker = await seedOrganization("attacker");
+
+    const scoped = postgres(shared!.appUrl, { max: 1 });
+    try {
+      // Legitimate: victim's own context opens its own receipt.
+      await scoped`SELECT set_config('opengeni.account_id', ${victim}, false)`;
+      const [opened] = await scoped<{ open_tenancy_backfill_receipt: string }[]>`
+        SELECT open_tenancy_backfill_receipt(${victim}, 'sessions', 'victim-run')`;
+      const receiptId = opened!.open_tenancy_backfill_receipt;
+
+      // Attacker context: every seam must refuse.
+      await scoped`SELECT set_config('opengeni.account_id', ${attacker}, false)`;
+      await expectRejection(
+        () => scoped`SELECT open_tenancy_backfill_receipt(${victim}, 'sessions', 'x')`,
+        /scope mismatch/u,
+      );
+      await expectRejection(
+        () =>
+          scoped`SELECT record_tenancy_backfill_unresolved(
+            ${receiptId}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`,
+        /scope mismatch/u,
+      );
+      await expectRejection(
+        () => scoped`SELECT complete_tenancy_backfill_receipt(${receiptId}, 999, 0, 'completed')`,
+        /scope mismatch/u,
+      );
+
+      // The victim's receipt is untouched and still open.
+      const [row] = await admin<{ status: string; classified_count: string }[]>`
+        SELECT status, classified_count FROM tenancy_backfill_receipts WHERE id = ${receiptId}`;
+      expect(row!.status).toBe("open");
+      expect(Number(row!.classified_count)).toBe(0);
+    } finally {
+      await scoped.end().catch(() => undefined);
+    }
+  }, 180_000);
 });
