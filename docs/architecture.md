@@ -52,6 +52,22 @@ Core value props in one line: **durable + recoverable + streamable + multi-tenan
 
 These are the load-bearing, cross-cutting rules. Breaking one tends to be a subtle correctness or security bug, not a compile error. Each is stated as an imperative rule with its canonical anchor.
 
+Editable spreadsheets persist and hash authored/causal state only. Formula
+source is durable; calculated values are query/render/export projections rebuilt
+by the Rust kernel and never enter commands, snapshots, collaboration history,
+authored/retained admission, or state hashes. Calculated projections retain
+separate memory and query-response limits. Current format/schema identifiers govern
+stored-state compatibility; producer build identity is diagnostic there but
+remains exact for package installation and materialization. Superseded
+spreadsheet formats have no reader or converter. Canonical:
+`packages/artifact-tool/kernel/src/value.rs`,
+`packages/artifact-tool/kernel/src/snapshot.rs`,
+`packages/artifact-tool/kernel/src/collaboration/snapshot.rs`, and
+[`artifact-engine.md`](artifact-engine.md).
+Live admission uses one explicit current modality/live/model/snapshot/command/
+committed-transaction tuple. Release receipts execute the same formula corpus
+on every native target and WASM and aggregation rejects any digest mismatch.
+
 ### 3.1 Postgres is durable truth; NATS is an ephemeral transport
 
 > Postgres remembers; NATS transports.

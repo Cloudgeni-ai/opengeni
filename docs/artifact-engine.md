@@ -80,29 +80,37 @@ atomic command batches with a causal base and an authored transaction id.
 
 The wire layers have one authority each and must not duplicate identity fields:
 
-- `OGATX001` is the sole authored mutation envelope. It binds artifact,
+- `OGATX001` is the sole authored mutation envelope. For spreadsheets it wraps
+  the current `OGASC002` command block and binds artifact,
   client-transaction and replica identity, authored causal base, predecessor,
   selective-undo targets, protocol versions, and one canonical modality-command
   payload.
 - The nested modality-command payload contains typed editing commands and
   structural preconditions only. It contains no actor, artifact, transaction,
   delivery sequence, or causal frontier that could disagree with `OGATX001`.
-- The authoritative server derives the committed-operation envelope after
+- The authoritative server derives the current spreadsheet `OGACO002`
+  committed-operation envelope after
   validation. It carries derived transaction/operation ids, the one causal dot,
   resolved base/resulting frontier, canonical typed operation bytes, and the
   exact prior/resulting canonical state hashes. Replay verifies both hashes, so
   host routing metadata cannot silently describe a different state chain.
-- `OGAKC001` is a private native/WASM command ABI. It is never persisted or
+- `OGAKC002` is a private native/WASM command ABI. It is never persisted or
   accepted as client-authored durable truth.
 
-Every boundary canonicalizes and compares exact bytes. Legacy envelopes that
-embed a second actor/base are rejected rather than reconciled by precedence.
+Every boundary canonicalizes and compares exact bytes. Superseded formats are
+rejected; there is no fallback reader, converter, or alternate writer.
 
 ### 4.1 Spreadsheet
 
 - A sheet is a sparse map of 256 × 256 tiles. Empty tiles do not exist.
 - A tile stores compact typed cell columns: value tag, scalar/string id,
   formula id, style id, comment id, and flags.
+- A formula's source is authored state. Its calculated value is a disposable
+  projection for query, render, and export only. `OGARTK02` model snapshots,
+  `OGACRD02` causal snapshots, commands, committed transactions, resource
+  admission for authored/retained state, and `stateHash` omit calculated values.
+  Calculated projections have separate memory and query-response budgets. Collaboration restore
+  reconstructs the visible workbook from causal history and recalculates it.
 - Formula source is parsed once into an arena AST. References compile into a
   dependency DAG; edits dirty only reachable dependants.
 - Recalculation is topologically partitioned and parallel where dependencies
@@ -113,6 +121,15 @@ embed a second actor/base are rejected rather than reconciled by precedence.
   comments, and merges are first-class objects—not cell-format conventions.
 - Charts reference formula-backed source ranges and share the presentation
   chart scene model.
+
+Stored-state compatibility is decided by modality plus explicit current
+schema/protocol identifiers. Producer build identity remains audit metadata and
+does not reject otherwise current bytes. Executable/package manifests and
+materialization jobs still require exact build identity because they protect
+installed code and reproducible outputs rather than stored-state semantics.
+Live admission requires the exact current modality/live/model/snapshot/command/
+committed-transaction tuple; the diagnostic client build identity is not an
+admission fact.
 
 ### 4.2 Presentation
 
@@ -405,6 +422,15 @@ resource ceilings and host adapters. A browser may edit against a remote or a
 self-hosted control plane identically. Persistent desktop installation is not
 required for browser editing, while local/self-hosted workers use native code
 to avoid WASM memory ceilings and accelerate large import/render jobs.
+Every target receipt also contains the digest of an executed spreadsheet
+formula-projection corpus. Release aggregation requires one digest across all
+seven native targets and browser WASM.
+
+Workbook-open telemetry is content-free: it records only a bounded stable code
+and one of `unsupported_old_format`, `byte_corruption`,
+`authored_causal_mismatch`, `runtime_package_mismatch`, or
+`projection_parity_ci_failure`. Formula source and cell values never enter the
+event.
 
 ## 11. Performance budgets
 

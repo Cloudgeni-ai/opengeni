@@ -338,6 +338,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 name = "opengeni-artifact-kernel"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "rustybuzz",
  "sha2",
  "unicode-bidi",

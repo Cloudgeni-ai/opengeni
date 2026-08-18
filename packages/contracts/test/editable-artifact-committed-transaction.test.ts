@@ -4,17 +4,17 @@ import {
   decodeCommittedTransactionSummary,
   MAX_COMMITTED_TRANSACTION_BYTES,
 } from "@opengeni/contracts/editable-artifact-committed-transaction";
-import fixture from "./fixtures/editable-artifact-spreadsheet-v1.json";
+import fixture from "./fixtures/editable-artifact-spreadsheet-current.json";
 
 const encoder = new TextEncoder();
 const U32_MASK = 0xffff_ffffn;
 
-describe("OGACO001 committed transaction metadata", () => {
-  test("matches the exact shared Rust-authored OGACO001 golden", () => {
+describe("current OGACO002 committed transaction metadata", () => {
+  test("matches the exact shared Rust-authored OGACO002 golden", () => {
     const summary = decodeCommittedTransactionSummary(unhex(fixture.committedHex));
 
     expect(summary).toEqual({
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
       transactionId: fixture.expectedTransactionId,
       dot: {
         replicaId: fixture.intent.replicaId,
@@ -56,7 +56,11 @@ describe("OGACO001 committed transaction metadata", () => {
     badMagic[0] = badMagic[0]! ^ 1;
     expect(() => decodeCommittedTransactionSummary(badMagic)).toThrow("magic");
 
-    const badVersion = mutateAndChecksum(bytes, (view) => view.setUint16(8, 2, true));
+    const previousMagic = bytes.slice();
+    previousMagic.set(new TextEncoder().encode("OGACO001"), 0);
+    expect(() => decodeCommittedTransactionSummary(previousMagic)).toThrow("magic");
+
+    const badVersion = mutateAndChecksum(bytes, (view) => view.setUint16(8, 1, true));
     expect(() => decodeCommittedTransactionSummary(badVersion)).toThrow("version");
 
     const badFlags = mutateAndChecksum(bytes, (view) => view.setUint16(10, 1, true));
@@ -205,7 +209,7 @@ function canonicalFixture(): {
       .cell(null, 3, 12.5)
       .cell(null, 4, "café")
       .cell(null, 5, 6)
-      .cell("=A1*2", 3, 25)
+      .cell("=A1*2", 0)
       .cell(null, 5, { custom: "#CUSTOM!" })
       .finish(),
     new FixtureWriter()
@@ -230,7 +234,7 @@ function canonicalFixture(): {
   return {
     bytes,
     expected: Object.freeze({
-      operationProtocolVersion: 1,
+      operationProtocolVersion: 2,
       transactionId: stableText(0x700n, 0x800n),
       dot: Object.freeze({ replicaId: hex64(0x33n), counter: 1 }),
       resolvedCausalBase: Object.freeze(
@@ -285,8 +289,8 @@ function envelope(options: EnvelopeOptions = {}): Uint8Array {
     .raw(options.stateHash ?? new Uint8Array(32));
   const payloadBytes = payload.finish();
   const output = new FixtureWriter()
-    .raw(encoder.encode("OGACO001"))
-    .u16(1)
+    .raw(encoder.encode("OGACO002"))
+    .u16(2)
     .u16(0)
     .u32(commands.length)
     .u64(BigInt(payloadBytes.length))
@@ -389,7 +393,10 @@ class FixtureWriter {
     value?: number | string | { custom: string },
   ): this {
     if (formula === null) this.u8(0);
-    else this.u8(1).string(formula);
+    else {
+      this.u8(1).string(formula);
+      return this;
+    }
     this.u8(valueTag);
     if (valueTag === 3) this.f64(value as number);
     else if (valueTag === 4) this.string(value as string);

@@ -17,6 +17,10 @@ import {
   type ArtifactKernelBuildReceipt,
 } from "../../src/runtime-receipt";
 import { resolveCurrentArtifactRuntimeTarget } from "../../src/runtime-cli";
+import {
+  spreadsheetFormulaProjectionCorpusBytes,
+  type FormulaCorpusBinding,
+} from "./formula-projection-corpus";
 
 export {
   canonicalArtifactKernelBuildReceiptBytes,
@@ -40,10 +44,11 @@ const WASM_RUNTIME_FILES = [
 ] as const;
 const MAX_RECEIPT_BYTES = 256 * 1024;
 
-type ReceiptBinding = Readonly<{
-  buildIdentity(): Uint8Array;
-  capabilities(): Uint8Array;
-}>;
+type ReceiptBinding = FormulaCorpusBinding &
+  Readonly<{
+    buildIdentity(): Uint8Array;
+    capabilities(): Uint8Array;
+  }>;
 
 /** Runs the actual target binding and returns a deterministic build receipt. */
 export async function createArtifactKernelBuildReceipt(
@@ -92,6 +97,9 @@ export async function createArtifactKernelBuildReceipt(
     );
   }
   const buildIdentity = new TextDecoder("utf-8", { fatal: true }).decode(identityBytes);
+  const spreadsheetFormulaProjectionCorpusSha256 = sha256(
+    spreadsheetFormulaProjectionCorpusBytes(binding),
+  );
   const manifest: ArtifactKernelPackageManifest = {
     schemaVersion: 1,
     target,
@@ -115,8 +123,8 @@ export async function createArtifactKernelBuildReceipt(
   void validatedRuntime;
   return validateArtifactKernelBuildReceipt(
     {
-      schemaVersion: 1,
-      producer: "opengeni-artifact-kernel-smoke-v1",
+      schemaVersion: 2,
+      producer: "opengeni-artifact-kernel-smoke-v2",
       target,
       kind: descriptor.kind,
       buildIdentity,
@@ -124,6 +132,7 @@ export async function createArtifactKernelBuildReceipt(
         bytes: capabilitiesBytes.byteLength,
         sha256: sha256(capabilitiesBytes),
       },
+      spreadsheetFormulaProjectionCorpusSha256,
       runtimeFiles,
     },
     target,
