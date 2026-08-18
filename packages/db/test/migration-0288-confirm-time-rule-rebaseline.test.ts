@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC } from "../src";
 
-const migrationUrl = new URL("../drizzle/0287_confirm_time_rule_rebaseline.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0288_confirm_time_rule_rebaseline.sql", import.meta.url);
 
 let shared: SharedTestDatabase | null = null;
 
@@ -15,7 +15,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0287 confirm-time rule rebaseline", () => {
+describe("migration 0288 confirm-time rule rebaseline", () => {
   test("moves proposal uniqueness to one per source per baseline", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);

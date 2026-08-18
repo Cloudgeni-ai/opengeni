@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0287_confirm_time_rule_rebaseline.sql")) {
+      if (migrations.has("0288_confirm_time_rule_rebaseline.sql")) {
         return includesActivation
-          ? "60c31679732ccb1ae23a8d9485cffbee815cd172115e274e8251c1d801014849"
-          : "1411814d7ca826c9c33ed191c850da17e0f9d60a777e2b7f3ad35d4e249b82d3";
+          ? "212c849b78b64d9d0d09f8173484cc03ecb97b4aa17f076719f2ef3fa4a8238f"
+          : "309fae05fa5a83cc8ba72263cbe79c96c9b74601797c3fe9f27b2bd64a9d4bca";
       }
       if (migrations.has("0286_widen_task_note_expiry_ceiling.sql")) {
         return includesActivation
@@ -1020,7 +1020,7 @@ describe("release schema contract", () => {
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
-        (migrations.has("0287_confirm_time_rule_rebaseline.sql") ? 1 : 0),
+        (migrations.has("0288_confirm_time_rule_rebaseline.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1055,8 +1055,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0287_confirm_time_rule_rebaseline.sql")
-        ? "0287_confirm_time_rule_rebaseline.sql"
+      migrations.has("0288_confirm_time_rule_rebaseline.sql")
+        ? "0288_confirm_time_rule_rebaseline.sql"
         : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
           ? "0286_widen_task_note_expiry_ceiling.sql"
           : migrations.has("0285_organization_tenancy_inventory.sql")
