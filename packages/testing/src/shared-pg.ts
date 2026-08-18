@@ -146,6 +146,23 @@ export type BlankTestDatabase = {
   release: () => Promise<void>;
 };
 
+export type OwnerMigratedTestDatabase = {
+  /**
+   * URL of the NOSUPERUSER NOBYPASSRLS role that OWNS this database. Drive
+   * `migrate()` through this URL to reproduce OpenGeni's production migration
+   * principal, for whom `FORCE ROW LEVEL SECURITY` genuinely engages.
+   */
+  ownerUrl: string;
+  /** Name of that owner role (useful for catalog assertions). */
+  ownerRole: string;
+  /** Superuser URL for the same database — seeding + RLS-free ground truth. */
+  adminUrl: string;
+  /** Superuser pool scoped to the same database. */
+  admin: postgres.Sql;
+  /** Drops the database, then the owner role, and decrements the refcount. */
+  release: () => Promise<void>;
+};
+
 function docker(args: string[]): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync("docker", args, { encoding: "utf8" });
 }
@@ -671,6 +688,87 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
       },
     };
   } catch (err) {
+    await releaseContainer(acquired).catch(() => undefined);
+    throw err;
+  }
+}
+
+/**
+ * Acquire a fresh, pristine database whose OWNER is a dedicated
+ * `NOSUPERUSER NOBYPASSRLS` login role - OpenGeni's documented production
+ * migration principal (`docs/deployment.md`).
+ *
+ * Why this exists (OPE-276): `acquireSharedTestDatabase` and
+ * `acquireBlankTestDatabase` both hand out the container SUPERUSER, for whom
+ * `FORCE ROW LEVEL SECURITY` never engages. A migration-time backfill over a
+ * FORCE-RLS table therefore looks correct in CI while matching ZERO rows on a
+ * real deployment, because FORCE RLS binds the table owner and no tenant GUC is
+ * set during a migration. Drive `migrate()` through `ownerUrl` to reproduce the
+ * real boundary; seed fixtures and read ground truth through `admin`.
+ *
+ * The superuser pre-installs `pgcrypto` and `vector` (a non-superuser owner
+ * cannot `CREATE EXTENSION`), exactly as a managed-Postgres operator does, and
+ * grants the owner `CREATE, USAGE` on `public`. Returns `null` when docker is
+ * unavailable so callers can skip.
+ */
+export async function acquireOwnerMigratedTestDatabase(
+  label = "owner-migrated",
+): Promise<OwnerMigratedTestDatabase | null> {
+  const acquired = await ensureContainerAndAcquire();
+  if (!acquired) {
+    return null;
+  }
+
+  const dbName = uniqueDbName(label);
+  const ownerRole = `${dbName}_owner`.slice(0, 63);
+  const ownerPassword = crypto.randomUUID().replace(/-/g, "");
+  const adminUrl = `${ADMIN_BASE_URL}/${dbName}`;
+  const ownerUrl = `postgres://${ownerRole}:${ownerPassword}@127.0.0.1:${PORT}/${dbName}`;
+
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+  let admin: postgres.Sql | null = null;
+  try {
+    // NOCREATEROLE/NOCREATEDB/NOREPLICATION mirror `provision-roles`' posture for
+    // the app role; the owner additionally needs nothing beyond object ownership
+    // because the superuser creates the database and the extensions for it.
+    await root.unsafe(
+      `CREATE ROLE "${ownerRole}" WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE
+         NOCREATEDB NOREPLICATION PASSWORD '${ownerPassword}'`,
+    );
+    await root.unsafe(`CREATE DATABASE "${dbName}" OWNER "${ownerRole}"`);
+    await root.end().catch(() => undefined);
+
+    admin = postgres(adminUrl, { max: 2 });
+    await admin.unsafe(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+    await admin.unsafe(`CREATE EXTENSION IF NOT EXISTS vector`);
+    await admin.unsafe(`GRANT CREATE, USAGE ON SCHEMA public TO "${ownerRole}"`);
+
+    let released = false;
+    return {
+      ownerUrl,
+      ownerRole,
+      adminUrl,
+      admin,
+      release: async () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        await admin?.end().catch(() => undefined);
+        // The database must go first: a role cannot be dropped while it owns one.
+        await dropDatabaseAndRelease(dbName, acquired);
+        const dropper = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+        await dropper.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
+        await dropper.end().catch(() => undefined);
+      },
+    };
+  } catch (err) {
+    await admin?.end().catch(() => undefined);
+    await root.end().catch(() => undefined);
+    const cleanup = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+    await cleanup.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
+    await cleanup.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
+    await cleanup.end().catch(() => undefined);
     await releaseContainer(acquired).catch(() => undefined);
     throw err;
   }

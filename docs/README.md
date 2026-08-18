@@ -27,6 +27,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
+| FORCE-RLS migration backfills | `docs/force-rls-migration-backfills.md` | `AGENTS.md`, `docs/deployment.md`, and migration comments should link instead of restating the owner-only `NO FORCE` window, the guard, or the classification inventory. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; executable admission truth in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs` | `.agents/skills/opengeni/SKILL.md`, `CONTRIBUTING.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `packages/react/README.md`, and customer integration skills should link. |
