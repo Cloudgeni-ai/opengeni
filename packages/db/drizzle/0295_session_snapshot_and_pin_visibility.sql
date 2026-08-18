@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-274: visibility-isolate the two session references that migration 0225's
+-- Visibility-isolate the two session references that migration 0225's
 -- foreign-key loop could not reach correctly.
 --
 -- 1. `session_list_snapshots.ordinary_session_ids` is a bare `uuid[]` with no

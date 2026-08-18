@@ -1,6 +1,7 @@
 <!-- docs-refs: record -->
 
-> **Point-in-time design record.** Frozen on August 18, 2026 (OPE-273). Code and
+> **Point-in-time design record.** Frozen on August 18, 2026 during the
+> organization-tenancy RLS posture review. Code and
 > [`../organization-tenancy.md`](../organization-tenancy.md) are the current
 > implementation map.
 
@@ -21,7 +22,7 @@ Three tables are not. `workspaces`, `workspace_memberships`, and
 that "their access model is implemented by the authentication/access layer or by
 exact global keys."
 
-That is a deliberate decision. But OPE-10's acceptance says cross-organization
+That is a deliberate decision. But the organization-tenancy acceptance criteria say cross-organization
 access is denied *at every surface*, and "every surface" reads as including the
 database. This record decides the question explicitly instead of letting the
 exemption be inherited silently.
@@ -186,7 +187,7 @@ could read another organization's workspace and membership metadata — names,
 ids, settings, member subject ids — but no content.** That is a defence-in-depth
 gap, not an access-control hole, because no product surface issues such a query.
 
-## Proposed amendment to OPE-10's acceptance
+## Proposed amendment to the organization-tenancy acceptance criteria
 
 Current wording (paraphrased): *cross-organization access is denied at every
 surface.*

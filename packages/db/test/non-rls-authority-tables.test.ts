@@ -4,7 +4,8 @@ import postgres from "postgres";
 import { createDb, createSession, ensureManagedAccessForUser, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES } from "../src/runtime-posture";
 
-// OPE-273. `workspaces`, `workspace_memberships`, and `auth_identities` carry an
+// Organization-tenancy RLS posture review. `workspaces`,
+// `workspace_memberships`, and `auth_identities` carry an
 // `account_id`, grant the runtime role full DML, and deliberately have NO row
 // level security: they are the tables the authentication layer reads to
 // ESTABLISH the organization context that every RLS predicate then depends on,
@@ -38,7 +39,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("non-RLS authority tables (OPE-273 attested exemption)", () => {
+describe("non-RLS authority tables (attested posture-review exemption)", () => {
   test("pins the exact exempt set", () => {
     // Adding a table here is a tenancy decision. Update the design record in the
     // same change.
@@ -163,7 +164,7 @@ describe("non-RLS authority tables (OPE-273 attested exemption)", () => {
     }
   }, 180_000);
 
-  // OPE-273 side finding. `api_keys` is FORCE RLS with a two-branch policy; the
+  // Posture-review side finding. `api_keys` is FORCE RLS with a two-branch policy; the
   // second branch, `key_hash = opengeni_private.current_api_key_hash()`, carries
   // no account or workspace check. It is a deliberate and necessary bootstrap
   // escape hatch — no account context exists at authentication time, and
