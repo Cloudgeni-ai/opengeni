@@ -18,13 +18,16 @@ const migrationUrl = new URL(
 describe("migration 0212 browser state transfer hardening", () => {
   let shared: SharedTestDatabase | null = null;
 
+  // The shared template is built once per runner; the first suite to reach it
+  // after a new migration lands pays that whole build here, which is far past
+  // bun's 5s default hook budget.
   beforeAll(async () => {
     shared = await acquireSharedTestDatabase("migration-0212-state-transfer");
-  });
+  }, 180_000);
 
   afterAll(async () => {
     await shared?.release();
-  });
+  }, 180_000);
 
   test("upgrades retained state and installs reclaimable upload authority", async () => {
     const source = await readFile(migrationUrl, "utf8");

@@ -44,7 +44,7 @@ import * as schema from "./schema";
  * rows `FOR KEY SHARE`. An ordinary workspace writer necessarily takes the
  * opposite order: it locks its `workspaces` row first and only then reaches
  * `managed_accounts` implicitly, through the account foreign-key check of a row
- * it inserts (`session_events`, `session_goals`, `session_system_updates`, ...),
+ * it inserts (a session event, goal, or system-update row, for example),
  * which needs `FOR KEY SHARE` on the same organization row. PostgreSQL resolves
  * that inversion by aborting one of the two transactions with `40P01`.
  *
