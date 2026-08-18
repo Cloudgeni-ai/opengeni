@@ -34,10 +34,12 @@ function server(input: {
 }
 
 describe("Gmail REST MCP adapter", () => {
-  test("exposes exactly the reviewed hosted-MCP-compatible tool names", () => {
+  test("exposes exactly the reviewed tool set, including the send tools the hosted preview MCP lacks", () => {
     expect(GMAIL_REST_MCP_TOOLS.map((tool) => tool.name).sort()).toEqual(
       [
         "create_draft",
+        "send_message",
+        "send_draft",
         "get_message",
         "get_thread",
         "label_message",
@@ -315,6 +317,120 @@ describe("Gmail REST MCP adapter", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("outcome is uncertain");
     expect(requests).toBe(1);
+  });
+
+  test("sends a new message as base64url MIME to messages/send and requires a recipient", async () => {
+    let requestUrl: string | undefined;
+    let requestBody: unknown;
+    const gmail = server({
+      fetchImpl: async (input, init) => {
+        requestUrl = typeof input === "string" ? input : input.toString();
+        requestBody = JSON.parse(String(init?.body));
+        return Response.json({ id: "sent-1", threadId: "thread-1" });
+      },
+    });
+    const result = (await gmail.callToolResult("send_message", {
+      to: ["user@example.com"],
+      subject: "Sent via REST bridge",
+      body: "This actually sends.",
+    })) as { content: Array<{ text: string }> };
+    expect(requestUrl).toContain("/messages/send");
+    const raw = (requestBody as { raw: string }).raw;
+    const mime = Buffer.from(raw, "base64url").toString("utf8");
+    expect(mime).toContain("To: user@example.com");
+    expect(mime).toContain("Subject: Sent via REST bridge");
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ id: "sent-1", threadId: "thread-1" });
+
+    const missingRecipient = (await gmail.callToolResult("send_message", {
+      body: "No recipient",
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(missingRecipient.isError).toBe(true);
+    expect(missingRecipient.content[0]!.text).toContain("to is required");
+  });
+
+  test("sends an existing draft by id to drafts/send", async () => {
+    let requestUrl: string | undefined;
+    let requestBody: unknown;
+    const gmail = server({
+      fetchImpl: async (input, init) => {
+        requestUrl = typeof input === "string" ? input : input.toString();
+        requestBody = JSON.parse(String(init?.body));
+        return Response.json({ id: "sent-2", threadId: "thread-2" });
+      },
+    });
+    const result = (await gmail.callToolResult("send_draft", {
+      draftId: "draft-1",
+    })) as { content: Array<{ text: string }> };
+    expect(requestUrl).toContain("/drafts/send");
+    expect(requestBody).toEqual({ id: "draft-1" });
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ id: "sent-2", threadId: "thread-2" });
+  });
+
+  test("never replays send_message or send_draft after a provider 401", async () => {
+    for (const [toolName, args] of [
+      ["send_message", { to: ["user@example.com"], body: "x" }],
+      ["send_draft", { draftId: "draft-1" }],
+    ] as const) {
+      let requests = 0;
+      const gmail = server({
+        fetchImpl: async () => {
+          requests += 1;
+          return Response.json({ error: { status: "UNAUTHENTICATED" } }, { status: 401 });
+        },
+      });
+      const result = (await gmail.callToolResult(toolName, args)) as {
+        isError?: boolean;
+        content: Array<{ text: string }>;
+      };
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("outcome is uncertain");
+      expect(requests).toBe(1);
+    }
+  });
+
+  test("reports an uncertain outcome without replaying a failed send transport", async () => {
+    for (const [toolName, args] of [
+      ["send_message", { to: ["user@example.com"], body: "x" }],
+      ["send_draft", { draftId: "draft-1" }],
+    ] as const) {
+      let requests = 0;
+      const gmail = server({
+        fetchImpl: async () => {
+          requests += 1;
+          throw new TypeError("fixture transport failure");
+        },
+      });
+      const result = (await gmail.callToolResult(toolName, args)) as {
+        isError?: boolean;
+        content: Array<{ text: string }>;
+      };
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("outcome is uncertain");
+      expect(requests).toBe(1);
+    }
+  });
+
+  test("rejects a send_message attachment MIME header injection before a provider request", async () => {
+    let requests = 0;
+    const gmail = server({
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({ id: "sent-1" });
+      },
+    });
+    const result = (await gmail.callToolResult("send_message", {
+      to: ["user@example.com"],
+      attachments: [
+        {
+          content: Buffer.from("fixture").toString("base64"),
+          filename: "safe.txt",
+          mimeType: "text/plain\r\nBcc: attacker@example.com",
+        },
+      ],
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("mimeType is invalid");
+    expect(requests).toBe(0);
   });
 
   test("retains the hosted MCP URL as the OAuth resource identity", () => {

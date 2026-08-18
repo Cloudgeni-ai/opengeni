@@ -246,7 +246,7 @@ describe("integrations.sh catalog import normalization", () => {
       domain: "gmailmcp.googleapis.com",
       name: "Gmail",
       description:
-        "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+        "Search and read Gmail, draft and send mail, and organize messages through OpenGeni's reviewed Gmail bridge.",
       mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
       tier: "verified",
       provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
@@ -258,6 +258,8 @@ describe("integrations.sh catalog import normalization", () => {
       ],
       allowedTools: [
         "create_draft",
+        "send_message",
+        "send_draft",
         "get_message",
         "get_thread",
         "label_message",
@@ -270,6 +272,8 @@ describe("integrations.sh catalog import normalization", () => {
       ],
       requireApproval: [
         "create_draft",
+        "send_message",
+        "send_draft",
         "label_message",
         "label_thread",
         "unlabel_message",

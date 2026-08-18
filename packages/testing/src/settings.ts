@@ -62,7 +62,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,
     integrationsOauthClientsJson: "{}",
-    gmailRestAdapterEnabled: false,
     googleDriveSyncMaxItems: 500,
     googleDriveSyncMaxBytes: 500_000_000,
     googleDriveSyncMaxFileBytes: 100_000_000,

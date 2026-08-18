@@ -6,7 +6,9 @@
  * web bundle (`REVIEWED_INTEGRATION_EXPERIENCES`); it is served with the
  * definition now so polishing a consent screen is a data change, not a
  * frontend release. The web keeps its generic fallback for any definition or
- * field missing here.
+ * field missing here. Gmail's reviewed presentation lives on its catalog row
+ * instead (`data/catalog/curated.json`): Gmail is a Connector, not one of
+ * these API integration definitions.
  *
  * MCP connectors carry the same shape on their curated catalog row
  * (`presentation` in `data/catalog/curated.json` -> importer ->
@@ -29,33 +31,6 @@ export type IntegrationPresentationCopy = {
 export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
   Record<string, IntegrationPresentationCopy>
 > = {
-  "google-gmail": {
-    providerName: "Google",
-    icon: "mail",
-    introduction: "Let agents work with the Gmail account you choose.",
-    capabilities: [
-      {
-        title: "Find and understand mail",
-        description: "Search messages and threads, then use them as context for your work.",
-      },
-      {
-        title: "Draft and send messages",
-        description: "Prepare replies and send mail through the reviewed Gmail tools.",
-      },
-      {
-        title: "Organize the mailbox",
-        description: "Work with labels, drafts, messages, and threads.",
-      },
-    ],
-    permissionSummary:
-      "Google grants broad mailbox access. OpenGeni still exposes only the reviewed tools configured for this integration.",
-    scopeLabels: {
-      "https://mail.google.com/": {
-        label: "Work with your Gmail mailbox",
-        description: "Read, organize, draft, and send mail for the account you approve.",
-      },
-    },
-  },
   "google-drive": {
     providerName: "Google",
     icon: "files",

@@ -13,6 +13,8 @@ const MAX_PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MUTATION_TOOLS = new Set([
   "create_draft",
+  "send_message",
+  "send_draft",
   "label_message",
   "label_thread",
   "unlabel_message",
@@ -130,6 +132,51 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
             },
           },
         },
+      },
+    },
+  },
+  {
+    name: "send_message",
+    description:
+      "Sends a new email immediately from the connected Gmail account. Requires human approval before it runs; there is no way to un-send.",
+    inputSchema: {
+      type: "object",
+      required: ["to"],
+      additionalProperties: false,
+      properties: {
+        to: { type: "array", items: { type: "string" }, minItems: 1 },
+        cc: { type: "array", items: { type: "string" } },
+        bcc: { type: "array", items: { type: "string" } },
+        subject: { type: "string" },
+        body: { type: "string" },
+        htmlBody: { type: "string" },
+        replyToMessageId: { type: "string" },
+        attachments: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["content"],
+            properties: {
+              content: { type: "string", description: "Base64-encoded attachment bytes." },
+              filename: { type: "string" },
+              mimeType: { type: "string" },
+              inline: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "send_draft",
+    description:
+      "Sends an existing Gmail draft as-is. Requires human approval before it runs; there is no way to un-send. Use get_message on the draft's message ID to review its content first.",
+    inputSchema: {
+      type: "object",
+      required: ["draftId"],
+      additionalProperties: false,
+      properties: {
+        draftId: { type: "string" },
       },
     },
   },
@@ -322,6 +369,10 @@ export class GmailRestMcpServer implements MCPServer {
         return await this.listDrafts(args);
       case "create_draft":
         return await this.createDraft(args);
+      case "send_message":
+        return await this.sendMessage(args);
+      case "send_draft":
+        return await this.sendDraft(args);
       case "label_message":
         return await this.modifyLabels("messages", args, true, false);
       case "unlabel_message":
@@ -515,6 +566,60 @@ export class GmailRestMcpServer implements MCPServer {
       false,
     );
     return { id: created.id ?? null };
+  }
+
+  /**
+   * Sends a freshly composed message immediately. Distinct from create_draft:
+   * a message actually needs a recipient, and there is no reviewable
+   * intermediate state - the human-approval gate on this tool IS the review.
+   */
+  private async sendMessage(args: Record<string, unknown>): Promise<unknown> {
+    const to = optionalEmailArray(args.to, "to");
+    if (to.length === 0) {
+      throw new GmailRestInputError("to is required to send a message");
+    }
+    const replyToMessageId = optionalString(args.replyToMessageId, "replyToMessageId", 256);
+    let reply: GmailMessage | null = null;
+    if (replyToMessageId) {
+      const url = new URL(
+        `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(replyToMessageId)}`,
+      );
+      url.searchParams.set("format", "metadata");
+      for (const header of ["Message-ID", "References", "Subject", "To", "From"])
+        url.searchParams.append("metadataHeaders", header);
+      reply = await this.request<GmailMessage>("send_message", url, {}, true);
+    }
+    const mime = buildDraftMime(args, reply);
+    const sent = await this.request<{ id?: string; threadId?: string }>(
+      "send_message",
+      `${GMAIL_REST_API_BASE}/messages/send`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          raw: Buffer.from(mime).toString("base64url"),
+          ...(reply?.threadId ? { threadId: reply.threadId } : {}),
+        }),
+      },
+      false,
+    );
+    return { id: sent.id ?? null, threadId: sent.threadId ?? null };
+  }
+
+  /** Sends an existing draft exactly as stored; the draft's own content is the review surface. */
+  private async sendDraft(args: Record<string, unknown>): Promise<unknown> {
+    const draftId = requiredId(args.draftId, "draftId");
+    const sent = await this.request<{ id?: string; threadId?: string }>(
+      "send_draft",
+      `${GMAIL_REST_API_BASE}/drafts/send`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: draftId }),
+      },
+      false,
+    );
+    return { id: sent.id ?? null, threadId: sent.threadId ?? null };
   }
 
   private async modifyLabels(

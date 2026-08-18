@@ -3502,9 +3502,10 @@ export async function prepareAgentTools(
         // auth misses are still published as actionable state because the
         // workspace catalog explicitly told the user that the surface existed.
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
-        const useGmailRestAdapter =
-          settings.gmailRestAdapterEnabled &&
-          isOfficialGmailMcpConfig(config.url, config.connectionRef);
+        // Every official-Gmail-resource turn executes through OpenGeni's own
+        // REST bridge, never Google's Developer Preview MCP endpoint directly:
+        // the bridge is the sole Gmail path (see gmail-rest-mcp.ts).
+        const useGmailRestAdapter = isOfficialGmailMcpConfig(config.url, config.connectionRef);
         const innerServer = useGmailRestAdapter
           ? new GmailRestMcpServer({
               workspaceId: options.workspaceId ?? "",

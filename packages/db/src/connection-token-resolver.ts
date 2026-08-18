@@ -167,7 +167,6 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
-  allowOfficialGmailRestDestination?: boolean;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -198,10 +197,11 @@ const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
 const OFFICIAL_GMAIL_REST_HOST = "gmail.googleapis.com";
 
 /**
- * The opt-in Gmail REST adapter reuses the exact OAuth grant created for
- * Google's hosted Gmail MCP while the preview endpoint is unavailable. Keep
- * this exception narrower than ordinary provider-domain binding: HTTPS only,
- * Google's canonical Gmail API host, and the authenticated `users/me` path.
+ * The Gmail bridge reuses the exact OAuth grant created for the official
+ * hosted Gmail MCP resource, executing every tool against Gmail's REST API
+ * instead of Google's Developer Preview MCP endpoint. Keep this exception
+ * narrower than ordinary provider-domain binding: HTTPS only, Google's
+ * canonical Gmail API host, and the authenticated `users/me` path.
  */
 function isOfficialGmailRestDestination(
   destinationUrl: string,
@@ -241,10 +241,7 @@ export function buildHostConnectionTokenResolver(
     if (
       !destinationUrl ||
       (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
-        !(
-          context.allowOfficialGmailRestDestination === true &&
-          isOfficialGmailRestDestination(destinationUrl, input.connectionRef)
-        ))
+        !isOfficialGmailRestDestination(destinationUrl, input.connectionRef))
     ) {
       throw new HostMcpCredentialBindingError("destinationUrl");
     }
@@ -711,7 +708,7 @@ export function buildConnectionTokenResolver(
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
-    if (!connectionBindingMatches(cred, ref, destinationUrl, settings.gmailRestAdapterEnabled)) {
+    if (!connectionBindingMatches(cred, ref, destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     const missingScopes = missingRequestedScopes(
@@ -939,9 +936,7 @@ export function buildConnectionTokenResolver(
     // Reject an audience/destination mismatch before any provider-side refresh
     // or usage update. Refreshing first would still create an unauthorized
     // external side effect even though the token was never sent to the target.
-    if (
-      !connectionBindingMatches(cred, ref, input.destinationUrl, settings.gmailRestAdapterEnabled)
-    ) {
+    if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
@@ -1004,7 +999,6 @@ function connectionBindingMatches(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
   destinationUrl: string,
-  gmailRestAdapterEnabled: boolean,
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
@@ -1020,7 +1014,6 @@ function connectionBindingMatches(
       !binding ||
       (destination !== binding &&
         !(
-          gmailRestAdapterEnabled &&
           binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
           isOfficialGmailRestDestination(destination, ref)
         ))

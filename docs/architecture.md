@@ -930,13 +930,16 @@ OAuth start and capability enablement reject workspace-owned Gmail bindings.
 Its exact Google authorization and token origins are pinned. Signed OAuth state
 records that Google's endpoints omit RFC 8707 `resource` while requesting
 offline consent, and refresh preserves that compatibility flag. Its reviewed
-catalog metadata also freezes the current tool allowlist and requires ordinary
-durable approval for draft and mailbox-label mutations. The opt-in Gmail REST
-adapter substitutes only the transport for that same catalog identity in the
-worker runtime and its attempt-frozen Codemode projection: it reuses the exact
-frozen connection delegation and permits credentials only for the canonical Gmail
-`users/me` REST subtree. Read-only authentication recovery is bounded to one
-retry, while mutations are never replayed after an ambiguous result.
+catalog metadata also freezes the current tool allowlist (including
+`send_message`/`send_draft`, additions the Developer Preview server does not
+offer) and requires ordinary durable approval for draft, send, and
+mailbox-label mutations. Gmail's REST bridge is the unconditional sole
+execution path for that catalog identity, in the worker runtime and its
+attempt-frozen Codemode projection alike - never Google's Developer Preview MCP
+endpoint directly: it reuses the exact frozen connection delegation and
+permits credentials only for the canonical Gmail `users/me` REST subtree.
+Read-only authentication recovery is bounded to one retry, while mutations are
+never replayed after an ambiguous result.
 
 The authenticated workspace model catalog projects static definitions through
 four ordered gates: runnable definition → secret-safe credential readiness →
