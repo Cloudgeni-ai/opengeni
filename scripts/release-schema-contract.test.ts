@@ -522,7 +522,7 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0299_organization_membership_lock_order.sql")) {
-        return includesActivation ? "PLACEHOLDER_ACTIVATION" : "PLACEHOLDER_PLAIN";
+        return includesActivation ? "e630bf3865aa198ad633e5fec6be182b4bcbaf1902155292e2dc9d9e9e0ad9ae" : "b86c387f62f49668813e7380a530985d711f7b8dc1ad758228c7b1397ddffda5";
       }
       if (migrations.has("0294_preference_activation_authority.sql")) {
         return includesActivation
@@ -1224,9 +1224,9 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     // The membership lifecycle lock-order repair. 0263 stays byte
-    // identical above; 0294 rewrites the three entry points in place.
-    expect(migrations.get("0294_organization_membership_lock_order.sql")).toMatchObject({
-      sha256: "0047827f6b9682f14ddf32d5bfdf84378089c7dbb032010213a6a14cf2625ef1",
+    // identical above; 0299 rewrites the three entry points in place.
+    expect(migrations.get("0299_organization_membership_lock_order.sql")).toMatchObject({
+      sha256: "c26d3400baa11a095262967de0f22368b4a1350b22ebd17e24bee0c27f86afdf",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0285_organization_tenancy_inventory.sql")).toMatchObject({

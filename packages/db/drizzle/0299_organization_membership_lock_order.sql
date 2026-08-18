@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0294: correct the organization-membership lifecycle lock
+-- Migration 0299: correct the organization-membership lifecycle lock
 -- order.
 --
 -- THE BUG

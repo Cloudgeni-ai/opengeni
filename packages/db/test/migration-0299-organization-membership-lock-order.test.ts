@@ -14,7 +14,7 @@ import {
   type DbClient,
 } from "../src";
 
-// Before migration 0294 the organization membership lifecycle locked
+// Before migration 0299 the organization membership lifecycle locked
 // `managed_accounts` FOR UPDATE and only then reached for `workspaces`, while
 // every ordinary workspace writer locks its `workspaces` row first and then
 // reaches `managed_accounts` implicitly through the account FK check of a row it
@@ -24,7 +24,7 @@ import {
 //   ordinary workspace writer       holds workspaces       waits managed_accounts
 //   prepare_organization_membership holds managed_accounts waits workspaces
 //
-// 0294 replaces the organization-row `FOR UPDATE` with a transaction-scoped
+// 0299 replaces the organization-row `FOR UPDATE` with a transaction-scoped
 // advisory lock keyed on the organization id and downgrades the row lock to
 // `FOR KEY SHARE`.
 
@@ -39,9 +39,9 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0294-organization-membership-lock-order");
+  shared = await acquireSharedTestDatabase("migration-0299-organization-membership-lock-order");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0294 requires PostgreSQL");
+    throw new Error("migration 0299 requires PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 12 });
 }, 180_000);
@@ -158,7 +158,7 @@ async function createOwnedSession(input: {
   return session.id;
 }
 
-describe("migration 0294 organization membership lock order", () => {
+describe("migration 0299 organization membership lock order", () => {
   test(
     "every membership lifecycle entry point takes the advisory organization fence " +
       "instead of a conflicting managed_accounts row lock",

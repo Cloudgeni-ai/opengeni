@@ -312,11 +312,11 @@ memberships for the subject and derives role-bounded account plus owner-only
 personal-workspace grants; inactive organizations disappear on the next
 request.
 
-### Lock order: organization fence before the canonical workspace prefix (0294)
+### Lock order: organization fence before the canonical workspace prefix (0299)
 
 The membership lifecycle spans an entire organization, so it must agree with
 every ordinary workspace writer about lock order. Migration
-`0294_organization_membership_lock_order.sql` fixes the one place
+`0299_organization_membership_lock_order.sql` fixes the one place
 where it did not.
 
 **What was wrong.** `prepare_organization_membership_protocol_settlements`, the
@@ -375,10 +375,10 @@ organization-wide seam that both locks `managed_accounts` more strongly than
 `FOR KEY SHARE` and afterwards touches `workspaces` (directly or through an FK)
 recreates this deadlock. Serialize on the advisory key instead. CAS on
 `organization_memberships.authorization_revision`, the operation-receipt
-idempotency, and every fail-closed authorization check are unchanged by 0294 -
+idempotency, and every fail-closed authorization check are unchanged by 0299 -
 only lock strength and lock class moved.
 
-`packages/db/test/migration-0294-organization-membership-lock-order.test.ts`
+`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
 not move (so an application-level `40P01` replay cannot mask a regression), and
