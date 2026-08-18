@@ -17,6 +17,7 @@ import {
 import { SandboxAgent } from "@openai/agents/sandbox";
 import {
   LazyToolModelProvider,
+  createResolveMissingFunctionTool,
   installLazyToolRuntime,
   restoreGenericDispatchHistory,
   restoreGenericDispatchHistoryItems,
@@ -125,6 +126,21 @@ function agentWith(toolValue: Tool): Agent<any, any> {
   });
 }
 
+/** MCP-shaped: catalog tool lives on getAllTools, not agent.tools. */
+function sandboxAgentWithCatalogTool(toolValue: Tool): Agent<any, any> {
+  const agent = new SandboxAgent({
+    name: "lazy-test",
+    model: "gpt-5.6-sol",
+    tools: [],
+  } as never) as unknown as Agent<any, any>;
+  const original = agent.getAllTools.bind(agent);
+  agent.getAllTools = (async (runContext: unknown) => [
+    ...(await original(runContext)),
+    toolValue,
+  ]) as typeof agent.getAllTools;
+  return agent;
+}
+
 async function runStreamed(
   agent: Agent<any, any>,
   model: ScriptedStreamingModel,
@@ -138,6 +154,7 @@ async function runStreamed(
     historyOwnership: "external",
     maxTurns: 8,
     toolNotFoundBehavior: "return_error_to_model",
+    resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
   });
   for await (const _event of result.toStream()) void _event;
   await result.completed;
@@ -570,14 +587,6 @@ describe("generic lazy tool dispatch", () => {
           arguments: JSON.stringify({ city: "Oslo" }),
         },
       ],
-      [
-        {
-          type: "function_call",
-          callId: "remembered-direct-retry",
-          name: WEATHER_TOOL,
-          arguments: JSON.stringify({ city: "Oslo" }),
-        },
-      ],
       [finalMessage("done")],
     ]);
 
@@ -596,8 +605,7 @@ describe("generic lazy tool dispatch", () => {
 
     expect(result.finalOutput).toBe("done");
     expect(executions).toBe(1);
-    const secondInput = model.requests[1]!.input as Array<Record<string, unknown>>;
-    expect(JSON.stringify(secondInput)).toContain(`Tool '${WEATHER_TOOL}' not found.`);
+    expect(JSON.stringify(model.requests[1]!.input)).not.toContain("not found");
     expect(model.requests[1]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
@@ -813,6 +821,7 @@ describe("generic lazy tool dispatch", () => {
       modelResponseRetention: "last",
       maxTurns: 8,
       toolNotFoundBehavior: "return_error_to_model",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
     });
     for await (const _event of first.toStream()) void _event;
     await first.completed;
@@ -835,6 +844,7 @@ describe("generic lazy tool dispatch", () => {
       modelResponseRetention: "last",
       maxTurns: 8,
       toolNotFoundBehavior: "return_error_to_model",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
     });
     for await (const _event of resumed.toStream()) void _event;
     await resumed.completed;
@@ -940,6 +950,7 @@ describe("generic lazy tool dispatch", () => {
       historyOwnership: "external",
       maxTurns: 8,
       toolNotFoundBehavior: "return_error_to_model",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(resumedRuntime),
     });
     const resumed = await resumedPromise;
     for await (const _event of resumed.toStream()) void _event;
@@ -1037,6 +1048,45 @@ describe("generic lazy tool dispatch", () => {
     });
     expect(input).not.toBe(restored);
     expect((input as Array<Record<string, unknown>>)[0]!.name).toBe(WEATHER_TOOL);
+  });
+
+  test("strips leftover internal late-registration items from provider replay", () => {
+    const input = [
+      {
+        type: "tool_search_call",
+        callId: "opengeni:lazy-dispatch:register:call-1",
+        execution: "client",
+        status: "completed",
+        arguments: { name: WEATHER_TOOL },
+      },
+      {
+        type: "tool_search_output",
+        callId: "opengeni:lazy-dispatch:register:call-1",
+        execution: "client",
+        status: "completed",
+        tools: [{ type: "function", name: WEATHER_TOOL }],
+      },
+      {
+        type: "function_call",
+        callId: "call-1",
+        name: WEATHER_TOOL,
+        arguments: JSON.stringify({ city: "Rome" }),
+        providerData: {
+          "opengeni.lazy_dispatch.v1": {
+            version: 1,
+            arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Rome" } }),
+          },
+        },
+      },
+    ] as ModelRequest["input"];
+    const restored = restoreGenericDispatchHistory(input) as Array<Record<string, unknown>>;
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({
+      type: "function_call",
+      callId: "call-1",
+      name: "tool_invoke",
+    });
+    expect(JSON.stringify(restored)).not.toContain("opengeni:lazy-dispatch:register:");
   });
 
   test("projects the dispatcher transcript before provider compaction", () => {
@@ -1174,7 +1224,7 @@ describe("generic lazy tool dispatch", () => {
     expect(() => generic.refresh([invokeNamedTool])).toThrow(/reserved/);
   });
 
-  test("hides only OpenGeni's internal client search helper", () => {
+  test("does not install an internal hosted registration search", () => {
     const runtime = installLazyToolRuntime(
       {
         async getAllTools() {
@@ -1189,12 +1239,18 @@ describe("generic lazy tool dispatch", () => {
       description: "Application-owned client tool search",
       execute: async () => [],
     }) as unknown as Tool;
-    const internalSearch = runtime.controlTools.find(
-      (candidate) => candidate.type === "hosted_tool",
-    );
 
-    expect(internalSearch).toBeDefined();
-    expect(runtime.shouldHideSerializedTool(serializedFunction(internalSearch!))).toBe(true);
+    expect(runtime.controlTools.every((candidate) => candidate.type !== "hosted_tool")).toBe(true);
+    expect(
+      runtime.shouldHideSerializedTool({
+        type: "hosted_tool",
+        name: "tool_search",
+        providerData: {
+          type: "tool_search",
+          "opengeni.internal_lazy_registration.v1": true,
+        },
+      }),
+    ).toBe(true);
     expect(runtime.shouldHideSerializedTool(serializedFunction(unrelatedSearch))).toBe(false);
   });
 
@@ -1763,5 +1819,304 @@ describe("OpenAI/Azure native client tool search", () => {
         await rawResult.completed;
       })(),
     ).rejects.toThrow(/tool_search|not loaded/i);
+  });
+
+  test("binds a remembered native name after the preparation fence settles", async () => {
+    let releasePreparation!: () => void;
+    let preparationSettled = false;
+    const preparation = new Promise<void>((resolve) => {
+      releasePreparation = () => {
+        preparationSettled = true;
+        resolve();
+      };
+    });
+    let executions = 0;
+    const realTool = weatherTool({
+      execute: ({ city }) => {
+        executions += 1;
+        return `fenced:${city}`;
+      },
+    });
+    const agent = agentWith(realTool);
+    const baseGetAllTools = agent.getAllTools.bind(agent);
+    agent.getAllTools = async (runContext) =>
+      preparationSettled ? await baseGetAllTools(runContext) : [];
+    const runtime = installLazyToolRuntime(
+      agent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      preparation,
+      new Set([SERVER_ID]),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "fenced-native-call",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Bergen" }),
+        },
+      ],
+      [finalMessage("fenced-done")],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(executions).toBe(0);
+
+    releasePreparation();
+    const result = await running;
+    expect(result.finalOutput).toBe("fenced-done");
+    expect(executions).toBe(1);
+    expect(JSON.stringify(model.requests[1]!.input)).not.toContain("not found");
+  });
+
+  test("resolves a qualified remembered name to the same catalog tool", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(
+      agent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      Promise.resolve(),
+      new Set([SERVER_ID]),
+    );
+    await agent.getAllTools(undefined as never);
+    const tool = await runtime.resolveAuthorizedFunctionTool(`mcp.${WEATHER_TOOL}`);
+    expect(tool?.name).toBe(WEATHER_TOOL);
+  });
+
+  test("returns a typed model-visible error for a revoked native name", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(
+      agent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      Promise.resolve(),
+      new Set([SERVER_ID]),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "revoked-native-call",
+          name: `${SERVER_ID}__removed`,
+          arguments: JSON.stringify({}),
+        },
+      ],
+      [finalMessage("recovered")],
+    ]);
+
+    const result = await runStreamed(agent, model, runtime);
+    expect(result.finalOutput).toBe("recovered");
+    const followUp = JSON.stringify(model.requests[1]!.input);
+    expect(followUp).toContain(`${SERVER_ID}__removed`);
+    expect(followUp.toLowerCase()).toContain("not found");
+  });
+
+  test("resumes a native pending-approval call after the catalog is ready", async () => {
+    let firstPreparationSettled = false;
+    let releaseFirstPreparation!: () => void;
+    const firstPreparation = new Promise<void>((resolve) => {
+      releaseFirstPreparation = () => {
+        firstPreparationSettled = true;
+        resolve();
+      };
+    });
+    let executions = 0;
+    const firstAgent = agentWith(
+      weatherTool({
+        needsApproval: () => true,
+        execute: () => {
+          executions += 1;
+          return "first-runtime-must-not-execute";
+        },
+      }),
+    );
+    const firstLoader = firstAgent.getAllTools.bind(firstAgent);
+    firstAgent.getAllTools = async (runContext) =>
+      firstPreparationSettled ? await firstLoader(runContext) : [];
+    const firstRuntime = installLazyToolRuntime(
+      firstAgent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      firstPreparation,
+      new Set([SERVER_ID]),
+    );
+    const firstModel = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "native-approval",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Tromso" }),
+        },
+      ],
+    ]);
+    const firstRunPromise = runStreamed(firstAgent, firstModel, firstRuntime);
+    await Bun.sleep(0);
+    releaseFirstPreparation();
+    const interrupted = await firstRunPromise;
+    expect(interrupted.interruptions).toHaveLength(1);
+    expect(executions).toBe(0);
+
+    const resumedAgent = agentWith(
+      weatherTool({
+        needsApproval: () => true,
+        execute: ({ city }) => {
+          executions += 1;
+          return `native-fresh:${city}`;
+        },
+      }),
+    );
+    let resumedPreparationSettled = false;
+    let releaseResumedPreparation!: () => void;
+    const resumedPreparation = new Promise<void>((resolve) => {
+      releaseResumedPreparation = () => {
+        resumedPreparationSettled = true;
+        resolve();
+      };
+    });
+    const resumedLoader = resumedAgent.getAllTools.bind(resumedAgent);
+    resumedAgent.getAllTools = async (runContext) =>
+      resumedPreparationSettled ? await resumedLoader(runContext) : [];
+    const resumedRuntime = installLazyToolRuntime(
+      resumedAgent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      resumedPreparation,
+      new Set([SERVER_ID]),
+    );
+    const resumedStatePromise = restoreInterruptedRunState(
+      resumedAgent,
+      interrupted.state.toString(),
+    );
+    await Bun.sleep(0);
+    releaseResumedPreparation();
+    const resumedState = await resumedStatePromise;
+    const [approval] = resumedState.getInterruptions();
+    expect(approval).toBeDefined();
+    resumedState.approve(approval!);
+    const resumedModel = new ScriptedStreamingModel([[finalMessage("native-fresh-done")]]);
+    const resumed = await new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(resumedModel), resumedRuntime),
+    }).run(resumedAgent, resumedState, {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 8,
+      toolNotFoundBehavior: "return_error_to_model",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(resumedRuntime),
+    });
+    for await (const _event of resumed.toStream()) void _event;
+    await resumed.completed;
+
+    expect(resumed.finalOutput).toBe("native-fresh-done");
+    expect(executions).toBe(1);
+  });
+
+  test("resumes a SandboxAgent pending-approval call whose tool is off agent.tools", async () => {
+    let firstPreparationSettled = false;
+    let releaseFirstPreparation!: () => void;
+    const firstPreparation = new Promise<void>((resolve) => {
+      releaseFirstPreparation = () => {
+        firstPreparationSettled = true;
+        resolve();
+      };
+    });
+    let executions = 0;
+    const firstAgent = agentWith(
+      weatherTool({
+        needsApproval: () => true,
+        execute: () => {
+          executions += 1;
+          return "first-runtime-must-not-execute";
+        },
+      }),
+    );
+    const firstLoader = firstAgent.getAllTools.bind(firstAgent);
+    firstAgent.getAllTools = async (runContext) =>
+      firstPreparationSettled ? await firstLoader(runContext) : [];
+    const firstRuntime = installLazyToolRuntime(
+      firstAgent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      firstPreparation,
+      new Set([SERVER_ID]),
+    );
+    const firstModel = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "sandbox-native-approval",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Tromso" }),
+        },
+      ],
+    ]);
+    const firstRunPromise = runStreamed(firstAgent, firstModel, firstRuntime);
+    await Bun.sleep(0);
+    releaseFirstPreparation();
+    const interrupted = await firstRunPromise;
+    expect(interrupted.interruptions).toHaveLength(1);
+    expect(executions).toBe(0);
+
+    const resumedAgent = sandboxAgentWithCatalogTool(
+      weatherTool({
+        needsApproval: () => true,
+        execute: ({ city }) => {
+          executions += 1;
+          return `sandbox-fresh:${city}`;
+        },
+      }),
+    );
+    let resumedPreparationSettled = false;
+    let releaseResumedPreparation!: () => void;
+    const resumedPreparation = new Promise<void>((resolve) => {
+      releaseResumedPreparation = () => {
+        resumedPreparationSettled = true;
+        resolve();
+      };
+    });
+    const resumedLoader = resumedAgent.getAllTools.bind(resumedAgent);
+    resumedAgent.getAllTools = async (runContext) =>
+      resumedPreparationSettled ? await resumedLoader(runContext) : [];
+    installLazyToolRuntime(
+      resumedAgent,
+      "openai_native",
+      new Set([SERVER_ID]),
+      resumedPreparation,
+      new Set([SERVER_ID]),
+    );
+    const resumedStatePromise = restoreInterruptedRunState(
+      resumedAgent,
+      interrupted.state.toString(),
+    );
+    await Bun.sleep(0);
+    releaseResumedPreparation();
+    const resumedState = await resumedStatePromise;
+    const resumedInternals = resumedState as unknown as {
+      _context: unknown;
+      _lastProcessedResponse: {
+        functions: Array<{
+          tool: { invoke: (runContext: unknown, input: string) => Promise<unknown> };
+        }>;
+      };
+    };
+    const bound = resumedInternals._lastProcessedResponse.functions[0]?.tool;
+    expect(bound).toBeDefined();
+    let output: unknown;
+    try {
+      output = await bound!.invoke(
+        resumedInternals._context,
+        JSON.stringify({ city: "Tromso" }),
+      );
+    } catch (error) {
+      throw new Error(
+        `bound invoke failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    expect(output).toBe("sandbox-fresh:Tromso");
+    expect(executions).toBe(1);
   });
 });
