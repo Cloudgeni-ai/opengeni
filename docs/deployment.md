@@ -376,6 +376,49 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Canonical organization-tenancy authority activation
+
+Organization-tenancy activation follows the same maintenance shape, one
+subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself -
+what is reversible before activation, what becomes forward-recovery-only after,
+and the exact preconditions - and this section owns the operator procedure.
+
+The switch that governs whether a deployment may cross the boundary at all is
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`. It defaults to
+`false` in both `.env.example` and the chart's `config` map, and leaving it at
+`false` is the supported way to decline or defer activation indefinitely: the
+deployment keeps the legacy workspace-owned lane and an image rollback stays an
+ordinary deployment decision. Every rolling tenancy migration still applies
+normally with the switch off.
+
+`0264_connection_authority_runtime_activation.sql` is the one tenancy cutover
+that has already run this path; a pre-0264 image must never be started again.
+For each subsequent activation:
+
+1. bind and verify the exact production subscription, cluster context,
+   namespace, release, database, and image digests;
+2. prove the activation preconditions in
+   [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
+   - completed backfill counters from
+   `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
+   cross-organization/RLS evidence, and immediate-revocation evidence - and
+   record that evidence in private operator storage before touching the cluster;
+3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
+   new image generation only. Never flip it on a running pre-activation
+   generation as a way to "test" activation;
+4. stop the API plus every control and turn worker while preserving the
+   migration-only secret and Job identity;
+5. query `pg_stat_activity` through the migration connection and prove zero
+   other sessions with `usename = 'opengeni_app'`;
+6. run the new digest's migration Job and require the activation migration to
+   appear in `schema_migrations`;
+7. start only that same digest's API and workers, and require the startup and
+   readiness posture checks to pass before reopening admission.
+
+After the activation migration commits, rollback to an earlier application image
+is forbidden, and setting the switch back to `false` is not a rollback - it
+cannot restore the legacy authority. Remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or

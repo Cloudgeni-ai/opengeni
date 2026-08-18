@@ -27,6 +27,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
+| Organization tenancy authority, activation, and rollback boundary | `docs/organization-tenancy.md` | `docs/deployment.md` owns the operator cutover procedure; `docs/architecture.md`, `AGENTS.md`, and chart/config comments should link instead of restating the boundary, the preconditions, or the pre-activation opt-out switch. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; executable admission truth in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs` | `.agents/skills/opengeni/SKILL.md`, `CONTRIBUTING.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `packages/react/README.md`, and customer integration skills should link. |
