@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 1.1.2
+
+### Patch Changes
+
+- 994a743: Stage connected-machine browser-control request files inside the placement-private path accepted by the self-hosted agent, restoring browser and computer-use session creation without weakening the private filesystem boundary.
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- Updated dependencies [8583779]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/codemode@0.4.9
+  - @opengeni/config@0.16.9
+  - @opengeni/sdk@1.2.1
+
 ## 1.1.1
 
 ### Patch Changes
