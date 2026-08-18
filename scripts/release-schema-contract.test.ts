@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0293_organization_tenancy_parity.sql")) {
         return includesActivation
-          ? "3e7e15df0828ffe51bd6f75e5c01295d439712e3e65472790a0ec4c77c546a84"
-          : "c9ec7016b96e64ad580b4504122e035505655ab36a3f0487c718fefc28abcc76";
+          ? "f8e40d878cf54595dff3c8a3434550f5d52aa0eaf30edfb0510fbbb2bffc2671"
+          : "1fb9cf9446b9736c43815449f4284bda1324b8aa8cc34f7cbec9d83b69cfadc6";
       }
       if (migrations.has("0286_widen_task_note_expiry_ceiling.sql")) {
         return includesActivation
@@ -1148,7 +1148,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0293_organization_tenancy_parity.sql")).toMatchObject({
-      sha256: "ded6fed3f19945ae2602ee3ea84e9b6e168ce868e5cf6e6a1b60e7a548a33247",
+      sha256: "988a02c412e5ca243ca155c1eaf3f43e32e0fc7050de00234fbee1561e44f287",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0283_editable_spreadsheet_authored_state.sql")).toMatchObject({

@@ -97,14 +97,22 @@ BEGIN
     'canonical_human_identity_subjects',
     'canonical_human_login_bindings'
   ] LOOP
-    EXECUTE format(
-      'CREATE POLICY organization_tenancy_parity_capability_read ON %I.%I '
-        || 'FOR SELECT USING (current_user = %L AND '
-        || 'opengeni_private.organization_tenancy_parity_capability_active())',
-      data_schema,
-      table_name,
-      migration_owner
-    );
+    -- Existence-guarded on purpose. A maintenance migration earlier in the
+    -- chain (0264, which introduces connection_use_audit_facts) can legitimately
+    -- be skipped or aborted, and the chain still runs forward over that partial
+    -- history. Creating a policy on an absent relation would break the whole
+    -- chain there; the parity seam simply cannot be executed against such a
+    -- database, which is already true of every other reader of that table.
+    IF to_regclass(format('%I.%I', data_schema, table_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'CREATE POLICY organization_tenancy_parity_capability_read ON %I.%I '
+          || 'FOR SELECT USING (current_user = %L AND '
+          || 'opengeni_private.organization_tenancy_parity_capability_active())',
+        data_schema,
+        table_name,
+        migration_owner
+      );
+    END IF;
   END LOOP;
 END
 $organization_tenancy_parity_capability_policies$;
