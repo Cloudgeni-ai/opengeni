@@ -35,6 +35,7 @@ import {
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   MODEL_ATTACHMENT_REFS_FIELD,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
@@ -2931,6 +2932,17 @@ describe("runtime event normalization", () => {
         decision: "approve",
       }),
     ).rejects.toThrow(/context was cleared/i);
+  });
+
+  test("refuses an approval resume against the open-suffix sentinel", async () => {
+    await expect(
+      prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
+        kind: "approval",
+        serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
+        approvalId: "appr_1",
+        decision: "approve",
+      }),
+    ).rejects.toThrow(/open suffix is the resume authority/i);
   });
 
   test("sanitizes an orphaned tool output out of replayed items-mode history", async () => {

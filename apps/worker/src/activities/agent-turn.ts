@@ -62,6 +62,7 @@ import {
   recordModelCallFact,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
+  attachOpenSuffixToPendingToolCalls,
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
   isSessionCompactionRequested,
@@ -90,6 +91,7 @@ import {
   SandboxRigConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  APPROVAL_RUN_STATE_MAX_JSON_BYTES,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getLiveEnrollmentConnection,
@@ -127,6 +129,10 @@ import {
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
   compactMcpResultCustomDataRunState,
+  extractOpenSuffixFromRunState,
+  assertOpenSuffixResumable,
+  interruptionKindForCallItem,
+  serializedRunStateForOpenSuffixPause,
   releaseMcpResultCustomDataFromSdkEvent,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
@@ -477,6 +483,7 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
+import { interruptionCallIdsFromPause, settleOpenSuffixResumeIfNeeded } from "./open-suffix-resume";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import {
   ChannelAPartialMutationError,
@@ -4653,8 +4660,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let latestCodexUsage: CodexUsageHeaderSnapshot | null = null;
     let lastCodexRequestOpaqueArtifacts: readonly string[] = [];
     // Hoisted for same-turn recovery: an approval-decision rerun must
-    // re-enter through the approval resume path (its frozen mid-flight state
-    // only exists in the RunState blob), never through a swapped trigger.
+    // re-enter through the suffix/history resume path, never through a swapped trigger.
     let triggerType: string | null = null;
     try {
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
@@ -8020,6 +8026,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rootSessionId: mcpCredentialRootSessionId,
         attemptId: input.attemptId,
         turn,
+        observability,
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
@@ -10781,7 +10788,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
         if (stream.interruptions.length > 0) {
-          await reconcileConversationTruth();
+          await reconcileConversationTruth({ requireDurable: true });
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
@@ -10858,6 +10865,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...approvals,
             ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
           ];
+          const suffixMembers = extractOpenSuffixFromRunState(stream.state);
+          const interruptionCallIds = interruptionCallIdsFromPause({
+            humanInputRequests,
+            interactionInterventionRequests,
+            pendingApprovals,
+          });
+          assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
+          const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
+          const attached = await attachOpenSuffixToPendingToolCalls(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            executionGeneration,
+            attemptId: input.attemptId,
+            members: interruptionCallIds.map((callId) => {
+              const member = suffixByCallId.get(callId)!;
+              return {
+                callId,
+                interruptionKind: interruptionKindForCallItem(
+                  member.callItem as Record<string, unknown>,
+                ),
+                reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+              };
+            }),
+          });
+          if (!attached.accepted) {
+            return claimedResult({ status: "cancelled" });
+          }
           if (
             !(await settle!({
               events: [
@@ -10879,7 +10915,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: compactApprovalRunState(stream.state.toString()),
+                serializedRunState: serializedRunStateForOpenSuffixPause(
+                  compactApprovalRunState(stream.state.toString()),
+                  APPROVAL_RUN_STATE_MAX_JSON_BYTES,
+                ),
                 pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
@@ -10939,6 +10978,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return claimedResult({ status: "idle" });
       };
+
+      const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
+        db,
+        agent,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        trigger,
+        humanInputResume,
+        modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+        settle: settle!,
+        publish,
+      });
+      if (openSuffixResume.action === "cancelled") {
+        return claimedResult({ status: "cancelled" });
+      }
+      if (openSuffixResume.action === "requires_action") {
+        activityStatus = "requires_action";
+        return claimedResult({ status: "requires_action" });
+      }
 
       await prepareRunAttemptInput();
       let retriedAfterCompaction = false;

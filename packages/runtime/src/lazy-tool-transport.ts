@@ -141,7 +141,6 @@ export class LazyToolRuntime {
   private currentTools: Tool[] = [];
   private readonly functionTools = new Map<string, Tool>();
   private readonly searchableToolNames = new Set<string>();
-  private readonly runtimeRegisteredToolNames = new Set<string>();
   private readonly originalToolLoaders = new WeakMap<
     object,
     (runContext: unknown) => Promise<Tool[]>
@@ -161,11 +160,7 @@ export class LazyToolRuntime {
     this.controlTools =
       transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool()]
-        : [
-            this.buildGenericSearchTool(),
-            this.buildGenericInvokeTool(),
-            this.buildGenericRegistrationTool(),
-          ];
+        : [this.buildGenericSearchTool(), this.buildGenericInvokeTool()];
     if (toolPreparationReady) {
       void toolPreparationReady.then(
         () => {
@@ -187,14 +182,28 @@ export class LazyToolRuntime {
   async ensurePrepared(): Promise<void> {
     await this.toolPreparationReady;
     this.preparationSettled = true;
-    if (this.transport === "generic_dispatch" && !this.preparedToolsLoaded && this.activeAgent) {
+    if (!this.preparedToolsLoaded && this.activeAgent) {
       const loader = this.originalToolLoaders.get(this.activeAgent);
       if (!loader) {
         throw new Error("Lazy tool search lost the agent's exact tool loader");
       }
-      this.refresh(await loader(this.activeRunContext));
+      const loaded = await loader(this.activeRunContext);
+      this.refresh(loaded);
       this.preparedToolsLoaded = true;
     }
+  }
+
+  async resolveAuthorizedFunctionTool(name: string): Promise<Tool | null> {
+    await this.ensurePrepared();
+    const direct = this.resolveFunctionTool(name);
+    if (direct && isFunctionTool(direct)) return direct;
+    const separator = name.lastIndexOf(".");
+    if (separator > 0) {
+      const suffix = name.slice(separator + 1);
+      const bySuffix = this.resolveFunctionTool(suffix);
+      if (bySuffix && isFunctionTool(bySuffix)) return bySuffix;
+    }
+    return null;
   }
 
   noteToolResolution(agent: object, runContext: unknown): void {
@@ -259,13 +268,12 @@ export class LazyToolRuntime {
             isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds)
           : isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds);
       if (lazy) {
-        // Native OpenAI client search and generic dispatch keep the real tool
-        // in Runner's registry but deliberately do not use the SDK's deferred
-        // gate. Generic dispatch hides every function schema behind its stable
-        // search/invoke pair; this includes large first-party Browser/Computer
-        // tools that are not backed by an MCP server. Enforce that invariant
-        // even if an upstream tool object was previously tagged; only Codex's
-        // separate transport uses deferLoading.
+        // After the preparation fence, deferred tools stay off the Agent
+        // list. Search teaches names; a remembered raw name binds later
+        // through resolveMissingFunctionTool. Do not use the SDK's
+        // deferLoading gate — installLazyToolRuntime clears it. Generic
+        // dispatch also hides first-party Browser/Computer schemas behind
+        // the stable search/invoke pair even without an MCP server.
         tool.deferLoading = false;
         this.searchableToolNames.add(tool.name);
       }
@@ -284,16 +292,12 @@ export class LazyToolRuntime {
 
   configuredExecutionTools(tools: Tool[]): Tool[] {
     if (!this.toolPreparationReady) return tools;
-    // Tools materialized after the first request enter Runner through the
-    // client tool_search runtime registry. Re-adding them as configured tools
-    // on the following model turn creates a routed-identity collision in the
-    // SDK. Required/eager tools remain configured; deferred tools remain
-    // available exclusively through their exact disclosed runtime objects.
+    // Required/eager tools stay on the Agent list. Deferred tools stay off
+    // getAllTools so the first-request schema stays cache-prefix stable; a
+    // remembered raw name binds through resolveMissingFunctionTool instead.
     return tools.filter((tool) => {
       if (!isFunctionTool(tool)) return true;
-      return this.transport === "generic_dispatch"
-        ? !this.runtimeRegisteredToolNames.has(tool.name)
-        : !this.searchableToolNames.has(tool.name);
+      return !this.searchableToolNames.has(tool.name);
     });
   }
 
@@ -381,49 +385,28 @@ export class LazyToolRuntime {
       description: INVOKE_DESCRIPTION,
       parameters: INVOKE_PARAMETERS as never,
       strict: false,
-      // A valid call is rewritten to the real runtime tool before Runner sees it.
+      // A valid call is rewritten to the real tool name before Runner sees it.
       // Reaching this executor therefore means the requested tool is absent or
       // the dispatcher arguments were malformed; never bypass approval/guardrails
       // by invoking a real tool from inside this control tool.
       execute: (input: unknown) => unavailableToolResult(input),
     }) as unknown as Tool;
   }
+}
 
-  private buildGenericRegistrationTool(): Tool {
-    const registrationTool = toolSearchTool({
-      execution: "client",
-      description: "OpenGeni internal late-binding registry",
-      parameters: {
-        type: "object",
-        properties: { name: { type: "string" } },
-        required: ["name"],
-        additionalProperties: false,
-      } as never,
-      execute: (async (args: { availableTools?: Tool[]; toolCall?: { arguments?: unknown } }) => {
-        await this.ensurePrepared();
-        const raw = args.toolCall?.arguments;
-        const parsed = typeof raw === "string" ? parseJsonObject(raw) : isRecord(raw) ? raw : null;
-        const name = parsed && typeof parsed.name === "string" ? parsed.name : null;
-        if (!name) return [];
-        const configured = args.availableTools?.find(
-          (candidate) => isFunctionTool(candidate) && candidate.name === name,
-        );
-        if (configured) return [configured];
-        const resolved = this.resolveFunctionTool(name);
-        if (!resolved || !isFunctionTool(resolved)) return [];
-        this.runtimeRegisteredToolNames.add(name);
-        return [resolved];
-      }) as never,
-    }) as unknown as Tool;
-    if (registrationTool.type !== "hosted_tool") {
-      throw new Error("OpenGeni late-binding registry must be a hosted tool_search tool");
+/** Bind a remembered raw name from the current authorized catalog, or null. */
+export function createResolveMissingFunctionTool(runtime: LazyToolRuntime) {
+  return async ({ name, toolCall }: { name: string; toolCall?: unknown }) => {
+    const names = [name];
+    if (isRecord(toolCall) && typeof toolCall.name === "string" && toolCall.name !== name) {
+      names.push(toolCall.name);
     }
-    registrationTool.providerData = {
-      ...registrationTool.providerData,
-      [INTERNAL_REGISTRATION_TOOL_MARKER_KEY]: true,
-    };
-    return registrationTool;
-  }
+    for (const candidate of names) {
+      const tool = await runtime.resolveAuthorizedFunctionTool(candidate);
+      if (tool && isFunctionTool(tool)) return tool;
+    }
+    return null;
+  };
 }
 
 const lazyToolRuntimeByAgent = new WeakMap<object, LazyToolRuntime>();
@@ -434,9 +417,10 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
 
 /**
  * Install native OpenAI/Azure or generic progressive disclosure on an agent.
- * The full tools remain in Runner's execution registry. Native search projects
- * eligible MCP schemas; generic dispatch projects every function schema behind
- * its stable search/invoke pair.
+ * Deferred schemas stay off the first-request tool block. A remembered raw
+ * name binds through resolveMissingFunctionTool after the catalog is ready.
+ * Generic dispatch still projects every function schema behind its stable
+ * search/invoke pair on the wire.
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,
@@ -632,13 +616,6 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   return [
     {
-      type: "tool_search_call",
-      callId: `${INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX}${originalCallId}`,
-      execution: "client",
-      status: "completed",
-      arguments: { name },
-    },
-    {
       ...candidate,
       name,
       arguments: JSON.stringify(args),
@@ -684,10 +661,7 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const response = await this.inner.getResponse(prepareLazyToolRequest(request, this.runtime));
-    if (
-      this.runtime.transport === "generic_dispatch" &&
-      responseRequiresGenericToolPreparation(response, this.runtime)
-    ) {
+    if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
     return this.runtime.transport === "generic_dispatch"
@@ -700,10 +674,7 @@ class LazyToolModel implements Model {
       prepareLazyToolRequest(request, this.runtime),
     )) {
       if (event.type === "response_done") {
-        if (
-          this.runtime.transport === "generic_dispatch" &&
-          responseRequiresGenericToolPreparation(event.response, this.runtime)
-        ) {
+        if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();
         }
       }
@@ -731,7 +702,7 @@ class LazyToolModel implements Model {
   }
 }
 
-function responseRequiresGenericToolPreparation(
+function responseRequiresToolPreparation(
   response: { output: ModelResponse["output"] },
   runtime: LazyToolRuntime,
 ): boolean {

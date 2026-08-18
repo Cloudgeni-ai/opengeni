@@ -2,9 +2,12 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   HumanInputResponseValidationError,
+  ApprovalRunStateLimitExceededError,
+  APPROVAL_RUN_STATE_MAX_JSON_BYTES,
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
   applySessionTurnSettlement,
+  attachOpenSuffixToPendingToolCalls,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -12,7 +15,9 @@ import {
   expireSessionHumanInputRequest,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
+  listTurnOpenSuffixToolCalls,
   peekSessionWork,
+  registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
@@ -474,5 +479,106 @@ describe("durable structured human input", () => {
     expect(await peekSessionWork(client.db, frozen.grant.workspaceId!, frozen.session.id)).toEqual({
       kind: "runnable",
     });
+  });
+
+  test("attaches open-suffix reasoning onto the pending interruption receipt", async () => {
+    const { grant, session } = await createFixture();
+    await send(grant, session.id, "ask before continuing");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`could not claim fixture: ${claim.reason}`);
+    const turn = claim.turn;
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        callId: "human-call-1",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "human-call-1",
+          name: "request_human_input",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    const reasoning = [
+      { type: "reasoning", id: "rs_open", content: [{ type: "input_text", text: "ask" }] },
+    ];
+    expect(
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+        members: [
+          {
+            callId: "human-call-1",
+            interruptionKind: "human_input",
+            reasoningItems: reasoning,
+          },
+        ],
+      }),
+    ).toEqual({ accepted: true, attached: 1 });
+    expect(
+      await listTurnOpenSuffixToolCalls(client.db, grant.workspaceId!, session.id, turn.id),
+    ).toMatchObject([
+      {
+        callId: "human-call-1",
+        interruptionKind: "human_input",
+        tiedReasoningItems: reasoning,
+        resultItem: null,
+      },
+    ]);
+  });
+
+  test("requires_action settlement rejects leftover run state above the envelope", async () => {
+    const { grant, session } = await createFixture();
+    await send(grant, session.id, "ask before continuing");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`could not claim fixture: ${claim.reason}`);
+    await expect(
+      applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: claim.turn.id,
+        runState: {
+          serializedRunState: JSON.stringify({
+            pad: "x".repeat(APPROVAL_RUN_STATE_MAX_JSON_BYTES),
+          }),
+          pendingApprovals: [],
+        },
+        events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+      }),
+    ).rejects.toMatchObject({
+      name: "ApprovalRunStateLimitExceededError",
+      code: "approval_run_state_too_large",
+    });
+    expect(ApprovalRunStateLimitExceededError).toBeDefined();
   });
 });
