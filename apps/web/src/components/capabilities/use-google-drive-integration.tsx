@@ -16,6 +16,7 @@ import type {
   IntegrationOption,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
+import { useApiIntegrationAccounts } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
@@ -35,9 +36,11 @@ import {
 } from "@/lib/google-drive-connection";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
+  ApiIntegrationInstallationSummary,
   ConnectionMetadata,
   GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartResponse,
+  IntegrationDefinitionSummary,
 } from "@/types";
 
 // The folder picker (Drive browsing, paging, and the save form) is only needed
@@ -55,6 +58,14 @@ export type IntegrationAdapter = {
   dialogs: ReactNode;
 };
 
+/**
+ * The curated `google-drive` ApiIntegration definition id: extra Drive
+ * accounts beyond the primary knowledge connection use this same multi-account
+ * mechanism as Outlook/OneDrive, folded into this one row instead of a
+ * separate row per account.
+ */
+export const GOOGLE_DRIVE_DEFINITION_ID = "google-drive";
+
 /** Maps the Google Drive knowledge connection onto the shared integration view-model. */
 export function useGoogleDriveIntegration({
   workspaceId,
@@ -63,6 +74,8 @@ export function useGoogleDriveIntegration({
   connectionsLoadFailed = false,
   refresh,
   replaceConnection,
+  definitions = [],
+  instances = [],
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
@@ -71,6 +84,9 @@ export function useGoogleDriveIntegration({
   connectionsLoadFailed?: boolean;
   refresh: () => Promise<void>;
   replaceConnection: (connection: ConnectionMetadata) => void;
+  /** The curated ApiIntegration catalog, for extra (non-primary) Drive accounts. */
+  definitions?: IntegrationDefinitionSummary[];
+  instances?: ApiIntegrationInstallationSummary[];
 }): IntegrationAdapter {
   const context = useAppContext();
   const client = context.client;
@@ -114,6 +130,16 @@ export function useGoogleDriveIntegration({
   const canPublish = googleDriveCanPublish(connection);
   const outputDestination = metadata?.outputDestination;
   const canChange = canWrite && !readOnly && !busy;
+
+  // Extra Drive accounts beyond the primary knowledge connection, folded into
+  // this one row instead of a separate row per account.
+  const extraAccounts = useApiIntegrationAccounts({
+    workspaceId,
+    definitionId: GOOGLE_DRIVE_DEFINITION_ID,
+    definitions,
+    instances,
+    canManage: canWrite,
+  });
 
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -400,31 +426,72 @@ export function useGoogleDriveIntegration({
     mark: { logoSrc: GOOGLE_DRIVE_LOGO_URL, monogram: "D" },
     chip,
     connection: facts,
-    ...(canRead && connected
+    ...(canRead && (connected || extraAccounts.accounts.length > 0)
       ? {
-          access: {
-            title: "Folders",
-            items: savedSources.map((source) => ({
-              name: googleDriveBoundaryLabel(source),
-              meta: source.syncEnabled ? "syncing" : "on request",
-            })),
-            emptyMessage:
-              "No folders selected yet. Agents cannot read Drive until you choose some.",
-            ...(accountState.state === "connected" && canChange
+          access:
+            extraAccounts.accounts.length > 0
               ? {
-                  editLabel: canReadSources ? "Change folders" : "Allow folder access",
-                  onEdit: canReadSources
-                    ? () => setFolderDialogOpen(true)
-                    : () => void connect(true, "source_read"),
-                  ...(canReadSources ? {} : { editDisclosureId: "google-drive-access" }),
+                  // At least one extra account: the block becomes account-scoped.
+                  // The primary account keeps its "Change folders" action inline
+                  // on its own row instead of as the block's single edit affordance.
+                  title: "Connected accounts",
+                  items: [
+                    ...(connected && metadata
+                      ? [
+                          {
+                            name: metadata.googleDisplayName
+                              ? `${metadata.googleDisplayName} (${metadata.googleEmail})`
+                              : metadata.googleEmail,
+                            meta: "Primary",
+                            status:
+                              accountState.state === "connected" || accountState.state === "paused"
+                                ? ("ok" as const)
+                                : ("warn" as const),
+                            ...(canChange
+                              ? {
+                                  action: {
+                                    label: canReadSources
+                                      ? "Change folders"
+                                      : "Allow folder access",
+                                    onClick: canReadSources
+                                      ? () => setFolderDialogOpen(true)
+                                      : () => void connect(true, "source_read"),
+                                  },
+                                }
+                              : {}),
+                          },
+                        ]
+                      : []),
+                    ...extraAccounts.accessItems,
+                  ],
+                  ...(canChange
+                    ? { editLabel: "+ Add account", onEdit: extraAccounts.addAccount }
+                    : {}),
                 }
-              : {}),
-          },
+              : {
+                  title: "Folders",
+                  items: savedSources.map((source) => ({
+                    name: googleDriveBoundaryLabel(source),
+                    meta: source.syncEnabled ? "syncing" : "on request",
+                  })),
+                  emptyMessage:
+                    "No folders selected yet. Agents cannot read Drive until you choose some.",
+                  ...(accountState.state === "connected" && canChange
+                    ? {
+                        editLabel: canReadSources ? "Change folders" : "Allow folder access",
+                        onEdit: canReadSources
+                          ? () => setFolderDialogOpen(true)
+                          : () => void connect(true, "source_read"),
+                        ...(canReadSources ? {} : { editDisclosureId: "google-drive-access" }),
+                      }
+                    : {}),
+                },
         }
       : {}),
     options,
     footer,
     ...(stateNotice ? { notice: stateNotice } : {}),
+    ...(extraAccounts.tools.length > 0 ? { tools: { tools: extraAccounts.tools } } : {}),
     // Google OAuth limited-use disclosures: rendered with every state so the
     // connect and publish affordances can point at them via aria-describedby.
     disclosures: [

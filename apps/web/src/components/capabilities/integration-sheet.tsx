@@ -11,6 +11,7 @@ import {
   type IntegrationFact,
   type IntegrationFooter,
   type IntegrationOption,
+  type IntegrationToolsBlock,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { Button } from "@/components/ui/button";
@@ -122,6 +123,7 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
             </div>
           </Block>
         ) : null}
+        {model.tools && model.tools.tools.length > 0 ? <ToolsBlock tools={model.tools} /> : null}
         {model.disclosures && model.disclosures.length > 0 ? (
           <div className="space-y-2 border-t border-border pt-4">
             {model.disclosures.map((disclosure) => (
@@ -222,16 +224,53 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
                 key={itemKey}
                 className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs"
               >
-                <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+                {item.status ? (
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "size-1.5 shrink-0 rounded-full",
+                      item.status === "ok" ? "bg-status-idle" : "bg-status-waiting",
+                    )}
+                  />
+                ) : (
+                  <FolderIcon className="size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+                )}
                 <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
                 {item.meta ? (
                   <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
+                ) : null}
+                {item.action ? (
+                  <button
+                    type="button"
+                    onClick={item.action.onClick}
+                    className="shrink-0 text-2xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm"
+                  >
+                    {item.action.label}
+                  </button>
                 ) : null}
               </li>
             );
           })}
         </ul>
       )}
+    </Block>
+  );
+}
+
+function ToolsBlock({ tools }: { tools: IntegrationToolsBlock }) {
+  const keys = contentKeys(tools.tools);
+  return (
+    <Block title={tools.title ?? "Tools"}>
+      <div className="flex flex-wrap gap-1.5">
+        {keys.map((key, index) => (
+          <span
+            key={key}
+            className="inline-flex items-center rounded-md border border-border bg-surface px-1.5 py-0.5 font-mono text-2xs text-fg-muted"
+          >
+            {tools.tools[index]}
+          </span>
+        ))}
+      </div>
     </Block>
   );
 }

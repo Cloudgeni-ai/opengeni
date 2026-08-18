@@ -25,6 +25,10 @@ export type IntegrationFact = {
 export type IntegrationAccessItem = {
   name: string;
   meta?: string;
+  /** Status dot color for a multi-account entry ("ok" green, "warn" amber). Omitted for a plain resource row. */
+  status?: "ok" | "warn";
+  /** Inline per-item action (e.g. "Reconnect") rendered at the end of the row. */
+  action?: { label: string; onClick: () => void };
 };
 
 export type IntegrationAccess = {
@@ -119,6 +123,18 @@ export type IntegrationFooter =
  */
 export type IntegrationDisclosure = { id: string; text: string };
 
+/**
+ * The tool/function names a connected integration actually publishes, shown as
+ * a flat informational chip grid (no toggles, no per-tool detail). Populated
+ * only from an already-available cheap source (a stored allowlist); omitted
+ * entirely when no such source exists for the adapter.
+ */
+export type IntegrationToolsBlock = {
+  /** Defaults to "Tools" when rendered without one. */
+  title?: string;
+  tools: string[];
+};
+
 export type IntegrationViewModel = {
   id: string;
   name: string;
@@ -129,6 +145,8 @@ export type IntegrationViewModel = {
   access?: IntegrationAccess;
   options: IntegrationOption[];
   footer: IntegrationFooter;
+  /** The tools this connection actually publishes; omitted when unavailable. */
+  tools?: IntegrationToolsBlock;
   /** Optional plain-language notice shown above the blocks (state explanations). */
   notice?: {
     tone: "muted" | "waiting" | "failed";

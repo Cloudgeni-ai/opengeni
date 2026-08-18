@@ -1,3 +1,4 @@
+import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
@@ -361,6 +362,23 @@ export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
   if (plan.mode === "api_key" || plan.mode === "fiken_api_token") return "API key";
   return null;
+}
+
+/**
+ * The same four-state chip Integrations rows use, derived for a Connectors
+ * catalog item so both surfaces render the identical compact state indicator.
+ * `health` is optional: tiles that only ever show not-yet-enabled items (the
+ * Browse grid, registry results) can omit it since every item there is
+ * necessarily "Not connected".
+ */
+export function capabilityStateChip(
+  item: Pick<CapabilityCatalogItem, "enabled">,
+  health?: ConnectionHealth,
+): IntegrationChip {
+  if (!item.enabled) return { label: "Not connected", tone: "idle" };
+  if (health?.state === "unverified") return { label: "Loading", tone: "plain" };
+  if (health?.state === "attention") return { label: "Needs attention", tone: "warn" };
+  return { label: "Connected", tone: "ok" };
 }
 
 export function preferredSocialConnection(

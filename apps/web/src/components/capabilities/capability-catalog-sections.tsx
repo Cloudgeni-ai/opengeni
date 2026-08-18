@@ -136,6 +136,7 @@ export function CapabilityBrowseSection({
   onOpenRegistry,
   onSearchRegistry,
   onLoadMore,
+  onQuickConnect,
 }: {
   filter: CapabilityFilter;
   query: string;
@@ -153,6 +154,8 @@ export function CapabilityBrowseSection({
   onOpenRegistry: (item: CapabilityCatalogItem) => void;
   onSearchRegistry: () => void;
   onLoadMore: () => void;
+  /** The icon quick-connect fast path; omitted for items with no dialog-free or one-dialog connect action. */
+  onQuickConnect?: (item: CapabilityCatalogItem) => (() => void) | undefined;
 }) {
   return (
     <section className="space-y-4" aria-labelledby="browse-capabilities-heading">
@@ -186,6 +189,7 @@ export function CapabilityBrowseSection({
                 item={item}
                 logoSrc={logoUrl(item)}
                 onOpen={() => onOpen(item)}
+                onQuickConnect={onQuickConnect?.(item)}
               />
             ))}
           </div>

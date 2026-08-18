@@ -61,7 +61,7 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/mcp
   -d '{"headers":{"Authorization":"Bearer <token>"}}'
 ```
 
-The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like workspace variable set values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values — installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
+The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like workspace variable set values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
@@ -102,9 +102,10 @@ ownership. An authenticated GraphQL preview is then retried through that exact
 Connection. The final review shows the immutable digest, tools, safety and
 approval policy, warnings, ownership, and account label before install.
 
-Installed custom APIs appear in a dedicated section rather than the legacy
-generic “Add custom” catalog dialog. Multiple named instances of one definition
-remain independent (for example, `Linear — Finance` and `Linear — Sales`), with
+Installed custom APIs appear as ordinary rows in the Connectors section's
+Custom APIs list rather than the legacy generic “Add custom” catalog dialog.
+Multiple named instances of one definition
+remain independent (for example, `Linear - Finance` and `Linear - Sales`), with
 their own Connection, stable runtime identity, selected tools, status, update
 review, reconnect action, and instance-scoped removal. Updating preserves only
 previously allowed tools that still exist; newly discovered tools are opt-in,
@@ -139,27 +140,19 @@ token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
 
-In the web control center, curated Definitions enter that flow through one
-reusable three-step connection journey. The account step gives every sibling
-account a human label and explains the consequences of Personal and Workspace
-ownership; users without integration-management permission may open the
-journey but receive administrator remediation instead of a mutation action. The
-access step describes reviewed agent use cases and permissions in plain
-language. Exact OAuth scopes and the provider domain remain available under
-progressive **Technical details**, rather than becoming the default interface.
-The review step repeats the provider, label, ownership, and capabilities before
-the user continues to the provider consent screen.
-
-The journey descriptor is presentation metadata only: it cannot grant scopes,
-select a Connection, or replace the Definition and Connection authority above.
-Its deterministic web reducer resets between account attempts and ignores stale
-submission outcomes. The existing controller still mints and preserves the
-exact instance key across a failed-start retry, owns the OAuth return path, and
-performs callback preview/install for that exact instance. The shared shell owns
-navigation, cancellation, accessible focus and progress semantics, loading, and
-safe errors; future thin provider adapters may add reviewed resource pickers or
-provider details without turning the shell into a generic schema form or
-changing the backend lifecycle.
+In the web app, curated Definitions enter that flow with no account-naming
+form: every curated Definition today is oauth2-only and already reviewed
+(Official), so starting or adding an account is a single click that redirects
+straight to the provider's own consent screen - that screen is the disclosure,
+not a local step. `apps/web/src/components/capabilities/use-api-integration-accounts.tsx`
+mints and preserves the exact instance key across a failed-start retry, owns
+the OAuth return path (`apiIntegrationOAuthReturnPath`/`pendingApiIntegrationOAuth`,
+matched by `definitionId` in the URL so one shared effect handles every
+provider's return regardless of how many rows are on screen), and performs
+callback preview/install for that exact instance before folding it into its
+provider row's Connected accounts block. A local step exists only for an
+*uncurated* Connector whose `oauth2` is not yet reviewed: one line naming the
+domain, rendered by the shared `quick-connect-dialog.tsx` described above.
 
 The normalized rows store the protocol-compiled revision, tools, Integration
 and API Facets, Facet installations, and owners under FORCE RLS. They are the
@@ -233,8 +226,8 @@ organization/workspace/personal destination authority, and writes only the
 facet binding. The generic facet `PUT` rejects this provider-owned facet;
 only the provider-specific `/source` route may persist its config, so a
 schema-valid payload cannot bypass Google metadata checks or forge destination
-authority. A sibling Google Drive instance—whether it uses another Google
-account or another ownership scope—is never selected by provider/domain
+authority. A sibling Google Drive instance-whether it uses another Google
+account or another ownership scope-is never selected by provider/domain
 fallback and is not mutated. Generic browser editing refuses required object or
 array fields unless a provider-specific flow owns them, so OneDrive and future
 rich schemas cannot be submitted as silently incomplete primitive config.
@@ -470,30 +463,56 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 The **Capabilities** view has exactly two user-facing objects.
 
 **Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
-and Jira & Confluence. They receive events, post as OpenGeni, and hold their own
-identity in the other product. Every integration renders through the same two
-components (`apps/web/src/components/capabilities/integration-row.tsx` and
+Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
+OneDrive. They receive events, post as OpenGeni, and hold their own identity in
+the other product. Every integration renders through the same two components
+(`apps/web/src/components/capabilities/integration-row.tsx` and
 `integration-sheet.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
-`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`) maps that
-provider's data onto the view-model and picks the content for the viewer's role.
-The row and the sheet contain no provider-specific branch.
+`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
+`use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
+`use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`) maps
+that provider's data onto the view-model and picks the content for the
+viewer's role. There is exactly one row per provider, never one row per
+account and never a separate control center: the shared multi-account layer
+(`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
+instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive, and extra
+Google Drive accounts beyond the primary knowledge connection) into that one
+row's rolled-up state. The row and the sheet contain no provider-specific
+branch; every account/provider difference lives in the adapters.
 
-- Each row is identical apart from mark, name, one-line description, and one
-  state chip. The chip vocabulary is closed: `Connected`, `Needs attention`,
-  `Not connected`, `Set up by an admin` (plus a transient `Loading`). No inline
-  scope text, per-provider buttons, or expandable sub-options.
-- Clicking a row opens the one detail sheet: a fixed frame with four blocks in
-  fixed order, empty blocks omitted. **Connection** is label/value facts;
-  **Access** is the scoped resources (channels, repositories, folders, projects
-  and spaces) with exactly one edit affordance; **Options** are switches (and,
-  where a setting is a choice, a compact select); **Action** is a footer from a
-  closed set: `Reconnect` + `Disconnect` when connected, the same pair with
-  `Reconnect` primary when broken, `Set up` when not connected, or a locked
-  sentence when the viewer cannot change anything. The locked sentence defaults
-  to "A workspace admin looks after this integration. You do not need to
-  connect anything."; an adapter may supply a truthful variant instead (e.g.
+- Each row shows mark, name, one-line description, and a compact circular
+  connection-state indicator in place of a text chip: a filled check for
+  `Connected`, a triangle for `Needs attention`, a plus for `Not connected`, a
+  muted dot for `Set up by an admin`, and a spinner while `Loading`. The click
+  target is split: the large body button opens the detail sheet (the full
+  sheet when connected, a lightweight read-only preview otherwise); the small
+  trailing indicator is a separate sibling button that is the one fast
+  connect path when the current state is `Not connected` and a dialog-free or
+  one-dialog connect action exists - for every other state it is purely
+  decorative, never a dead click target. No inline scope text or per-provider
+  buttons on the row itself.
+- The detail sheet is a fixed frame with blocks in fixed order, empty blocks
+  omitted. **Connection** is label/value facts; **Access** is the scoped
+  resources (channels, repositories, folders, projects and spaces) with
+  exactly one edit affordance - for a multi-account provider this block
+  becomes **Connected accounts**: one entry per account with a status dot
+  (`ok`/`warn`), optional meta text, and an optional inline per-item action
+  (e.g. `Reconnect`), plus a `+ Add account` edit-link in the block header;
+  **Options** are switches (and, where a setting is a choice, a compact
+  select); **Tools** is a flat, purely informational, monospace chip grid of
+  the tool/function names the connection actually publishes (no toggles, no
+  per-tool detail), populated only from an already-available cheap source
+  (a stored allowlist) and omitted entirely when unavailable; **Action** is a
+  footer from a closed set: `Reconnect` + `Disconnect` when connected, the
+  same pair with `Reconnect` primary when broken, `Set up` when not connected,
+  or a locked sentence when the viewer cannot change anything (a multi-account
+  row with at least one account also uses the locked sentence, pointing the
+  viewer at the Connected accounts block above instead of an ambiguous
+  whole-row Reconnect/Disconnect). The locked sentence defaults to "A
+  workspace admin looks after this integration. You do not need to connect
+  anything."; an adapter may supply a truthful variant instead (e.g.
   personal-only Slack tells a member that connection management permission is
   required, because no admin can connect it for them). Provider limited-use
   disclosures (Google's OAuth disclosures) render in a fixed place above the
@@ -508,18 +527,44 @@ The row and the sheet contain no provider-specific branch.
   folder picker, the Jira/Confluence source picker, the reaction conversation
   picker, the Slack decision-publication settings) open from the Access block's
   single edit affordance or an option's action link.
-- Named per-account API integration instances (Outlook, OneDrive, and
-  additional Google Drive accounts) and custom OpenAPI/GraphQL APIs remain in
-  the separate **Connected services** control center below the integrations.
-  Gmail is not one of these: it is a Connector, not an API integration
-  definition (see the Gmail section below).
+- Adding an account to a multi-account provider (Outlook, OneDrive, extra
+  Google Drive accounts) is a zero-dialog, straight OAuth redirect - every
+  curated `IntegrationDefinition` today is oauth2-only and already reviewed,
+  so there is no account-naming form first. The one shared
+  `quick-connect-dialog.tsx` component exists for the two authKind cases that
+  do need a screen (`api_key`: one field, no scope bullet list; unreviewed
+  `oauth2`: one line naming the domain), and is reused by both the "+ Add
+  account" action and the Connectors row-icon fast path described below.
+  Gmail is not a multi-account provider: it is a single personal-only
+  Connector, not an API integration definition (see the Gmail section below).
 
-**Connectors** are MCP servers from the catalog. Connection setup defaults to workspace-owned; a personal connection requires the explicit **Connect only for me** choice (official Gmail and Slack's hosted MCP are the personal-only exceptions).
+**Connectors** are MCP servers from the catalog, plus workspace-defined Custom
+APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
+field (`"none" | "oauth2" | "api_key" | "unknown"`) already carries every
+behavioral difference the connect flow needs, so Custom API connectors use the
+exact same click-split/quick-connect treatment as any other Connector.
+Connection setup defaults to workspace-owned; a personal connection requires
+the explicit **Connect only for me** choice (official Gmail and Slack's hosted
+MCP are the personal-only exceptions).
 A **Featured** strip of tiles driven by curated `metadata.curation.featured`
-leads, followed by the searchable long tail. Tile badges are only `Official`
-(curated `metadata.curation.official`) and `Built by OpenGeni` (first-party
-bridges such as Fiken); nothing is ever labelled reviewed or verified. Every
-featured tile opens the same connector detail sheet as the grid.
+leads, followed by the searchable long tail: the enabled catalog strip, then a
+**Custom APIs** list of already-installed workspace-defined instances
+(`CustomApiSection`), then Skills/Plugins and Packs, then the Browse grid.
+Tile badges are only `Official` (curated `metadata.curation.official`) and
+`Built by OpenGeni` (first-party bridges such as Fiken); nothing is ever
+labelled reviewed or verified. Every tile shows the same connection-state
+indicator and click-split as an Integrations row: the icon is the fast
+connect path, the rest of the tile opens the detail sheet. Custom API
+*creation* (paste an OpenAPI/GraphQL source URL, preview, pick tools,
+authenticate, create) stays its own multi-phase wizard
+(`custom-api-setup-dialog.tsx`, reachable from the Custom APIs list's own
+**Connect custom API** button) - that is a fundamentally different "define a
+new connector from a spec" flow, not a catalog connect. Once created, a
+custom API instance is an ordinary row
+fed directly from `listApiIntegrations` filtered to
+`definitionProvenance === "workspace"`, not a `CapabilityCatalogItem`; this is
+a deliberately narrower fold-in than making custom APIs first-class catalog
+citizens, to avoid touching unrelated `kind: "api"` catalog-builder behavior.
 
 Open the **Capabilities** view in the web app to:
 
