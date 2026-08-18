@@ -568,7 +568,7 @@ BEGIN
         );
       END IF;
     END LOOP;
-    -- Migration 0288's tenancy backfill ledger seam has the same shape: its
+    -- Migration 0289's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
     -- yet exist, and these three live in the data schema rather than
     -- opengeni_private, so the blanket sweep above never reaches them.

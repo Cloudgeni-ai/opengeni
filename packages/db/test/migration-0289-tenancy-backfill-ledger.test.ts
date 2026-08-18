@@ -1,4 +1,4 @@
-// Migration 0288: the tenancy backfill receipt and unresolved-row ledger.
+// Migration 0289: the tenancy backfill receipt and unresolved-row ledger.
 // Phase D requires backfill to "record backfill receipts and unresolved rows
 // without widening access" - so the ledger must be write-reachable ONLY through
 // its lifecycle seam, must be append-only for unresolved evidence, and must be
@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, migrate, type DbClient } from "../src";
 
-const migrationUrl = new URL("../drizzle/0288_tenancy_backfill_ledger.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0289_tenancy_backfill_ledger.sql", import.meta.url);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -22,7 +22,7 @@ let admin: postgres.Sql;
 let client: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0288-tenancy-backfill-ledger");
+  shared = await acquireSharedTestDatabase("migration-0289-tenancy-backfill-ledger");
   if (!shared) {
     available = false;
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
@@ -109,7 +109,7 @@ async function seedOrganization(label: string): Promise<string> {
   return rows[0]!.id;
 }
 
-describe("migration 0288 tenancy backfill ledger", () => {
+describe("migration 0289 tenancy backfill ledger", () => {
   test("declares a rolling lifecycle-only ledger that cannot carry proposed authority", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -347,7 +347,7 @@ describe("migration 0288 tenancy backfill ledger", () => {
     // migration's own explicit grants must be sufficient on their own. That
     // also makes this the only place where "no direct DML" is a real assertion
     // about THIS migration rather than about provisionRoles.
-    const blank = await acquireBlankTestDatabase("migration-0288-no-provision-roles");
+    const blank = await acquireBlankTestDatabase("migration-0289-no-provision-roles");
     if (!blank) return;
     try {
       await migrate(blank.databaseUrl);
@@ -391,7 +391,7 @@ describe("migration 0288 tenancy backfill ledger", () => {
     // no lifecycle GUC set, and a naive "is the parent gone" probe answers
     // "gone" while the receipt is alive - letting any nested delete
     // (pg_trigger_depth() > 1) erase append-only evidence.
-    const blank = await acquireBlankTestDatabase("migration-0288-nonsuperuser-owner");
+    const blank = await acquireBlankTestDatabase("migration-0289-nonsuperuser-owner");
     if (!blank) return;
     try {
       await migrate(blank.databaseUrl);

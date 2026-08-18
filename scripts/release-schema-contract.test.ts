@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0288_tenancy_backfill_ledger.sql")) {
+      if (migrations.has("0289_tenancy_backfill_ledger.sql")) {
         return includesActivation
-          ? "30c624284e909df5256f7ffcb53d16c81336462339d25884ba4e2a7f696fa6a4"
-          : "1a49ff07ec9fca78992733793966c795dd036946b55b6ae933ed6afe92f68b8f";
+          ? "36df1a2df4eaa8158684111ff6af4381bde5016d08222e468fe0e148789bdeb2"
+          : "164ba6e5dc453df40894d9b92e0c3a8a6848e20f226ab89d7ec75a5e850b7857";
       }
       if (migrations.has("0288_attached_browser_reenrollment.sql")) {
         return includesActivation
@@ -1028,7 +1028,7 @@ describe("release schema contract", () => {
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +
         (migrations.has("0283_editable_spreadsheet_authored_state.sql") ? 1 : 0) +
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
-        (migrations.has("0288_tenancy_backfill_ledger.sql") ? 1 : 0) +
+        (migrations.has("0289_tenancy_backfill_ledger.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
@@ -1067,8 +1067,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0288_tenancy_backfill_ledger.sql")
-        ? "0288_tenancy_backfill_ledger.sql"
+      migrations.has("0289_tenancy_backfill_ledger.sql")
+        ? "0289_tenancy_backfill_ledger.sql"
         : migrations.has("0288_attached_browser_reenrollment.sql")
           ? "0288_attached_browser_reenrollment.sql"
           : migrations.has("0287_open_suffix_pending_tool_calls.sql")
