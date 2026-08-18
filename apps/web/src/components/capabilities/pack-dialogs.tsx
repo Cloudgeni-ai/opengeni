@@ -66,13 +66,11 @@ export type RigOption = {
  */
 export function PackManifestDialog({
   open,
-  busy,
   onOpenChange,
   onRegister,
   restoreFocusRef,
 }: {
   open: boolean;
-  busy: boolean;
   onOpenChange: (open: boolean) => void;
   onRegister: (manifestDraft: string) => Promise<boolean>;
   restoreFocusRef?: RefObject<HTMLElement | null>;
@@ -122,7 +120,9 @@ export function PackManifestDialog({
           </Button>
           <Button
             type="button"
-            disabled={registering || busy || !manifestDraft.trim()}
+            // Only this dialog's own submit gates it. Another Pack installing
+            // elsewhere in the section says nothing about registering a manifest.
+            disabled={registering || !manifestDraft.trim()}
             onClick={() => void register()}
           >
             {registering ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
@@ -371,6 +371,8 @@ function PackInstallationDialog(props: {
           </DialogDescription>
         </DialogHeader>
 
+        <PackIdentity pack={pack} installation={props.installation} />
+
         <div className="grid min-h-0 gap-4 overflow-y-auto pr-1">
           {pack.variableSet || showsRig ? (
             <div className="grid gap-3 rounded-lg border border-border bg-surface/40 p-3 sm:grid-cols-2">
@@ -469,63 +471,139 @@ function PackInstallationDialog(props: {
         </div>
 
         <DialogFooter className="sm:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            {props.installed ? (
-              <Button
-                type="button"
-                variant="outline"
-                disabled={props.busy}
-                onClick={props.onUninstall}
-              >
-                <Trash2Icon />
-                Uninstall
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              className="text-fg-subtle hover:text-status-failed"
-              disabled={props.busy || props.installed}
-              title={
-                props.installed
-                  ? "Uninstall this Pack before unregistering its manifest"
-                  : "Unregister this Pack (built-ins cannot be removed)"
-              }
-              onClick={props.onUnregister}
-            >
-              Unregister
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={props.reviewing || props.busy}
-              onClick={() => props.onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant={props.selectionReviewed ? "outline" : "default"}
-              disabled={props.reviewing || props.busy}
-              onClick={props.onReview}
-            >
-              {props.reviewing ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
-              {preview ? "Review again" : "Review plan"}
-            </Button>
-            <Button
-              type="button"
-              disabled={!props.installReady || props.reviewing || props.busy}
-              onClick={props.onInstall}
-            >
-              {props.busy ? <Loader2Icon className="animate-spin" /> : <PackageCheckIcon />}
-              {props.installLabel}
-            </Button>
-          </div>
+          <PackDetailActions
+            busy={props.busy}
+            installed={props.installed}
+            reviewing={props.reviewing}
+            reviewed={props.selectionReviewed}
+            hasPreview={preview !== null}
+            installReady={props.installReady}
+            installLabel={props.installLabel}
+            onCancel={() => props.onOpenChange(false)}
+            onReview={props.onReview}
+            onInstall={props.onInstall}
+            onUninstall={props.onUninstall}
+            onUnregister={props.onUnregister}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The installed identity a repair or a two-version comparison actually turns
+ * on: which manifest version this row is, what role and category it claims,
+ * which digest is installed right now, and the Pack's own description in full.
+ * Rendered as its own strip because the dialog title only ever carries a name.
+ */
+export function PackIdentity({
+  pack,
+  installation,
+}: {
+  pack: CapabilityPack;
+  installation: PackInstallation | null;
+}) {
+  return (
+    <div data-pack-identity={pack.id} className="grid gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-fg-subtle">
+        <MetaChip className="font-mono">v{pack.version}</MetaChip>
+        <span>{pack.role}</span>
+        <span aria-hidden className="text-fg-subtle/50">
+          ·
+        </span>
+        <span>{pack.category}</span>
+        {installation?.manifestDigest ? (
+          <>
+            <span aria-hidden className="text-fg-subtle/50">
+              ·
+            </span>
+            <span className="font-mono" title={installation.manifestDigest}>
+              {installation.manifestDigest.slice(0, 12)}
+            </span>
+          </>
+        ) : null}
+      </div>
+      {pack.description.trim() ? (
+        <p className="line-clamp-2 text-xs leading-5 text-fg-muted">{pack.description}</p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The Pack dialog's footer. Extracted from the dialog frame so the two
+ * destructive, ownership-releasing verbs - Uninstall and Unregister - are unit
+ * testable: Radix portals the dialog itself out of reach of the DOM shim, but
+ * the buttons that fire the callbacks do not have to live in there.
+ */
+export function PackDetailActions(props: {
+  busy: boolean;
+  installed: boolean;
+  reviewing: boolean;
+  /** True while the reviewed plan still describes the current selections. */
+  reviewed: boolean;
+  hasPreview: boolean;
+  installReady: boolean;
+  installLabel: string;
+  onCancel: () => void;
+  onReview: () => void;
+  onInstall: () => void;
+  onUninstall: () => void;
+  onUnregister: () => void;
+}) {
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {props.installed ? (
+          <Button type="button" variant="outline" disabled={props.busy} onClick={props.onUninstall}>
+            <Trash2Icon />
+            Uninstall
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          className="text-fg-subtle hover:text-status-failed"
+          disabled={props.busy || props.installed}
+          title={
+            props.installed
+              ? "Uninstall this Pack before unregistering its manifest"
+              : "Unregister this Pack (built-ins cannot be removed)"
+          }
+          onClick={props.onUnregister}
+        >
+          Unregister
+        </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={props.reviewing || props.busy}
+          onClick={props.onCancel}
+        >
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          variant={props.reviewed ? "outline" : "default"}
+          disabled={props.reviewing || props.busy}
+          onClick={props.onReview}
+        >
+          {props.reviewing ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+          {props.hasPreview ? "Review again" : "Review plan"}
+        </Button>
+        <Button
+          type="button"
+          disabled={!props.installReady || props.reviewing || props.busy}
+          onClick={props.onInstall}
+        >
+          {props.busy ? <Loader2Icon className="animate-spin" /> : <PackageCheckIcon />}
+          {props.installLabel}
+        </Button>
+      </div>
+    </>
   );
 }
 

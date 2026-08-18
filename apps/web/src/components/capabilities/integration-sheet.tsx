@@ -94,7 +94,7 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
           >
             {model.name}
           </SheetTitle>
-          <SheetDescription className="truncate text-xs text-fg-muted">
+          <SheetDescription className="line-clamp-2 text-xs text-fg-muted">
             {model.description}
           </SheetDescription>
         </div>

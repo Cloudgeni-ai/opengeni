@@ -478,6 +478,12 @@ The **Capabilities** view has exactly three top-level sections, in this order:
 connections - something that holds an identity in another product. The third is
 not: a Bundle is a named collection of tools and instructions.
 
+The heading outline says the same thing: exactly three `<h2>`s, one per
+section. The Featured strip, the discovery controls, **Enabled**, **Custom
+APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
+and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
+surfaces of their own.
+
 **Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
 Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
 OneDrive. They receive events, post as OpenGeni, and hold their own identity in
@@ -582,10 +588,12 @@ connector. It also stores an api-key credential under the field's **wire header
 name**, never its human label, and declines the fast path entirely for a
 connector declaring more than one required header - a single-field dialog would
 otherwise store half a credential that only fails later as a 401.
-A **Featured** strip of tiles driven by curated `metadata.curation.featured`
-leads, followed by the searchable long tail: the enabled catalog strip, then a
-**Custom APIs** list of already-installed workspace-defined instances
-(`CustomApiSection`), then the Browse grid.
+Inside that section a **Featured** strip of tiles driven by curated
+`metadata.curation.featured` leads, followed by the searchable long tail: the
+enabled catalog strip, then a **Custom APIs** list of already-installed
+workspace-defined instances (`CustomApiSection`), then the Browse grid. The
+enabled strip carries only `mcp`/`api` rows, so its one remove affordance is
+**Disconnect**; removing a Skill lives in the Bundles section.
 
 The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
@@ -647,6 +655,17 @@ Three provenances coexist and each is named on the row itself, as
 - **Imported from source** - a Skill imported from GitHub/skills.sh, or a
   Plugin installed from a reviewed manifest URL.
 
+A Pack's provenance is read from its `pack:<id>` catalog row, and Packs and the
+catalog load independently, so "no matching row yet" resolves to *unknown*
+rather than `built_in`: the row simply omits the provenance segment until the
+catalog arrives instead of briefly claiming OpenGeni curated it. The row's
+`aria-label` replaces its own contents, so each row also supplies an
+`accessibleDetail` ("Pack, curated by OpenGeni") that `IntegrationRow` speaks
+between the name and the state - it renders whatever string it is given and
+branches on no kind. The bundle search matches name, description, category,
+tags, and source, plus the kind word itself as a discrete token, so narrowing
+to `pack` cannot also return every Plugin whose text contains "package".
+
 Only the detail differs, and only where it genuinely must. An imported Skill or
 Plugin opens the same four-block `IntegrationSheet` an Integration does, with
 its immutable pinned identity as **Connection** facts and an `actions` footer
@@ -658,7 +677,10 @@ identity, install/update/remove, and immutable provenance panel. A Pack opens
 `PackDetailDialog` (`pack-dialogs.tsx`), because choosing a Rig and a Variable
 Set, reviewing an exact component plan, and uninstall/unregister do not
 compress into four blocks. Opening a Pack row *is* the review request, so the
-plan resolves immediately rather than behind a second button.
+plan resolves immediately rather than behind a second button. That dialog names
+the installed identity a repair or a version comparison turns on - manifest
+version, role, category, the installed manifest digest, and the Pack's own
+description - under its header, because the title only ever carries a name.
 
 No `kind: "plugin"` catalog item is produced anywhere today, and both catalog
 Skills and Packs are scoped out of the Connectors projections by kind rather

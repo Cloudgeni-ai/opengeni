@@ -39,13 +39,14 @@ describe("BundlesSection", () => {
         "imported:skill:release-operator-abc123",
         "skill:terraform",
       ]);
-      // Every one of them is the same component, so a name/state pair is the
-      // accessible name of every row body button.
+      // Every one of them is the same component, and the aria-label overrides
+      // the visible line inside the button, so the taxonomy the row shows is
+      // spoken between the name and the state rather than lost.
       expect(rowNames(rendered.container)).toEqual([
-        "Infrastructure operations. Not installed",
-        "Research suite. Installed",
-        "release-operator. Installed",
-        "Terraform. Installed",
+        "Infrastructure operations. Pack, registered in this workspace. Not installed",
+        "Research suite. Plugin, imported from source. Installed",
+        "release-operator. Skill, imported from source. Installed",
+        "Terraform. Skill, curated by OpenGeni. Installed",
       ]);
       // A Bundle is never "Connected" - that word belongs to a connection.
       expect(rendered.container.textContent).not.toContain("Connected");
@@ -89,6 +90,31 @@ describe("BundlesSection", () => {
     }
   });
 
+  test("a failed load is reported as a failure, never as an empty inventory", async () => {
+    const rendered = await renderSection({ empty: true, loadError: true });
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Couldn't load installed Skills and Plugins",
+      );
+      // The banner above already owns this state; claiming nothing is installed
+      // would contradict it.
+      expect(rendered.container.textContent).not.toContain("No bundles yet");
+      expect(rowIds(rendered.container)).toEqual([]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a failed Pack load is reported the same way", async () => {
+    const rendered = await renderSection({ empty: true, packsError: true });
+    try {
+      expect(rendered.container.textContent).toContain("Couldn't load Packs");
+      expect(rendered.container.textContent).not.toContain("No bundles yet");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("a catalog Skill row opens the catalog detail sheet rather than a second frame", async () => {
     const onOpenCatalogItem = mock((_item: CapabilityCatalogItem) => {});
     const rendered = await renderSection({ onOpenCatalogItem });
@@ -124,10 +150,14 @@ describe("BundlesSection", () => {
       expect(rendered.container.textContent).toContain(
         "Workspace administrators can install, update, and remove Bundles.",
       );
-      const importSkill = [...rendered.container.querySelectorAll("button")].find((candidate) =>
-        candidate.textContent?.includes("Import Skill"),
-      );
-      expect(importSkill?.disabled).toBe(true);
+      // Every header action is a workspace-administrator action; none of them
+      // may sit live directly under the sentence that says so.
+      for (const label of ["Import Skill", "Install Plugin", "Add manifest"]) {
+        const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
+          candidate.textContent?.includes(label),
+        );
+        expect(button?.disabled).toBe(true);
+      }
     } finally {
       await rendered.unmount();
     }
@@ -154,12 +184,14 @@ async function renderSection(
   options: {
     canManage?: boolean;
     empty?: boolean;
+    loadError?: boolean;
+    packsError?: boolean;
     onOpenCatalogItem?: (item: CapabilityCatalogItem) => void;
   } = {},
 ) {
   const rendered = await render(
     <BundlesSection
-      client={stubClient(options.empty ?? false)}
+      client={stubClient(options.empty ?? false, options.loadError ?? false)}
       workspaceId="00000000-0000-4000-8000-000000000001"
       connections={[]}
       canManage={options.canManage ?? true}
@@ -167,7 +199,7 @@ async function renderSection(
       logoUrl={() => null}
       busyCatalogId={null}
       onOpenCatalogItem={options.onOpenCatalogItem ?? (() => {})}
-      packs={packsState(options.empty ?? false)}
+      packs={packsState(options.empty ?? false, options.packsError ?? false)}
       variableSets={[]}
       rigs={[]}
       busyPackId={null}
@@ -202,20 +234,30 @@ async function render(element: ReactNode) {
   };
 }
 
-function stubClient(empty: boolean): OpenGeniCoreClient {
+function stubClient(empty: boolean, failed = false): OpenGeniCoreClient {
+  if (failed) {
+    return {
+      listInstalledSkills: async () => {
+        throw new Error("network is down");
+      },
+      listInstalledPlugins: async () => {
+        throw new Error("network is down");
+      },
+    } as unknown as OpenGeniCoreClient;
+  }
   return {
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
   } as unknown as OpenGeniCoreClient;
 }
 
-function packsState(empty: boolean): ReturnType<typeof usePacks> {
+function packsState(empty: boolean, failed = false): ReturnType<typeof usePacks> {
   return {
     packs: empty ? [] : [pack()],
     installations: [],
     installationFor: () => null,
     loading: false,
-    error: null,
+    error: failed ? new Error("network is down") : null,
     refresh: async () => {},
     register: async () => null,
     enable: async () => null,

@@ -146,6 +146,24 @@ export function canManageApiIntegrations(
   return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
 }
 
+/**
+ * Whether the `?section=packs` deep link should scroll the Bundles section into
+ * view on this render.
+ *
+ * It must wait for the catalog: on first commit Browse is a skeleton, and
+ * resolving a 1000+ item catalog then inserts thousands of pixels above the
+ * Bundles section, leaving a reader who followed the link stranded in the
+ * middle of the Browse grid. It must also fire exactly once, so a later
+ * loading/settled cycle (a refresh) never yanks the page back.
+ */
+export function shouldScrollToDeepLinkedBundles(
+  initialSection: "packs" | undefined,
+  loading: boolean,
+  alreadyScrolled: boolean,
+): boolean {
+  return initialSection === "packs" && !loading && !alreadyScrolled;
+}
+
 export function CapabilitiesRoute({
   workspaceId,
   initialSection,
@@ -204,6 +222,7 @@ export function CapabilitiesRoute({
   // Bundles now, so that deep link scrolls the Bundles section into view
   // instead of selecting a kind filter the Connectors grid no longer offers.
   const bundlesRef = useRef<HTMLDivElement | null>(null);
+  const bundlesScrolled = useRef(false);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
@@ -470,11 +489,15 @@ export function CapabilitiesRoute({
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
 
-  // Honour the `?section=packs` deep link once, on arrival.
+  // Honour the `?section=packs` deep link exactly once, after the catalog has
+  // settled. Scrolling on first commit lands in the wrong place: Browse is
+  // still a skeleton then, and resolving a 1000+ item catalog inserts thousands
+  // of pixels above the Bundles section afterwards.
   useEffect(() => {
-    if (initialSection !== "packs") return;
+    if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
+    bundlesScrolled.current = true;
     bundlesRef.current?.scrollIntoView({ block: "start" });
-  }, [initialSection]);
+  }, [initialSection, loading]);
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A
@@ -1697,6 +1720,12 @@ export function CapabilitiesRoute({
           }}
         />
 
+        {/*
+          One <section> per top-level surface. Featured, the discovery controls,
+          Enabled, Custom APIs, and Browse are all Connectors, so they live
+          inside this element rather than beside it: otherwise the accessibility
+          tree says they belong to no section at all.
+        */}
         <section className="mt-10 space-y-3" aria-labelledby="connectors-heading">
           <div>
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -1711,78 +1740,77 @@ export function CapabilitiesRoute({
               (below) are workspace-defined connectors from an OpenAPI or GraphQL spec.
             </p>
           </div>
-        </section>
 
-        {showFeatured ? (
-          <div className="mt-4">
-            <FeaturedConnectorsStrip
-              items={featured}
+          {showFeatured ? (
+            <div className="mt-4">
+              <FeaturedConnectorsStrip
+                items={featured}
+                logoUrl={logoUrl}
+                onOpen={openItem}
+                health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
+                onQuickConnect={capabilityQuickConnectAction}
+              />
+            </div>
+          ) : null}
+
+          <CapabilityDiscoveryControls
+            query={query}
+            filter={filter}
+            counts={counts}
+            onQueryChange={setQuery}
+            onFilterChange={setFilter}
+          />
+
+          <div className="mt-8 space-y-10">
+            <EnabledCapabilitiesSection
+              items={enabledItems}
+              busyId={busyId}
+              connectionHealth={(item) =>
+                connectionHealth(item, connections ?? [], connectionsLoaded)
+              }
               logoUrl={logoUrl}
               onOpen={openItem}
+              onDisable={(item) => void removeFromStrip(item)}
+            />
+
+            {(filter === "all" || filter === "api") &&
+            (query.trim().length === 0 || visibleCustomApiInstances.length > 0) ? (
+              <CustomApiSection
+                instances={visibleCustomApiInstances}
+                connections={connections}
+                canManage={canManageApiIntegrationInstances}
+                busyKey={customApiBusyKey}
+                onConnect={openCustomApi}
+                onUpdate={(instance) => editCustomApi(instance, "update")}
+                onReconnect={(instance) => editCustomApi(instance, "reconnect")}
+                onRemove={(instance) => void previewRemoveCustomApi(instance)}
+              />
+            ) : null}
+
+            <CapabilityBrowseSection
+              filter={filter}
+              query={query}
+              catalogView={catalogView}
+              loadError={loadError}
+              enabledCount={enabledItems.length}
+              browseItems={browseItems}
+              visibleBrowse={visibleBrowse}
+              registryBusy={registryBusy}
+              registrySearched={registrySearched}
+              registryResults={visibleRegistry}
+              logoUrl={logoUrl}
               health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
+              onRetry={() => void refresh()}
+              onOpen={openItem}
+              onOpenRegistry={(item) => openItem(item, true)}
+              onSearchRegistry={() => void searchRegistry()}
+              onLoadMore={() =>
+                setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
+              }
               onQuickConnect={capabilityQuickConnectAction}
             />
           </div>
-        ) : null}
-
-        <CapabilityDiscoveryControls
-          query={query}
-          filter={filter}
-          counts={counts}
-          onQueryChange={setQuery}
-          onFilterChange={setFilter}
-        />
-
-        <div className="mt-8 space-y-10">
-          <EnabledCapabilitiesSection
-            items={enabledItems}
-            busyId={busyId}
-            connectionHealth={(item) =>
-              connectionHealth(item, connections ?? [], connectionsLoaded)
-            }
-            logoUrl={logoUrl}
-            canManageSkills={canManageSkills}
-            onOpen={openItem}
-            onDisable={(item) => void removeFromStrip(item)}
-          />
-
-          {(filter === "all" || filter === "api") &&
-          (query.trim().length === 0 || visibleCustomApiInstances.length > 0) ? (
-            <CustomApiSection
-              instances={visibleCustomApiInstances}
-              connections={connections}
-              canManage={canManageApiIntegrationInstances}
-              busyKey={customApiBusyKey}
-              onConnect={openCustomApi}
-              onUpdate={(instance) => editCustomApi(instance, "update")}
-              onReconnect={(instance) => editCustomApi(instance, "reconnect")}
-              onRemove={(instance) => void previewRemoveCustomApi(instance)}
-            />
-          ) : null}
-
-          <CapabilityBrowseSection
-            filter={filter}
-            query={query}
-            catalogView={catalogView}
-            loadError={loadError}
-            enabledCount={enabledItems.length}
-            browseItems={browseItems}
-            visibleBrowse={visibleBrowse}
-            registryBusy={registryBusy}
-            registrySearched={registrySearched}
-            registryResults={visibleRegistry}
-            logoUrl={logoUrl}
-            health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
-            onRetry={() => void refresh()}
-            onOpen={openItem}
-            onOpenRegistry={(item) => openItem(item, true)}
-            onSearchRegistry={() => void searchRegistry()}
-            onLoadMore={() =>
-              setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
-            }
-            onQuickConnect={capabilityQuickConnectAction}
-          />
-        </div>
+        </section>
 
         <div ref={bundlesRef}>
           <BundlesSection

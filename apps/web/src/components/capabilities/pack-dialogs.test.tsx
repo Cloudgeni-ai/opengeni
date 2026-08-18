@@ -3,10 +3,17 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { CapabilityPack, PackInstallationPreview, PackUninstallPreview } from "@/types";
+import type {
+  CapabilityPack,
+  PackInstallation,
+  PackInstallationPreview,
+  PackUninstallPreview,
+} from "@/types";
 import {
   PackContents,
+  PackDetailActions,
   PackDetailDialog,
+  PackIdentity,
   PackInstallationPlan,
   PackUninstallPlan,
 } from "./pack-dialogs";
@@ -109,6 +116,97 @@ describe("PackDetailDialog", () => {
     }
   });
 
+  // Two destructive, ownership-releasing verbs. Radix portals the dialog frame
+  // out of this DOM shim's reach, but the footer that fires them does not have
+  // to live inside it, so the wiring is proven here rather than assumed.
+  test("Uninstall and Unregister reach their callbacks", async () => {
+    const onUninstall = mock(() => {});
+    const onUnregister = mock(() => {});
+    const rendered = await render(
+      <PackDetailActions
+        busy={false}
+        installed
+        reviewing={false}
+        reviewed
+        hasPreview
+        installReady
+        installLabel="Update Pack"
+        onCancel={() => {}}
+        onReview={() => {}}
+        onInstall={() => {}}
+        onUninstall={onUninstall}
+        onUnregister={onUnregister}
+      />,
+    );
+    try {
+      await act(async () => button(rendered.container, "Uninstall").click());
+      expect(onUninstall).toHaveBeenCalledTimes(1);
+      // Unregister is refused while the Pack is installed: releasing the
+      // manifest under a live installation is the one order that cannot work.
+      expect(button(rendered.container, "Unregister").disabled).toBe(true);
+      expect(button(rendered.container, "Unregister").title).toContain(
+        "Uninstall this Pack before unregistering",
+      );
+      await act(async () => button(rendered.container, "Unregister").click());
+      expect(onUnregister).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+
+    const notInstalled = await render(
+      <PackDetailActions
+        busy={false}
+        installed={false}
+        reviewing={false}
+        reviewed={false}
+        hasPreview={false}
+        installReady={false}
+        installLabel="Review plan"
+        onCancel={() => {}}
+        onReview={() => {}}
+        onInstall={() => {}}
+        onUninstall={onUninstall}
+        onUnregister={onUnregister}
+      />,
+    );
+    try {
+      // Nothing to uninstall, so the verb is absent rather than inert.
+      expect(
+        [...notInstalled.container.querySelectorAll("button")].map((node) =>
+          node.textContent?.trim(),
+        ),
+      ).not.toContain("Uninstall");
+      await act(async () => button(notInstalled.container, "Unregister").click());
+      expect(onUnregister).toHaveBeenCalledTimes(1);
+      expect(onUninstall).toHaveBeenCalledTimes(1);
+    } finally {
+      await notInstalled.unmount();
+    }
+  });
+
+  test("names the installed version, role, category, digest, and description", async () => {
+    const rendered = await render(<PackIdentity pack={pack()} installation={installation()} />);
+    try {
+      const text = rendered.container.textContent ?? "";
+      expect(text).toContain("v2.0.0");
+      expect(text).toContain("infrastructure");
+      expect(text).toContain("operations");
+      // The exact digest an operator compares before a repair, not a name.
+      expect(text).toContain("eeeeeeeeeeee");
+      expect(text).toContain("Pinned infrastructure automation capabilities.");
+    } finally {
+      await rendered.unmount();
+    }
+
+    const uninstalled = await render(<PackIdentity pack={pack()} installation={null} />);
+    try {
+      expect(uninstalled.container.textContent).toContain("v2.0.0");
+      expect(uninstalled.container.textContent).not.toContain("eeeeeeeeeeee");
+    } finally {
+      await uninstalled.unmount();
+    }
+  });
+
   test("explains shared-owner retention before uninstall", async () => {
     const plan = await render(<PackUninstallPlan loading={false} preview={uninstallPreview()} />);
     try {
@@ -120,6 +218,32 @@ describe("PackDetailDialog", () => {
     }
   });
 });
+
+function button(container: ParentNode, label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll("button")].find(
+    (node) => node.textContent?.trim() === label,
+  );
+  if (!found) throw new Error(`no button labelled ${label}`);
+  return found as HTMLButtonElement;
+}
+
+function installation(): PackInstallation {
+  return {
+    id: "88888888-8888-4888-8888-888888888888",
+    accountId: "99999999-9999-4999-8999-999999999999",
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+    packId: pack().id,
+    status: "active",
+    version: 3,
+    manifestSnapshot: pack(),
+    manifestDigest: "e".repeat(64),
+    selectedRigId: RIG_ID,
+    installedBySubjectId: null,
+    metadata: {},
+    enabledAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+  };
+}
 
 const RIG_ID = "11111111-1111-4111-8111-111111111111";
 const VARIABLE_SET_ID = "22222222-2222-4222-8222-222222222222";

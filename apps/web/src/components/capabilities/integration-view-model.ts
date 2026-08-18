@@ -222,6 +222,14 @@ export type IntegrationViewModel = {
   id: string;
   name: string;
   description: string;
+  /**
+   * One extra segment for the row's accessible name, spoken between the name
+   * and the state ("Slack. Pack, curated by OpenGeni. Not installed"). The row
+   * button's `aria-label` overrides its own contents, so anything the visible
+   * description line carries that a caller needs announced has to arrive here.
+   * The row renders whatever string it is given and branches on nothing.
+   */
+  accessibleDetail?: string;
   mark: IntegrationMark;
   chip: IntegrationChip;
   connection: IntegrationFact[];

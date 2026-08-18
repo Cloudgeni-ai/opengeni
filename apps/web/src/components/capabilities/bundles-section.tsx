@@ -54,6 +54,9 @@ import type {
 
 export type PackSelectionInput = { rigId?: string; variableSetId?: string };
 
+/** The search input describes itself with the count, so both need one id. */
+const BUNDLE_COUNT_ID = "bundles-visible-count";
+
 export function BundlesSection({
   client,
   workspaceId,
@@ -187,6 +190,10 @@ export function BundlesSection({
     rows.find((row) => row.detail.kind === "sheet" && row.id === openSheetId)?.detail ?? null;
   const openPack = packs.packs.find((pack) => pack.id === openPackId) ?? null;
   const loading = source.loading || packs.loading;
+  // A load that failed says nothing about what is installed. The error banner
+  // above already owns that state, so the empty state must stand down rather
+  // than claim an inventory nobody managed to read.
+  const failed = source.loadError !== null || packs.error !== null;
   const searching = query.trim().length > 0;
 
   /**
@@ -200,7 +207,11 @@ export function BundlesSection({
   }
 
   function open(row: BundleRow, element: EventTarget | null) {
-    openerRef.current = element instanceof HTMLElement ? element : null;
+    // `document.body` is what `document.activeElement` reports when nothing is
+    // focused; restoring focus to it is the same as dropping focus, so it is
+    // not an opener. Matches the Integrations rows in the same route.
+    openerRef.current =
+      element instanceof HTMLElement && element !== document.body ? element : null;
     if (row.detail.kind === "sheet") {
       setOpenSheetId(row.id);
       return;
@@ -253,7 +264,15 @@ export function BundlesSection({
             <PuzzleIcon />
             Install Plugin
           </Button>
-          <Button type="button" size="sm" onClick={() => setManifestOpen(true)}>
+          <Button
+            type="button"
+            size="sm"
+            disabled={!canManage}
+            onClick={(event) => {
+              openerRef.current = event.currentTarget;
+              setManifestOpen(true);
+            }}
+          >
             <PlusIcon />
             Add manifest
           </Button>
@@ -269,9 +288,19 @@ export function BundlesSection({
             placeholder="Search installed skills, plugins, and packs"
             className="h-10 rounded-xl pl-9 transition-none"
             aria-label="Search bundles"
+            aria-describedby={BUNDLE_COUNT_ID}
           />
         </div>
-        <span className="shrink-0 text-xs text-fg-muted" data-bundle-count>
+        {/*
+          A live region tied to the search box: narrowing the list is otherwise
+          a silent change for a reader who cannot see the grid shrink.
+        */}
+        <span
+          id={BUNDLE_COUNT_ID}
+          role="status"
+          className="shrink-0 text-xs text-fg-muted"
+          data-bundle-count
+        >
           {visible.length} of {rows.length}
         </span>
       </div>
@@ -307,7 +336,7 @@ export function BundlesSection({
           <Skeleton className="h-16 rounded-xl" />
           <Skeleton className="h-16 rounded-xl" />
         </div>
-      ) : (
+      ) : failed ? null : (
         <EmptyState
           icon={<PackagePlusIcon />}
           title={searching ? "No bundles match" : "No bundles yet"}
@@ -355,7 +384,7 @@ export function BundlesSection({
 
       <PackManifestDialog
         open={manifestOpen}
-        busy={busyPackId !== null}
+        restoreFocusRef={openerRef}
         onOpenChange={setManifestOpen}
         onRegister={onRegisterPack}
       />

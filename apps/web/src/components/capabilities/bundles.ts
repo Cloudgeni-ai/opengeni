@@ -56,10 +56,22 @@ export type BundleRow = {
   /** Stable across reloads; unique across all three sources. */
   id: string;
   kind: BundleKind;
-  provenance: BundleProvenance;
+  /**
+   * `null` while the fact is genuinely not known yet - a Pack whose catalog row
+   * has not arrived. Provenance is read, never guessed, so an unknown one is
+   * omitted from the row rather than defaulted to a flattering value.
+   */
+  provenance: BundleProvenance | null;
   name: string;
   /** The kind, the provenance, then the bundle's own one-line description. */
   description: string;
+  /**
+   * The taxonomy segment of the accessible name, spoken mid-sentence between
+   * the bundle's name and its state ("Pack, curated by OpenGeni"). The row
+   * button's `aria-label` overrides its own contents, so without this a screen
+   * reader hears neither the kind nor the provenance the visible line carries.
+   */
+  accessibleDetail?: string;
   mark: IntegrationMark;
   chip: IntegrationChip;
   /** True while this row's own mutation is in flight, from its source's state. */
@@ -92,16 +104,47 @@ export function bundleProvenanceLabel(provenance: BundleProvenance): string {
 }
 
 /**
+ * The same provenance read mid-sentence, for the row's accessible name. The
+ * visible label is a standalone segment and capitalises accordingly; spoken
+ * after "Pack," it must not.
+ */
+function bundleProvenanceSpokenLabel(provenance: BundleProvenance): string {
+  switch (provenance) {
+    case "built_in":
+      return "curated by OpenGeni";
+    case "admin_registered":
+      return "registered in this workspace";
+    case "installed_from_source":
+      return "imported from source";
+  }
+}
+
+/**
+ * The taxonomy a screen reader hears between the bundle's name and its state.
+ * An unknown provenance contributes nothing rather than a guess.
+ */
+export function bundleAccessibleDetail(
+  kind: BundleKind,
+  provenance: BundleProvenance | null,
+): string {
+  const kindLabel = bundleKindLabel(kind);
+  return provenance ? `${kindLabel}, ${bundleProvenanceSpokenLabel(provenance)}` : kindLabel;
+}
+
+/**
  * The row's single description line. The taxonomy leads because it is what a
  * reader scans for and it never truncates away; the bundle's own sentence
  * follows and is the part that truncates. The full text stays in the detail.
+ * An unknown provenance is omitted rather than guessed.
  */
 export function bundleRowDescription(
   kind: BundleKind,
-  provenance: BundleProvenance,
+  provenance: BundleProvenance | null,
   description: string,
 ): string {
-  const prefix = `${bundleKindLabel(kind)} · ${bundleProvenanceLabel(provenance)}`;
+  const prefix = provenance
+    ? `${bundleKindLabel(kind)} · ${bundleProvenanceLabel(provenance)}`
+    : bundleKindLabel(kind);
   const trimmed = description.trim();
   return trimmed ? `${prefix} · ${trimmed}` : prefix;
 }
@@ -162,11 +205,12 @@ export function catalogSkillBundleRow(
     provenance: options.provenance,
     name: item.name,
     description: bundleRowDescription("skill", options.provenance, description),
+    accessibleDetail: bundleAccessibleDetail("skill", options.provenance),
     mark: mark(item.name, options.logoSrc),
     chip,
     busy: options.busy,
     detail: { kind: "catalog-sheet", item },
-    searchText: searchText([item.name, description, item.category, ...item.tags, "skill"]),
+    searchText: searchText([item.name, description, item.category, ...item.tags]),
   };
 }
 
@@ -196,6 +240,7 @@ export function importedSkillBundleRow(
     provenance: "installed_from_source",
     name,
     description,
+    accessibleDetail: bundleAccessibleDetail("skill", "installed_from_source"),
     mark: mark(name, null),
     chip,
     busy: options.busy,
@@ -229,14 +274,7 @@ export function importedSkillBundleRow(
             },
       },
     },
-    searchText: searchText([
-      name,
-      rawDescription,
-      skill.category,
-      ...skill.tags,
-      skill.sourceUrl,
-      "skill",
-    ]),
+    searchText: searchText([name, rawDescription, skill.category, ...skill.tags, skill.sourceUrl]),
   };
 }
 
@@ -254,7 +292,9 @@ export function pluginBundleRow(
   const chip: IntegrationChip = active
     ? { label: "Installed", tone: "ok" }
     : { label: "Needs attention", tone: "warn" };
-  const rawDescription = plugin.description || "Portable Plugin package";
+  // Not "Portable Plugin package": a bundle search for `pack` would then match
+  // every Plugin that never supplied its own description.
+  const rawDescription = plugin.description || "A portable set of tools and instructions.";
   const sourceAvailable = plugin.sourceUrl !== null;
   return {
     id: `plugin:${plugin.pluginKey}`,
@@ -262,6 +302,7 @@ export function pluginBundleRow(
     provenance: "installed_from_source",
     name: plugin.name,
     description: bundleRowDescription("plugin", "installed_from_source", rawDescription),
+    accessibleDetail: bundleAccessibleDetail("plugin", "installed_from_source"),
     mark: mark(plugin.name, null),
     chip,
     busy: options.busy,
@@ -325,7 +366,6 @@ export function pluginBundleRow(
       plugin.pluginKey,
       ...plugin.tags,
       plugin.sourceUrl,
-      "plugin",
     ]),
   };
 }
@@ -349,7 +389,8 @@ export function packBundleRow(
   pack: CapabilityPack,
   options: {
     installation: PackInstallation | null;
-    provenance: BundleProvenance;
+    /** `null` while the catalog row that carries this fact has not arrived. */
+    provenance: BundleProvenance | null;
     busy: boolean;
   },
 ): BundleRow {
@@ -360,6 +401,7 @@ export function packBundleRow(
     provenance: options.provenance,
     name: pack.name,
     description: bundleRowDescription("pack", options.provenance, pack.description),
+    accessibleDetail: bundleAccessibleDetail("pack", options.provenance),
     mark: mark(pack.name, null),
     chip,
     busy: options.busy || chip.label === "Installing",
@@ -371,7 +413,6 @@ export function packBundleRow(
       pack.category,
       pack.id,
       `v${pack.version}`,
-      "pack",
     ]),
   };
 }
@@ -380,20 +421,41 @@ export function packBundleRow(
  * Where a Pack manifest came from. The catalog already carries this fact
  * (`built_in` for the manifests OpenGeni ships, `manual` for one a workspace
  * admin registered), so it is read rather than guessed.
+ *
+ * Packs and the catalog load independently, so "no matching catalog row" is
+ * genuinely "not known yet", not "shipped by OpenGeni": returning `null` keeps
+ * the row honest until the catalog resolves instead of flashing a provenance
+ * the caller never read.
  */
 export function packBundleProvenance(
   packId: string,
-  items: readonly CapabilityCatalogItem[],
-): BundleProvenance {
-  const item = items.find((candidate) => candidate.id === `pack:${packId}`);
-  return item?.source === "manual" ? "admin_registered" : "built_in";
+  items: readonly CapabilityCatalogItem[] | null,
+): BundleProvenance | null {
+  const item = items?.find((candidate) => candidate.id === `pack:${packId}`);
+  if (!item) return null;
+  return item.source === "manual" ? "admin_registered" : "built_in";
 }
 
-/** The bundle-scoped search: name and description, case-insensitive. */
+/**
+ * The bundle-scoped search: name and description, case-insensitive, plus the
+ * kind word itself.
+ *
+ * The kind is matched as a discrete token rather than folded into the row's
+ * searchable text: as a substring, `pack` matched every Plugin carrying the
+ * word "package" as well as every Pack, so a reader narrowing to Packs got a
+ * list that was not Packs.
+ */
 export function filterBundleRows(rows: readonly BundleRow[], query: string): BundleRow[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...rows];
-  return rows.filter((row) => row.searchText.includes(normalized));
+  return rows.filter(
+    (row) => matchesBundleKindWord(row.kind, normalized) || row.searchText.includes(normalized),
+  );
+}
+
+function matchesBundleKindWord(kind: BundleKind, normalizedQuery: string): boolean {
+  const word = bundleKindLabel(kind).toLowerCase();
+  return normalizedQuery === word || normalizedQuery === `${word}s`;
 }
 
 /**

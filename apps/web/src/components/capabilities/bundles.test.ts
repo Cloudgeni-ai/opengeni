@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  bundleAccessibleDetail,
   bundleMonogram,
   bundleRowDescription,
   catalogSkillBundleRow,
@@ -180,7 +181,48 @@ describe("bundle rows", () => {
     ] as CapabilityCatalogItem[];
     expect(packBundleProvenance("infra-ops", items)).toBe("admin_registered");
     expect(packBundleProvenance("openg-ops", items)).toBe("built_in");
-    expect(packBundleProvenance("unknown", items)).toBe("built_in");
+    // Packs and the catalog load independently. A Pack with no catalog row yet
+    // is unknown, not "curated by OpenGeni".
+    expect(packBundleProvenance("unknown", items)).toBeNull();
+    expect(packBundleProvenance("infra-ops", [])).toBeNull();
+    expect(packBundleProvenance("infra-ops", null)).toBeNull();
+  });
+
+  test("an unknown provenance is omitted from the row rather than claimed", () => {
+    const row = packBundleRow(pack(), { installation: null, provenance: null, busy: false });
+    expect(row.description).toBe("Pack · Pinned infrastructure automation capabilities.");
+    expect(row.description).not.toContain("Curated by OpenGeni");
+    expect(row.accessibleDetail).toBe("Pack");
+  });
+
+  test("every row carries its taxonomy as a spoken accessible detail", () => {
+    // The row button's aria-label overrides its own contents, so the kind and
+    // provenance the visible line carries have to arrive through this field or
+    // a screen reader never hears either.
+    expect(
+      packBundleRow(pack(), { installation: null, provenance: "built_in", busy: false })
+        .accessibleDetail,
+    ).toBe("Pack, curated by OpenGeni");
+    expect(
+      packBundleRow(pack(), { installation: null, provenance: "admin_registered", busy: false })
+        .accessibleDetail,
+    ).toBe("Pack, registered in this workspace");
+    expect(
+      pluginBundleRow(installedPlugin(), {
+        canManage: true,
+        busy: false,
+        onUpdate: () => {},
+        onRemove: () => {},
+      }).accessibleDetail,
+    ).toBe("Plugin, imported from source");
+    expect(
+      catalogSkillBundleRow(curatedSkillItem(), {
+        logoSrc: null,
+        busy: false,
+        provenance: "built_in",
+      }).accessibleDetail,
+    ).toBe("Skill, curated by OpenGeni");
+    expect(bundleAccessibleDetail("skill", null)).toBe("Skill");
   });
 });
 
@@ -214,8 +256,25 @@ describe("bundle search", () => {
     expect(filterBundleRows(rows(), "nothing matches this")).toHaveLength(0);
   });
 
-  test("finds a bundle by its kind word", () => {
+  test("finds a bundle by its kind word, singular or plural", () => {
     expect(filterBundleRows(rows(), "pack").map((row) => row.kind)).toEqual(["pack"]);
+    expect(filterBundleRows(rows(), "Packs").map((row) => row.kind)).toEqual(["pack"]);
+    expect(filterBundleRows(rows(), "plugin").map((row) => row.kind)).toEqual(["plugin"]);
+  });
+
+  test("the kind word is a discrete token, so `pack` never matches a `package`", () => {
+    // A Plugin that supplied no description of its own used to default to
+    // "Portable Plugin package", which substring-matched every search for
+    // Packs.
+    const describedByDefault = pluginBundleRow(installedPlugin({ description: "" }), {
+      canManage: true,
+      busy: false,
+      onUpdate: () => {},
+      onRemove: () => {},
+    });
+    expect(describedByDefault.description).toContain("A portable set of tools and instructions.");
+    expect(filterBundleRows([describedByDefault], "pack")).toHaveLength(0);
+    expect(filterBundleRows([describedByDefault], "plugin")).toHaveLength(1);
   });
 });
 
