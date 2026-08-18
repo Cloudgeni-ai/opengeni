@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0289_preference_activation_authority.sql")) {
+      if (migrations.has("0293_preference_activation_authority.sql")) {
         return includesActivation
-          ? "e31a897416f1767203e15e41cd70e6e4a2c1735fa4080da6b371456882f02c14"
-          : "61d763cbe4b0edaa682695a1b244ee4f1c07fdb8afd2539165a8825f7acf6b17";
+          ? "a182b4fbbcbe3f50dfcb0238dddf49bc55db0da0fd2b67ea8228045356fc7184"
+          : "c83e9b1f0d5c01ec4ae673be246eed9bf9aadb4f60944fba9c4f4a8b668e0fde";
       }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
@@ -1026,7 +1026,7 @@ describe("release schema contract", () => {
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
-        (migrations.has("0289_preference_activation_authority.sql") ? 1 : 0),
+        (migrations.has("0293_preference_activation_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1061,8 +1061,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0289_preference_activation_authority.sql")
-        ? "0289_preference_activation_authority.sql"
+      migrations.has("0293_preference_activation_authority.sql")
+        ? "0293_preference_activation_authority.sql"
         : migrations.has("0287_open_suffix_pending_tool_calls.sql")
           ? "0287_open_suffix_pending_tool_calls.sql"
           : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
