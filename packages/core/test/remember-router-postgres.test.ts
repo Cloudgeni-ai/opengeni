@@ -183,6 +183,16 @@ describe("remember router (real PostgreSQL)", () => {
       undo: "learning_history",
     });
     expect(receipt.learning?.automaticEligible).toBe(true);
+    // The automatic path keeps its exact legacy review wording.
+    const [automaticReview] = await shared.admin<Array<{ state: string; reason: string }>>`
+      select review.state, review.reason from knowledge_claim_reviews review
+      join knowledge_change_proposals proposal on proposal.claim_id = review.claim_id
+      where proposal.id = ${receipt.proposalId} order by review.review_revision desc limit 1
+    `;
+    expect(automaticReview).toMatchObject({
+      state: "approved",
+      reason: "Automatic governed-learning activation.",
+    });
   }, 180_000);
 
   test("requires one bound human confirmation under suggest, then activates with human authority", async () => {
@@ -270,6 +280,17 @@ describe("remember router (real PostgreSQL)", () => {
     });
     const confirmReplay = await router.confirm({ attempt: f.attempt, request: confirmRequest });
     expect(confirmReplay).toEqual(confirmed);
+    // The human-confirmed activation records a truthful review reason, not the
+    // automatic wording.
+    const [confirmedReview] = await shared.admin<Array<{ state: string; reason: string }>>`
+      select review.state, review.reason from knowledge_claim_reviews review
+      join knowledge_change_proposals proposal on proposal.claim_id = review.claim_id
+      where proposal.id = ${receipt.proposalId} order by review.review_revision desc limit 1
+    `;
+    expect(confirmedReview).toMatchObject({
+      state: "approved",
+      reason: "Approved by the exact initiating human through human-confirmed learning activation.",
+    });
     const history = await listGovernedLearningActivationHistory(client.db, {
       workspaceId: f.grant.workspaceId,
       subjectId: f.ownerSubjectId,
@@ -410,7 +431,13 @@ describe("remember router (real PostgreSQL)", () => {
       select state, actor_kind, reason from knowledge_claim_reviews
       where claim_id = ${receipt.claimId} order by review_revision desc limit 1
     `;
-    expect(latestReview).toMatchObject({ state: "approved", actor_kind: "service" });
+    expect(latestReview).toMatchObject({
+      state: "approved",
+      actor_kind: "service",
+      // The bound human confirmation records its truthful reason, not the
+      // automatic wording.
+      reason: "Approved by the exact initiating human through the bound remember confirmation.",
+    });
     // A second confirmation of an approved claim conflicts.
     await expect(
       router.confirm({

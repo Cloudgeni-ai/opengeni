@@ -183,8 +183,9 @@ this workspace?`), exact-note-text, fixed-options, and `save` checks bound to
 `proposed` and its Task-note evidence to be active and uncontradicted, then
 appends an `approved` service review through the guarded
 `governed_learning_apply_knowledge_review` path (service actor, causal human
-retained) and records an immutable content-free
-`remember_knowledge_confirmation_receipts` row. Undo is the Knowledge review
+retained; since migration 0284 the reason-carrying overload records a truthful
+human-confirmed reason instead of the automatic wording) and records an
+immutable content-free `remember_knowledge_confirmation_receipts` row. Undo is the Knowledge review
 lifecycle itself (`knowledge_correct` or a human revocation), not Learning &
 autonomy history. Knowledge is never approved automatically, even under the
 `automatic` learning mode.
