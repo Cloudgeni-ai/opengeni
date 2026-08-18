@@ -287,6 +287,8 @@ async function seedResources(
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   resources.push({ family: "session", table: "sessions", id: session.id });
@@ -420,6 +422,8 @@ async function seedPrivateSession(
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     createdBy: { kind: "subject", subjectId: input.subjectId },
     createdByContext: {},

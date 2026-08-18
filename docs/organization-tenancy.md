@@ -441,7 +441,9 @@ user-facing private toggle is not yet safe:
 `test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
 if any product package starts naming either entry point or authorizing either
 operation. The first real caller must land together with an update to this
-section and to that test.
+section and to that test. Later migrations may replace `fork_session_content`
+only to copy newly required session columns (0289 copies typed reasoning and
+latency); they still must not wire a product caller.
 
 ## Referential integrity
 
@@ -574,6 +576,7 @@ matches zero rows and reports success on such a deployment, and only appears to
 work in the test harness, which migrates as a superuser for whom FORCE RLS never
 engages. Any future classification work on these tables must run behind the same
 kind of capability-claiming seam.
+
 **There is no "unclassified" count for Variable Sets, Rigs, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape

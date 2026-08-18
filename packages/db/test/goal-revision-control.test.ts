@@ -58,6 +58,8 @@ async function fixture(
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(client.db, {

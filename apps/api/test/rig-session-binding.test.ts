@@ -408,6 +408,8 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       rigId: rigB.rigId,
       rigVersionId: rigB.activeVersionId,

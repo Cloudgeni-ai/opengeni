@@ -863,6 +863,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(dbClient.db, {
@@ -1264,6 +1266,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(dbClient.db, {
@@ -4536,6 +4540,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const mcpWorkflow = new FakeWorkflowClient();
@@ -7237,6 +7243,8 @@ describe("API component integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await initializeSessionStartAtomically(dbClient.db, {
@@ -7259,6 +7267,8 @@ describe("API component integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
@@ -7461,6 +7471,8 @@ describe("API component integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await initializeSessionStartAtomically(dbClient.db, {
@@ -8666,6 +8678,8 @@ describe("API component integration", () => {
     const args = {
       initialMessage,
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       idempotencyKey,
     };
@@ -8860,6 +8874,8 @@ describe("API component integration", () => {
     const spawnedReceipt = await callMcpTool<McpMutationReceiptType>(managerMcp, "session_create", {
       initialMessage: "spawn a delegated worker",
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       firstPartyMcpPermissions: ["sessions:read"],
     });
@@ -9763,6 +9779,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       firstPartyMcpPermissions: [
         "workspace:read",
@@ -10056,6 +10074,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       variableSetId: first.resource.id,
       subjectId: grant.subjectId,
@@ -10204,6 +10224,8 @@ describe("API component integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       firstPartyMcpPermissions: grant.permissions,
       variableSetId: written.resource.id,
@@ -10824,6 +10846,8 @@ async function createCodemodeAttempt(
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const queued = await submitTestHumanPrompt(db, {

@@ -133,6 +133,8 @@ async function sessionVisibilityFixture() {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "modal",
     createdBy: { kind: "subject", subjectId: ownerSubjectId },
     createdByContext: {},
@@ -380,6 +382,8 @@ describe("migration 0225 session visibility and fork activation", () => {
         turnCount: number;
         goalCount: number;
         mcpServerCount: number;
+        reasoningEffort: string;
+        latencyMode: string;
       }>
     >`
       select
@@ -396,7 +400,9 @@ describe("migration 0225 session visibility and fork activation", () => {
         (select count(*)::int from session_goals goal
           where goal.session_id = destination.id) as "goalCount",
         (select count(*)::int from session_mcp_servers server
-          where server.session_id = destination.id) as "mcpServerCount"
+          where server.session_id = destination.id) as "mcpServerCount",
+        destination.reasoning_effort as "reasoningEffort",
+        destination.latency_mode as "latencyMode"
       from sessions destination
       where destination.id = ${forked.sessionId}
     `;
@@ -411,6 +417,8 @@ describe("migration 0225 session visibility and fork activation", () => {
       turnCount: 0,
       goalCount: 0,
       mcpServerCount: 0,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
     });
 
     const replay = await forkSessionContent(client.db, {
@@ -616,6 +624,8 @@ describe("migration 0225 session visibility and fork activation", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
       createdBy: { kind: "service", subjectId: "service:legacy" },
       createdByContext: {},

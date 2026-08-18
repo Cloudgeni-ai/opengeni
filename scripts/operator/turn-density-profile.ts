@@ -645,6 +645,8 @@ export async function runWave(input: {
           },
           createdBy: initiator,
           model: "scripted-density-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
         }),
         "session creation",

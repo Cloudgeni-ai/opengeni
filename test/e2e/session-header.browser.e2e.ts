@@ -131,6 +131,8 @@ describe("responsive production session header", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         maxNestedAgentDepthOverride: 33,
         allowNestedAgentDepthIncrease: true,
@@ -148,6 +150,8 @@ describe("responsive production session header", () => {
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
           parentSessionId: parent.id,
         });

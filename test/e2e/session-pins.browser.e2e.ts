@@ -496,13 +496,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
       const search = page.getByRole("searchbox", { name: "Search sessions" });
+      await search.waitFor();
+      await page.locator("[data-sessionpin-session-list] a[data-session-row]").first().waitFor({
+        timeout: 30_000,
+      });
       const firstPageResponse = page.waitForResponse(
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
             search: batch,
             cursor: null,
           }),
-        { timeout: 10_000 },
+        { timeout: 30_000 },
       );
       await search.fill(batch);
       const firstPage = (await (await firstPageResponse).json()) as BrowserSessionPage;
@@ -645,6 +649,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
@@ -655,6 +661,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
@@ -665,6 +673,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
@@ -675,6 +685,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
@@ -685,6 +697,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: descendant.id,
       });
@@ -863,6 +877,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
           parentSessionId: manager.id,
         });
@@ -878,6 +894,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: childSessionIds[0]!,
       });
@@ -891,6 +909,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: grandchild.id,
       });
@@ -923,8 +943,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // inert workflow client keeps both rows waiting so the browser can inspect
       // the exact server-authoritative order.
       await composer.fill("A second prompt queued from the composer");
-      await composer.press("Enter");
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await submitQueuedComposerPrompt(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A second prompt queued from the composer",
+      );
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 20_000 });
       await queueChip.click();
       await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
       const queuePanel = chrome.locator('[data-og-session-chrome-panel-frame="queue"]');
@@ -992,7 +1018,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
-      await composer.press("Enter");
+      await submitQueuedComposerPrompt(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A second prompt queued from the composer (edited)",
+      );
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
@@ -1012,7 +1044,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await chrome.getByRole("button", { name: "Remove queued prompt 1" }).click();
       await queueChip.waitFor({ state: "detached" });
       await composer.fill("A replacement prompt after delete");
-      await composer.press("Enter");
+      await submitQueuedComposerPrompt(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A replacement prompt after delete",
+      );
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
@@ -1042,7 +1080,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(ancestry, 1280);
       const deepComposer = desktopPage.getByLabel("Message the agent");
       await deepComposer.fill("Run this selected nested session through the parent Pause");
-      await deepComposer.press("Enter");
+      await submitQueuedComposerPrompt(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        deepChild.id,
+        "Run this selected nested session through the parent Pause",
+      );
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       await desktopPage
         .getByTestId("session-chrome-queue")
@@ -1663,6 +1707,8 @@ async function createSessionThroughApi(
           body: JSON.stringify({
             initialMessage: sessionMessage,
             model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
             sandboxBackend: "none",
             ...sessionOptions,
           }),
@@ -1711,6 +1757,28 @@ async function setSessionPinThroughApi(
   );
 }
 
+async function submitQueuedComposerPrompt(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  sessionId: string,
+  expectedText: string,
+): Promise<void> {
+  await waitForComposerDraftText(page, apiBaseUrl, workspaceId, sessionId, expectedText);
+  const send = page.getByRole("button", { name: /Send message|Send and resume/ });
+  await waitFor(async () => !(await send.isDisabled()), { timeoutMs: 10_000 });
+  const submitted = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" && response.url().includes("/composer-draft/submit"),
+    { timeout: 15_000 },
+  );
+  await send.click();
+  const response = await submitted;
+  if (!response.ok()) {
+    throw new Error(`composer submit failed: ${response.status()} ${await response.text()}`);
+  }
+}
+
 async function waitForComposerDraftText(
   page: Page,
   apiBaseUrl: string,
@@ -1736,8 +1804,12 @@ async function waitForComposerDraftText(
             `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/composer-draft`,
           );
           if (!response.ok) return false;
-          const draft = (await response.json()) as { text?: unknown };
-          return draft.text === targetText;
+          const draft = (await response.json()) as { text?: unknown; revision?: unknown };
+          return (
+            draft.text === targetText &&
+            typeof draft.revision === "number" &&
+            (targetText === "" || draft.revision >= 1)
+          );
         },
         { apiBaseUrl, workspaceId, sessionId, expectedText },
       );

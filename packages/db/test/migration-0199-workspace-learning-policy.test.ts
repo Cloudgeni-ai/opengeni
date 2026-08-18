@@ -70,6 +70,8 @@ async function seedAttempt(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const turnId = crypto.randomUUID();

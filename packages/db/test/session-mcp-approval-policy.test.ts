@@ -95,6 +95,8 @@ describe("session MCP approval-policy attempt snapshots", () => {
       tools: [{ kind: "mcp", id: "external" }],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await createSessionMcpServers(firstDb, {
