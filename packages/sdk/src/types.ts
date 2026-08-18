@@ -488,6 +488,7 @@ export type ToolRef = {
   kind: "mcp";
   id: string;
   optional?: boolean | undefined;
+  eager?: boolean | undefined;
 };
 
 export type SessionToolPolicy = {
@@ -2377,7 +2378,7 @@ export type CreateSessionRequest = {
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
-  // user-visible timeline. Trimmed, non-empty, max 32768 chars.
+  // user-visible timeline. Trimmed, non-empty, max 65536 chars.
   instructions?: string | undefined;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole?: string | undefined;
@@ -2590,6 +2591,7 @@ export type FirstPartyMcpToolName =
   | "scheduled_tasks_delete"
   | "scheduled_task_runs_list"
   | "slack_bot_list_channels"
+  | "slack_bot_search"
   | "slack_bot_channel_history"
   | "slack_bot_thread_replies"
   | "slack_bot_list_users"
@@ -5602,6 +5604,20 @@ export type IntegrationFacetRemovalResult = {
   remainingOwners: CapabilityComponentOwner[];
 };
 
+/**
+ * Presentation-only consent copy served with an integration or connector.
+ * Never grants a scope or replaces server-side authorization; the UI keeps a
+ * generic fallback for any omitted field.
+ */
+export type IntegrationPresentation = {
+  providerName?: string | undefined;
+  icon?: "calendar" | "cloud" | "contacts" | "files" | "mail" | undefined;
+  introduction?: string | undefined;
+  capabilities?: { title: string; description: string }[] | undefined;
+  permissionSummary?: string | undefined;
+  scopeLabels?: Record<string, { label: string; description: string }> | undefined;
+};
+
 export type IntegrationDefinitionSummary = {
   id: string;
   name: string;
@@ -5615,6 +5631,7 @@ export type IntegrationDefinitionSummary = {
     kind: "oauth2";
     scopes: string[];
   };
+  presentation?: IntegrationPresentation | undefined;
   facets: IntegrationFacetDefinitionSummary[];
 };
 

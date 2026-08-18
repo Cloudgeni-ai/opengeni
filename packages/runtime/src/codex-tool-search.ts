@@ -54,7 +54,6 @@ export function isCodexAppsFunctionTool(
 }
 
 const MCP_TOOL_NAME_SEPARATOR = "__";
-const MANDATORY_FIRST_PARTY_MCP_SERVER_ID = "opengeni";
 const NO_MCP_SERVER_IDS: ReadonlySet<string> = new Set();
 
 /** Return the authorized server id for a runtime MCP function tool name. */
@@ -80,7 +79,10 @@ function mcpServerIdForTool(tool: unknown, mcpServerIds: ReadonlySet<string>): s
 }
 
 /**
- * True for non-mandatory MCP function tools on the effective agent surface.
+ * True for an MCP function tool on the effective agent surface. Selecting a
+ * server is an authority decision; it does not make every schema from that
+ * server eager. Per-turn eager identities are removed from this searchable
+ * pool by the runtime before provider projection.
  * The prefix is the same runtime namespace used by PrefixedMcpServer; this
  * intentionally does not inspect the global registry, connection metadata, or
  * credentials, so search cannot widen the already-authorized tool set.
@@ -90,7 +92,7 @@ export function isSearchableMcpFunctionTool(
   mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
 ): tool is Tool & { name: string; deferLoading?: boolean } {
   const serverId = mcpServerIdForTool(tool, mcpServerIds);
-  return serverId !== null && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID;
+  return serverId !== null;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -106,9 +108,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
 
 function searchSourceForTool(tool: Tool, mcpServerIds: ReadonlySet<string>): string | null {
   const serverId = mcpServerIdForTool(tool, mcpServerIds);
-  return serverId && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID
-    ? truncateUtf8(serverId, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH)
-    : null;
+  return serverId ? truncateUtf8(serverId, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH) : null;
 }
 
 function searchSourcesForTools(

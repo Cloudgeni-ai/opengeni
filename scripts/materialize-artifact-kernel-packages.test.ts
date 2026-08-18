@@ -236,6 +236,28 @@ describe("artifact kernel target package materializer", () => {
         targets: ["darwin-arm64", "wasm-web"],
       }),
     ).rejects.toThrow("one exact build identity");
+
+    const projectionMismatch = await createAssetFixture(["darwin-arm64", "wasm-web"]);
+    const projectionMismatchPath = join(
+      artifactKernelTargetAssetDirectory("wasm-web", projectionMismatch.assetRoot),
+      ARTIFACT_KERNEL_BUILD_RECEIPT,
+    );
+    const projectionMismatchReceipt = JSON.parse(await readFile(projectionMismatchPath, "utf8"));
+    await writeFile(
+      projectionMismatchPath,
+      canonicalArtifactKernelBuildReceiptBytes({
+        ...projectionMismatchReceipt,
+        spreadsheetFormulaProjectionCorpusSha256: `sha256:${"e".repeat(64)}`,
+      }),
+    );
+    await expect(
+      materializeArtifactKernelPackages({
+        assetRoot: projectionMismatch.assetRoot,
+        outputRoot: projectionMismatch.outputRoot,
+        artifactToolVersion: "1.2.3",
+        targets: ["darwin-arm64", "wasm-web"],
+      }),
+    ).rejects.toThrow("one formula projection corpus digest");
   });
 });
 
@@ -276,8 +298,8 @@ async function createAssetFixture(targets: readonly ArtifactRuntimeTarget[]) {
     await writeFile(
       join(directory, ARTIFACT_KERNEL_BUILD_RECEIPT),
       canonicalArtifactKernelBuildReceiptBytes({
-        schemaVersion: 1,
-        producer: "opengeni-artifact-kernel-smoke-v1",
+        schemaVersion: 2,
+        producer: "opengeni-artifact-kernel-smoke-v2",
         target,
         kind: target === "wasm-web" ? "wasm" : "native",
         buildIdentity: fixtureIdentity,
@@ -286,6 +308,7 @@ async function createAssetFixture(targets: readonly ArtifactRuntimeTarget[]) {
           new TextEncoder().encode("fixture-capabilities"),
           false,
         ),
+        spreadsheetFormulaProjectionCorpusSha256: `sha256:${"f".repeat(64)}`,
         runtimeFiles,
       }),
     );

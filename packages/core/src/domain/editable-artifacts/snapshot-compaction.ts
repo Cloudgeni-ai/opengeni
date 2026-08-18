@@ -1,4 +1,6 @@
 import { type BoundedImmutableObjectWritePort, BoundedObjectWriteError } from "@opengeni/storage";
+import { EDITABLE_ARTIFACT_CODEC_REGISTRY } from "@opengeni/contracts/editable-artifacts";
+import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "@opengeni/contracts/editable-artifact-committed-transaction";
 
 import type { EditableArtifactCompactionPort, EditableArtifactKernelState } from "./ports";
 import {
@@ -177,6 +179,7 @@ function validateGenerated(
   scope: EditableArtifactScope,
   artifactId: EditableArtifactId,
 ): void {
+  const currentCodec = EDITABLE_ARTIFACT_CODEC_REGISTRY[value.modality];
   if (
     value.scope.accountId !== scope.accountId ||
     value.scope.workspaceId !== scope.workspaceId ||
@@ -207,11 +210,12 @@ function validateGenerated(
     throw new EditableArtifactSnapshotVerificationError("limit_exceeded");
   }
   editableArtifactContentHash(value.canonicalContentHash);
-  const versions =
-    value.modality === "spreadsheet"
-      ? [value.modelSchemaVersion, value.operationProtocolVersion, value.crdtStateVersion]
-      : [value.modelSchemaVersion];
-  if (versions.some((version) => !Number.isSafeInteger(version) || version <= 0)) {
+  if (
+    value.modelSchemaVersion !== currentCodec.modelSchemaVersion ||
+    (value.modality === "spreadsheet" &&
+      (value.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+        value.crdtStateVersion !== currentCodec.snapshotVersion))
+  ) {
     throw new EditableArtifactSnapshotVerificationError("version_mismatch");
   }
   try {

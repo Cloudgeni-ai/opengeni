@@ -123,11 +123,20 @@ export async function resolveGoogleDrivePublicationTarget(
   ) {
     return null;
   }
+  // The destination frozen on the accepted delegation is the authority. A
+  // live connection-settings change since acceptance fails the target closed
+  // (personal-authority warning path) instead of silently redirecting the
+  // publication; a pre-freeze delegation keeps the bounded legacy
+  // live-resolution behavior.
+  const frozenDestination = delegation.outputDestination;
+  if (frozenDestination && !sameDestination(metadata.data.outputDestination, frozenDestination)) {
+    return null;
+  }
   return Object.freeze({
     ownerSubjectId: delegation.ownerSubjectId,
     connectionId: connection.id,
     originWorkspaceId,
-    destination: metadata.data.outputDestination,
+    destination: frozenDestination ?? metadata.data.outputDestination,
     credentialScope: connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
       ? GOOGLE_DRIVE_FILE_SCOPE
       : GOOGLE_DRIVE_FULL_SCOPE,
@@ -284,17 +293,31 @@ export function createGoogleDrivePublicationAttemptTool(input: {
         request,
         context.operationId,
       );
+      // Every caller is behind exactly one durable execute-once fence. Model
+      // callers arrive through the attempt connector-action wrapper, which has
+      // already registered this call under its durable SDK call id and moved
+      // the approved row to executing - a second inner begin here would mint a
+      // second row under an unrelated operation id and deadlock the default
+      // ask policy. Codemode callers bypass that wrapper, so the tool
+      // registers the fence itself with the shared Codemode operation id.
       let requestId: string | null = null;
       if (context.caller.kind === "codemode") {
         const admission = await ports.begin(input.db, input.identity, connectorCall);
         if (!admission.allowed) {
-          throw new Error(`Google Drive publication was not executed: ${admission.reason}`);
+          throw new Error(
+            admission.reason === "uncertain_retry" || admission.reason === "already_executed"
+              ? "Google Drive publication outcome is unknown: a previous attempt may have already sent this publication to Google Drive. Verify in Drive before retrying with a new idempotency key."
+              : admission.reason === "not_executed"
+                ? "Google Drive publication was not executed: the previous attempt failed before any request reached Google Drive. Retrying with a new call is safe."
+                : `Google Drive publication was not executed: ${admission.reason}. No request reached Google Drive.`,
+          );
         }
         if (!admission.managed) {
           throw new Error("Google Drive publication has no explicit connector action policy");
         }
         requestId = admission.requestId;
       }
+      let providerRequestStarted = false;
       try {
         const receipt = await executeGoogleDrivePublication(
           {
@@ -305,6 +328,9 @@ export function createGoogleDrivePublicationAttemptTool(input: {
             target: input.target,
             request,
             resolveCredential: input.resolveCredential,
+            onProviderRequest: () => {
+              providerRequestStarted = true;
+            },
             ...((context.signal ?? input.signal) ? { signal: context.signal ?? input.signal } : {}),
           },
           ports,
@@ -329,10 +355,16 @@ export function createGoogleDrivePublicationAttemptTool(input: {
             workspaceId: input.identity.workspaceId,
             requestId,
             attemptId: input.identity.attemptId,
-            outcome: "uncertain",
+            outcome: providerRequestStarted ? "uncertain" : "not_executed",
           });
         }
-        throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          providerRequestStarted
+            ? `Google Drive publication outcome is unknown: a provider request may have been sent before the failure. Verify in Drive before retrying. Cause: ${detail}`
+            : `Google Drive publication was not executed: no request reached Google Drive. Cause: ${detail}`,
+          { cause: error },
+        );
       }
     },
   };
@@ -373,6 +405,8 @@ export async function executeGoogleDrivePublication(
       input: ResolveConnectionCredentialInput,
     ) => Promise<ResolveConnectionCredentialResult>;
     signal?: AbortSignal;
+    /** Invoked immediately before the first provider request is sent. */
+    onProviderRequest?: () => void;
   },
   ports: Pick<
     GoogleDrivePublicationPorts,
@@ -491,6 +525,13 @@ export async function executeGoogleDrivePublication(
     }
     const headers = new Headers(credential.headers);
     new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    // Only a mutating request can create the publication: read-only
+    // verify/lookup GETs stay retry-safe, while any later failure after the
+    // first mutation is an unknown outcome, never a safe retry.
+    const method = (init?.method ?? (url instanceof Request ? url.method : "GET")).toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      input.onProviderRequest?.();
+    }
     return await ports.fetch(url, { ...init, headers });
   };
   return await publishToGoogleDrive({

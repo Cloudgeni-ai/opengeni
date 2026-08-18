@@ -1,5 +1,69 @@
 # @opengeni/documents
 
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/config@0.16.7
+  - @opengeni/storage@0.2.99
+
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [a65505d]
+  - @opengeni/db@1.2.0
+
+## 0.6.0
+
+### Minor Changes
+
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- c297fc0: Add permission-first Knowledge search selection facts, pre-window relevance floors, deterministic ranking, search/browse response budgets, exact textual-content deduplication, freshness-aware ordering, revision-fenced cursors, and authorization-rechecked document/chunk traversal links.
+
+### Patch Changes
+
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [987742d]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [6a8954f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [5cd7b46]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [304462e]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+- Updated dependencies [ea52ff2]
+- Updated dependencies [cac85bc]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/storage@0.2.98
+
 ## 0.5.42
 
 ### Patch Changes

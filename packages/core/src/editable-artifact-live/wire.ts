@@ -81,15 +81,5 @@ export function encodeEditableArtifactLiveMutationWireFrame(
 export function encodeEditableArtifactLiveServerWireFrame(
   frame: EditableArtifactLiveServerFrame,
 ): Uint8Array {
-  if (frame.type === "transaction" && frame.transaction.modality === "spreadsheet") {
-    const { operationProtocolVersion, modality: _modality, ...transaction } = frame.transaction;
-    return encodeContractServerFrame({
-      ...frame,
-      transaction: {
-        ...transaction,
-        protocolVersion: operationProtocolVersion,
-      },
-    } as unknown as ContractServerFrame);
-  }
   return encodeContractServerFrame(frame as unknown as ContractServerFrame);
 }

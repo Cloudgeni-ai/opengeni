@@ -131,57 +131,160 @@ pub enum CellValue {
     Error(FormulaError),
 }
 
+/// Authored cell state. This is the only cell shape accepted by commands,
+/// collaboration registers, and canonical state encoders. Formula results are
+/// deliberately unrepresentable here.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Cell {
-    value: CellValue,
-    formula: Option<String>,
+pub struct AuthoredCellContent {
+    kind: AuthoredCellKind,
 }
 
-impl Cell {
+#[derive(Clone, Debug, PartialEq)]
+enum AuthoredCellKind {
+    Value(CellValue),
+    Formula(String),
+}
+
+impl Default for AuthoredCellKind {
+    fn default() -> Self {
+        Self::Value(CellValue::Empty)
+    }
+}
+
+impl AuthoredCellContent {
     #[must_use]
     pub const fn empty() -> Self {
-        Self {
-            value: CellValue::Empty,
-            formula: None,
-        }
+        Self::from_value(CellValue::Empty)
     }
 
     #[must_use]
     pub const fn from_value(value: CellValue) -> Self {
         Self {
-            value,
-            formula: None,
+            kind: AuthoredCellKind::Value(value),
         }
     }
 
-    pub fn formula(source: impl Into<String>, cached_value: CellValue) -> Result<Self, ValueError> {
+    pub fn formula(source: impl Into<String>) -> Result<Self, ValueError> {
         let source = source.into();
         if source.is_empty() {
             return Err(ValueError::EmptyFormula);
         }
         Ok(Self {
-            value: cached_value,
-            formula: Some(source),
+            kind: AuthoredCellKind::Formula(source),
         })
     }
 
     #[must_use]
-    pub const fn value(&self) -> &CellValue {
-        &self.value
+    pub fn literal_value(&self) -> Option<&CellValue> {
+        match &self.kind {
+            AuthoredCellKind::Value(value) => Some(value),
+            AuthoredCellKind::Formula(_) => None,
+        }
     }
 
     #[must_use]
     pub fn formula_source(&self) -> Option<&str> {
-        self.formula.as_deref()
+        match &self.kind {
+            AuthoredCellKind::Value(_) => None,
+            AuthoredCellKind::Formula(source) => Some(source),
+        }
     }
 
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        matches!(self.value, CellValue::Empty) && self.formula.is_none()
+        matches!(self.kind, AuthoredCellKind::Value(CellValue::Empty))
     }
 
-    pub(crate) const fn from_snapshot(value: CellValue, formula: Option<String>) -> Self {
-        Self { value, formula }
+    #[must_use]
+    pub fn materialize(&self) -> Cell {
+        match &self.kind {
+            AuthoredCellKind::Value(value) => Cell::from_value(value.clone()),
+            AuthoredCellKind::Formula(_) => Cell {
+                authored: self.clone(),
+                projected_formula_value: Some(CellValue::Empty),
+            },
+        }
+    }
+}
+
+/// Materialized workbook cell. Literal values are stored once; only formulas
+/// have a disposable calculated projection alongside their authored source.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cell {
+    authored: AuthoredCellContent,
+    projected_formula_value: Option<CellValue>,
+}
+
+impl Cell {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self::from_value(CellValue::Empty)
+    }
+
+    #[must_use]
+    pub const fn from_value(value: CellValue) -> Self {
+        Self {
+            authored: AuthoredCellContent::from_value(value),
+            projected_formula_value: None,
+        }
+    }
+
+    /// Creates an authored formula with an empty calculated projection.
+    pub fn formula(source: impl Into<String>) -> Result<Self, ValueError> {
+        Ok(AuthoredCellContent::formula(source)?.materialize())
+    }
+
+    /// Creates a materialized/query formula cell. Authored command blocks
+    /// convert this back to [`AuthoredCellContent`] and discard the projection.
+    pub(crate) fn from_formula_projection(
+        source: impl Into<String>,
+        projected_value: CellValue,
+    ) -> Result<Self, ValueError> {
+        Ok(Self {
+            authored: AuthoredCellContent::formula(source)?,
+            projected_formula_value: Some(projected_value),
+        })
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &CellValue {
+        self.authored.literal_value().unwrap_or_else(|| {
+            self.projected_formula_value
+                .as_ref()
+                .expect("formula cells always own a calculated projection")
+        })
+    }
+
+    #[must_use]
+    pub fn formula_source(&self) -> Option<&str> {
+        self.authored.formula_source()
+    }
+
+    #[must_use]
+    pub const fn authored(&self) -> &AuthoredCellContent {
+        &self.authored
+    }
+
+    #[must_use]
+    pub fn into_authored(self) -> AuthoredCellContent {
+        self.authored
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.authored.is_empty()
+    }
+}
+
+impl From<Cell> for AuthoredCellContent {
+    fn from(cell: Cell) -> Self {
+        cell.into_authored()
+    }
+}
+
+impl From<AuthoredCellContent> for Cell {
+    fn from(content: AuthoredCellContent) -> Self {
+        content.materialize()
     }
 }
 

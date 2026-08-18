@@ -1,5 +1,6 @@
 import {
   EDITABLE_ARTIFACT_INTENT_VERSION,
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
   assertCanonicalSpreadsheetArtifactCommandBytes,
   decodeEditableArtifactMutationIntent,
@@ -9,6 +10,7 @@ import {
   type EditableArtifactMutationIntent,
   type SpreadsheetArtifactCommandBatch,
 } from "@opengeni/contracts/editable-artifacts";
+import { SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION } from "@opengeni/contracts/editable-artifact-versions";
 import {
   ArtifactCollaborationSession,
   ArtifactDocumentSession,
@@ -61,7 +63,7 @@ export type NativeSpreadsheetAuthoredTransaction = Readonly<{
   /** Exact canonical OGATX001 bytes passed to Rust. */
   intentBytes: Uint8Array;
   requestHash: string;
-  /** One whole canonical OGACO001 transaction returned by Rust. */
+  /** One whole canonical OGACO002 transaction returned by Rust. */
   committedTransactionBytes: Uint8Array;
 }>;
 
@@ -137,8 +139,8 @@ export class NativeSpreadsheetSession {
     const intentBytes = encodeEditableArtifactMutationIntent({
       ...input.intent,
       envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
-      protocolVersion: 1,
-      modelSchemaVersion: 1,
+      protocolVersion: EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+      modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
       commandProtocolVersion: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
       commandBytes,
     });
@@ -361,8 +363,8 @@ function assertSpreadsheetIntent(intentBytes: Uint8Array): void {
   const intent = decodeEditableArtifactMutationIntent(intentBytes);
   if (
     intent.envelopeVersion !== EDITABLE_ARTIFACT_INTENT_VERSION ||
-    intent.protocolVersion !== 1 ||
-    intent.modelSchemaVersion !== 1 ||
+    intent.protocolVersion !== EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION ||
+    intent.modelSchemaVersion !== SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION ||
     intent.commandProtocolVersion !== SPREADSHEET_ARTIFACT_COMMAND_VERSION
   ) {
     throw new ArtifactRuntimeError(

@@ -59,6 +59,7 @@ import {
   type SiteAuthAuthority,
 } from "@opengeni/contracts";
 import {
+  getSessionAuthorityEpoch,
   acquireLease,
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
@@ -197,6 +198,7 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -1739,6 +1741,18 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
           const stream = relayed
             ? await (async () => {
+                // 0281: stamp the authenticated viewer subject and the live
+                // session authority epoch into the relay stream token.
+                const relayAuthorityEpoch = await getSessionAuthorityEpoch(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId: record.sourceSessionId,
+                });
+                if (relayAuthorityEpoch === null) {
+                  throw new BrowserControlUnsupportedError(
+                    "stream authority is unavailable for this session",
+                  );
+                }
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
                   sessionId: record.sourceSessionId,
@@ -1746,6 +1760,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   leaseEpoch: record.tokenGeneration,
                   port: relayed.channel.port,
                   ttlSeconds: request.expiresInSeconds,
+                  subjectId: grant.subjectId,
+                  authorityEpoch: relayAuthorityEpoch,
                 });
                 return {
                   kind: "relay" as const,
@@ -1760,14 +1776,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   },
                 };
               })()
-            : {
-                kind: "direct_websocket" as const,
-                url: await client.frameStreamUrl(reference, request.targetId, request.stream),
-                protocols: [
+            : await (async () => {
+                const protocols = [
                   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                ],
-              };
+                ] as const;
+                const upstreamUrl = await client.frameStreamUrl(
+                  reference,
+                  request.targetId,
+                  request.stream,
+                );
+                const attachment =
+                  placement.lease?.backend === "docker"
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        rootSecret,
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
+                return {
+                  kind: "direct_websocket" as const,
+                  ...attachment,
+                };
+              })();
           return BrowserSessionAttachment.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,

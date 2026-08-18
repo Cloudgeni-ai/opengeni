@@ -5479,6 +5479,12 @@ export const connectionUseAuditFacts = pgTable(
     ownerSubjectId: text("owner_subject_id"),
     authorityId: uuid("authority_id"),
     grantId: uuid("grant_id"),
+    initiatorKind: text("initiator_kind"),
+    initiatorSubjectId: text("initiator_subject_id"),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    authorityEpoch: integer("authority_epoch"),
+    authorityVisibility: text("authority_visibility"),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     outcome: text("outcome").notNull(),
     denialReason: text("denial_reason"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7461,6 +7467,11 @@ export const sandboxLeaseHolders = pgTable(
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
+    // Viewer holders only (0281): the authenticated viewer subject and the
+    // session authority epoch observed at attach - identities and epochs
+    // only, mirrored into the scoped stream token's claims.
+    viewerSubjectId: text("viewer_subject_id"),
+    viewerAuthorityEpoch: integer("viewer_authority_epoch"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -7482,6 +7493,14 @@ export const sandboxLeaseHolders = pgTable(
 
 export const sandboxWorkspaceMutationActorKindValues = ["turn", "direct", "process"] as const;
 export const sandboxWorkspaceMutationHolderKindValues = ["turn", "direct", "process"] as const;
+// The causal principal behind an admitted workspace writer. `subject`/`service`
+// are the canonical `session_turns` initiator vocabulary; `legacy_unattributed`
+// exists only for rows written before migration 0277 recorded any authority.
+export const sandboxWorkspaceMutationInitiatorKindValues = [
+  "subject",
+  "service",
+  "legacy_unattributed",
+] as const;
 
 // Durable admission ledger for every provider operation that may mutate a
 // persistable /workspace. The row is inserted atomically with the lease's
@@ -7526,6 +7545,29 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     workspaceGeneration: integer("workspace_generation").notNull(),
     operation: text("operation").notNull(),
+    // Exact authority admitted with this operation (migration 0277). Identities
+    // and epochs only, never a secret value. `legacy_unattributed` marks a
+    // pre-0277 `direct`/`process` row whose authority was never recorded; a
+    // post-0277 writer never produces it and new admission refuses it.
+    initiatorKind: text("initiator_kind", {
+      enum: sandboxWorkspaceMutationInitiatorKindValues,
+    })
+      .notNull()
+      .default("legacy_unattributed"),
+    initiatorSubjectId: text("initiator_subject_id").notNull().default("unattributed-legacy"),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    // The grant identity that authorized the causal human, plus the
+    // authorization revision observed at admission. The revision is audit
+    // evidence: a role change is not a revocation and must not fence a writer.
+    initiatorOrganizationMembershipId: uuid("initiator_organization_membership_id"),
+    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", { mode: "number" }),
+    // Session tenancy authority observed when the operation was admitted; the
+    // same triple `session_turn_attempts` freezes for a turn.
+    authorityEpoch: integer("authority_epoch"),
+    authorityVisibility: text("authority_visibility", {
+      enum: ["user_private", "workspace_shared"],
+    }),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     providerOutcome: text("provider_outcome", {
       enum: ["resolved", "rejected", "retained"],
     }),
@@ -7575,6 +7617,65 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
       table.workspaceId,
       table.actorKind,
       table.actorId,
+    ),
+    initiatorMembership: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_initiator_membership_fk",
+      columns: [table.initiatorOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authorityOwnerMembership: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_authority_owner_fk",
+      columns: [table.authorityOwnerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    initiator: index("sandbox_workspace_mutation_admissions_initiator_idx")
+      .on(table.accountId, table.initiatorOrganizationMembershipId)
+      .where(sql`${table.settledAt} is null`),
+    initiatorValid: check(
+      "sandbox_workspace_mutation_admissions_initiator_check",
+      sql`(
+          ${table.initiatorKind} = 'legacy_unattributed'
+          and ${table.initiatorSubjectId} = 'unattributed-legacy'
+          and ${table.initiatingHumanSubjectId} is null
+          and ${table.initiatorOrganizationMembershipId} is null
+          and ${table.initiatorAuthorizationRevision} is null
+        ) or (
+          ${table.initiatorKind} in ('subject', 'service')
+          and length(btrim(${table.initiatorSubjectId})) between 1 and 1024
+          and ${table.initiatorSubjectId} <> 'unattributed-legacy'
+          and (
+            ${table.initiatingHumanSubjectId} is null
+            or length(btrim(${table.initiatingHumanSubjectId})) between 1 and 1024
+          )
+          and (
+            ${table.initiatorOrganizationMembershipId} is null
+            or ${table.initiatingHumanSubjectId} is not null
+          )
+          and (
+            ${table.initiatorAuthorizationRevision} is null
+            or (
+              ${table.initiatorAuthorizationRevision} > 0
+              and ${table.initiatorOrganizationMembershipId} is not null
+            )
+          )
+        )`,
+    ),
+    tenancyValid: check(
+      "sandbox_workspace_mutation_admissions_tenancy_check",
+      sql`(
+          ${table.authorityEpoch} is null
+          and ${table.authorityVisibility} is null
+          and ${table.authorityOwnerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityEpoch} is not null
+          and ${table.authorityVisibility} is not null
+          and ${table.authorityEpoch} > 0
+          and ${table.authorityVisibility} in ('user_private', 'workspace_shared')
+          and (
+            ${table.authorityVisibility} <> 'user_private'
+            or ${table.authorityOwnerOrganizationMembershipId} is not null
+          )
+        )`,
     ),
     generationValid: check(
       "sandbox_workspace_mutation_admissions_generation_check",
@@ -7670,6 +7771,23 @@ export const sandboxRetainedProcesses = pgTable(
     routeTargetId: uuid("route_target_id"),
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
+    // Authority frozen when the process was retained (migration 0277). A
+    // `legacy_unattributed` process keeps running; only its next workspace
+    // mutation is refused, because nothing may invent an owner for it.
+    initiatorKind: text("initiator_kind", {
+      enum: sandboxWorkspaceMutationInitiatorKindValues,
+    })
+      .notNull()
+      .default("legacy_unattributed"),
+    initiatorSubjectId: text("initiator_subject_id").notNull().default("unattributed-legacy"),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    initiatorOrganizationMembershipId: uuid("initiator_organization_membership_id"),
+    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", { mode: "number" }),
+    authorityEpoch: integer("authority_epoch"),
+    authorityVisibility: text("authority_visibility", {
+      enum: ["user_private", "workspace_shared"],
+    }),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     state: text("state", { enum: sandboxRetainedProcessStateValues }).notNull().default("active"),
     exitCode: integer("exit_code"),
     settlementReason: text("settlement_reason"),
@@ -7752,6 +7870,68 @@ export const sandboxRetainedProcesses = pgTable(
     activeInventory: index("sandbox_retained_processes_active_inventory_idx")
       .on(table.ownerActorKind, table.workspaceId, table.ownerTurnId, table.ownerAttemptId)
       .where(sql`${table.state} = 'active'`),
+    initiatorMembership: foreignKey({
+      name: "sandbox_retained_processes_initiator_membership_fk",
+      columns: [table.initiatorOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authorityOwnerMembership: foreignKey({
+      name: "sandbox_retained_processes_authority_owner_fk",
+      columns: [table.authorityOwnerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    initiator: index("sandbox_retained_processes_initiator_idx")
+      .on(table.accountId, table.initiatorOrganizationMembershipId)
+      .where(sql`${table.state} = 'active'`),
+    initiatingHuman: index("sandbox_retained_processes_initiating_human_idx")
+      .on(table.accountId, table.initiatingHumanSubjectId)
+      .where(sql`${table.state} = 'active'`),
+    initiatorValid: check(
+      "sandbox_retained_processes_initiator_check",
+      sql`(
+          ${table.initiatorKind} = 'legacy_unattributed'
+          and ${table.initiatorSubjectId} = 'unattributed-legacy'
+          and ${table.initiatingHumanSubjectId} is null
+          and ${table.initiatorOrganizationMembershipId} is null
+          and ${table.initiatorAuthorizationRevision} is null
+        ) or (
+          ${table.initiatorKind} in ('subject', 'service')
+          and length(btrim(${table.initiatorSubjectId})) between 1 and 1024
+          and ${table.initiatorSubjectId} <> 'unattributed-legacy'
+          and (
+            ${table.initiatingHumanSubjectId} is null
+            or length(btrim(${table.initiatingHumanSubjectId})) between 1 and 1024
+          )
+          and (
+            ${table.initiatorOrganizationMembershipId} is null
+            or ${table.initiatingHumanSubjectId} is not null
+          )
+          and (
+            ${table.initiatorAuthorizationRevision} is null
+            or (
+              ${table.initiatorAuthorizationRevision} > 0
+              and ${table.initiatorOrganizationMembershipId} is not null
+            )
+          )
+        )`,
+    ),
+    tenancyValid: check(
+      "sandbox_retained_processes_tenancy_check",
+      sql`(
+          ${table.authorityEpoch} is null
+          and ${table.authorityVisibility} is null
+          and ${table.authorityOwnerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityEpoch} is not null
+          and ${table.authorityVisibility} is not null
+          and ${table.authorityEpoch} > 0
+          and ${table.authorityVisibility} in ('user_private', 'workspace_shared')
+          and (
+            ${table.authorityVisibility} <> 'user_private'
+            or ${table.authorityOwnerOrganizationMembershipId} is not null
+          )
+        )`,
+    ),
     identityValid: check(
       "sandbox_retained_processes_identity_check",
       sql`${table.leaseEpoch} >= 0

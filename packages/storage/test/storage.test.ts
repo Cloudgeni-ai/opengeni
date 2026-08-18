@@ -1,7 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
-import { createObjectStorage } from "../src";
+import { createObjectStorage, DOWNLOAD_URL_TTL_SECONDS, UPLOAD_URL_TTL_SECONDS } from "../src";
+
+describe("signed-URL TTL policy", () => {
+  test("the default TTLs are the revocation residual windows - change deliberately", () => {
+    // A signed object-storage URL is a bearer capability with no provider-side
+    // revocation: revocation prevents NEW mints immediately (route-time
+    // authorization + issuance audit facts), while an already-issued URL
+    // remains valid until expiry. These defaults ARE that residual exposure
+    // window, and Modal/S3/GCS sandbox materialization budgets around the
+    // download TTL - do not raise them casually, and never treat a longer TTL
+    // as a convenience fix.
+    expect(DOWNLOAD_URL_TTL_SECONDS).toBe(300);
+    expect(UPLOAD_URL_TTL_SECONDS).toBe(900);
+  });
+});
 
 describe("object storage adapters", () => {
   test("creates S3-compatible storage and signs checksum metadata once", async () => {

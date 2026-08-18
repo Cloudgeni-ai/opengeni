@@ -3,7 +3,8 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
-  firstPartyMcpBaseUrl,
+  firstPartyMcpInternalBaseUrl,
+  firstPartyMcpInternalWorkspaceUrl,
   resolveFirstPartyDelegationSecret,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
@@ -116,6 +117,7 @@ import {
   run,
   Runner,
   Usage,
+  UserError,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index;
@@ -1384,7 +1386,13 @@ export type ConnectorActionExecutionAdmission =
       allowed: false;
       managed: true;
       requestId: string;
-      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      reason:
+        | "approval_required"
+        | "blocked"
+        | "rejected"
+        | "already_executed"
+        | "uncertain_retry"
+        | "not_executed";
     };
 
 /** Secret-free persistence boundary supplied by the worker for one attempt. */
@@ -1465,7 +1473,7 @@ export type BuildAgentOptions = {
   /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
-   * terminal model output and every disclosed tool still wait for this fence.
+   * only a search, deferred invocation, or catalog-dependent runtime joins it.
    */
   toolPreparationReady?: Promise<void>;
   // Whether this turn's resolved model accepts image input. This is derived
@@ -2371,23 +2379,12 @@ function maybeInstallLazyToolTransport(
   if (!enabled) return;
 
   const mcpServers = options.mcpServers ?? [];
-  // Every transport removes non-mandatory MCP definitions from the provider's
-  // initial tool block. Keep proactive compaction accounting on that wire truth.
-  for (const server of mcpServers) {
-    const registryId = mcpServerRegistryId(server);
-    if (registryId === "opengeni") continue;
-    (
-      server as MCPServer & {
-        deferModelToolSchemaAccounting?: () => void;
-      }
-    ).deferModelToolSchemaAccounting?.();
-  }
   // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
   // their registry identity. Preserve the fallback for embedded/test servers.
   const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
   const deferredMcpServerIds = new Set(
     mcpServers
-      .filter((server) => mcpServerDefersPreparation(server))
+      .filter((server) => mcpServerDefersModelSchemas(server))
       .map((server) => mcpServerRegistryId(server)),
   );
   installLazyToolRuntime(
@@ -2404,8 +2401,14 @@ function mcpServerRegistryId(server: MCPServer): string {
   return typeof registryId === "string" && registryId.length > 0 ? registryId : server.name;
 }
 
-function mcpServerDefersPreparation(server: MCPServer): boolean {
-  return (server as MCPServer & { deferredPreparation?: unknown }).deferredPreparation === true;
+function mcpServerDefersModelSchemas(server: MCPServer): boolean {
+  const candidate = server as MCPServer & {
+    deferredPreparation?: unknown;
+    modelToolSchemasAreDeferred?: () => boolean;
+  };
+  return (
+    candidate.deferredPreparation === true || candidate.modelToolSchemasAreDeferred?.() === true
+  );
 }
 
 /** True when the unprefixed tool `name` requires approval under `policy`. */
@@ -3053,9 +3056,10 @@ export type PreparedAgentTools = {
   // credential selection.
   codexConnectorNamespaces: Set<string>;
   /**
-   * Optional completion fence for best-effort MCP discovery. Required MCPs are
-   * already connected and listed before this handle is returned. The promise
-   * resolves only after the combined attempt catalog is persisted.
+   * Optional completion fence for non-eager MCP discovery. Only session-marked
+   * eager servers are connected/listed before this handle is returned. Search,
+   * deferred invocation, Codemode activation, and final cleanup may join this
+   * promise; an ordinary first model response does not.
    */
   ready?: Promise<PreparedAgentTools>;
 };
@@ -3132,7 +3136,7 @@ export type PrepareToolsOptions = {
   localMcpServers?: readonly LocalMcpServerRegistration[];
   /** Monotonic catalog generation for this execution attempt. */
   attemptToolCatalogGeneration?: number;
-  /** Durable host seam; completion is required before the model can run. */
+  /** Durable host seam; completion is required before the prepared catalog is demanded. */
   onAttemptToolCatalog?: (catalog: AttemptToolCatalog) => Promise<void> | void;
   /** Bounded critical-path timings; telemetry failures never affect preparation. */
   onPreparationPhase?: (measurement: ToolPreparationPhaseMeasurement) => void;
@@ -3149,8 +3153,8 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
-  /** Overlap best-effort MCP connection/catalog work with the first model request. */
-  deferBestEffortUntilModelResponse?: boolean;
+  /** Overlap every non-eager MCP connection/catalog with the first model request. */
+  deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
   deferredCodexConnectorNamespaces?: Set<string>;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -3365,6 +3369,10 @@ class DeferredPreparedMcpServer implements MCPServer {
     // No deferred schema has entered provider context yet.
   }
 
+  modelToolSchemasAreDeferred(): boolean {
+    return true;
+  }
+
   private async requiredTarget(): Promise<MCPServer> {
     const target = await this.resolveTarget();
     if (!target) {
@@ -3436,9 +3444,11 @@ export async function prepareAgentTools(
                 config.url,
                 local.resolvedConnectionId,
               ),
+              tool.eager !== true,
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
+            eager: tool.eager === true,
             timeoutMs: config.timeoutMs,
           };
         }
@@ -3551,19 +3561,24 @@ export async function prepareAgentTools(
           `${config.id}:${index}`,
           firstParty && !bestEffort,
           buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
+          tool.eager !== true,
         );
         return {
           server,
           bestEffort,
           optional,
+          eager: tool.eager === true,
           timeoutMs: config.timeoutMs,
         };
       }),
   );
-  const requiredEntries = servers.filter((entry) => !entry.bestEffort);
-  const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
-  const requiredServers = requiredEntries.map((entry) => entry.server);
-  const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
+  const deferNonEager = options.deferNonEagerUntilToolDemand === true;
+  const eagerEntries = deferNonEager ? servers.filter((entry) => entry.eager) : servers;
+  const deferredEntries = deferNonEager ? servers.filter((entry) => !entry.eager) : [];
+  const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
+  const eagerBestEffortEntries = eagerEntries.filter((entry) => entry.bestEffort);
+  const deferredRequiredEntries = deferredEntries.filter((entry) => !entry.bestEffort);
+  const deferredBestEffortEntries = deferredEntries.filter((entry) => entry.bestEffort);
   // Names of optional servers so a setup drop is surfaced with the registry
   // identity and safe retry metadata. Codex Apps is intentionally included:
   // its catalog entry told the user the surface was available, so an auth or
@@ -3575,16 +3590,80 @@ export async function prepareAgentTools(
       .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
       .map((server) => server.registryId),
   );
-  const connectedRequired = await measureToolPreparationPhase(
-    options,
-    "required_connect",
-    async () =>
-      await connectMcpServersInBatches(requiredServers, {
-        strict: true,
-        connectTimeoutMs: mcpOuterConnectTimeoutMs(requiredEntries.map((entry) => entry.timeoutMs)),
-      }),
-  );
-  let connectedBestEffort: ConnectedMcpServerBatches | null = null;
+  const connectEntries = async (
+    entries: typeof servers,
+    strict: boolean,
+    phase: "required_connect" | "optional_connect",
+  ): Promise<ConnectedMcpServerBatches | null> =>
+    entries.length === 0
+      ? null
+      : await measureToolPreparationPhase(
+          options,
+          phase,
+          async () =>
+            await connectMcpServersInBatches(
+              entries.map((entry) => entry.server),
+              {
+                strict,
+                connectTimeoutMs: mcpOuterConnectTimeoutMs(entries.map((entry) => entry.timeoutMs)),
+              },
+            ),
+        );
+  const warnBestEffortFailures = (connected: ConnectedMcpServerBatches | null): void => {
+    if (!connected) return;
+    for (const failed of connected.failed) {
+      if (failed instanceof PrefixedMcpServer) {
+        failed.releaseAggregateBudget();
+      }
+      if (
+        !(failed instanceof PrefixedMcpServer) ||
+        (failed.registryId !== CODEX_APPS_MCP_SERVER_ID &&
+          !optionalServerIds.has(failed.registryId))
+      ) {
+        continue;
+      }
+      const error = connected.errors.get(failed);
+      console.warn(
+        failed.registryId === CODEX_APPS_MCP_SERVER_ID
+          ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
+          : "[mcp] optional server failed to connect/list tools; skipping it for this turn",
+        mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
+      );
+    }
+  };
+  const connectEntryGroups = async (
+    required: typeof servers,
+    bestEffort: typeof servers,
+  ): Promise<{
+    required: ConnectedMcpServerBatches | null;
+    bestEffort: ConnectedMcpServerBatches | null;
+  }> => {
+    const [requiredResult, bestEffortResult] = await Promise.allSettled([
+      connectEntries(required, true, "required_connect"),
+      connectEntries(bestEffort, false, "optional_connect"),
+    ]);
+    const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
+    const connectedBestEffort =
+      bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
+    const failure =
+      requiredResult.status === "rejected"
+        ? requiredResult.reason
+        : bestEffortResult.status === "rejected"
+          ? bestEffortResult.reason
+          : undefined;
+    if (failure !== undefined) {
+      await connectedBestEffort?.close().catch(() => undefined);
+      await connectedRequired?.close().catch(() => undefined);
+      throw failure;
+    }
+    return { required: connectedRequired, bestEffort: connectedBestEffort };
+  };
+  const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
+  const connectedEagerRequired = connectedEager.required;
+  const connectedEagerBestEffort = connectedEager.bestEffort;
+  warnBestEffortFailures(connectedEagerBestEffort);
+  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
+  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
   let localToolServer: AttemptDefinitionMcpServer | null = options.attemptToolDefinitions?.length
     ? new AttemptDefinitionMcpServer(
         options.attemptToolDefinitions,
@@ -3592,55 +3671,38 @@ export async function prepareAgentTools(
         options.subjectId ?? "worker:mcp-model",
       )
     : null;
+  const localScope = attemptToolScope(options);
+  if (localToolServer && localScope) {
+    localToolServer.bindAttemptToolEnvironment(
+      createAttemptToolEnvironment({
+        scope: localScope,
+        generation: options.attemptToolCatalogGeneration ?? 1,
+        definitions: [...(options.attemptToolDefinitions ?? [])],
+        ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
+      }),
+    );
+  }
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     try {
-      connectedBestEffort = await measureToolPreparationPhase(
-        options,
-        "optional_connect",
-        async () =>
-          bestEffortServers.length
-            ? await connectMcpServersInBatches(bestEffortServers, {
-                strict: false,
-                connectTimeoutMs: mcpOuterConnectTimeoutMs(
-                  bestEffortEntries.map((entry) => entry.timeoutMs),
-                ),
-              })
-            : null,
+      const connectedDeferred = await connectEntryGroups(
+        deferredRequiredEntries,
+        deferredBestEffortEntries,
       );
-      if (connectedBestEffort) {
-        for (const failed of connectedBestEffort.failed) {
-          if (failed instanceof PrefixedMcpServer) {
-            failed.releaseAggregateBudget();
-          }
-          if (
-            !(failed instanceof PrefixedMcpServer) ||
-            (failed.registryId !== CODEX_APPS_MCP_SERVER_ID &&
-              !optionalServerIds.has(failed.registryId))
-          ) {
-            continue;
-          }
-          const error = connectedBestEffort.errors.get(failed);
-          console.warn(
-            failed.registryId === CODEX_APPS_MCP_SERVER_ID
-              ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
-              : "[mcp] optional server failed to connect/list tools; skipping it for this turn",
-            mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
-          );
-        }
-      }
+      connectedDeferredRequired = connectedDeferred.required;
+      connectedDeferredBestEffort = connectedDeferred.bestEffort;
+      warnBestEffortFailures(connectedDeferredBestEffort);
       const activeMcpServers = [
-        ...connectedRequired.active,
-        ...(connectedBestEffort?.active ?? []),
+        ...(connectedEagerRequired?.active ?? []),
+        ...(connectedEagerBestEffort?.active ?? []),
+        ...(connectedDeferredRequired?.active ?? []),
+        ...(connectedDeferredBestEffort?.active ?? []),
       ];
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
         async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
       );
-      if (attemptToolEnvironment && localToolServer) {
-        localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
-      }
       if (attemptToolEnvironment) {
         await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
           await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
@@ -3662,17 +3724,18 @@ export async function prepareAgentTools(
               firstError ??= error;
             }
           }
-          if (connectedBestEffort) {
+          for (const connected of [
+            connectedDeferredBestEffort,
+            connectedDeferredRequired,
+            connectedEagerBestEffort,
+            connectedEagerRequired,
+          ]) {
+            if (!connected) continue;
             try {
-              await connectedBestEffort.close();
+              await connected.close();
             } catch (error) {
               firstError ??= error;
             }
-          }
-          try {
-            await connectedRequired.close();
-          } catch (error) {
-            firstError ??= error;
           }
           if (firstError !== undefined) throw firstError;
         },
@@ -3680,19 +3743,20 @@ export async function prepareAgentTools(
       };
     } catch (error) {
       await localToolServer?.close().catch(() => undefined);
-      await connectedBestEffort?.close().catch(() => undefined);
-      await connectedRequired.close().catch(() => undefined);
+      await connectedDeferredBestEffort?.close().catch(() => undefined);
+      await connectedDeferredRequired?.close().catch(() => undefined);
+      await connectedEagerBestEffort?.close().catch(() => undefined);
+      await connectedEagerRequired?.close().catch(() => undefined);
       throw error;
     }
   };
 
-  if (!options.deferBestEffortUntilModelResponse || bestEffortEntries.length === 0) {
+  if (!deferNonEager || deferredEntries.length === 0) {
     return await completePreparation();
   }
 
-  // Start optional connection/listing immediately, while required tools finish
-  // their eager schema snapshot. Only the optional portion leaves this call in
-  // flight; explicit required MCP failure remains a pre-model failure.
+  // Non-eager connection/listing starts immediately but is not a first-request
+  // dependency. Search and direct deferred invocation join this exact promise.
   const ready = completePreparation();
   let preparationSettled = false;
   void ready.then(
@@ -3705,12 +3769,14 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   await Promise.all(
-    connectedRequired.active.map(async (server) => {
-      if (server instanceof PrefixedMcpServer) await server.freezeTools();
-    }),
+    [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
+      async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      },
+    ),
   );
 
-  const deferredOptionalServers = bestEffortEntries.map(
+  const deferredServers = deferredEntries.map(
     (entry) =>
       new DeferredPreparedMcpServer(
         entry.server.registryId,
@@ -3723,8 +3789,9 @@ export async function prepareAgentTools(
   );
   return {
     mcpServers: [
-      ...connectedRequired.active,
-      ...deferredOptionalServers,
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+      ...deferredServers,
       ...(localToolServer ? [localToolServer] : []),
     ],
     attemptToolCatalog: null,
@@ -5207,44 +5274,34 @@ function firstPartyMcpServerUrlForRun(
   if (!workspaceId || !["opengeni", "files", "docs"].includes(config.id)) {
     return null;
   }
-  if (config.url.includes("{workspaceId}")) {
-    return config.url.replaceAll("{workspaceId}", workspaceId);
-  }
   if (!isFirstPartyMcpServer(settings, config)) {
     return null;
   }
-  const rawBase = settings.opengeniMcpUrl?.includes("{workspaceId}")
-    ? settings.opengeniMcpUrl.replaceAll("{workspaceId}", workspaceId)
-    : settings.opengeniMcpUrl
-      ? scopedMcpUrlFromConfiguredBase(settings.opengeniMcpUrl, workspaceId)
-      : // unset → the shared loopback default (a `{workspaceId}` template owned by
-        // @opengeni/config's firstPartyMcpBaseUrl), scoped to this run's workspace.
-        firstPartyMcpBaseUrl(settings).replaceAll("{workspaceId}", workspaceId);
+  const rawBase = firstPartyMcpInternalWorkspaceUrl(settings, workspaceId);
   const url = new URL(rawBase);
-  if (config.id === "docs") {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
+  if (config.id === "docs" || config.id === "files") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/${config.id}`;
   }
-  return url.toString();
-}
-
-function scopedMcpUrlFromConfiguredBase(raw: string, workspaceId: string): string {
-  const url = new URL(raw);
-  url.pathname = `/v1/workspaces/${workspaceId}/mcp`;
-  url.search = "";
-  url.hash = "";
   return url.toString();
 }
 
 function firstPartyMcpUrls(settings: Settings): string[] {
-  // Route the unset case through the shared loopback default so the literal
-  // lives in exactly one place (@opengeni/config's firstPartyMcpBaseUrl).
-  const base = normalizeUrl(settings.opengeniMcpUrl ?? firstPartyMcpBaseUrl(settings));
-  if (!base) {
-    return [];
+  const candidates = [settings.opengeniMcpUrl, firstPartyMcpInternalBaseUrl(settings)].filter(
+    (value): value is string => Boolean(value),
+  );
+  const urls = new Set<string>();
+  for (const candidate of candidates) {
+    const base = normalizeUrl(candidate);
+    if (!base) continue;
+    urls.add(base);
+    for (const suffix of ["docs", "files"] as const) {
+      const scoped = new URL(base);
+      scoped.pathname = `${scoped.pathname.replace(/\/+$/, "")}/${suffix}`;
+      const normalizedScoped = normalizeUrl(scoped.toString());
+      if (normalizedScoped) urls.add(normalizedScoped);
+    }
   }
-  const docs = new URL(base);
-  docs.pathname = `${docs.pathname.replace(/\/+$/, "")}/docs`;
-  return [base, normalizeUrl(docs.toString())].filter((value): value is string => Boolean(value));
+  return [...urls];
 }
 
 function normalizeUrl(raw: string): string | null {
@@ -5431,7 +5488,6 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
-  private modelToolSchemaAccountingDeferred = false;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
@@ -5447,6 +5503,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly aggregateSourceId = registryId,
     private readonly recoverySafeSetup = false,
     private readonly connectorAttachmentAuthority?: PrefixedMcpConnectorAttachmentAuthority,
+    private modelToolSchemaAccountingDeferred = false,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -5616,6 +5673,10 @@ export class PrefixedMcpServer implements MCPServer {
    */
   deferModelToolSchemaAccounting(): void {
     this.modelToolSchemaAccountingDeferred = true;
+  }
+
+  modelToolSchemasAreDeferred(): boolean {
+    return this.modelToolSchemaAccountingDeferred;
   }
 
   async callTool(
@@ -5834,9 +5895,29 @@ export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
-  return await RunState.fromString(agent, serializedRunState, {
-    clientToolSearchRehydration: "preserve_history",
-  });
+  const restore = async () =>
+    await RunState.fromString(agent, serializedRunState, {
+      clientToolSearchRehydration: "preserve_history",
+    });
+  try {
+    return await restore();
+  } catch (error) {
+    const lazyRuntime = lazyToolRuntimeForAgent(agent);
+    if (
+      !(error instanceof UserError) ||
+      !/^Tool .+ not found$/.test(error.message) ||
+      !lazyRuntime?.hasPendingPreparation()
+    ) {
+      throw error;
+    }
+    // A durable approval may resume in a new worker after its real tool was
+    // disclosed through client tool_search. Rehydration correctly refuses to
+    // bind that pending call until the current authorized catalogue contains
+    // the same routed identity. Join preparation only on this exact miss, then
+    // retry from the untouched serialized state; revoked tools still fail.
+    await lazyRuntime.ensurePrepared();
+    return await restore();
+  }
 }
 
 export async function prepareRunInput(
@@ -6278,6 +6359,9 @@ export async function runAgentStream(
       historyOwnership: "external",
       modelResponseRetention: "last",
       toolExecution: { preApprovalInputGuardrails: true },
+      ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
+        ? { toolNotFoundBehavior: "return_error_to_model" as const }
+        : {}),
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -6416,6 +6500,9 @@ export async function runAgentStream(
     historyOwnership: "external",
     modelResponseRetention: "last",
     toolExecution: { preApprovalInputGuardrails: true },
+    ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
+      ? { toolNotFoundBehavior: "return_error_to_model" as const }
+      : {}),
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND

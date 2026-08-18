@@ -66,6 +66,15 @@ mock.module("@opengeni/db", () => ({
     }
     return null;
   },
+  // 0281: the mint resolves the session's live authority epoch before minting;
+  // the fake db has no live session row, so answer for the test workspace.
+  getSessionAuthorityEpoch: async (
+    db: never,
+    input: { accountId: string; workspaceId: string; sessionId: string },
+  ) => {
+    if (input.workspaceId === WS) return 1;
+    return realDb.getSessionAuthorityEpoch(db, input);
+  },
 }));
 
 // Import mints AFTER the db mock is installed so the mock binding is active.
@@ -205,6 +214,8 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const secret = resolveStreamTokenSecret(settings)!;
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
+    // 0281: the selfhosted lane threads the authority claims end-to-end.
+    expect(claims?.authorityEpoch).toBe(1);
     expect(cell?.leaseEpoch).toBe(7);
     expect(cell?.url).not.toContain(cell!.token);
   });
@@ -224,6 +235,7 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const secret = resolveStreamTokenSecret(settings)!;
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
+    expect(claims?.authorityEpoch).toBe(1);
     expect(cell?.leaseEpoch).toBe(7);
     // Desktop cell must carry resolution.
     expect(cell?.resolution).toBeDefined();

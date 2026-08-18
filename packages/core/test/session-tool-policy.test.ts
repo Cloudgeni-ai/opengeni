@@ -6,10 +6,11 @@ import {
 } from "../src/domain/session-tool-policy";
 import type { ToolRef } from "@opengeni/contracts";
 
-const mcp = (id: string, optional?: boolean): ToolRef => ({
+const mcp = (id: string, optional?: boolean, eager?: boolean): ToolRef => ({
   kind: "mcp",
   id,
   ...(optional ? { optional: true } : {}),
+  ...(eager ? { eager: true } : {}),
 });
 
 function resolve(overrides: Partial<SessionToolPolicyInput> = {}) {
@@ -32,13 +33,13 @@ describe("session tool policy resolution", () => {
     expect(result.effectivePolicy.mandatoryIds).toEqual(["opengeni"]);
     expect(result.effectivePolicy.lazyRouter).toEqual({
       state: "required",
-      deferredIds: ["cap-docs", "files"],
+      deferredIds: ["cap-docs", "files", "opengeni"],
     });
     expect(result.effectivePolicy.counts).toEqual({
       selected: 0,
       effective: 3,
       mandatory: 1,
-      deferred: 2,
+      deferred: 3,
       configured: 3,
       dropped: 0,
     });
@@ -75,7 +76,7 @@ describe("session tool policy resolution", () => {
       expect(result.effectivePolicy.effectiveIds).toEqual(["cap-selected", "opengeni"]);
       expect(result.effectivePolicy.lazyRouter).toEqual({
         state: "required",
-        deferredIds: ["cap-selected"],
+        deferredIds: ["cap-selected", "opengeni"],
       });
       expect(result.effectivePolicy.counts.selected).toBe(1);
     }
@@ -93,9 +94,24 @@ describe("session tool policy resolution", () => {
     expect(result.effectivePolicy.effectiveIds).toEqual([slackId, "opengeni"]);
     expect(result.effectivePolicy.lazyRouter).toEqual({
       state: "required",
-      deferredIds: [slackId],
+      deferredIds: [slackId, "opengeni"],
     });
     expect(result.toolRefs.map((tool) => tool.id)).toEqual([slackId, "opengeni"]);
+  });
+
+  test("only exact session refs marked eager leave the deferred set", () => {
+    const result = resolve({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [mcp("cap-selected", false, true), mcp("opengeni", false, true)],
+      availableMcpServerIds: ["opengeni", "cap-selected", "files"],
+      defaultMcpServerIds: [],
+    });
+
+    expect(result.toolRefs).toEqual([
+      mcp("cap-selected", false, true),
+      mcp("opengeni", false, true),
+    ]);
+    expect(result.effectivePolicy.lazyRouter).toEqual({ state: "disabled", deferredIds: [] });
   });
 
   test("drops unavailable optional history without hiding it from policy truth", () => {

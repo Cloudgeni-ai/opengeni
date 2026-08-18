@@ -198,14 +198,86 @@ also on the bounded idle timer. A buffered or replayed event therefore fails
 closed after suspension or offboarding instead of retaining the grant captured
 when the HTTP request began.
 Reactivation restores only active organization and personal-workspace access,
-never old grants. Offboarding applies the same canonical
+never old grants.
+Removing one workspace membership (migration 0278) is the same canonical
+teardown scoped to exactly that workspace and subject: the
+`workspace_membership_removal_command` SECURITY DEFINER seam cancels the
+removed member's queued/live turns there, interrupts live attempts, ends their
+active realtime modes, pauses their created scheduled tasks and owned-session
+goals, revokes their workspace-scoped resource grants, advances their private
+sessions' authority epochs with `session.authority.revoked` events, registers
+workflow wakes, deletes their per-workspace personal rows, and deletes the
+membership - in one transaction, behind the same prepare/settle protocol for
+pending tool calls. Self-removal, removing the last administering member, and
+a non-administering actor fail closed in the seam itself. Other workspaces,
+organization membership status, and retention are untouched. Offboarding applies the same canonical
 workspace/session/turn/attempt teardown, then terminally revokes membership and
 retains resource authority and physical data. Owned-session authority epochs
 advance with content-free audit events; unrelated users' shared-session state
-is not changed. The lifecycle does not infer membership ownership for retained
-processes or other direct provider operations that lack an exact membership
-authority field; adding that attribution and stream-token invalidation belongs
-to the separate live-access hardening program. `retain` has no deletion deadline;
+is not changed. Since migration 0277, every persistable `/workspace` writer
+admission and retained process carries its own authority tuple: causal
+initiator, initiating human, the exact organization-membership grant identity
+with its observed authorization revision, and the session tenancy
+epoch/visibility/owner frozen at admission. `turn` actors copy the accepted
+turn's frozen snapshot; `direct` (API request) actors resolve the request
+principal's grant through the tenant-fenced
+`resolve_workspace_writer_grant_identity` SECURITY DEFINER seam; retained
+processes inherit their parent admission's tuple verbatim. A revoked or
+suspended grant fences a NEW direct mutation immediately
+(`authority_revoked`), and a pre-0277 row with no tenancy half fences a
+retained process's next mutation (`authority_unattributed`) - in both cases the
+running provider process is never terminated or re-owned, and the fence
+consumes no workspace generation. The lifecycle still never infers ownership
+for a historical row whose authority was never recorded. Since migration
+0281 the live-stream surface is bound to the same authority: a scoped stream
+token (`ogs_`, 120 s TTL unchanged) minted for a viewer carries the
+authenticated viewer subject and the session's live authority epoch, the
+viewer lease holder records the same pair (per-subject monotone - a stale
+lower claim never lowers a subject's recorded epoch, while a different
+subject reusing the holder id starts a fresh pair), the API re-verifies a
+human subject's live workspace authority at every mint through the same
+model the route uses - a membership row whose owning organization membership
+is active, or an active organization membership's personal-workspace pointer
+(managed personal workspaces deliberately have no membership row) - and
+degrades to `transport:null` when that authority is gone. Delegated
+token-borne grants are authorized by their signed token, not rows, and keep
+their route authorization. The selfhosted relay rejects an attach whose
+authority claim is below the live channel's authority floor; the floor is
+defense-in-depth that dies with the channel, while mint refusal plus the
+120 s TTL remain the revocation authority. A pre-0281 token without the
+claims still attaches during the rolling window and enforces nothing new.
+Connection-use audit facts and variable-set audit events carry the same
+attribution since migration 0280: every `connection_use_audit_facts` row
+records the frozen causal initiator and the session authority
+epoch/visibility/owner observed by the exact locked rows of that use (NULL
+attribution on a fence that never loaded them is itself the honest fact), and
+variable-set materialization/secret-read audits carry the causal human,
+attempt authority triple, and owner authority identity. Variable-set denials
+raise and roll their transaction back by design; the application records the
+metadata-only denial fact in a fresh transaction instead of weakening the
+fail-closed seam. Since migration 0282 the API-direct session-attach
+materialization lane records the same fact: the seam reads the request
+subject and causal human from the standard context GUCs, writes a
+`variable_set.materialized` audit event with actor kind `session_attach` and
+the live session authority tuple from the exact locked session row, and an
+old image that sets no subject records the explicit `service:session`
+sentinel rather than nothing.
+
+Signed object-storage URLs are the remaining deliberately-bounded bearer
+surface: provider-native signing has no revocation, so revocation prevents
+NEW mints immediately (every mint is route-time authorized against live
+grants), every principal-facing issuance - file download/upload mints, video
+playback sources, document originals, the files-MCP download tool, and the
+workspace-capture manifest/file serves - records a metadata-only
+`file.signed_url.issued`/`file.signed_upload.issued` audit fact (subject,
+target, expiry; never the URL or object key) awaited before the URL leaves
+the platform, and an already-issued URL stays valid only for its short
+default TTL (download 300 s, upload 900 s - pinned in the storage tests).
+Worker- and provider-internal signed URLs (sandbox materialization,
+server-side capture-manifest loads, browser-session provider plumbing) stay
+on their attempt/session-scoped authority and are not double-recorded.
+Retention policy: `retain`
+has no deletion deadline;
 `delete_after` accepts the initial 30–90 day policy window and stamps a bounded
 future deadline. Destructive expiry is an explicit operator lifecycle, not an
 API request or background service. The command

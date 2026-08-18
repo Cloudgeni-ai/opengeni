@@ -190,6 +190,32 @@ function gmailDefinition(): IntegrationDefinitionSummary {
       kind: "oauth2",
       scopes: ["openid", "email", "profile", "https://mail.google.com/"],
     },
+    // Mirrors the reviewed copy the definitions endpoint serves for
+    // google-gmail (INTEGRATION_DEFINITION_PRESENTATIONS in
+    // @opengeni/capabilities); the dialog itself has no hardcoded copy.
+    presentation: {
+      providerName: "Google",
+      icon: "mail",
+      introduction: "Let agents work with the Gmail account you choose.",
+      capabilities: [
+        {
+          title: "Find and understand mail",
+          description: "Search messages and threads, then use them as context for your work.",
+        },
+        {
+          title: "Draft and send messages",
+          description: "Prepare replies and send mail through the reviewed Gmail tools.",
+        },
+      ],
+      permissionSummary:
+        "Google grants broad mailbox access. OpenGeni still exposes only the reviewed tools configured for this integration.",
+      scopeLabels: {
+        "https://mail.google.com/": {
+          label: "Work with your Gmail mailbox",
+          description: "Read, organize, draft, and send mail for the account you approve.",
+        },
+      },
+    },
     facets: [],
   };
 }

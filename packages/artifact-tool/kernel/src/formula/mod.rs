@@ -19,10 +19,10 @@ use arena::{
     RangeArena, StringId, StringInterner, UnaryOperator,
 };
 use parser::{
-    parse_formula, rewrite_deleted_sheet_references, rewrite_sheet_references,
-    ParsedBinaryOperator, ParsedError, ParsedExpr, ParsedReference, ParsedUnaryOperator,
-    ParsedValue,
+    parse_formula, ParsedBinaryOperator, ParsedError, ParsedExpr, ParsedReference,
+    ParsedUnaryOperator, ParsedValue,
 };
+pub(crate) use parser::{rewrite_deleted_sheet_references, rewrite_sheet_references};
 
 pub const DEFAULT_MAX_FORMULA_BYTES: usize = 8_192;
 pub const DEFAULT_MAX_FORMULA_TOKENS: usize = 4_096;
@@ -449,7 +449,7 @@ pub struct FormulaEngineAllocationFacts {
     pub string_capacity: usize,
     pub string_index_capacity: usize,
     pub interned_utf8_bytes: usize,
-    pub cached_value_utf8_bytes: usize,
+    pub projected_value_utf8_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -534,7 +534,7 @@ pub struct FormulaEngine {
     dirty_formula_count: usize,
     formula_count: usize,
     graph_edges: usize,
-    cached_value_bytes: usize,
+    projected_value_bytes: usize,
     strings: StringInterner,
     expressions: ExprArena,
     ranges: RangeArena,
@@ -560,7 +560,7 @@ impl FormulaEngine {
             dirty_formula_count: 0,
             formula_count: 0,
             graph_edges: 0,
-            cached_value_bytes: 0,
+            projected_value_bytes: 0,
             strings: StringInterner::default(),
             expressions: ExprArena::default(),
             ranges: RangeArena::default(),
@@ -654,8 +654,8 @@ impl FormulaEngine {
                 self.dirty_formula_count = self.dirty_formula_count.saturating_sub(1);
             }
             let node = &mut self.nodes[node_id.index()];
-            self.cached_value_bytes = self
-                .cached_value_bytes
+            self.projected_value_bytes = self
+                .projected_value_bytes
                 .saturating_sub(value_utf8_bytes(&node.value));
             node.value = CellValue::Error(FormulaError::Reference);
             node.pending_value = None;
@@ -775,7 +775,7 @@ impl FormulaEngine {
             .get(&key)
             .map_or(0, |id| value_utf8_bytes(&self.nodes[id.index()].value));
         let next_value_bytes = self
-            .cached_value_bytes
+            .projected_value_bytes
             .saturating_sub(previous_value_bytes)
             .saturating_add(value_utf8_bytes(&value));
         if next_value_bytes > self.limits.max_engine_value_bytes {
@@ -816,7 +816,7 @@ impl FormulaEngine {
         self.nodes[index].pending_value = None;
         self.nodes[index].value = value;
         self.nodes[index].input_hydrated = true;
-        self.cached_value_bytes = next_value_bytes;
+        self.projected_value_bytes = next_value_bytes;
         self.mark_dependents_dirty(node_id);
         Ok(FormulaUpdateReceipt {
             created_cell: created,
@@ -1033,9 +1033,9 @@ impl FormulaEngine {
         Some(self.strings.resolve(formula.source))
     }
 
-    /// Rebuilds the derived formula graph from canonical workbook cells.
-    /// Formula source is authoritative; persisted cached values are ignored
-    /// and recalculated deterministically before the engine is returned.
+    /// Rebuilds the derived formula graph from authored workbook cells.
+    /// Formula source is authoritative; projected values are recalculated
+    /// deterministically before the engine is returned.
     pub fn from_workbook(workbook: &Workbook) -> Result<Self, FormulaEngineError> {
         Self::from_workbook_with_limits(workbook, FormulaLimits::default())
     }
@@ -1120,8 +1120,11 @@ impl FormulaEngine {
         let node = &self.nodes[node_id.index()];
         if let Some(formula) = &node.formula {
             return Some(
-                Cell::formula(self.strings.resolve(formula.source), node.value.clone())
-                    .expect("formula engine sources are nonempty"),
+                Cell::from_formula_projection(
+                    self.strings.resolve(formula.source),
+                    node.value.clone(),
+                )
+                .expect("formula engine sources are nonempty"),
             );
         }
         (!matches!(node.value, CellValue::Empty)).then(|| Cell::from_value(node.value.clone()))
@@ -1182,7 +1185,7 @@ impl FormulaEngine {
             string_capacity,
             string_index_capacity,
             interned_utf8_bytes,
-            cached_value_utf8_bytes: self.cached_value_bytes,
+            projected_value_utf8_bytes: self.projected_value_bytes,
         }
     }
 

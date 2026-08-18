@@ -3,6 +3,11 @@ import { isAbsolute } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
 
 import {
   EditableArtifactMaterializerPermanentError,
@@ -69,9 +74,9 @@ type IdentityEnvelope = Readonly<{
   fontRegistryHash: string;
   policyHash: string;
   maxOutputBytes: number;
-  supportedModelSchemaVersions: readonly number[];
-  supportedOperationProtocolVersions: readonly number[];
-  supportedSnapshotProtocolVersions: readonly number[];
+  supportedModelSchemaVersions: readonly [typeof SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION];
+  supportedOperationProtocolVersions: readonly [typeof COMMITTED_TRANSACTION_PROTOCOL_VERSION];
+  supportedSnapshotProtocolVersions: readonly [typeof SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION];
 }>;
 
 export type NativeEditableArtifactSubprocessPort = NativeEditableArtifactMaterializerPort &
@@ -762,9 +767,18 @@ function validateIdentity(identity: IdentityEnvelope): void {
     !isHash(identity.fontRegistryHash) ||
     !isHash(identity.policyHash) ||
     !isCodecRegistry(identity.codecVersions) ||
-    !isCanonicalPositiveVersionList(identity.supportedModelSchemaVersions) ||
-    !isCanonicalPositiveVersionList(identity.supportedOperationProtocolVersions) ||
-    !isCanonicalPositiveVersionList(identity.supportedSnapshotProtocolVersions)
+    !isCurrentSpreadsheetVersionList(
+      identity.supportedModelSchemaVersions,
+      SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+    ) ||
+    !isCurrentSpreadsheetVersionList(
+      identity.supportedOperationProtocolVersions,
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+    ) ||
+    !isCurrentSpreadsheetVersionList(
+      identity.supportedSnapshotProtocolVersions,
+      SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+    )
   ) {
     throw new Error("native materializer capability identity is incomplete");
   }
@@ -817,14 +831,11 @@ function isCodecRegistry(value: unknown): value is Readonly<Record<string, strin
   return true;
 }
 
-function isCanonicalPositiveVersionList(value: unknown): value is readonly number[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return false;
-  let previous = 0;
-  for (const version of value) {
-    if (!Number.isSafeInteger(version) || version <= previous) return false;
-    previous = version;
-  }
-  return true;
+function isCurrentSpreadsheetVersionList<const Version extends number>(
+  value: unknown,
+  expected: Version,
+): value is readonly [Version] {
+  return Array.isArray(value) && value.length === 1 && value[0] === expected;
 }
 
 function isBoundedVersion(value: unknown): value is string {

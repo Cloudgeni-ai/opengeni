@@ -49,6 +49,8 @@ import {
   type Database,
   type LeaseSnapshot,
   type SandboxRecord,
+  getSessionAuthorityEpoch,
+  subjectHasLiveWorkspaceAuthority,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -142,6 +144,9 @@ export async function sessionAttachEnvironment(
   services: ViewerServices,
   workspaceId: string,
   session: Session,
+  /** The authenticated route subject driving this attach (0282); recorded on
+   *  the materialization audit fact. Null records the legacy service sentinel. */
+  attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
   const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
     services.db,
@@ -150,7 +155,7 @@ export async function sessionAttachEnvironment(
       accountId: session.accountId,
       workspaceId,
       variableSetId: session.environmentId,
-      authority: { kind: "session_attach", sessionId: session.id },
+      authority: { kind: "session_attach", sessionId: session.id, subjectId: attachSubjectId },
     },
   );
   // Build the env with the SESSION's backend, not the deployment default: the
@@ -196,6 +201,9 @@ export async function attachViewer(
     workspaceId: string;
     session: Session;
     viewerId?: string;
+    /** The authenticated subject attaching this viewer (0281): recorded on
+     *  the holder row together with the live session authority epoch. */
+    viewerSubjectId?: string;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
   },
@@ -203,6 +211,10 @@ export async function attachViewer(
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
   const viewerId = input.viewerId ?? crypto.randomUUID();
+  const attachSubjectId = claimableSubjectId(input.viewerSubjectId ?? null);
+  const attachAuthorityEpoch = attachSubjectId
+    ? await getSessionAuthorityEpoch(db, { accountId, workspaceId, sessionId: session.id })
+    : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
   const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
@@ -227,6 +239,8 @@ export async function attachViewer(
       kind: "viewer",
       holderId: viewerId,
       subjectId: session.id,
+      ...(attachSubjectId ? { viewerSubjectId: attachSubjectId } : {}),
+      ...(attachAuthorityEpoch !== null ? { viewerAuthorityEpoch: attachAuthorityEpoch } : {}),
       backend: session.sandboxBackend,
       os: session.sandboxOs,
       image: sandboxRuntime.image,
@@ -282,7 +296,12 @@ export async function attachViewer(
       // so the next turn's agent-manifest apply finds an EMPTY environment delta in
       // the SDK's validateNoEnvironmentDelta (otherwise: "Live sandbox sessions
       // cannot change manifest environment variables").
-      const environment = await sessionAttachEnvironment(services, workspaceId, session);
+      const environment = await sessionAttachEnvironment(
+        services,
+        workspaceId,
+        session,
+        input.viewerSubjectId ?? null,
+      );
       const providerSettings = await providerSettingsForSessionSandboxRuntime(
         sandboxRuntime,
         session.sandboxBackend,
@@ -369,7 +388,12 @@ export async function attachViewer(
         message: `sandbox is ${live.recovery.restore.status} at epoch ${live.leaseEpoch}`,
       });
     }
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.viewerSubjectId ?? null,
+    );
     let observed: EstablishedSandboxSession | undefined;
     try {
       const establish = services.establishSandboxSession ?? establishSandboxSessionFromEnvelope;
@@ -446,13 +470,26 @@ export type SessionGroupReadinessHold = {
  * it. */
 export async function ensureSessionGroupReady(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; session: Session },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    /** The authenticated subject driving the fleet attach/swap (0282): recorded
+     *  on the viewer holder and the materialization audit fact. Omitting it
+     *  records the explicit service sentinel, so forward the route subject. */
+    subjectId?: string | null;
+  },
 ): Promise<SessionGroupReadinessHold> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let release: (() => Promise<void>) | undefined;
     try {
-      const attached = await attachViewer(services, input);
+      const attached = await attachViewer(services, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        session: input.session,
+        ...(input.subjectId ? { viewerSubjectId: input.subjectId } : {}),
+      });
       let releasePromise: Promise<void> | undefined;
       release = () =>
         (releasePromise ??= detachViewer(services, {
@@ -664,10 +701,73 @@ export type DesktopStreamMint = {
   leaseEpoch: number;
 };
 
+/** A subject claim must satisfy the StreamTokenPayload bounds and the 0281
+ *  holder CHECK (non-blank, <= 512). An out-of-bounds subject (possible only
+ *  from a host-signed delegated token) is omitted from the claims rather than
+ *  turning the mint into a 500. */
+function claimableSubjectId(subjectId: string | null): string | null {
+  if (!subjectId) return null;
+  const trimmed = subjectId.trim();
+  return trimmed.length >= 1 && subjectId.length <= 512 ? subjectId : null;
+}
+
+/**
+ * Resolve the viewer-facing authority claims stamped into a scoped stream
+ * token and recorded on the viewer holder (0281): the authenticated viewer
+ * subject and the session's LIVE authority epoch. Re-verifies a human
+ * (`user:`) subject's current workspace authority at mint time through the
+ * same model the route-time access builder uses - a membership row with an
+ * active owning organization membership, or an active organization
+ * membership's personal-workspace pointer - so a viewer whose authority was
+ * revoked since the route authorized them degrades to null (transport:null)
+ * instead of receiving a fresh token. Delegated token-borne grants
+ * (`subjectDelegated`) are authorized by their signed token, not by rows this
+ * check can see; they keep their route authorization, as do API-key and
+ * service principals. Identity and epoch only - never a secret value.
+ */
+async function resolveViewerAuthorityClaims(
+  db: ViewerServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string | null;
+    subjectDelegated?: boolean;
+  },
+): Promise<{ subjectId?: string; authorityEpoch: number } | null> {
+  const authorityEpoch = await getSessionAuthorityEpoch(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (authorityEpoch === null) {
+    return null;
+  }
+  if (input.subjectId?.startsWith("user:") && input.subjectDelegated !== true) {
+    const live = await subjectHasLiveWorkspaceAuthority(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+    });
+    if (!live) {
+      return null;
+    }
+  }
+  const subjectId = claimableSubjectId(input.subjectId);
+  return {
+    ...(subjectId ? { subjectId } : {}),
+    authorityEpoch,
+  };
+}
+
 export type MintDesktopStreamInput = {
   accountId: string;
   workspaceId: string;
   resourceSubjectId?: string;
+  /** True when the route grant is a signed delegated token (metadata.delegated):
+   *  its authority is the token, not membership rows, so the mint-time
+   *  live-authority recheck does not apply. */
+  resourceSubjectDelegated?: boolean;
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
@@ -730,6 +830,22 @@ export async function mintDesktopStream(
     return null;
   }
 
+  // 0281: the viewer's authority claims. A missing epoch (session not
+  // visible) or a removed human membership degrades the mint instead of
+  // issuing a fresh token.
+  const viewerAuthority = await resolveViewerAuthorityClaims(db, {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    subjectId: input.resourceSubjectId ?? null,
+    ...(input.resourceSubjectDelegated !== undefined
+      ? { subjectDelegated: input.resourceSubjectDelegated }
+      : {}),
+  });
+  if (!viewerAuthority) {
+    return null;
+  }
+
   // SELFHOSTED ACTIVE: when the session's active sandbox is a selfhosted machine,
   // route to the relay (NOT the Modal group-box path — it would resume the wrong
   // box and return a Modal URL). No Modal lease required.
@@ -751,6 +867,7 @@ export async function mintDesktopStream(
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: DESKTOP_STREAM_PORT,
           sandbox: active,
+          viewerAuthority,
         },
         input.resolveSelfhostedSession,
       );
@@ -782,7 +899,12 @@ export async function mintDesktopStream(
   try {
     // On a cold-restore (the lease's box is gone) this create() must carry the
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.resourceSubjectId ?? null,
+    );
     try {
       const establish = () =>
         (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
@@ -832,6 +954,7 @@ export async function mintDesktopStream(
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
         resolution: defaultResolution(settings),
+        ...viewerAuthority,
       });
     } catch (error) {
       // A transient/headless provider failure degrades the desktop cell.
@@ -933,6 +1056,8 @@ export type MintTerminalStreamInput = {
   accountId: string;
   workspaceId: string;
   resourceSubjectId?: string;
+  /** See MintDesktopStreamInput.resourceSubjectDelegated. */
+  resourceSubjectDelegated?: boolean;
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
@@ -981,6 +1106,22 @@ export async function mintTerminalStream(
     return null;
   }
 
+  // 0281: the viewer's authority claims. A missing epoch (session not
+  // visible) or a removed human membership degrades the mint instead of
+  // issuing a fresh token.
+  const viewerAuthority = await resolveViewerAuthorityClaims(db, {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    subjectId: input.resourceSubjectId ?? null,
+    ...(input.resourceSubjectDelegated !== undefined
+      ? { subjectDelegated: input.resourceSubjectDelegated }
+      : {}),
+  });
+  if (!viewerAuthority) {
+    return null;
+  }
+
   // SELFHOSTED ACTIVE: when the session's active sandbox is a selfhosted machine,
   // route to the relay. NEVER fall through to the Modal group-box path (it would
   // resume the wrong box / return a Modal URL).
@@ -1002,6 +1143,7 @@ export async function mintTerminalStream(
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: TERMINAL_STREAM_PORT,
           sandbox: active,
+          viewerAuthority,
         },
         input.resolveSelfhostedSession,
       );
@@ -1023,7 +1165,12 @@ export async function mintTerminalStream(
   try {
     // On a cold-restore this create() must carry the SAME stable run-env the turn
     // declares, so a later turn finds no manifest-env delta.
-    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const environment = await sessionAttachEnvironment(
+      services,
+      workspaceId,
+      session,
+      input.resourceSubjectId ?? null,
+    );
     try {
       const establish = () =>
         (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
@@ -1072,6 +1219,7 @@ export async function mintTerminalStream(
         leaseEpoch: lease.leaseEpoch,
         streamTokenSecret: secret,
         port: TERMINAL_STREAM_PORT,
+        ...viewerAuthority,
       });
     } catch (error) {
       if (error instanceof StreamPortUnavailableError) {
@@ -1150,6 +1298,8 @@ async function tryMintActiveSelfhostedStream(
     resourceSubjectId?: string;
     port: number;
     sandbox: SandboxRecord;
+    /** 0281 viewer authority claims stamped into the relay stream token. */
+    viewerAuthority?: { subjectId?: string; authorityEpoch: number };
   },
   // optional test seam (mirrors the existing `establish?` seam pattern): inject a
   // fake relay-resolving session; production NEVER passes it.
@@ -1208,6 +1358,7 @@ async function tryMintActiveSelfhostedStream(
     sessionId: session.id,
     viewerId: input.viewerId,
     activeEpoch: session.activeEpoch,
+    ...(input.viewerAuthority ? { viewerAuthority: input.viewerAuthority } : {}),
     port,
     session: shSession,
   });
@@ -1227,6 +1378,8 @@ export type MintSelfhostedStreamInput = {
    *  THIS as its leaseEpoch claim so the relay rejects a stale-epoch (swapped-away)
    *  viewer. */
   activeEpoch: number;
+  /** 0281 viewer authority claims stamped into the relay stream token. */
+  viewerAuthority?: { subjectId?: string; authorityEpoch: number };
   /** The exposed stream port (6080 desktop / 7681 terminal). */
   port: number;
   /** The resolvable selfhosted session (the routing proxy resolves the active
@@ -1270,6 +1423,7 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
+      ...(input.viewerAuthority ?? {}),
     });
     return {
       url: exposed.url,

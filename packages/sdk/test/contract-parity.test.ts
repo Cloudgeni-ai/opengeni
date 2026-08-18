@@ -5,6 +5,8 @@ import {
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
+  IntegrationDefinitionSummary as ContractIntegrationDefinitionSummary,
+  IntegrationPresentation as ContractIntegrationPresentation,
   AttachViewerRequest as ContractAttachViewerRequest,
   AttachViewerResponse as ContractAttachViewerResponse,
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
@@ -126,6 +128,8 @@ import {
 import type {
   AcknowledgeStreamRequest,
   AgentTopologyPageResponse,
+  IntegrationDefinitionSummary,
+  IntegrationPresentation,
   ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
@@ -266,6 +270,25 @@ describe("SDK / contracts parity", () => {
     ): ListSlackUserLinkAccessRequestsResponse => value;
     expect(
       [acceptRequest, acceptPrepare, acceptMutation, acceptApproval, acceptList].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+  });
+  test("integration definition and presentation shapes match the public contracts", () => {
+    const acceptDefinition = (
+      value: z.infer<typeof ContractIntegrationDefinitionSummary>,
+    ): IntegrationDefinitionSummary => value;
+    const acceptDefinitionInput = (
+      value: IntegrationDefinitionSummary,
+    ): z.input<typeof ContractIntegrationDefinitionSummary> => value;
+    const acceptPresentation = (
+      value: z.infer<typeof ContractIntegrationPresentation>,
+    ): IntegrationPresentation => value;
+    const acceptPresentationInput = (
+      value: IntegrationPresentation,
+    ): z.input<typeof ContractIntegrationPresentation> => value;
+    expect(
+      [acceptDefinition, acceptDefinitionInput, acceptPresentation, acceptPresentationInput].every(
         (fn) => typeof fn === "function",
       ),
     ).toBe(true);

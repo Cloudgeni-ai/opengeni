@@ -907,6 +907,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_tasks_delete",
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
+  "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
   "slack_bot_list_users",
@@ -2447,6 +2448,17 @@ export const StreamTokenPayload = z.object({
   // Short TTL (120s default); rotation is event-driven under the epoch fence,
   // not on a keepalive clock.
   exp: z.number().int().positive(),
+  // The authenticated subject the token was minted for (0281). Optional for
+  // rolling compatibility: old verifiers strip it, old mints omit it.
+  subjectId: z.string().min(1).max(512).optional(),
+  // The session authority epoch observed at mint (0281). The relay tracks the
+  // highest value presented per LIVE channel and rejects tokens below that
+  // floor. The floor is defense-in-depth, not the revocation authority: it
+  // lives only as long as the channel does (both sides detached, the
+  // half-open reaper, or a relay restart reset it), so a stale in-TTL token
+  // can still attach to a fresh channel. Real revocation is the mint refusing
+  // to issue new tokens plus the 120 s TTL bounding the old ones.
+  authorityEpoch: z.number().int().positive().optional(),
 });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 
@@ -3490,6 +3502,24 @@ export const McpPersonalConnectionDelegation = z
      * the organization-user authority lifecycle.
      */
     userDelegation: UserResourceDelegation.optional(),
+    /**
+     * Google Drive publication only: the exact output destination frozen when
+     * this delegation was accepted, so a later connection-settings change can
+     * never redirect an already-accepted turn's publication. Structurally
+     * mirrors GoogleDriveOutputDestination (defined in ./google-drive, which
+     * imports this module - hence the inline shape). Absent on pre-freeze
+     * turns, which keep the bounded legacy live-resolution behavior.
+     */
+    outputDestination: z
+      .object({
+        folderId: z.string().min(1).max(256),
+        folderName: z.string().min(1).max(1024),
+        driveId: z.string().min(1).max(256).nullable(),
+        location: z.enum(["my_drive", "shared_drive"]),
+        selectedAt: z.string().datetime({ offset: true }),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -4519,9 +4549,15 @@ export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearch
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
+  // Session-scoped startup choice. `true` prepares this server's authorized
+  // schemas before the first model request; absent/false keeps it behind
+  // progressive discovery. This never grants a server or tool permission.
+  eager: z.boolean().optional(),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
   // gracefully. On new input, absent/false is STRICT: the id must be configured
-  // and an unavailable registered server fails the turn. Persisted refs are
+  // and an unavailable registered server fails closed when its preparation is
+  // demanded. Only the independent eager marker makes that a startup failure.
+  // Persisted refs are
   // intersected with the current registry at each turn boundary, so a server
   // disconnected after admission is retained in policy/audit truth but skipped
   // until it is registered again. `optional:true` additionally makes runtime
@@ -4718,10 +4754,14 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // strict occurrence upgrades the merged ref so an unavailable server fails
     // the turn. This preserves the fail-loud default when defaults, packs, and
     // per-turn tool selections are combined.
-    if (prior.optional === true && tool.optional !== true) {
-      const { optional: _dropped, ...strict } = prior;
-      byKey.set(key, strict);
-    }
+    const optional = prior.optional === true && tool.optional === true ? true : undefined;
+    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    byKey.set(key, {
+      kind: "mcp",
+      id: prior.id,
+      ...(optional ? { optional } : {}),
+      ...(eager ? { eager } : {}),
+    });
   }
   return order.map((key) => byKey.get(key)!);
 }
@@ -9085,6 +9125,43 @@ export const IntegrationFacetDefinitionSummary = z
   .strict();
 export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
+/**
+ * Presentation-only consent copy for an integration or connector. Never grants
+ * a scope, selects a connection, or replaces server-side authorization; the UI
+ * falls back to generic copy for any omitted field.
+ */
+export const IntegrationPresentation = z
+  .object({
+    providerName: z.string().min(1).max(120).optional(),
+    icon: z.enum(["calendar", "cloud", "contacts", "files", "mail"]).optional(),
+    introduction: z.string().min(1).max(500).optional(),
+    capabilities: z
+      .array(
+        z
+          .object({
+            title: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .max(8)
+      .optional(),
+    permissionSummary: z.string().min(1).max(500).optional(),
+    scopeLabels: z
+      .record(
+        z.string().min(1).max(1024),
+        z
+          .object({
+            label: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict();
+export type IntegrationPresentation = z.infer<typeof IntegrationPresentation>;
+
 export const IntegrationDefinitionSummary = z
   .object({
     id: z.string().min(1).max(128),
@@ -9103,6 +9180,7 @@ export const IntegrationDefinitionSummary = z
         scopes: z.array(z.string().min(1).max(1024)).max(256),
       })
       .strict(),
+    presentation: IntegrationPresentation.optional(),
     facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();
@@ -12075,6 +12153,8 @@ export const SessionControlResponse = z.object({
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
+export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
+
 export const CreateSessionRequest = withVariableSetIdAlias(
   {
     /**
@@ -12098,10 +12178,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // agentInstructions rides, composed AFTER the workspace persona so it refines
     // it for this one session — how a host delivers per-agent-type prompts without
     // leaking them into the user-visible timeline (it is NEVER emitted as an
-    // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
-    // matches the codebase's largest free-form string convention (workspace
-    // variable set variable values). Absent ⇒ byte-identical to today.
-    instructions: z.string().trim().min(1).max(32768).optional(),
+    // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
+    // shared durable session-instruction contract. Absent ⇒ byte-identical to
+    // today.
+    instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     // Immutable prompt-policy role binding for matching one activated role
     // policy. This never derives from or grants a human workspace membership
     // role. Existing callers may continue to use normalized metadata.role as a

@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { SandboxProviderReadLockUnavailableError } from "@opengeni/db";
+import {
+  SandboxImageConflictError,
+  SandboxProviderReadLockUnavailableError,
+  SandboxRigConflictError,
+} from "@opengeni/db";
 import {
   ChannelAConflictError,
   ChannelAUnavailableError,
@@ -245,6 +249,26 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(mapped).toBeInstanceOf(HTTPException);
     expect((mapped as HTTPException).status).toBe(499);
     expect((mapped as HTTPException).message).toBe("request cancelled");
+  });
+
+  test("runtime drift is an explicit retryable lifecycle conflict, never a 500", () => {
+    for (const error of [
+      new SandboxImageConflictError("group", "old", "new"),
+      new SandboxRigConflictError("group", "old", "new"),
+    ]) {
+      expect(channelAOperationFailureDiagnostic(error)).toEqual({
+        reason: "lifecycle_conflict",
+        status: 409,
+        errorCode: "sandbox_channel_a_lifecycle_conflict",
+      });
+      const mapped = mapChannelAError(error);
+      expect(mapped).toBeInstanceOf(HTTPException);
+      expect((mapped as HTTPException).status).toBe(409);
+      expect((mapped as HTTPException).message).toBe(
+        "sandbox runtime changed while this session still has active operations; retry",
+      );
+      expect(mapped).toMatchObject({ code: "conflict", retryable: true });
+    }
   });
 
   test("an unrelated provider AbortError is not misreported as a client cancellation", () => {

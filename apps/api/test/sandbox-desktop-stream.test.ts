@@ -237,6 +237,163 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     expect(bus.published.flat().some((e) => e.type === "stream.url.rotated")).toBe(false);
   }, 60_000);
 
+  test("0281 — a human viewer's token carries the subject + LIVE authority epoch; a removed membership degrades the mint", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const human = `user:${crypto.randomUUID()}`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${accountId}, ${workspaceId}, ${human})`;
+    // Advance the session authority epoch the way the lifecycle seam does:
+    // mint a transaction-scoped write capability, then update under it.
+    await admin.begin(async (tx) => {
+      const [cap] = await tx<{ capability_id: string }[]>`
+        insert into session_visibility_write_capabilities
+          (backend_pid, transaction_id, capability_id)
+        values (pg_backend_pid(), pg_current_xact_id(), gen_random_uuid())
+        returning capability_id`;
+      await tx`select set_config(
+        'opengeni.session_visibility_write_capability', ${cap!.capability_id}, true)`;
+      await tx`update sessions set authority_epoch = 4 where id = ${session!.id}`;
+    });
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe(human);
+    expect(claims!.authorityEpoch).toBe(4);
+
+    // Membership removed since the route authorized the viewer: the mint-time
+    // re-verification degrades to null instead of issuing a fresh token.
+    await admin`delete from workspace_memberships
+      where workspace_id = ${workspaceId} and subject_id = ${human}`;
+    const afterRemoval = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(afterRemoval).toBeNull();
+  }, 60_000);
+
+  test("0281 — a managed PERSONAL-workspace human mints (no membership row by design); suspension degrades", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const human = `user:${crypto.randomUUID()}`;
+    // Slice A+B: personal-workspace authority is the ACTIVE organization
+    // membership's pointer; deliberately NO workspace_memberships row.
+    await admin`
+      insert into organization_memberships
+        (account_id, subject_id, status, personal_workspace_id, role)
+      values (${accountId}, ${human}, 'active', ${workspaceId}, 'member')`;
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe(human);
+    expect(claims!.authorityEpoch).toBe(1);
+
+    // A suspended organization membership is a live revocation: degrade.
+    await admin`
+      update organization_memberships set status = 'suspended'
+      where account_id = ${accountId} and subject_id = ${human}`;
+    const suspended = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(suspended).toBeNull();
+  }, 60_000);
+
+  test("0281 — a delegated token-borne user grant keeps its route authorization (no rows to re-check)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const delegatedHuman = `user:${crypto.randomUUID()}`;
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: delegatedHuman,
+        resourceSubjectDelegated: true,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe(delegatedHuman);
+    expect(claims!.authorityEpoch).toBe(1);
+  }, 60_000);
+
+  test("0281 — an API-key principal keeps its route authorization; the token still pins the authority epoch", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: "configured:key",
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe("configured:key");
+    expect(claims!.authorityEpoch).toBe(1);
+  }, 60_000);
+
   test("GATE — a COLD lease never mints (the handshake never spins a box up)", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

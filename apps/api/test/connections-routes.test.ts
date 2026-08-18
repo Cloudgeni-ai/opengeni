@@ -36,6 +36,7 @@ import {
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
 } from "../src/integrations/oauth-client";
+import { builtInOAuthProfileByKey } from "../src/integrations/oauth-profiles";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -366,6 +367,10 @@ describe("official Gmail MCP OAuth compatibility", () => {
   });
 
   test("requests offline consent without sending Google's unsupported resource parameter", () => {
+    // Both quirks are Gmail profile data: `sendResourceParameter: false`
+    // suppresses RFC 8707 and `extraAuthorizeParams` carries the offline
+    // consent options. The resulting URL is unchanged.
+    const gmailProfile = builtInOAuthProfileByKey("official-gmail");
     const authorizationUrl = new URL(
       buildAuthorizationUrl({
         endpoint: google.authorizationEndpoint,
@@ -380,7 +385,8 @@ describe("official Gmail MCP OAuth compatibility", () => {
           "https://www.googleapis.com/auth/gmail.compose",
           "https://www.googleapis.com/auth/gmail.modify",
         ],
-        resourceParameterSupported: false,
+        resourceParameterSupported: gmailProfile.sendResourceParameter,
+        extraParams: gmailProfile.extraAuthorizeParams,
       }),
     );
 

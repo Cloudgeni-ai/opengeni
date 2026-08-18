@@ -38,6 +38,13 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Apply durable model/tool/reasoning settings in the host's controlled UI. */
     onDraftApplied?: ((draft: ComposerDraft) => void) | undefined;
+    /**
+     * Return true when a human has explicitly changed the composer policy
+     * (model, effort, or latency) for the current session. Hosts may seed
+     * those values automatically while a draft read is in flight; that must
+     * not be mistaken for a picker change that should beat the draft.
+     */
+    isPolicyTouched?: (() => boolean) | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
   };
@@ -561,6 +568,7 @@ export function useComposer(
   const onSent = options.onSent;
   const onSubmitted = options.onSubmitted;
   const onDraftApplied = options.onDraftApplied;
+  const isPolicyTouched = options.isPolicyTouched;
   // Read through a ref so live session/policy projections can replace their
   // apply callback without invalidating the draft loader and re-running its
   // initial-load effect. Publish only committed callbacks: a suspended target
@@ -569,6 +577,10 @@ export function useComposer(
   useLayoutEffect(() => {
     onDraftAppliedRef.current = onDraftApplied;
   }, [onDraftApplied]);
+  const isPolicyTouchedRef = useRef(isPolicyTouched);
+  useLayoutEffect(() => {
+    isPolicyTouchedRef.current = isPolicyTouched;
+  }, [isPolicyTouched]);
   useLayoutEffect(() => {
     steeringRef.current = steering;
   }, [steering]);
@@ -799,6 +811,14 @@ export function useComposer(
               extrasNow.model !== extrasAtStart.model ||
               extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort ||
               extrasNow.latencyMode !== extrasAtStart.latencyMode;
+            // A host can change the controlled policy automatically while
+            // hydrating (for example, by seeding an existing session's
+            // metadata). Only preserve the local policy as authoritative when
+            // the host confirms that a human actually touched the picker.
+            // Keep the historical diff-based behavior for embedders that do
+            // not provide the explicit signal.
+            const pickerChangedByHuman =
+              pickerChangedDuringFetch && (isPolicyTouchedRef.current?.() ?? true);
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             annotationsRef.current = fetched.annotations ?? [];
@@ -806,7 +826,7 @@ export function useComposer(
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
             setAnnotations(fetched.annotations ?? []);
-            if (replaceLocal || !pickerChangedDuringFetch) {
+            if (replaceLocal || !pickerChangedByHuman) {
               onDraftAppliedRef.current?.(fetched);
             }
           }

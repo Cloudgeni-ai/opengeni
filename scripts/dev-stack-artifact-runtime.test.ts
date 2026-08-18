@@ -224,6 +224,18 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin");
   });
 
+  test("keeps worker MCP on worktree loopback while Modal may use a public edge", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain(
+      'export OPENGENI_MCP_INTERNAL_URL="http://127.0.0.1:${OPENGENI_API_PORT}/v1/workspaces/{workspaceId}/mcp"',
+    );
+    expect(source).toContain(
+      'export OPENGENI_MCP_URL="${sandbox_edge_url}/v1/workspaces/{workspaceId}/mcp"',
+    );
+    expect(source).toContain("printf 'OPENGENI_MCP_INTERNAL_URL=%s\\n'");
+  });
+
   test("admits only an exact-head runtime in a source-tagged local image", async () => {
     const source = await Bun.file(scriptPath).text();
     expect(source).toContain("bun scripts/resolve-development-sandbox-runtime.ts");

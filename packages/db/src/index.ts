@@ -2193,75 +2193,8 @@ export async function listWorkspaceMembers(
   });
 }
 
-export async function removeWorkspaceMember(
-  db: Database,
-  workspaceId: string,
-  subjectId: string,
-): Promise<boolean> {
-  // A removed principal must not regain stale organization preferences if the
-  // same stable subject is invited again later. Set the target subject GUC so
-  // FORCE RLS permits deleting only that member's personal rows, and make the
-  // cleanup + membership removal one transaction.
-  return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    await lockSessionPersonalStateExclusive(scopedDb, workspaceId, subjectId);
-    // Exclusively lock the membership before cleanup so concurrent removals
-    // preserve the previous one-winner/one-no-op behavior while snapshots are
-    // still visible to the subject-scoped FORCE-RLS policy. Session listing takes
-    // the shared counterpart of this subject fence; pin mutation takes the same
-    // exclusive fence. Removal therefore waits for readers/writers, then cleans
-    // every personal row before deleting the membership.
-    const [membership] = await scopedDb
-      .select({ id: schema.workspaceMemberships.id })
-      .from(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.workspaceId, workspaceId),
-          eq(schema.workspaceMemberships.subjectId, subjectId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (!membership) {
-      return false;
-    }
-
-    await scopedDb
-      .delete(schema.sessionListSnapshots)
-      .where(
-        and(
-          eq(schema.sessionListSnapshots.workspaceId, workspaceId),
-          eq(schema.sessionListSnapshots.subjectId, subjectId),
-        ),
-      );
-    await scopedDb
-      .delete(schema.sessionPins)
-      .where(
-        and(
-          eq(schema.sessionPins.workspaceId, workspaceId),
-          eq(schema.sessionPins.subjectId, subjectId),
-        ),
-      );
-    await scopedDb
-      .delete(schema.newSessionDrafts)
-      .where(
-        and(
-          eq(schema.newSessionDrafts.workspaceId, workspaceId),
-          eq(schema.newSessionDrafts.subjectId, subjectId),
-        ),
-      );
-
-    const rows = await scopedDb
-      .delete(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.workspaceId, workspaceId),
-          eq(schema.workspaceMemberships.subjectId, subjectId),
-        ),
-      )
-      .returning({ id: schema.workspaceMemberships.id });
-    return rows.length > 0;
-  });
-}
+// removeWorkspaceMember moved to ./organization-membership-lifecycle: removal is
+// now the fenced SECURITY DEFINER teardown from migration 0278.
 
 /**
  * Resolve a managed user email to its user id.
@@ -6738,6 +6671,45 @@ export async function listCapabilityCatalogItems(
       const exposure = catalogExposureState(row, installationByCapabilityId.get(row.id) ?? null);
       return exposure === "blocked" ? [] : [mapCapabilityCatalogItem(row, exposure)];
     });
+  });
+}
+
+/**
+ * Declarative OAuth profile carried by a global (registry-imported) catalog
+ * row for an exact MCP URL, or null when no row declares one. Only global
+ * rows are consulted: a workspace-created row must not steer another
+ * workspace's OAuth flow, and the OAuth client applies the profile as a
+ * narrowing constraint over its defaults.
+ *
+ * A stale row's profile still applies deliberately: staleness hides the row
+ * from the browse surface, but dropping its declared fences on staleness
+ * would loosen an ownership or origin constraint. Non-stale rows win when a
+ * duplicate `mcp_url` exists under two provider domains; the remaining id
+ * tie-break is only for determinism. The value is returned raw (whatever the
+ * row carries) so the caller's validation decides how a malformed profile
+ * fails; absence of the key is the only null.
+ */
+export async function getGlobalCatalogOAuthProfile(
+  db: Database,
+  workspaceId: string,
+  mcpUrl: string,
+): Promise<unknown | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        metadata: schema.capabilityCatalogItems.metadata,
+        stale: schema.capabilityCatalogItems.stale,
+      })
+      .from(schema.capabilityCatalogItems)
+      .where(
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          eq(schema.capabilityCatalogItems.mcpUrl, mcpUrl),
+        ),
+      )
+      .orderBy(asc(schema.capabilityCatalogItems.stale), asc(schema.capabilityCatalogItems.id));
+    const row = rows.find((candidate) => candidate.metadata.oauthProfile !== undefined);
+    return row === undefined ? null : (row.metadata.oauthProfile ?? null);
   });
 }
 
@@ -15272,7 +15244,7 @@ export async function readVariableSetSecretAtomically(
   if ((input.variableSetId === undefined) === (input.variableSetName === undefined)) {
     throw new Error("exactly one variableSetId or variableSetName is required");
   }
-  return await withRlsContext(
+  const outcome = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -15316,7 +15288,35 @@ export async function readVariableSetSecretAtomically(
           });
         } catch (error) {
           if (input.actor.kind === "agent_attempt") {
-            throw new VariableSetSecretReadAuthorityError();
+            // Only an actual authority denial (42501) is durable denial
+            // evidence. A transient failure (deadlock, timeout, missing row)
+            // keeps the typed rejection but must not fabricate a denial fact.
+            if (nestedPostgresSqlState(error) !== "42501") {
+              return DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED;
+            }
+            // The denied read was a savepoint; this outer transaction is
+            // alive, so the metadata-only denial fact commits with it while
+            // the typed rejection still reaches the caller (thrown outside
+            // the transaction callback so the audit row survives).
+            await tx.insert(schema.auditEvents).values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              action: "variable_set.secret.read.denied",
+              targetType: "workspace_variable_set",
+              targetId: input.variableSetId ?? input.variableSetName ?? "unresolved",
+              metadata: {
+                outcome: "denied",
+                name: input.name,
+                actorKind: input.actor.kind,
+                sessionId: input.actor.sessionId,
+                turnId: input.actor.turnId,
+                attemptId: input.actor.attemptId,
+                executionGeneration: input.actor.executionGeneration,
+              },
+              metadataCodecVersion: 1,
+            });
+            return DENIED_VARIABLE_SET_SECRET_READ;
           }
           if (nestedPostgresSqlState(error) === "P0002") {
             return null;
@@ -15335,7 +15335,19 @@ export async function readVariableSetSecretAtomically(
         };
       }),
   );
+  if (
+    outcome === DENIED_VARIABLE_SET_SECRET_READ ||
+    outcome === DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED
+  ) {
+    throw new VariableSetSecretReadAuthorityError();
+  }
+  return outcome;
 }
+
+const DENIED_VARIABLE_SET_SECRET_READ = Symbol("denied-variable-set-secret-read");
+const DENIED_VARIABLE_SET_SECRET_READ_UNRECORDED = Symbol(
+  "denied-variable-set-secret-read-unrecorded",
+);
 
 export async function updateVariableSet(
   db: Database,
@@ -17488,6 +17500,82 @@ export async function getScheduledVariableSetExpectedGenerationForAttempt(
  * activity that materializes a sandbox for a run whose session carries an
  * variableSet attachment. Do not call from API routes: values are write-only.
  */
+/**
+ * Live session authority epoch, for stamping viewer-facing claims (stream
+ * tokens, viewer holders). Identity/epoch only; NULL when the session is not
+ * visible in this workspace.
+ */
+export async function getSessionAuthorityEpoch(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<number | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ epoch: number }>(
+        scopedDb,
+        sql`select authority_epoch::int as epoch from sessions
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and id = ${input.sessionId}`,
+      );
+      return row?.epoch ?? null;
+    },
+  );
+}
+
+/**
+ * Mint-time live-authority recheck for a human viewer subject (0281). True
+ * when the subject currently holds workspace authority the same way the
+ * route-time access builder derives it: a `workspace_memberships` row whose
+ * owning organization membership (when one exists) is active, or an active
+ * organization membership whose personal-workspace pointer is exactly this
+ * workspace (managed personal workspaces deliberately have no membership
+ * row). Never infers authority any other way; a deleted membership row and a
+ * suspended/revoked organization membership are both false.
+ */
+export async function subjectHasLiveWorkspaceAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [membershipRow] = await rawRows<{ present: number }>(
+        scopedDb,
+        sql`select 1 as present from workspace_memberships
+          where subject_id = ${input.subjectId}
+            and workspace_id = ${input.workspaceId}
+          limit 1`,
+      );
+      const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_self_organization_memberships(${input.subjectId}) as result`,
+      );
+      const organizationMemberships = OrganizationMember.array().parse(
+        organizationMembershipResult?.result ?? [],
+      );
+      const selfOrganizationMembership = organizationMemberships.find(
+        (organizationMembership) => organizationMembership.organizationId === input.accountId,
+      );
+      if (membershipRow) {
+        // Mirror the access builder's inactive-organization filter: a
+        // persisted membership row is dead while its organization membership
+        // is suspended/revoked. A subject with no organization membership at
+        // all (legacy/standalone) keeps its persisted row's authority.
+        return !selfOrganizationMembership || selfOrganizationMembership.status === "active";
+      }
+      return (
+        selfOrganizationMembership?.status === "active" &&
+        selfOrganizationMembership.personalWorkspaceId === input.workspaceId
+      );
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {
@@ -17504,7 +17592,14 @@ export async function getVariableSetValuesForRun(
           executionGeneration: number;
           initiatingHumanSubjectId?: string | null;
         }
-      | { kind: "session_attach"; sessionId: string };
+      | {
+          kind: "session_attach";
+          sessionId: string;
+          /** The authenticated route subject driving the attach (0282); null
+           *  records the explicit legacy sentinel `service:session`. */
+          subjectId: string | null;
+          initiatingHumanSubjectId?: string | null;
+        };
   },
 ): Promise<{
   variableSet: {
@@ -17516,7 +17611,101 @@ export async function getVariableSetValuesForRun(
   };
   values: Record<string, string>;
 } | null> {
+  try {
+    return await getVariableSetValuesForRunInTransaction(db, input);
+  } catch (error) {
+    // Denials RAISE inside the SECURITY DEFINER seam, so their transaction -
+    // including any audit row it could have written - rolls back by design.
+    // Record the denial fact from out here in a fresh transaction instead:
+    // metadata-only, content-free, never weakening the fail-closed contract.
+    if (nestedPostgresSqlState(error) === "42501") {
+      await recordVariableSetDenialAudit(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        action: "variable_set.materialize.denied",
+        variableSetId: input.variableSetId,
+        subjectId:
+          input.authority.kind === "agent_attempt"
+            ? input.authority.subjectId
+            : (input.authority.subjectId ?? "service:session"),
+        ...(input.authority.kind === "agent_attempt"
+          ? {
+              sessionId: input.authority.sessionId,
+              turnId: input.authority.turnId,
+              attemptId: input.authority.attemptId,
+              executionGeneration: input.authority.executionGeneration,
+            }
+          : { sessionId: input.authority.sessionId }),
+      }).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function recordVariableSetDenialAudit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    action: string;
+    variableSetId?: string;
+    subjectId: string;
+    sessionId?: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
+    name?: string;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: input.action,
+        targetType: "workspace_variable_set",
+        targetId: input.variableSetId ?? "unresolved",
+        metadata: {
+          outcome: "denied",
+          ...(input.variableSetId ? { variableSetId: input.variableSetId } : {}),
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+          ...(input.executionGeneration !== undefined
+            ? { executionGeneration: input.executionGeneration }
+            : {}),
+        },
+        metadataCodecVersion: 1,
+      });
+    },
+  );
+}
+
+async function getVariableSetValuesForRunInTransaction(
+  db: Database,
+  input: Parameters<typeof getVariableSetValuesForRun>[1],
+): ReturnType<typeof getVariableSetValuesForRun> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    if (input.authority.kind === "session_attach") {
+      // 0282: the seam reads the request subject + causal human from the
+      // standard context GUCs and records the materialization audit fact. A
+      // null subject explicitly clears the GUC so a reused transaction handle
+      // can never attribute this materialization to an earlier subject.
+      if (input.authority.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.authority.subjectId);
+      } else {
+        await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+      }
+      if (input.authority.initiatingHumanSubjectId) {
+        await scopedDb.execute(sql`select set_config(
+          'opengeni.initiating_human_subject_id',
+          ${input.authority.initiatingHumanSubjectId}, true)`);
+      }
+    }
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
       await scopedDb.execute(sql`select set_config(
@@ -17668,7 +17857,14 @@ export async function loadVariableSetForRun(
           executionGeneration: number;
           initiatingHumanSubjectId?: string | null;
         }
-      | { kind: "session_attach"; sessionId: string };
+      | {
+          kind: "session_attach";
+          sessionId: string;
+          /** The authenticated route subject driving the attach (0282); null
+           *  records the explicit legacy sentinel `service:session`. */
+          subjectId: string | null;
+          initiatingHumanSubjectId?: string | null;
+        };
   },
 ): Promise<VariableSetForRun | null> {
   if (!input.variableSetId) {
@@ -23946,7 +24142,13 @@ export type BeginConnectorActionExecutionResult =
   | {
       allowed: false;
       managed: true;
-      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      reason:
+        | "approval_required"
+        | "blocked"
+        | "rejected"
+        | "already_executed"
+        | "uncertain_retry"
+        | "not_executed";
       requestId: string;
       actionFingerprint: string;
     };
@@ -24834,7 +25036,9 @@ export async function beginConnectorActionExecution(
               ? "rejected"
               : row.status === "blocked"
                 ? "blocked"
-                : "already_executed";
+                : row.status === "failed"
+                  ? "not_executed"
+                  : "already_executed";
         return {
           allowed: false,
           managed: true,
@@ -24853,7 +25057,7 @@ export async function completeConnectorActionExecution(
     workspaceId: string;
     requestId: string;
     attemptId: string;
-    outcome: "completed" | "uncertain";
+    outcome: "completed" | "uncertain" | "not_executed";
   },
 ): Promise<void> {
   await withRlsContext(
@@ -24874,14 +25078,20 @@ export async function completeConnectorActionExecution(
           .for("update")
           .limit(1);
         if (!existing) throw new Error("Connector action request not found for completion");
-        if (existing.status === input.outcome) return;
+        // A not-executed completion is a terminal failure whose provider
+        // request never happened; it keeps the existing status vocabulary.
+        // Reaching the terminal status is idempotent even when a concurrent
+        // begin already settled the row with a different uncertain outcome
+        // (retry_after_execution_started).
+        const terminalStatus = input.outcome === "not_executed" ? "failed" : input.outcome;
+        if (existing.status === terminalStatus) return;
         if (existing.status !== "executing") {
           throw new Error(`Connector action request cannot complete from ${existing.status}`);
         }
         const [row] = await tx
           .update(schema.connectorActionRequests)
           .set({
-            status: input.outcome,
+            status: terminalStatus,
             outcome: input.outcome,
             executionFinishedAt: new Date(),
             updatedAt: new Date(),
@@ -24894,7 +25104,9 @@ export async function completeConnectorActionExecution(
           action:
             input.outcome === "completed"
               ? "connector.action.execution_completed"
-              : "connector.action.execution_uncertain",
+              : input.outcome === "not_executed"
+                ? "connector.action.execution_not_executed"
+                : "connector.action.execution_uncertain",
           subjectId: row.initiatorSubjectId,
           extra: { outcome: input.outcome },
         });
@@ -32131,6 +32343,12 @@ export interface AcquireLeaseInput {
   // (viewer). A workflow-local activity id is not a valid turn holder id.
   holderId: string;
   subjectId?: string | null; // the attributing session within the group
+  /** Viewer holders only (0281): the authenticated viewer subject recorded on
+   *  the holder row - identity only, never a secret value. */
+  viewerSubjectId?: string;
+  /** Viewer holders only (0281): the session authority epoch observed at
+   *  attach, mirrored into the scoped stream token's claims. */
+  viewerAuthorityEpoch?: number;
   backend: string; // sessions.sandbox_backend
   os?: string; // default 'linux'
   // The container image this run resolves (Modal image ref / docker image). Stamped on
@@ -32900,13 +33118,38 @@ async function upsertLeaseHolder(
   kind: LeaseHolderKind,
   holderId: string,
   subjectId: string | null,
+  viewerAuthority: { subjectId: string | null; authorityEpoch: number | null } = {
+    subjectId: null,
+    authorityEpoch: null,
+  },
 ): Promise<void> {
   await tx.execute(sql`
     insert into sandbox_lease_holders
-      (account_id, workspace_id, lease_id, kind, holder_id, subject_id, last_heartbeat_at)
-    values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId}, now())
+      (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at)
+    values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId},
+      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now())
     on conflict (lease_id, kind, holder_id)
-      do update set last_heartbeat_at = now()
+      do update set last_heartbeat_at = now(),
+        viewer_subject_id = coalesce(excluded.viewer_subject_id,
+          sandbox_lease_holders.viewer_subject_id),
+        -- The recorded (subject, epoch) pair stays coherent. Same subject (or
+        -- a claimless rolling-window attach): the epoch is monotone - a
+        -- re-acquire may raise it but never lower it. A DIFFERENT subject
+        -- reusing the holder id starts a fresh pair; carrying the previous
+        -- subject's higher epoch would misattribute authority evidence.
+        viewer_authority_epoch = case
+          when excluded.viewer_subject_id is not null
+            and sandbox_lease_holders.viewer_subject_id is not null
+            and excluded.viewer_subject_id
+              is distinct from sandbox_lease_holders.viewer_subject_id
+            then excluded.viewer_authority_epoch
+          else greatest(
+            coalesce(excluded.viewer_authority_epoch,
+              sandbox_lease_holders.viewer_authority_epoch),
+            coalesce(sandbox_lease_holders.viewer_authority_epoch,
+              excluded.viewer_authority_epoch))
+        end
   `);
 }
 
@@ -33091,7 +33334,10 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+            subjectId: input.viewerSubjectId ?? null,
+            authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          });
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
           return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
         }
@@ -33124,7 +33370,10 @@ async function acquireLeaseOnce(
           where id = ${row.id} and liveness = 'cold'
           returning id
         `);
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+            subjectId: input.viewerSubjectId ?? null,
+            authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          });
           const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
           // casRows.length === 0 cannot happen under the held row lock (defensive):
           // a lost CAS means a sibling flipped it first, so we attach.
@@ -33156,7 +33405,10 @@ async function acquireLeaseOnce(
         // collapse expires_at and let the warming-death reaper reset/drain the
         // lease before instance_id is recorded (F1). A WARM attach uses the plain
         // TTL as before.
-        await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+        await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+          subjectId: input.viewerSubjectId ?? null,
+          authorityEpoch: input.viewerAuthorityEpoch ?? null,
+        });
         const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
         const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
         return { role: "attached" as const, lease: mapLeaseRow(updated) };
@@ -37553,7 +37805,13 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "capture_in_progress"
       | "admission_fenced"
       | "operation_invalid"
-      | "generation_exhausted",
+      | "generation_exhausted"
+      // The writer predates migration 0277 and therefore carries no recorded
+      // authority. Nothing may invent one, so a NEW mutation is refused; the
+      // live provider process behind it is deliberately left running.
+      | "authority_unattributed"
+      // The exact grant identity behind this writer is no longer active.
+      | "authority_revoked",
     message: string,
   ) {
     super(message);
@@ -37732,7 +37990,9 @@ export class SandboxRetainedProcessPromotionFencedError extends SandboxWorkspace
       | "lease_fenced"
       | "route_fenced"
       | "process_fenced"
-      | "admission_fenced",
+      | "admission_fenced"
+      | "authority_unattributed"
+      | "authority_revoked",
     message: string,
     public readonly process: SandboxRetainedProcess,
   ) {
@@ -37749,7 +38009,9 @@ type SandboxWorkspaceMutationSettlementResult =
         | "holder_fenced"
         | "lease_fenced"
         | "route_fenced"
-        | "process_fenced";
+        | "process_fenced"
+        | "authority_unattributed"
+        | "authority_revoked";
       detail: string;
     };
 
@@ -37783,6 +38045,26 @@ type DirectWorkspaceMutationAuthority = {
   routeKind: "active";
   routeTargetId: string | null;
   routeEpoch: number;
+  /** The exact authenticated principal that drove this API request. A direct
+   * writer has no frozen turn snapshot, so this is its only causal identity and
+   * it is required: an unattributed direct mutation is refused. */
+  initiatorSubjectId: string;
+};
+
+/** Identity-and-epoch attribution recorded with an admitted workspace writer
+ * (migration 0277). Never contains a secret value. */
+type AdmittedWorkspaceMutationAuthority = {
+  /** `legacy_unattributed` is honest, not broken: a turn frozen before
+   * migration 0096 has no causal initiator to copy, and inventing one would be
+   * exactly the ownership inference this authority model forbids. */
+  initiatorKind: "subject" | "service" | "legacy_unattributed";
+  initiatorSubjectId: string;
+  initiatingHumanSubjectId: string | null;
+  initiatorOrganizationMembershipId: string | null;
+  initiatorAuthorizationRevision: number | null;
+  authorityEpoch: number;
+  authorityVisibility: "user_private" | "workspace_shared";
+  authorityOwnerOrganizationMembershipId: string | null;
 };
 
 type ProcessWorkspaceMutationAuthority = {
@@ -37817,6 +38099,7 @@ type LockedWorkspaceMutationAuthority = {
   routeKind: "home" | "active";
   routeTargetId: string | null;
   routeEpoch: number;
+  authority: AdmittedWorkspaceMutationAuthority;
   session: typeof schema.sessions.$inferSelect;
   retainedProcess: typeof schema.sandboxRetainedProcesses.$inferSelect | null;
 };
@@ -37985,6 +38268,117 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/**
+ * Resolve the organization grant identity behind a causal human, and refuse the
+ * operation when that grant has been revoked or suspended.
+ *
+ * `organization_memberships` is unique per (account, subject), so this is an
+ * exact lookup and never a guess. A principal with no membership row at all is
+ * not an organization human (deployment/API-key/local principals): it keeps its
+ * subject attribution and carries no membership, because inventing one would be
+ * exactly the ownership inference this authority model forbids. A `provisioning` membership
+ * is not yet a grant and is likewise not recorded, but it is not a revocation
+ * either and must not fence.
+ */
+async function resolveWorkspaceMutationGrantIdentityTx(
+  tx: Database,
+  input: { accountId: string; humanSubjectId: string | null },
+): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
+  if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
+  // `organization_memberships` has no runtime SELECT (0263). Migration 0277
+  // installs one narrow tenant-fenced SECURITY DEFINER seam that returns only
+  // this identity/status/revision triple.
+  const rows = await tx.execute<{
+    membership_id: string;
+    membership_status: string;
+    authorization_revision: number | string;
+  }>(sql`
+    select membership_id, membership_status, authorization_revision
+    from resolve_workspace_writer_grant_identity(
+      ${input.accountId}::uuid, ${input.humanSubjectId}::text
+    )
+  `);
+  const membership = rows[0];
+  if (!membership) return { membershipId: null, authorizationRevision: null };
+  if (membership.membership_status === "revoked" || membership.membership_status === "suspended") {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_revoked",
+      `Workspace mutation rejected because its organization grant is ${membership.membership_status}`,
+    );
+  }
+  if (membership.membership_status !== "active") {
+    return { membershipId: null, authorizationRevision: null };
+  }
+  return {
+    membershipId: membership.membership_id,
+    authorizationRevision: Number(membership.authorization_revision),
+  };
+}
+
+/** The initiator half, copied verbatim from the accepted turn. A turn frozen
+ * before migration 0096 carries the subject sentinel with the default
+ * `service` kind; that is honestly "no causal initiator", so it is normalized
+ * to the explicit sentinel instead of being promoted to a real one. Turn work
+ * is never refused for this - the attempt fence remains its authority - but
+ * anything the turn retains inherits the honest absence. */
+function frozenTurnInitiator(
+  turn: typeof schema.sessionTurns.$inferSelect,
+): Pick<
+  AdmittedWorkspaceMutationAuthority,
+  "initiatorKind" | "initiatorSubjectId" | "initiatingHumanSubjectId"
+> {
+  const kind = turn.initiatorKind === "subject" ? "subject" : "service";
+  if (turn.initiatorSubjectId === "unattributed-legacy") {
+    return {
+      initiatorKind: "legacy_unattributed",
+      initiatorSubjectId: "unattributed-legacy",
+      initiatingHumanSubjectId: null,
+    };
+  }
+  return {
+    initiatorKind: kind,
+    initiatorSubjectId: turn.initiatorSubjectId,
+    initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+  };
+}
+
+/** The tenancy half of the tuple, read from the exact locked session row. A
+ * direct writer has no frozen snapshot, so the live session IS its authority -
+ * which is also why the private-session owner check below runs here, inside the
+ * same transaction that advances the generation. */
+function directSessionAuthorityTx(
+  session: typeof schema.sessions.$inferSelect,
+  initiatorSubjectId: string,
+  grant: { membershipId: string | null },
+): Pick<
+  AdmittedWorkspaceMutationAuthority,
+  "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+> {
+  const visibility = session.visibility === "user_private" ? "user_private" : "workspace_shared";
+  if (visibility === "user_private") {
+    const ownedBySubject = session.ownerSubjectId === initiatorSubjectId;
+    const ownedByMembership =
+      grant.membershipId !== null && session.ownerOrganizationMembershipId === grant.membershipId;
+    if (!ownedBySubject && !ownedByMembership) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_revoked",
+        "Direct workspace mutation rejected because the request no longer owns this private session",
+      );
+    }
+    if (!session.ownerOrganizationMembershipId) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_revoked",
+        "Direct workspace mutation rejected because the private session has no owning membership",
+      );
+    }
+  }
+  return {
+    authorityEpoch: session.authorityEpoch,
+    authorityVisibility: visibility,
+    authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId,
+  };
+}
+
 async function lockWorkspaceMutationAuthorityTx(
   tx: Database,
   authority: WorkspaceMutationAuthority,
@@ -38023,6 +38417,17 @@ async function lockWorkspaceMutationAuthorityTx(
         "Workspace mutation rejected because its active route moved before admission",
       );
     }
+    // The accepted turn already froze its causal initiator and tenancy tuple;
+    // copy them verbatim so recovery, retry and continuation all record the
+    // same authority. The grant identity below is the one live resolution: it
+    // can fence a frozen human whose membership was since revoked or
+    // suspended, matching the 0263 teardown that cancels work initiated by a
+    // suspended subject.
+    const turnInitiator = frozenTurnInitiator(fence.turn);
+    const turnGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+      accountId: authority.accountId,
+      humanSubjectId: turnInitiator.initiatingHumanSubjectId,
+    });
     return {
       accountId: authority.accountId,
       workspaceId: authority.workspaceId,
@@ -38042,6 +38447,18 @@ async function lockWorkspaceMutationAuthorityTx(
       routeKind: authority.routeKind,
       routeTargetId: authority.routeKind === "home" ? null : authority.routeTargetId,
       routeEpoch,
+      authority: {
+        ...turnInitiator,
+        initiatorOrganizationMembershipId: turnGrant.membershipId,
+        initiatorAuthorizationRevision: turnGrant.authorizationRevision,
+        authorityEpoch: fence.attempt.authorityEpoch,
+        authorityVisibility:
+          fence.attempt.authorityVisibility === "user_private"
+            ? "user_private"
+            : "workspace_shared",
+        authorityOwnerOrganizationMembershipId:
+          fence.attempt.authorityOwnerOrganizationMembershipId,
+      },
       session: fence.session,
       retainedProcess: null,
     };
@@ -38074,6 +38491,25 @@ async function lockWorkspaceMutationAuthorityTx(
         "Direct workspace mutation rejected because its active route moved before admission",
       );
     }
+    const initiatorSubjectId = authority.initiatorSubjectId.trim();
+    if (initiatorSubjectId.length === 0 || initiatorSubjectId === "unattributed-legacy") {
+      throw new SandboxWorkspaceMutationFencedError(
+        "authority_unattributed",
+        "Direct workspace mutation rejected because it carries no causal initiator",
+      );
+    }
+    // A direct writer has no frozen snapshot, so its grant is re-proved here,
+    // in the same transaction that advances the generation: a revocation
+    // committed before this statement fences the operation instead of relying
+    // on stale HTTP authorization. A revocation committing after this
+    // lock-free read still races the admission commit; the recorded grant
+    // identity and observed revision exist so the offboarding teardown and a
+    // later revocation sweep can find and settle exactly those writers.
+    const directGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+      accountId: authority.accountId,
+      humanSubjectId: initiatorSubjectId,
+    });
+    const directTenancy = directSessionAuthorityTx(session, initiatorSubjectId, directGrant);
     return {
       accountId: authority.accountId,
       workspaceId: authority.workspaceId,
@@ -38093,6 +38529,14 @@ async function lockWorkspaceMutationAuthorityTx(
       routeKind: "active",
       routeTargetId: authority.routeTargetId,
       routeEpoch: authority.routeEpoch,
+      authority: {
+        initiatorKind: "subject",
+        initiatorSubjectId,
+        initiatingHumanSubjectId: directGrant.membershipId ? initiatorSubjectId : null,
+        initiatorOrganizationMembershipId: directGrant.membershipId,
+        initiatorAuthorizationRevision: directGrant.authorizationRevision,
+        ...directTenancy,
+      },
       session,
       retainedProcess: null,
     };
@@ -38123,6 +38567,24 @@ async function lockWorkspaceMutationAuthorityTx(
       "Workspace mutation rejected because the retained process scope is stale",
     );
   }
+  // A retained process outlives the request or turn that started it, so its
+  // frozen authority is the only thing that can license a further write. It is
+  // never re-derived: an unattributed (pre-0277) process is refused rather than
+  // adopted, and the running provider process is deliberately left alone.
+  const processAuthority = assertRetainedProcessAuthority(process);
+  const processGrant = await resolveWorkspaceMutationGrantIdentityTx(tx, {
+    accountId: authority.accountId,
+    humanSubjectId: processAuthority.initiatingHumanSubjectId,
+  });
+  if (
+    processAuthority.authorityEpoch !== session.authorityEpoch ||
+    processAuthority.authorityVisibility !== session.visibility
+  ) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_revoked",
+      "Workspace mutation rejected because the retained process authority no longer matches its session",
+    );
+  }
   return {
     accountId: authority.accountId,
     workspaceId: authority.workspaceId,
@@ -38142,8 +38604,49 @@ async function lockWorkspaceMutationAuthorityTx(
     routeKind: process.routeKind as "home" | "active",
     routeTargetId: process.routeTargetId,
     routeEpoch: process.routeEpoch,
+    authority: {
+      ...processAuthority,
+      // A frozen grant identity is never replaced. A process admitted before
+      // its human's membership row existed may backfill it from the live
+      // unique (account, subject) row - memberships are never deleted or
+      // recreated, so the id cannot diverge from the frozen human - and the
+      // observed revision refreshes because it is evidence, not a fence.
+      initiatorOrganizationMembershipId:
+        processAuthority.initiatorOrganizationMembershipId ?? processGrant.membershipId,
+      initiatorAuthorizationRevision:
+        processGrant.authorizationRevision ?? processAuthority.initiatorAuthorizationRevision,
+    },
     session,
     retainedProcess: process,
+  };
+}
+
+/** Read the frozen authority of a retained process, refusing a pre-0277 row.
+ * The refusal is a write fence only: the caller never terminates the process.
+ *
+ * The MISSING TENANCY HALF is what marks a pre-0277 row. A recorded but
+ * `legacy_unattributed` initiator is not the same thing: that process still has
+ * a real session epoch and visibility to be fenced against, and refusing it
+ * would fence ordinary work on sessions whose turns predate migration 0096. */
+function assertRetainedProcessAuthority(
+  process: typeof schema.sandboxRetainedProcesses.$inferSelect,
+): AdmittedWorkspaceMutationAuthority {
+  if (process.authorityEpoch === null || process.authorityVisibility === null) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "authority_unattributed",
+      "Workspace mutation rejected because the retained process predates recorded authority; " +
+        "start a new command - the running process is untouched",
+    );
+  }
+  return {
+    initiatorKind: process.initiatorKind,
+    initiatorSubjectId: process.initiatorSubjectId,
+    initiatingHumanSubjectId: process.initiatingHumanSubjectId,
+    initiatorOrganizationMembershipId: process.initiatorOrganizationMembershipId,
+    initiatorAuthorizationRevision: process.initiatorAuthorizationRevision,
+    authorityEpoch: process.authorityEpoch,
+    authorityVisibility: process.authorityVisibility,
+    authorityOwnerOrganizationMembershipId: process.authorityOwnerOrganizationMembershipId,
   };
 }
 
@@ -38206,7 +38709,11 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             actor_kind, actor_id, turn_id, attempt_id, execution_generation,
             holder_kind, holder_id, lease_epoch, provider_backend,
             provider_instance_id, route_kind, route_target_id, route_epoch,
-            workspace_generation, operation
+            workspace_generation, operation,
+            initiator_kind, initiator_subject_id, initiating_human_subject_id,
+            initiator_organization_membership_id, initiator_authorization_revision,
+            authority_epoch, authority_visibility,
+            authority_owner_organization_membership_id
           )
           select
             ${locked.accountId}, ${locked.workspaceId}, advanced.id,
@@ -38215,7 +38722,13 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             ${locked.executionGeneration}, ${locked.holderKind}, ${locked.holderId},
             ${locked.expectedEpoch}, advanced.backend, ${locked.expectedInstanceId},
             ${locked.routeKind}, ${locked.routeTargetId}, ${locked.routeEpoch},
-            advanced.workspace_generation, ${operation}
+            advanced.workspace_generation, ${operation},
+            ${locked.authority.initiatorKind}, ${locked.authority.initiatorSubjectId},
+            ${locked.authority.initiatingHumanSubjectId},
+            ${locked.authority.initiatorOrganizationMembershipId},
+            ${locked.authority.initiatorAuthorizationRevision},
+            ${locked.authority.authorityEpoch}, ${locked.authority.authorityVisibility},
+            ${locked.authority.authorityOwnerOrganizationMembershipId}
           from advanced
           returning id, lease_id, sandbox_group_id, session_id, actor_kind,
             actor_id, holder_kind, holder_id, lease_epoch, provider_backend,
@@ -38403,7 +38916,10 @@ export async function advanceWorkspaceGeneration(
 
 /** Admit an API/direct mutation under an exact request holder and active route.
  * Direct actors intentionally have no turn identity and can never inherit the
- * attempt-quiescence archive fallback. */
+ * attempt-quiescence archive fallback. `initiatorSubjectId` is the exact
+ * authenticated principal behind the request and is required: it is this
+ * writer's only causal identity, and it is re-proved against the live grant
+ * inside the admission transaction. */
 export async function advanceWorkspaceGenerationForDirectRequest(
   db: Database,
   input: {
@@ -38412,6 +38928,7 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     sessionId: string;
     requestId: string;
     holderId: string;
+    initiatorSubjectId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -38475,6 +38992,16 @@ type AdmissionIdentityRow = {
   route_epoch: number | string;
   workspace_generation: number | string;
   operation: string;
+  // Migration 0277 attribution. A row admitted by a pre-0277 writer carries the
+  // sentinel and null epochs; it is never upgraded in place.
+  initiator_kind: "subject" | "service" | "legacy_unattributed";
+  initiator_subject_id: string;
+  initiating_human_subject_id: string | null;
+  initiator_organization_membership_id: string | null;
+  initiator_authorization_revision: number | string | null;
+  authority_epoch: number | string | null;
+  authority_visibility: "user_private" | "workspace_shared" | null;
+  authority_owner_organization_membership_id: string | null;
   provider_outcome: "resolved" | "rejected" | "retained" | null;
   settled_at: Date | string | null;
 } & Record<string, unknown>;
@@ -38623,7 +39150,12 @@ function workspaceMutationAuthorityFailure(
     error.code !== "holder_fenced" &&
     error.code !== "lease_fenced" &&
     error.code !== "route_fenced" &&
-    error.code !== "process_fenced"
+    error.code !== "process_fenced" &&
+    // A physically yielded provider process must still be promoted durably when
+    // its authority turns out to be unattributed or revoked; the output is
+    // rejected after commit instead of stranding a running process.
+    error.code !== "authority_unattributed" &&
+    error.code !== "authority_revoked"
   ) {
     return null;
   }
@@ -38851,6 +39383,7 @@ export async function verifyDirectWorkspaceMutationSettlement(
     sessionId: string;
     requestId: string;
     holderId: string;
+    initiatorSubjectId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
@@ -38919,6 +39452,7 @@ export async function retainWorkspaceMutationProcess(
           kind: "direct";
           requestId: string;
           holderId: string;
+          initiatorSubjectId: string;
           sandboxGroupId: string;
           expectedEpoch: number;
           expectedInstanceId: string;
@@ -38971,6 +39505,7 @@ export async function retainWorkspaceMutationProcess(
           sessionId: input.sessionId,
           requestId: input.owner.requestId,
           holderId: input.owner.holderId,
+          initiatorSubjectId: input.owner.initiatorSubjectId,
           sandboxGroupId: input.owner.sandboxGroupId,
           expectedEpoch: input.owner.expectedEpoch,
           expectedInstanceId: input.owner.expectedInstanceId,
@@ -39136,6 +39671,24 @@ export async function retainWorkspaceMutationProcess(
               routeTargetId: admission.route_target_id,
               routeEpoch: Number(admission.route_epoch),
               providerSessionId: input.providerSessionId,
+              // The retained process inherits the EXACT authority admitted with
+              // its parent operation. It is copied, never re-resolved: the
+              // process may outlive the request or turn behind it, and a later
+              // membership or visibility change must fence it rather than
+              // silently re-own it.
+              initiatorKind: admission.initiator_kind,
+              initiatorSubjectId: admission.initiator_subject_id,
+              initiatingHumanSubjectId: admission.initiating_human_subject_id,
+              initiatorOrganizationMembershipId: admission.initiator_organization_membership_id,
+              initiatorAuthorizationRevision:
+                admission.initiator_authorization_revision === null
+                  ? null
+                  : Number(admission.initiator_authorization_revision),
+              authorityEpoch:
+                admission.authority_epoch === null ? null : Number(admission.authority_epoch),
+              authorityVisibility: admission.authority_visibility,
+              authorityOwnerOrganizationMembershipId:
+                admission.authority_owner_organization_membership_id,
               state: "active",
             })
             .returning();

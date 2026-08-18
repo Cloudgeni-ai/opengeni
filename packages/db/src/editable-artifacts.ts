@@ -11,9 +11,11 @@ import {
   decodeEditableArtifactSerializedCommit,
 } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import {
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES,
   EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
 } from "@opengeni/contracts/editable-artifacts";
+import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-versions";
 import { sql } from "drizzle-orm";
 
 import { rawRows, type Database, withRlsContext } from "./database";
@@ -331,7 +333,7 @@ export type PersistedEditableArtifactLiveHead =
 
 export type PersistedEditableArtifactLiveResume =
   | Readonly<{
-      modality?: "spreadsheet";
+      modality: "spreadsheet";
       localCursor: number | null;
       localStateHash: string | null;
       localCausalFrontier: PersistedEditableArtifactCausalFrontier;
@@ -354,6 +356,7 @@ export type PersistedEditableArtifactLiveSnapshot =
       causalFrontier: PersistedEditableArtifactCausalFrontier;
       digest: string;
       operationProtocolVersion: number;
+      snapshotVersion: number;
       kernelVersion: string;
       modelSchemaVersion: number;
       bytes: Uint8Array;
@@ -1841,11 +1844,9 @@ export class PostgresEditableArtifactLiveReadStore {
     scope: PersistedEditableArtifactScope;
     artifactId: string;
     resume: PersistedEditableArtifactLiveResume;
-    protocolVersion: number;
   }): Promise<PersistedEditableArtifactLiveBootstrap> {
     const scope = validateScope(input.scope);
     const artifactId = validateStableId(input.artifactId, "artifact id");
-    validateInteger(input.protocolVersion, "live protocol version", 1);
     const resume = validateLiveResume(input.resume);
     const authority = await withRlsContext(
       this.db,
@@ -2103,6 +2104,7 @@ export class PostgresEditableArtifactLiveReadStore {
           modality: snapshot.modality,
           causalFrontier: snapshot.coveredCausalFrontier,
           operationProtocolVersion: snapshot.operationProtocolVersion,
+          snapshotVersion: snapshot.crdtStateVersion,
         })
       : Object.freeze({
           ...common,
@@ -2872,7 +2874,7 @@ function validateLiveResume(
   input: PersistedEditableArtifactLiveResume,
 ): NormalizedPersistedEditableArtifactLiveResume {
   if (!isPlainRecord(input)) throw new TypeError("Editable artifact live resume is invalid");
-  const modality = input.modality ?? "spreadsheet";
+  const modality = input.modality;
   if (modality !== "spreadsheet" && modality !== "document" && modality !== "presentation") {
     throw new TypeError("Editable artifact live resume modality is invalid");
   }
@@ -3443,7 +3445,7 @@ function committedTransactionFromRow(
     } catch (error) {
       throw new EditableArtifactPersistenceError(
         "corrupt_history",
-        "Stored canonical committed transaction is not a valid OGACO001 envelope",
+        "Stored canonical committed transaction is not a valid OGACO002 envelope",
         { cause: error },
       );
     }
@@ -4144,7 +4146,7 @@ function validateCommittedTransactionProjection(
     try {
       summary = decodeCommittedTransactionSummary(transaction.committedTransactionBytes);
     } catch (error) {
-      throw new TypeError("Canonical committed transaction is not a valid OGACO001 envelope", {
+      throw new TypeError("Canonical committed transaction is not a valid OGACO002 envelope", {
         cause: error,
       });
     }
@@ -4159,7 +4161,7 @@ function validateCommittedTransactionProjection(
       !sameFrontier(summary.resolvedCausalBase, resolvedCausalBase) ||
       !sameFrontier(summary.resultingCausalFrontier, resultingCausalFrontier)
     ) {
-      throw new TypeError("Canonical OGACO001 bytes disagree with their durable projection");
+      throw new TypeError("Canonical OGACO002 bytes disagree with their durable projection");
     }
     return;
   }
@@ -4681,6 +4683,10 @@ function validateLiveTicketRecord(
     throw new TypeError("Live ticket lifetime must be 1-60 seconds");
   }
   const modality = validateLiveTicketModality(input.modality);
+  const protocolVersion = validateInteger(input.protocolVersion, "live protocol version", 1);
+  if (protocolVersion !== EDITABLE_ARTIFACT_LIVE_WIRE_VERSION) {
+    throw new TypeError("Live ticket protocol version is unsupported");
+  }
   return Object.freeze({
     tokenDigest: validateHash(input.tokenDigest, "live ticket digest"),
     scope: validateScope(input.scope),
@@ -4688,7 +4694,7 @@ function validateLiveTicketRecord(
     modality,
     actor: validateLiveTicketActor(input.actor),
     allowEdit: validateBoolean(input.allowEdit, "live ticket allowEdit"),
-    protocolVersion: validateInteger(input.protocolVersion, "live protocol version", 1),
+    protocolVersion,
     issuedAt,
     expiresAt,
   });
@@ -4984,9 +4990,13 @@ function validateCanonicalIntentBytes(value: unknown, requestHashInput: unknown)
   return bytes;
 }
 
-function validateIntentProtocolVersion(value: unknown): 1 {
-  if (value !== 1) throw new TypeError("Intent protocol version must be 1 for OGATX001");
-  return 1;
+function validateIntentProtocolVersion(
+  value: unknown,
+): typeof EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION {
+  if (value !== EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION) {
+    throw new TypeError("Intent protocol version is unsupported for current OGATX001");
+  }
+  return EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION;
 }
 
 function validateClientTransactionId(value: unknown): string {

@@ -1,5 +1,74 @@
 # @opengeni/contracts
 
+## 1.3.0
+
+### Minor Changes
+
+- 4c2d958: Google Drive publication freezes its exact output destination on the accepted delegation, so a later connection-settings change fails an already-accepted turn's publication closed instead of silently redirecting it. Every publication sits behind exactly one durable execute-once connector fence (the attempt connector-action wrapper for model callers, the tool's own registration for Codemode callers): a failure before the first mutating provider request settles not_executed with a retry-safe message, while a failure after it settles uncertain and surfaces the unknown outcome.
+- 4c2d958: Scoped stream tokens (`ogs_`, 120 s TTL unchanged) now carry the authenticated viewer subject and the session's live authority epoch (migration 0281). The viewer lease holder records the same pair monotonically, the API re-verifies a human viewer's current workspace membership at every mint and degrades the stream to `transport:null` when membership is gone, and the selfhosted relay fences an attach whose authority claim is below the channel's recorded floor. Pre-0281 tokens keep working during the rolling window and enforce nothing new.
+
+## 1.2.0
+
+### Minor Changes
+
+- ca75ed9: Add the governed-learning activation controller with exact authority revalidation, destination-native workspace activation, immutable content-free receipts, and supersession-safe append-only undo.
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- c297fc0: Add permission-first Knowledge search selection facts, pre-window relevance floors, deterministic ranking, search/browse response budgets, exact textual-content deduplication, freshness-aware ordering, revision-fenced cursors, and authorization-rechecked document/chunk traversal links.
+- c297fc0: Add the permission-filtered Company Brain read and deterministic OKF export
+  surface, subject-scoped full guidance history, and the Company Brain discovery
+  and export experience.
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- e9aabaa: Wire the governed-learning evaluator and activation controller into the Company Brain learning-policy router. Ways-of-working proposals now record a content-free decision receipt after they commit; under `automatic`, an eligible preference decision is activated through the destination lifecycle (instruction policy keeps a human activation boundary). The route receipt gains `learning`, `learningFailure`, and activation receipt/destination facts; `activation.activated` is no longer always `false`.
+- 1f860f0: Add durable publication and authenticated download support for session sandbox files. Agents can publish bounded `/workspace` outputs through a first-party tool, raw sandbox links can recover through the session API, retained file receipts render with downloads, and retained screenshots expose an explicit download action.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 22c0c21: Add the managed-human organization invitation, role, suspension, offboarding,
+  and retention lifecycle with revision-fenced APIs and SDK methods. Self
+  invitation history is exposed only through bounded keyset pages, and acceptance
+  resolves one exact subject-bound invitation. Already-open session,
+  workspace-control, live, and interaction streams periodically recheck current
+  membership authority and close after revocation. A bounded operator command
+  commits expired offboarded personal database deletion together with a closed,
+  exact-key cleanup-obligation set before deleting external objects. Provider
+  failures retry only unfinished obligations, retained references abort before
+  external bytes are touched, File bucket identity stays frozen across retries,
+  and immutable lifecycle evidence survives cleanup.
+- 4eb7abd: `remember` with `lane: knowledge` now returns `confirmation_required` bound to the Knowledge claim, and `remember_confirm` (`claimId`) approves the claim through the Knowledge review lifecycle after the exact initiating human answered the bound canonical question with `save` (rolling migration 0274, `confirm_remember_knowledge_claim`, immutable `remember_knowledge_confirmation_receipts`). `remember_confirm` accepts either `proposalId` + `decisionReceiptId` (preference / instruction policy) or `claimId` (knowledge); the confirm receipt carries `claimId` and a `knowledge` activation summary with `undo: knowledge_review`.
+- 89d4ab3: Add the explicit user-directed `remember` / `remember_confirm` agent tools. Content becomes exact task-note evidence promoted through the learning-policy router; a preference activates immediately under `automatic`, Knowledge stays proposal-only, and everything else returns a bound `request_human_input` payload whose `save` answer authorizes activation through the new rolling migration 0272 `activate_human_confirmed_learning_decision` capability (`authority_kind = human_confirmed`, human-input request id recorded on the receipt).
+- 7454580: Retire the legacy Memory V1 `memory_save` agent tool from the default retrieval-only surface: it is now compatibility-only, excluded from the default first-party tool catalog, and registered only when a workspace opts into the `legacy_standing` rollback mode. Agents save user-directed knowledge through `remember` and their own findings through task notes and governed promotion; `memory_search` and `memory_correct` remain.
+- 16cbd7b: Make `retrieval_only` the default Company Brain memory prompt mode. An absent or unrecognized workspace `memoryPromptMode` now removes the broad Memory V1 standing block, excludes legacy preference-kind rows from agent search, and omits the company profile from child prompts; an explicit `legacy_standing` remains the per-workspace rollback opt-out. Rolling migration 0271 applies the same fallback at turn acceptance so frozen snapshots and the contracts resolver agree.
+- 30ba620: Make every accepted scheduled agent occurrence an immutable, credential-free
+  execution snapshot bound to one run, session, scheduled update, logical turn,
+  and attempt chain. Agent tasks accept explicit `connectionAuthorities`
+  (omitted preserves, `[]` clears, an array replaces), execution-affecting edits
+  require the same causal human, `once` grants are consumed exactly once per
+  run, cold reusable sessions converge on one revision-bound materialization
+  receipt, and task deletion becomes a one-way paused tombstone with durable
+  connector cleanup. Create/update requests are byte-bounded at ingress while
+  stored rows stay readable. Migration `0275` is a maintenance cutover.
+- d168b8f: Allow exact scheduled service turns to materialize organization- and workspace-scoped Variable Sets while preserving causal-human and personal-grant checks for user-scoped sets.
+- f72563d: Slack now has exactly two authorities: the personal hosted Slack MCP grant and the OpenGeni workspace bot. The workspace-owned hosted Slack MCP connection is removed: OAuth start, reconnect, the callback fence, and capability enablement reject an explicit non-personal ownership for `https://mcp.slack.com/mcp`, an omitted ownership on that resource defaults to personal, and `listEnabledMcpCapabilityServers` no longer runs a workspace-scoped Slack MCP installation enabled by an earlier release. The bot manifest and canonical bot allowlist gain the bot-token Real-time Search scopes `search:read.public`, `search:read.files`, and `search:read.users` as requested-but-not-required extras; apply them to the Slack app before deploying, since the install URL requests every requested scope. The bot search tool itself is a separate change.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+- c297fc0: Add deterministic governed-learning evaluation over exact accepted policy and evidence authority, with immutable content-free decision receipts and no activation capability.
+
+### Patch Changes
+
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+
 ## 1.1.0
 
 ### Minor Changes

@@ -263,7 +263,7 @@ describe("SDK-backed editable spreadsheet", () => {
 
     expect(fake.applied).toHaveLength(1);
     expect(JSON.parse(JSON.stringify(fake.applied[0]))).toEqual({
-      version: 1,
+      version: 2,
       commands: [
         {
           kind: "cells.set",
@@ -275,7 +275,7 @@ describe("SDK-backed editable spreadsheet", () => {
           anchor: { row: 0, column: 0 },
           rows: 1,
           columns: 1,
-          cells: [{ formula: "=1+2", cached: null }],
+          cells: [{ formula: "=1+2" }],
         },
       ],
     });
@@ -349,7 +349,7 @@ describe("SDK-backed editable spreadsheet", () => {
 
     expect(fake.applied).toHaveLength(1);
     expect(JSON.parse(JSON.stringify(fake.applied[0]))).toEqual({
-      version: 1,
+      version: 2,
       commands: [
         {
           kind: "cells.set",
@@ -361,7 +361,7 @@ describe("SDK-backed editable spreadsheet", () => {
           anchor: { row: 0, column: 0 },
           rows: 2,
           columns: 2,
-          cells: [1, { formula: "=1+1", cached: null }, true, "hello\tworld"],
+          cells: [1, { formula: "=1+1" }, true, "hello\tworld"],
         },
       ],
     });
@@ -392,8 +392,8 @@ function pending(): EditableArtifactPendingTransaction {
     clientTransactionId: "test-transaction",
     requestHash: `sha256:${"a".repeat(64)}`,
     protocolVersion: 1,
-    modelSchemaVersion: 1,
-    commandVersion: 1,
+    modelSchemaVersion: 2,
+    commandVersion: 2,
     replicaId: "1111111111111111",
     replicaCounter: 1,
     previousLocalTransactionId: null,
