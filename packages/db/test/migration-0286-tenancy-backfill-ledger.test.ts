@@ -11,7 +11,7 @@ import {
 } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, migrate, type Database, type DbClient } from "../src";
+import { createDb, migrate, type DbClient } from "../src";
 
 const migrationUrl = new URL("../drizzle/0286_tenancy_backfill_ledger.sql", import.meta.url);
 
@@ -20,7 +20,6 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
-let db: Database;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0286-tenancy-backfill-ledger");
@@ -31,7 +30,6 @@ beforeAll(async () => {
   }
   admin = shared.admin;
   client = createDb(shared.appUrl);
-  db = client.db;
 });
 
 afterAll(async () => {
@@ -184,11 +182,17 @@ describe("migration 0286 tenancy backfill ledger", () => {
     const resourceId = Bun.randomUUIDv7();
     await admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${resourceId}, 'ambiguous_candidate_authority')`;
 
-    await expectRejection(() => admin`
+    await expectRejection(
+      () => admin`
         UPDATE tenancy_backfill_unresolved_rows SET reason_code = 'legacy_shape_unrecognized'
         WHERE receipt_id = ${receiptId}
-      `, /immutable/u);
-    await expectRejection(() => admin`DELETE FROM tenancy_backfill_unresolved_rows WHERE receipt_id = ${receiptId}`, /append-only/u);
+      `,
+      /immutable/u,
+    );
+    await expectRejection(
+      () => admin`DELETE FROM tenancy_backfill_unresolved_rows WHERE receipt_id = ${receiptId}`,
+      /append-only/u,
+    );
 
     await admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 5, 2, 'completed')`;
     const [settled] = await admin<
@@ -203,9 +207,19 @@ describe("migration 0286 tenancy backfill ledger", () => {
 
     // A settled receipt is evidence: it can neither absorb new unresolved
     // rows nor be re-opened nor be settled twice.
-    await expectRejection(() => admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`, /already settled/u);
-    await expectRejection(() => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'completed')`, /already settled/u);
-    await expectRejection(() => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'rigs', 'run-b')`, /already settled/u);
+    await expectRejection(
+      () =>
+        admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`,
+      /already settled/u,
+    );
+    await expectRejection(
+      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'completed')`,
+      /already settled/u,
+    );
+    await expectRejection(
+      () => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'rigs', 'run-b')`,
+      /already settled/u,
+    );
   }, 180_000);
 
   test("the caller cannot understate its own outstanding obligations", async () => {
@@ -231,17 +245,37 @@ describe("migration 0286 tenancy backfill ledger", () => {
     if (!available) return;
     const organizationId = await seedOrganization("fail-closed");
 
-    await expectRejection(() => admin`SELECT open_tenancy_backfill_receipt(NULL, 'sessions', 'run-d')`, /.*/u);
-    await expectRejection(() => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'not_a_family', 'run-d')`, /.*/u);
+    await expectRejection(
+      () => admin`SELECT open_tenancy_backfill_receipt(NULL, 'sessions', 'run-d')`,
+      /.*/u,
+    );
+    await expectRejection(
+      () => admin`SELECT open_tenancy_backfill_receipt(${organizationId}, 'not_a_family', 'run-d')`,
+      /.*/u,
+    );
 
     const [opened] = await admin<{ open_tenancy_backfill_receipt: string }[]>`
       SELECT open_tenancy_backfill_receipt(${organizationId}, 'sessions', 'run-d')
     `;
     const receiptId = opened!.open_tenancy_backfill_receipt;
-    await expectRejection(() => admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'invented_reason')`, /.*/u);
-    await expectRejection(() => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'half_done')`, /completed or failed/u);
-    await expectRejection(() => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, -1, 0, 'completed')`, /non-negative/u);
-    await expectRejection(() => admin`SELECT record_tenancy_backfill_unresolved(${Bun.randomUUIDv7()}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`, /does not exist/u);
+    await expectRejection(
+      () =>
+        admin`SELECT record_tenancy_backfill_unresolved(${receiptId}, ${Bun.randomUUIDv7()}, 'invented_reason')`,
+      /.*/u,
+    );
+    await expectRejection(
+      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, 1, 1, 'half_done')`,
+      /completed or failed/u,
+    );
+    await expectRejection(
+      () => admin`SELECT complete_tenancy_backfill_receipt(${receiptId}, -1, 0, 'completed')`,
+      /non-negative/u,
+    );
+    await expectRejection(
+      () =>
+        admin`SELECT record_tenancy_backfill_unresolved(${Bun.randomUUIDv7()}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`,
+      /does not exist/u,
+    );
   }, 180_000);
 
   test("the ledger is organization-scoped and one run key does not collide across organizations", async () => {
@@ -283,6 +317,77 @@ describe("migration 0286 tenancy backfill ledger", () => {
           `;
           expect({ signature, granted: row!.granted }).toEqual({ signature, granted: true });
         }
+      } finally {
+        await probe.end().catch(() => undefined);
+      }
+    } finally {
+      await blank.release();
+    }
+  }, 300_000);
+  test("the append-only guard holds under a NON-SUPERUSER owner at trigger depth > 1", async () => {
+    // The regression this pins is invisible to the ordinary harness: it
+    // migrates as superuser `postgres`, for whom FORCE RLS never engages, so
+    // the guard's own reads always see the parent rows. Under a real
+    // non-superuser owner the SECURITY DEFINER reads run under FORCE RLS with
+    // no lifecycle GUC set, and a naive "is the parent gone" probe answers
+    // "gone" while the receipt is alive - letting any nested delete
+    // (pg_trigger_depth() > 1) erase append-only evidence.
+    const blank = await acquireBlankTestDatabase("migration-0286-nonsuperuser-owner");
+    if (!blank) return;
+    try {
+      await migrate(blank.databaseUrl);
+      const probe = postgres(blank.databaseUrl, { max: 1 });
+      try {
+        await probe.unsafe(`
+          DROP ROLE IF EXISTS og_ledger_owner;
+          CREATE ROLE og_ledger_owner NOSUPERUSER NOBYPASSRLS NOLOGIN;
+          ALTER TABLE tenancy_backfill_receipts OWNER TO og_ledger_owner;
+          ALTER TABLE tenancy_backfill_unresolved_rows OWNER TO og_ledger_owner;
+          ALTER FUNCTION guard_tenancy_backfill_unresolved_row() OWNER TO og_ledger_owner;
+          GRANT USAGE ON SCHEMA public TO og_ledger_owner;
+          GRANT SELECT ON managed_accounts TO og_ledger_owner;
+        `);
+
+        const [org] = await probe<{ id: string }[]>`
+          INSERT INTO managed_accounts (name) VALUES ('nonsuperuser-owner') RETURNING id`;
+        const [opened] = await probe<{ open_tenancy_backfill_receipt: string }[]>`
+          SELECT open_tenancy_backfill_receipt(${org!.id}, 'sessions', 'owner-run')`;
+        const receiptId = opened!.open_tenancy_backfill_receipt;
+        await probe`SELECT record_tenancy_backfill_unresolved(
+          ${receiptId}, ${Bun.randomUUIDv7()}, 'no_deterministic_evidence')`;
+
+        // Drive a delete from inside another trigger so pg_trigger_depth() > 1
+        // while BOTH parents are demonstrably alive.
+        await probe.unsafe(`
+          CREATE TABLE ledger_depth_probe (id serial PRIMARY KEY);
+          CREATE FUNCTION ledger_depth_probe_fn() RETURNS trigger
+            LANGUAGE plpgsql AS $fn$
+            BEGIN
+              DELETE FROM tenancy_backfill_unresolved_rows;
+              RETURN NEW;
+            END;
+            $fn$;
+          CREATE TRIGGER ledger_depth_probe_tr AFTER INSERT ON ledger_depth_probe
+            FOR EACH ROW EXECUTE FUNCTION ledger_depth_probe_fn();
+        `);
+
+        await expectRejection(
+          () => probe`INSERT INTO ledger_depth_probe DEFAULT VALUES`,
+          /append-only/u,
+        );
+
+        // The evidence must still be there.
+        const [remaining] = await probe<{ count: string }[]>`
+          SELECT count(*) AS count FROM tenancy_backfill_unresolved_rows
+          WHERE receipt_id = ${receiptId}`;
+        expect(Number(remaining!.count)).toBe(1);
+
+        // A genuine parent cascade is still permitted.
+        await probe`DELETE FROM tenancy_backfill_receipts WHERE id = ${receiptId}`;
+        const [afterCascade] = await probe<{ count: string }[]>`
+          SELECT count(*) AS count FROM tenancy_backfill_unresolved_rows
+          WHERE receipt_id = ${receiptId}`;
+        expect(Number(afterCascade!.count)).toBe(0);
       } finally {
         await probe.end().catch(() => undefined);
       }

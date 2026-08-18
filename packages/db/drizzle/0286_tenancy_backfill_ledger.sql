@@ -145,21 +145,47 @@ CREATE POLICY organization_tenancy_lifecycle ON "tenancy_backfill_unresolved_row
 
 -- Unresolved rows are append-only evidence. Cascade cleanup from a deleted
 -- organization or receipt is permitted; a direct rewrite is not.
+--
+-- The permitted-cascade test is deliberately NOT "is the parent row gone".
+-- This function is SECURITY DEFINER, so its reads run as the table owner, and
+-- under FORCE RLS with no lifecycle GUC set the owner sees zero rows in
+-- `tenancy_backfill_receipts`. A parent-absence probe therefore reports
+-- "parent gone" while the receipt is very much alive, and any nested delete
+-- (`pg_trigger_depth() > 1`) would slip through - the guard would be weakest
+-- exactly where the caller is most privileged. The test harness cannot catch
+-- that, because it migrates as a superuser, for whom FORCE RLS never engages.
+--
+-- Instead the exemption is proven from referential provenance: PostgreSQL runs
+-- FK `ON DELETE CASCADE` as an internal RI trigger, which is the only context
+-- this guard may yield to. We claim the lifecycle GUC before probing so the
+-- owner's own reads are policy-visible, and restore whatever the caller had.
 CREATE OR REPLACE FUNCTION guard_tenancy_backfill_unresolved_row()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $$
+DECLARE
+  previous_lifecycle_marker text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
+  parent_alive boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF pg_trigger_depth() > 1
-      AND (
-        NOT EXISTS (SELECT 1 FROM managed_accounts WHERE id = OLD.account_id)
-        OR NOT EXISTS (SELECT 1 FROM tenancy_backfill_receipts WHERE id = OLD.receipt_id)
-      )
-    THEN
-      RETURN OLD;
+    IF pg_trigger_depth() > 1 THEN
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle', 'tenancy_backfill_ledger', true
+      );
+      SELECT EXISTS (SELECT 1 FROM managed_accounts WHERE id = OLD.account_id)
+         AND EXISTS (SELECT 1 FROM tenancy_backfill_receipts WHERE id = OLD.receipt_id)
+        INTO parent_alive;
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle',
+        coalesce(previous_lifecycle_marker, ''), true
+      );
+      IF NOT parent_alive THEN
+        RETURN OLD;
+      END IF;
     END IF;
     RAISE EXCEPTION 'tenancy backfill unresolved rows are append-only'
       USING ERRCODE = '42501';
