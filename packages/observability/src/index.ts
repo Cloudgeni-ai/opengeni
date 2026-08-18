@@ -88,6 +88,88 @@ const SANDBOX_OPERATION_NAMES = new Set([
   "serializeSessionState",
 ]);
 
+/**
+ * Closed set of organization-tenancy compatibility lanes (OPE-204 phase E).
+ *
+ * Each entry names one legacy behaviour a live request can still take today.
+ * The metric built from them is deliberately a COUNTER of lane USES, and it
+ * measures exactly one thing: **is this lane still being exercised?** That is
+ * the question OPE-204's cutover gate ("zero incompatible writers") actually
+ * asks, and it is answerable.
+ *
+ * It is emphatically NOT a burndown of unmigrated rows, and must never be
+ * relabelled as one. Every one of these lanes is still *open*: the live write
+ * paths keep producing rows in it, so no row-count predicate over any of them
+ * can reach zero and a backlog gauge would read as a permanent, untruthful
+ * unmigrated backlog. `docs/organization-tenancy.md` records, per lane, why -
+ * including the lanes deliberately left uninstrumented because no truthful
+ * signal exists for them yet.
+ *
+ * The recorded value is the lane name and nothing else. No organization,
+ * workspace, session, subject, connection, or resource identity, and no
+ * credential, name, or content, may ever become a label here.
+ */
+export const TENANCY_COMPATIBILITY_LANES = [
+  /**
+   * A provider connection carrying `authority_scope = 'legacy_user'` was
+   * resolved for accepted use: a personal row with no common authority or
+   * grant, admitted through `legacy_user_compatibility` provenance instead of
+   * an explicit delegation. Migration 0256 backfilled the existing rows, but
+   * its `bind_connection_authority` trigger still classifies a NEW personal
+   * connection this way whenever the inserting subject has no active
+   * organization membership, so this counter is expected to stay above zero
+   * until that classification changes. That is the finding, not a defect.
+   */
+  "connection_legacy_user",
+  /**
+   * A workspace-scope connection ref carried no connection id, so the
+   * accepted-use authority (migration 0279) could not identify the exact row
+   * and the request fell back to the unprivileged pre-snapshot resolution.
+   * This lane writes no `connection_use_audit_facts` row and leaves no durable
+   * trace of any kind, so a use counter is the only possible evidence it was
+   * taken at all.
+   */
+  "connection_pre_snapshot_ref",
+  /**
+   * A NEW persistable `/workspace` mutation was refused because the writer
+   * behind it has no recorded authority (`authority_unattributed`): either a
+   * direct request whose principal froze the pre-0096 legacy initiator, or a
+   * retained process whose pre-0277 row has no tenancy half. This counts
+   * REFUSED MUTATIONS, not unattributed rows - the turn and process admission
+   * lanes deliberately still accept a `legacy_unattributed` initiator, and
+   * nothing may invent the missing authority or disturb the running provider
+   * process.
+   */
+  "workspace_writer_unattributed",
+] as const;
+export type TenancyCompatibilityLane = (typeof TENANCY_COMPATIBILITY_LANES)[number];
+
+const TENANCY_COMPATIBILITY_LANE_SET = new Set<string>(TENANCY_COMPATIBILITY_LANES);
+
+const TENANCY_COMPATIBILITY_LANE_METRIC = {
+  name: "opengeni_tenancy_compatibility_lane_uses_total",
+  help: "Live uses of an organization-tenancy compatibility lane, by lane.",
+} as const;
+
+/**
+ * Record one live use of a tenancy compatibility lane. Fail-safe by
+ * construction: telemetry must never change an authorization or credential
+ * outcome, so a registry failure is counted best-effort and swallowed here.
+ */
+export function recordTenancyCompatibilityLaneUse(
+  observability: Observability | null | undefined,
+  lane: TenancyCompatibilityLane,
+): void {
+  if (!observability) return;
+  // An unreviewed lane name must not silently mint a new series.
+  if (!TENANCY_COMPATIBILITY_LANE_SET.has(lane)) return;
+  try {
+    observability.incrementCounter({ ...TENANCY_COMPATIBILITY_LANE_METRIC, labels: { lane } });
+  } catch {
+    recordObserverFailure(observability, "tenancy_compatibility_lane");
+  }
+}
+
 const INTERACTION_RESOURCES = new Set(["browser", "computer"]);
 const INTERACTION_OPERATIONS = new Set([
   "create",
@@ -423,6 +505,19 @@ export class Observability {
         value: 1,
       });
       this.registerSandboxRolloutConfig();
+      this.registerTenancyCompatibilityLanes();
+    }
+  }
+
+  /**
+   * Publish every compatibility lane at zero on startup. Without this an
+   * un-exercised lane has no series at all, and an operator cannot tell "this
+   * lane is dormant" from "this lane was never wired up" - the two readings
+   * that matter most to a cutover gate.
+   */
+  private registerTenancyCompatibilityLanes(): void {
+    for (const lane of TENANCY_COMPATIBILITY_LANES) {
+      this.incrementCounter({ ...TENANCY_COMPATIBILITY_LANE_METRIC, labels: { lane }, amount: 0 });
     }
   }
 

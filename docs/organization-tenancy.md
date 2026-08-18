@@ -450,6 +450,102 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
+#### Compatibility-lane telemetry
+
+The inventory seam answers "how many legacy-shaped rows exist right now". It
+does not answer the question the cutover gate actually asks - **is a
+compatibility lane still being exercised by live traffic?** - and it cannot,
+because a point-in-time row count cannot separate a dormant historical
+population from one that live writers are still adding to.
+
+`opengeni_tenancy_compatibility_lane_uses_total{lane}` is that second signal: a
+content-free Prometheus counter, one increment per live use, emitted through
+the ordinary `@opengeni/observability` registry by both the API and the worker.
+The closed lane set is `TENANCY_COMPATIBILITY_LANES` in
+`packages/observability/src/index.ts`; an unreviewed name is ignored rather
+than minting a series. Every lane is published at zero on process start, so an
+operator can tell "this lane is dead" from "this lane was never wired up". The
+lane name is the only label OpenGeni adds - never an organization, workspace,
+session, subject, connection, resource, provider, or server identity - and a
+registry failure is swallowed at the telemetry boundary, so counting can never
+change an authorization or credential outcome.
+
+| Lane | Increments when | Emitted from |
+| --- | --- | --- |
+| `connection_legacy_user` | An accepted connection use resolves to `authority_scope = 'legacy_user'` - a personal row with no common authority or grant, admitted through `legacy_user_compatibility` provenance. | `apps/worker/src/activities/mcp-credentials.ts` |
+| `connection_pre_snapshot_ref` | A workspace-scope connection ref carries no connection id, so accepted-use authority (0279) cannot identify the exact row and the request takes the unprivileged pre-snapshot resolution. | `apps/worker/src/activities/mcp-credentials.ts` |
+| `workspace_writer_unattributed` | An API-direct persistable `/workspace` mutation is refused `authority_unattributed` because its writer has no recorded authority. | `apps/api/src/sandbox/channel-a.ts` |
+
+The workspace-writer lane is scoped to the API-direct surface on purpose: that
+is where the fence is a deliberate, observable refusal of a caller's request.
+The worker's turn-admission lane does not raise it at all (it accepts a
+recorded-but-legacy initiator by design), and the retained-process promotion
+path in `apps/worker/src/sandbox-routing.ts` collapses every promotion fence
+into one durable-output rejection without discriminating the code, so counting
+there would need a separate change to that fence's contract.
+
+**These counters are use rates, never burndown gauges, and must not be
+relabelled as one.** Restating the finding plainly: *none* of the tenancy
+compatibility populations is bounded on the current write paths. Each is still
+open, so no row-count predicate over it can reach zero, and a backlog gauge
+would read as a permanent unmigrated backlog - the same defect class that
+already had to be removed from the inventory seam's resource counters.
+
+- **`legacy_user` connections are not backfill residue.** Migration 0256's
+  `bind_connection_authority` trigger is still the live classifier and is never
+  superseded by 0264/0275/0279/0280, which only *read* the lane. It assigns
+  `legacy_user` to any NEW personal connection whose inserting subject has no
+  active organization membership, and `configured:`/`local:`/`apikey:` subjects
+  can never have one (below). The offboarding sweep in 0263 deletes only
+  `authority_scope = 'user'` rows, so the population never shrinks either.
+- **`legacy_unattributed` workspace writers are monotonically non-decreasing.**
+  `'legacy_unattributed'` remains the column DEFAULT on both
+  `sandbox_workspace_mutation_admissions` and `sandbox_retained_processes`
+  (0277), the turn lane still freezes it whenever the parent turn carries the
+  pre-0096 legacy initiator, and a retained process copies its parent verbatim.
+  Only the direct lane fences it; `assertRetainedProcessAuthority` deliberately
+  accepts a recorded-but-legacy initiator rather than fencing ordinary work.
+  There is no DELETE, prune, or retention on either table anywhere in the tree,
+  so nothing ages out. The counter above therefore reports *refused mutations*,
+  which is a real bounded event, and says nothing about the row population.
+- **Null-authority personal Documents are a permanent lane, not only a legacy
+  one.** `create_personal_document_authority` (0258) returns zero rows when the
+  caller has no deterministic active organization membership, and the document
+  store then inserts `authority_id = NULL` by design. The inventory predicate
+  `authority_kind = 'personal' AND authority_id IS NULL` is truthful - it names
+  exactly the shape 0258 permits - but it is not drainable while that lane
+  stays open, so its `legacyPersonal…` naming overstates what the number means.
+- **Default-visibility sessions are not a compatibility lane at all and must
+  never be instrumented as one.** `workspace_shared` is the permanent,
+  legitimate column default for every new session (0218); only `user_private`
+  requires an owner. Counting it would be the `total - userScoped` defect in
+  another costume. The genuinely legacy-shaped session population is
+  `owner_organization_membership_id IS NULL`, which the inventory already
+  reports as `ownerless` - but that too is still growing (service, API-key, and
+  configured creators take the `created_by_kind <> 'subject'` path in
+  `guard_session_authority_write`, which leaves the owner NULL) and cannot be
+  repaired in place: `transition_session_visibility` explicitly refuses an
+  ownerless session and has no non-test caller.
+- **Subjects with no organization-membership anchor are partly unreachable by
+  construction.** Only two statements ever insert an `organization_memberships`
+  row: managed-human provisioning (0219), gated to `user:%` subjects in their
+  own `better-auth:user` self-account, and invitation acceptance (0263), whose
+  invitations are CHECK-constrained to `user:%`. So `configured:`, `local:`, and
+  `apikey:` subjects can *never* acquire an anchor - the inventory's
+  `user:%` filter correctly excludes them. Cross-account human grants
+  (`grantWorkspaceAccess`, `bootstrapWorkspace`, the Slack link approval) still
+  add anchorless `user:` subjects, and re-authentication cannot fix those;
+  only an explicit invitation accept can.
+
+Deliberately uninstrumented, with the reason recorded rather than a misleading
+number shipped: the Document lane (its runtime branch is dominated by
+permanently-ineligible subject kinds, so a use counter could not be read as a
+migration signal without a discriminator the schema does not have); ownerless
+session creation (no runtime lane switch exists - the trigger simply leaves the
+column NULL); and the missing-anchor lane (same mixed-population problem, and
+its permanently-ineligible subjects would dominate the count). Instrumenting
+any of these truthfully requires a durable classification-decision fact first.
+
 ### F. Activate
 
 Add exact organization+subject+workspace RLS policies and narrowly scoped
