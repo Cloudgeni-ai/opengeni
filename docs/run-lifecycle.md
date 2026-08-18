@@ -1164,17 +1164,21 @@ audit reads may return it, so it is never a secret boundary.
    preserves omitted references in one compact catalog. When old bytes are
    actually needed, the model uses the existing dedicated Files MCP download
    URL plus shell instead of startup rematerialization.
-2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
-   blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
-   job is resuming a turn that paused mid-flight for a human approval or
-   structured-input tool call (`requires_action`); neither a half-finished tool
-   approval nor an unanswered tool call can be represented as plain history
-   items. Before the blob is written, every copy of a retained screenshot tool
-   result and generated-image result inside the RunState is compacted to its
-   retry-stable receipt. On SDK resume, generated-image hosted items are
-   temporarily projected to the same provider-neutral artifact fact used by
-   ordinary history; the durable checkpoint stays compact.
-   The blob is written only for those cases.
+2. **`agent_run_states` — leftover requires-action blob only (expand era).**
+   New pauses flush completed-pair history, then persist the bounded open suffix
+   on `session_pending_tool_calls` (the pending call item, tied reasoning the
+   sanitizer would drop, and interruption kind). Unpaired calls never enter
+   model-facing `session_history_items`. Resume settles one suffix member
+   (human-input response, approval invoke through the existing MCP execute-once
+   fence, or rejection), promotes reasoning + call + bounded result as one pair,
+   and either stays `requires_action` without a model call or continues from
+   history. It does not reconstruct synthetic SDK `RunState`.
+   A leftover SDK `generatedItems` heap may still be written when it fits the
+   3 MiB envelope; an oversized heap stores the open-suffix sentinel so pause
+   still succeeds. Settlement insert enforces that envelope. Resume prefers the
+   suffix; the blob is only for writers that never attached interruption rows.
+   Before any leftover blob is written, retained screenshot and generated-image
+   copies inside it are compacted to retry-stable receipts.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and

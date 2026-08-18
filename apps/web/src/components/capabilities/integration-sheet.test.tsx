@@ -66,17 +66,8 @@ async function render(node: React.ReactNode) {
   };
 }
 
-/** Structural fingerprint: tag names and roles, ignoring text and ids. */
-function shape(element: Element): string {
-  const parts: string[] = [element.tagName.toLowerCase()];
-  const role = element.getAttribute("role");
-  if (role) parts.push(`[role=${role}]`);
-  const children = [...element.children].map(shape).join(",");
-  return children ? `${parts.join("")}(${children})` : parts.join("");
-}
-
 describe("IntegrationRow", () => {
-  test("renders every integration through the same row shape", async () => {
+  test("renders every integration through the same two-button row shape", async () => {
     const onOpen = mock(() => {});
     const rendered = await render(
       <>
@@ -102,19 +93,85 @@ describe("IntegrationRow", () => {
       </>,
     );
     try {
-      const rows = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-      expect(rows).toHaveLength(3);
-      expect(rows[0]?.getAttribute("aria-label")).toBe("Slack. Connected");
-      expect(rows[1]?.getAttribute("aria-label")).toBe("GitHub. Not connected");
-      // Apart from the mark (logo vs monogram) and the chip dot, the DOM shape is identical.
-      const shapes = rows.map((row) => shape(row).replace(/span\(img\)|span/g, "mark"));
-      expect(new Set(shapes.map((entry) => entry.replace(/mark\(mark\)/g, "mark"))).size).toBe(1);
-      for (const row of rows) {
-        expect(row.querySelector("[data-integration-chip]")).not.toBeNull();
+      const rowContainers = [...rendered.container.querySelectorAll("[data-integration-row]")];
+      expect(rowContainers).toHaveLength(3);
+      // Every row's body-open button is a real sibling of the state indicator,
+      // never nested inside it - one clean click target per row. Its accessible
+      // name carries the connection state, so the state is never colour-only.
+      for (const row of rowContainers) {
+        expect(row.tagName).not.toBe("BUTTON");
+        const openButton = row.querySelector("button");
+        expect(openButton).not.toBeNull();
+        expect(openButton?.querySelector("button")).toBeNull();
+      }
+      expect(rowContainers[0]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Slack. Connected",
+      );
+      expect(rowContainers[1]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "GitHub. Not connected",
+      );
+      expect(rowContainers[2]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Google Drive. Set up by an admin",
+      );
+      // The indicator itself is decorative, so each row still exposes its state
+      // as text for assistive tech and forced-colours users.
+      expect(rowContainers[0]?.textContent).toContain("Connected");
+      expect(rowContainers[2]?.textContent).toContain("Set up by an admin");
+      for (const row of rowContainers) {
         expect(row.textContent).not.toContain("scope");
       }
-      await act(async () => rows[1]!.click());
+      const openButtons = rowContainers.map(
+        (row) => row.querySelector("button") as HTMLButtonElement,
+      );
+      await act(async () => openButtons[1]!.click());
       expect(onOpen).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("only the not-connected state renders an interactive quick-connect icon", async () => {
+    const onOpen = mock(() => {});
+    const onQuickConnect = mock(() => {});
+    const rendered = await render(
+      <>
+        <IntegrationRow model={model()} onOpen={onOpen} />
+        <IntegrationRow
+          model={model({
+            id: "github",
+            chip: { label: "Not connected", tone: "idle" },
+          })}
+          onOpen={onOpen}
+          onQuickConnect={onQuickConnect}
+        />
+      </>,
+    );
+    try {
+      const rows = [...rendered.container.querySelectorAll("[data-integration-row]")];
+      // Connected: the indicator is decorative, not a button.
+      const connectedButtons = [...rows[0]!.querySelectorAll("button")];
+      expect(connectedButtons).toHaveLength(1);
+      // Not connected with a quick-connect handler: a second, real button.
+      const idleButtons = [...rows[1]!.querySelectorAll("button")];
+      expect(idleButtons).toHaveLength(2);
+      await act(async () => idleButtons[1]!.click());
+      expect(onQuickConnect).toHaveBeenCalledTimes(1);
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("omits the quick-connect icon entirely when no fast path exists, even if not connected", async () => {
+    const rendered = await render(
+      <IntegrationRow
+        model={model({ chip: { label: "Not connected", tone: "idle" } })}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      const row = rendered.container.querySelector("[data-integration-row]")!;
+      expect([...row.querySelectorAll("button")]).toHaveLength(1);
     } finally {
       await rendered.unmount();
     }
@@ -307,6 +364,94 @@ describe("IntegrationSheet", () => {
       expect(second).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("Connected accounts items render a status dot and an inline per-item action", async () => {
+    const onReconnect = mock(() => {});
+    const onEdit = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "outlook-mail",
+            name: "Outlook Mail",
+            access: {
+              title: "Connected accounts",
+              editLabel: "+ Add account",
+              onEdit,
+              items: [
+                { name: "ana@acme.com", status: "ok" },
+                {
+                  name: "ben@acme.com",
+                  status: "warn",
+                  meta: "Needs attention",
+                  actions: [{ label: "Reconnect", onClick: onReconnect }],
+                },
+              ],
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="outlook-mail"]')!;
+      const items = [...sheet.querySelectorAll("li")];
+      expect(items).toHaveLength(2);
+      expect(items[0]?.textContent).toContain("ana@acme.com");
+      expect(items[0]?.querySelector("button")).toBeNull();
+      const reconnect = items[1]?.querySelector("button");
+      expect(reconnect?.textContent?.trim()).toBe("Reconnect");
+      await act(async () => reconnect!.click());
+      expect(onReconnect).toHaveBeenCalledTimes(1);
+      const addAccount = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "+ Add account",
+      )!;
+      await act(async () => addAccount.click());
+      expect(onEdit).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("Tools renders a flat informational chip grid and is omitted when empty", async () => {
+    const withTools = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({ tools: { tools: ["mail.read", "mail.send", "mail.read"] } })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      const heading = [...sheet.querySelectorAll("h3")].find(
+        (node) => node.textContent === "Tools",
+      );
+      expect(heading).toBeDefined();
+      const chips = heading!.closest("section")!.querySelectorAll("span");
+      expect([...chips].map((node) => node.textContent)).toEqual([
+        "mail.read",
+        "mail.send",
+        "mail.read",
+      ]);
+      // Purely informational: no button/toggle inside a tool chip.
+      expect(heading!.closest("section")!.querySelector("button")).toBeNull();
+    } finally {
+      await withTools.unmount();
+    }
+
+    const withoutTools = await render(
+      <Sheet open>
+        <IntegrationSheetBody model={model({ tools: { tools: [] } })} />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      expect([...sheet.querySelectorAll("h3")].some((node) => node.textContent === "Tools")).toBe(
+        false,
+      );
+    } finally {
+      await withoutTools.unmount();
     }
   });
 

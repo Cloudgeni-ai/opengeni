@@ -43,6 +43,7 @@ import {
   capabilitySourceLabel,
   curatedSkillProvenance,
   socialConnectionsForOwnership,
+  DEFAULT_CONNECTION_OWNERSHIP,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -113,7 +114,9 @@ export type ConnectAction =
     }
   | { type: "disconnect"; item: CapabilityCatalogItem };
 
-export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
+// Re-exported from the shared library so the sheet and the row/tile quick-connect
+// fast path can never drift on what a new connection defaults to.
+export { DEFAULT_CONNECTION_OWNERSHIP };
 
 export function CapabilityDetailSheet({
   item,

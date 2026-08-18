@@ -30276,6 +30276,153 @@ export async function recordPendingSessionToolCallResult(
   );
 }
 
+export type OpenSuffixInterruptionKind = "human_input" | "approval" | "interaction_intervention";
+
+export type OpenSuffixPendingToolCall = {
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+  interruptionKind: OpenSuffixInterruptionKind;
+  tiedReasoningItems: Array<Record<string, unknown>>;
+  resultItem: Record<string, unknown> | null;
+  modelToolOutputTruncationTokens: number | null;
+};
+
+function asOpenSuffixInterruptionKind(value: string | null): OpenSuffixInterruptionKind | null {
+  if (value === null) {
+    return null;
+  }
+  if (value === "human_input" || value === "approval" || value === "interaction_intervention") {
+    return value;
+  }
+  throw new Error(`Unknown pending-tool interruption kind: ${value}`);
+}
+
+/**
+ * Bind unpaired interruption calls and their tied reasoning onto existing
+ * pending receipts. Fail closed when any interruption call is missing.
+ */
+export async function attachOpenSuffixToPendingToolCalls(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    members: Array<{
+      callId: string;
+      interruptionKind: OpenSuffixInterruptionKind;
+      reasoningItems: Array<Record<string, unknown>>;
+    }>;
+  },
+): Promise<{ accepted: boolean; attached: number }> {
+  if (input.members.length === 0) {
+    return { accepted: true, attached: 0 };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false, attached: 0 };
+        const ordered = [...input.members].sort((left, right) =>
+          left.callId.localeCompare(right.callId),
+        );
+        let attached = 0;
+        for (const member of ordered) {
+          const [pending] = await tx
+            .select()
+            .from(schema.sessionPendingToolCalls)
+            .where(
+              and(
+                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                eq(schema.sessionPendingToolCalls.callId, member.callId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!pending) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} has no pending tool-call receipt`,
+            );
+          }
+          if (pending.resultItem) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} already has a recorded result`,
+            );
+          }
+          const existingKind = asOpenSuffixInterruptionKind(pending.interruptionKind);
+          if (existingKind && existingKind !== member.interruptionKind) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} changed kind from ${existingKind} to ${member.interruptionKind}`,
+            );
+          }
+          const updated = await tx
+            .update(schema.sessionPendingToolCalls)
+            .set(
+              withLosslessContentWriteVersion(
+                {
+                  interruptionKind: member.interruptionKind,
+                  tiedReasoningItems: member.reasoningItems,
+                },
+                "tiedReasoningItems",
+                "tiedReasoningItemsCodecVersion",
+              ),
+            )
+            .where(eq(schema.sessionPendingToolCalls.id, pending.id))
+            .returning({ id: schema.sessionPendingToolCalls.id });
+          if (updated.length === 1) {
+            attached += 1;
+          }
+        }
+        return { accepted: true, attached };
+      }),
+  );
+}
+
+/** Turn-scoped interruption suffix rows, including already-settled members. */
+export async function listTurnOpenSuffixToolCalls(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<OpenSuffixPendingToolCall[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, workspaceId),
+          eq(schema.sessionPendingToolCalls.sessionId, sessionId),
+          eq(schema.sessionPendingToolCalls.turnId, turnId),
+          isNotNull(schema.sessionPendingToolCalls.interruptionKind),
+        ),
+      )
+      .orderBy(asc(schema.sessionPendingToolCalls.createdAt));
+    return rows.map((row) => {
+      const interruptionKind = asOpenSuffixInterruptionKind(row.interruptionKind);
+      if (!interruptionKind) {
+        throw new Error(`Pending tool call ${row.callId} is missing interruption kind`);
+      }
+      return {
+        callId: row.callId,
+        callType: row.callType,
+        callItem: row.callItem,
+        interruptionKind,
+        tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
+        resultItem: row.resultItem ?? null,
+        modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
+      };
+    });
+  });
+}
+
 /**
  * Remove completed receipts only after the full SDK call/result batch is
  * durable. Until then every raw result remains available to an attempt-ending
@@ -55627,11 +55774,13 @@ export type ApplySessionTurnSettlementInput = {
   activeTurnId: string | null;
   events: AppendEventInput[];
   /**
-   * A mid-turn SDK freeze installed atomically with requires_action. Human
-   * input requests are public protocol rows; ordinary approvals remain only in
-   * pendingApprovals. No request can become visible without the exact frozen
-   * RunState needed to resume it, and no frozen request can miss its status
-   * transition/events because all writes share this transaction.
+   * A mid-turn requires_action freeze. Human-input rows and interaction
+   * interventions are public protocol; ordinary approvals remain in
+   * pendingApprovals. Pause also attaches the bounded open suffix on
+   * `session_pending_tool_calls`. Expand-era leftover SDK blobs still write
+   * here when they fit the 3 MiB envelope; oversized heaps store the open-suffix
+   * sentinel instead. Resume prefers the suffix and must not require
+   * `RunState.fromString`.
    */
   runState?: {
     serializedRunState: string;
@@ -56029,6 +56178,11 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
+        await assertApprovalRunStateForSave(
+          tx,
+          input.runState.serializedRunState,
+          input.runState.pendingApprovals,
+        );
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(

@@ -6,7 +6,7 @@ import type {
   IntegrationOption,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
-import type { IntegrationAdapter } from "@/components/capabilities/use-google-drive-integration";
+import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
