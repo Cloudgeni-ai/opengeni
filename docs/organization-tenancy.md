@@ -495,7 +495,7 @@ already had to be removed from the inventory seam's resource counters.
   `bind_connection_authority` trigger is still the live classifier and is never
   superseded by 0264/0275/0279/0280, which only *read* the lane. It assigns
   `legacy_user` to any NEW personal connection whose inserting subject has no
-  active organization membership, and `configured:`/`local:`/`apikey:` subjects
+  active organization membership, and `configured:`, `api_key:`, and bare `dev` subjects
   can never have one (below). The offboarding sweep in 0263 deletes only
   `authority_scope = 'user'` rows, so the population never shrinks either.
 - **`legacy_unattributed` workspace writers are monotonically non-decreasing.**
@@ -505,7 +505,7 @@ already had to be removed from the inventory seam's resource counters.
   pre-0096 legacy initiator, and a retained process copies its parent verbatim.
   Only the direct lane fences it; `assertRetainedProcessAuthority` deliberately
   accepts a recorded-but-legacy initiator rather than fencing ordinary work.
-  There is no DELETE, prune, or retention on either table anywhere in the tree,
+  There is no targeted prune, retention job, or recurring backfill on either table,
   so nothing ages out. The counter above therefore reports *refused mutations*,
   which is a real bounded event, and says nothing about the row population.
 - **Null-authority personal Documents are a permanent lane, not only a legacy
@@ -530,8 +530,8 @@ already had to be removed from the inventory seam's resource counters.
   construction.** Only two statements ever insert an `organization_memberships`
   row: managed-human provisioning (0219), gated to `user:%` subjects in their
   own `better-auth:user` self-account, and invitation acceptance (0263), whose
-  invitations are CHECK-constrained to `user:%`. So `configured:`, `local:`, and
-  `apikey:` subjects can *never* acquire an anchor - the inventory's
+  invitations are CHECK-constrained to `user:%`. So `configured:`, `api_key:`, and
+  bare `dev` subjects can *never* acquire an anchor - the inventory's
   `user:%` filter correctly excludes them. Cross-account human grants
   (`grantWorkspaceAccess`, `bootstrapWorkspace`, the Slack link approval) still
   add anchorless `user:` subjects, and re-authentication cannot fix those;
