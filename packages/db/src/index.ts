@@ -17636,7 +17636,7 @@ export interface TenancyParityLaneDefinition {
    * that "the lane stopped being exercised" is still a reachable zero.
    */
   readonly kind: "drainable" | "observation";
-  /** The issue that owns draining this lane, when it is not this program. */
+  /** The workstream that owns draining this lane, when it is not this one. */
   readonly owner?: string;
 }
 
@@ -17819,13 +17819,13 @@ export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
     id: "documentsLegacyPersonalNullAuthority",
     title: "Legacy personal Documents with no common authority",
     kind: "drainable",
-    owner: "OPE-157",
+    owner: "document authority migration",
   },
   {
     id: "codexCredentialsUnattributedConnector",
     title: "Codex subscription credentials with no recorded connecting human",
     kind: "drainable",
-    owner: "OPE-177",
+    owner: "Codex connector ownership repair",
   },
   {
     id: "workspaceMemberSubjectsWithoutMembershipAnchor",
