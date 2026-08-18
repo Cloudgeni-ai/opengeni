@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 1.3.0
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- Updated dependencies [79ee99b]
+  - @opengeni/sdk@1.3.0
+
 ## 1.2.0
 
 ### Minor Changes
