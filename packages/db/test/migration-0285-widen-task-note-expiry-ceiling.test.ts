@@ -1,7 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 const migrationUrl = new URL("../drizzle/0285_widen_task_note_expiry_ceiling.sql", import.meta.url);
+
+let shared: SharedTestDatabase | null = null;
+
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("migration-0285-task-note-expiry");
+});
+
+afterAll(async () => {
+  await shared?.release();
+});
 
 describe("migration 0285 widen task-note expiry ceiling", () => {
   test("widens the CHECK constraint and both SECURITY DEFINER bounds to 90 days", async () => {
@@ -25,10 +36,33 @@ describe("migration 0285 widen task-note expiry ceiling", () => {
     expect(sql).toContain("octet_length(p_reason) NOT BETWEEN 1 AND 2048");
     // Neither function's 30-day bound should survive.
     expect(sql).not.toContain("NOT BETWEEN 1 AND 30");
-    // Both functions keep their SECURITY DEFINER / FROM CURRENT search_path
-    // exactly as-is - no re-pin needed since the search_path clause is
-    // unchanged (not a `SET search_path = ...` literal being replaced).
+    // CREATE OR REPLACE drops proconfig entirely - the search_path pin both
+    // functions originally received via ALTER FUNCTION in 0239/0260 must be
+    // re-applied here, or the widen silently de-hardens them.
     expect(sql.match(/SECURITY DEFINER/g)?.length).toBe(2);
     expect(sql.match(/SET search_path FROM CURRENT/g)?.length).toBe(2);
+    expect(sql).toContain("ALTER FUNCTION %I.create_task_note_for_attempt(");
+    expect(sql).toContain("ALTER FUNCTION %I.replace_task_note_for_attempt(");
+    expect(sql.match(/SET search_path = pg_catalog, %I, pg_temp/g)?.length).toBe(2);
+  });
+
+  test("both functions are SECURITY DEFINER with a pinned search_path on the live database", async () => {
+    if (!shared) return;
+    const rows = await shared.admin<
+      Array<{ name: string; secdef: boolean; config: string[] | null }>
+    >`
+      select proname as name, prosecdef as secdef, proconfig as config
+      from pg_proc
+      where proname in ('create_task_note_for_attempt', 'replace_task_note_for_attempt')
+      order by proname`;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.secdef).toBe(true);
+      expect(
+        (row.config ?? []).some(
+          (entry) => entry.startsWith("search_path=") && entry.includes("pg_catalog"),
+        ),
+      ).toBe(true);
+    }
   });
 });

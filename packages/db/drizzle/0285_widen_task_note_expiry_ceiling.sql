@@ -365,3 +365,27 @@ $$;
 
 RESET statement_timeout;
 RESET lock_timeout;
+
+DO $task_note_expiry_widen_hardening$
+DECLARE
+  target_schema text := current_schema();
+BEGIN
+  -- CREATE OR REPLACE FUNCTION drops the previously pinned search_path
+  -- (the FROM CURRENT clause re-resolves to the migration runner's
+  -- session search_path at DDL time, not the hardened value). Both functions
+  -- were originally re-pinned via ALTER FUNCTION in 0239/0260; re-apply the
+  -- same pin here.
+  EXECUTE format(
+    'ALTER FUNCTION %I.create_task_note_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.replace_task_note_for_attempt('
+      || 'uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,integer,text,text,integer,text) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
+END
+$task_note_expiry_widen_hardening$;
