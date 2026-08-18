@@ -5,7 +5,6 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   AttemptToolCatalogAuthorityError,
   AttemptToolCatalogConflictError,
-  CodemodeCallBudgetExceededError,
   CodemodeOperationConflictError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
@@ -184,7 +183,7 @@ describe("durable attempt tool catalogs", () => {
     ).toBeNull();
   });
 
-  test("admits an exact Codemode call once without double-charging idempotent retries", async () => {
+  test("admits an exact Codemode call once without duplicating idempotent retries", async () => {
     if (!available) return;
     const scope = await fixture();
     const exactCatalog = catalog(scope);
@@ -194,29 +193,24 @@ describe("durable attempt tool catalogs", () => {
     const first = await submitCodemodeOperation(client.db, {
       ...scope,
       call,
-      callLimit: 1,
     });
     expect(first.created).toBe(true);
     expect(first.operation.state).toBe("queued");
     const replay = await submitCodemodeOperation(client.db, {
       ...scope,
       call,
-      callLimit: 1,
     });
     expect(replay.created).toBe(false);
     expect(replay.operation.operationId).toBe(operationId);
-    await expect(
-      submitCodemodeOperation(client.db, {
-        ...scope,
-        call: codemodeCall(exactCatalog.digest),
-        callLimit: 1,
-      }),
-    ).rejects.toBeInstanceOf(CodemodeCallBudgetExceededError);
+    const second = await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: codemodeCall(exactCatalog.digest),
+    });
+    expect(second.created).toBe(true);
     await expect(
       submitCodemodeOperation(client.db, {
         ...scope,
         call: codemodeCall(exactCatalog.digest, operationId, { query: "different" }),
-        callLimit: 10,
       }),
     ).rejects.toBeInstanceOf(CodemodeOperationConflictError);
   });
@@ -227,7 +221,7 @@ describe("durable attempt tool catalogs", () => {
     const exactCatalog = catalog(scope);
     await persistAttemptToolCatalog(client.db, exactCatalog);
     const call = codemodeCall(exactCatalog.digest);
-    await submitCodemodeOperation(client.db, { ...scope, call, callLimit: 10 });
+    await submitCodemodeOperation(client.db, { ...scope, call });
     const claimId = crypto.randomUUID();
     const claimed = await claimCodemodeOperation(client.db, {
       ...scope,
@@ -300,7 +294,6 @@ describe("durable attempt tool catalogs", () => {
           ...codemodeCall(exactCatalog.digest),
           identity: { serverId: "docs", toolName: "missing" },
         },
-        callLimit: 10,
       }),
     ).rejects.toBeInstanceOf(CodemodeToolNotInCatalogError);
   });
@@ -316,7 +309,6 @@ describe("durable attempt tool catalogs", () => {
     await submitCodemodeOperation(client.db, {
       ...scope,
       call: beforeBoundary,
-      callLimit: 10,
     });
     const abandonedClaimId = crypto.randomUUID();
     expect(
@@ -358,7 +350,6 @@ describe("durable attempt tool catalogs", () => {
     await submitCodemodeOperation(client.db, {
       ...scope,
       call: afterBoundary,
-      callLimit: 10,
     });
     const executingClaimId = crypto.randomUUID();
     await claimCodemodeOperation(client.db, {
@@ -397,7 +388,7 @@ describe("durable attempt tool catalogs", () => {
     });
   });
 
-  test("rejects human-approval tools before reserving budget or execution", async () => {
+  test("rejects human-approval tools before reserving execution", async () => {
     if (!available) return;
     const scope = await fixture();
     const exactCatalog = createAttemptToolEnvironment({
@@ -419,14 +410,12 @@ describe("durable attempt tool catalogs", () => {
       submitCodemodeOperation(client.db, {
         ...scope,
         call: codemodeCall(exactCatalog.digest),
-        callLimit: 1,
       }),
     ).rejects.toBeInstanceOf(CodemodeToolApprovalRequiredError);
     await expect(
       submitCodemodeOperation(client.db, {
         ...scope,
         call: codemodeCall(exactCatalog.digest),
-        callLimit: 1,
       }),
     ).rejects.toBeInstanceOf(CodemodeToolApprovalRequiredError);
   });

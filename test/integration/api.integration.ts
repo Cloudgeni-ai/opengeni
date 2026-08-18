@@ -9357,7 +9357,6 @@ describe("API component integration", () => {
         databaseUrl: services.databaseUrl,
         productAccessMode: "configured",
         delegationSecret,
-        codemodeMaxCallsPerTurn: 1,
       }),
       db: dbClient.db,
       bus,
@@ -9441,12 +9440,12 @@ describe("API component integration", () => {
       operation: { operationId, state: "queued" },
     });
 
-    const exhausted = await app.request(`${base}/calls`, {
+    const second = await app.request(`${base}/calls`, {
       method: "POST",
       headers: { authorization, "content-type": "application/json" },
       body: JSON.stringify({ ...request, operationId: crypto.randomUUID() }),
     });
-    expect(exhausted.status).toBe(429);
+    expect(second.status).toBe(202);
 
     const queued = await app.request(`${base}/calls/${operationId}`, {
       headers: { authorization },

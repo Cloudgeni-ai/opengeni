@@ -17578,6 +17578,28 @@ export async function subjectHasLiveWorkspaceAuthority(
   );
 }
 
+/**
+ * Read-only organization tenancy inventory (0285): content-free counts of
+ * every legacy-attribution population the backfill/parity program gates on.
+ * Integers only - no identities, names, keys, or values.
+ */
+export async function inventoryOrganizationTenancy(
+  db: Database,
+  input: { organizationId: string },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select inventory_organization_tenancy(${input.organizationId}) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {

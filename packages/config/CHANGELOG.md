@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 0.16.8
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- f804057: Remove the arbitrary per-turn Codemode call cap. One turn may journal as many Codemode calls as the work needs; recovery still reuses that same journal rather than minting a new budget.
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+
 ## 0.16.7
 
 ### Patch Changes

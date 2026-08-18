@@ -16,7 +16,7 @@ const accountId = "00000000-0000-4000-8000-000000000618";
 const subjectId = "user:capabilities-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
-const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
+const outlookConnectionId = "00000000-0000-4000-8000-000000000621";
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
@@ -25,7 +25,6 @@ type UiState = {
   connectionsUnavailable: boolean;
   dense: boolean;
   loading: boolean;
-  mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
   oauthFailuresRemaining: number;
   oauthStarts: Array<{
     definitionId: string;
@@ -229,48 +228,7 @@ describe("custom API control center browser acceptance", () => {
     }
   }, 90_000);
 
-  test("pass 6: Gmail facets configure and pause without exposing provider state", async () => {
-    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
-    const page = await context.newPage();
-    try {
-      const state = readyState();
-      await installApi(page, state);
-      await openCapabilities(page);
-      const gmail = page.locator('[data-integration-instance="account-finance"]');
-      await expectText(gmail, "Gmail — Finance");
-      await gmail.getByRole("button", { name: "Manage facets for Gmail — Finance" }).click();
-      await expectText(page.locator('[data-integration-facets="account-finance"]'), "Mail inbox");
-      await expectText(
-        page.locator('[data-integration-facets="account-finance"]'),
-        "Mail delivery",
-      );
-      await expectText(
-        page.locator('[data-integration-facets="account-finance"]'),
-        "Account identity",
-      );
-
-      const inbox = page.locator('[data-integration-facet="mail-inbox"]');
-      await inbox.getByRole("button", { name: "Configure" }).click();
-      const dialog = page.getByRole("dialog");
-      await dialog.getByLabel("Folder").fill("INBOX");
-      await dialog.getByLabel("Unread Only").check();
-      await dialog.getByRole("button", { name: "Enable facet" }).click();
-      await expectText(inbox, "Active");
-      expect(JSON.stringify(state.mailInboxBinding)).not.toContain("history_id");
-
-      await inbox.getByRole("button", { name: "Pause" }).click();
-      await expectText(inbox, "Paused");
-      await assertAccessibleAndBounded(
-        page,
-        '[aria-labelledby="integration-control-center-heading"]',
-      );
-      await page.screenshot({ path: `${evidenceDir}pass-6-gmail-facets.png`, fullPage: true });
-    } finally {
-      await context.close();
-    }
-  }, 60_000);
-
-  test("pass 7: guided Gmail setup reviews access and retries one exact account", async () => {
+  test("pass 6: guided Outlook Mail setup reviews access and retries one exact account", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
     const state = readyState();
@@ -279,14 +237,16 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      const gmailCard = page.locator("article").filter({
-        has: page.getByRole("heading", { name: "Gmail", exact: true }),
+      const outlookCard = page.locator("article").filter({
+        has: page.getByRole("heading", { name: "Outlook Mail", exact: true }),
       });
-      const addAccount = gmailCard.getByRole("button", { name: "Add another account" });
+      const addAccount = outlookCard.getByRole("button", { name: "Add another account" });
       await addAccount.click();
       let dialog = page.getByRole("dialog");
       await expectVisible(dialog);
-      expect(await dialog.getByLabel("Account label").inputValue()).toBe("Gmail — Account 2");
+      expect(await dialog.getByLabel("Account label").inputValue()).toBe(
+        "Outlook Mail — Account 2",
+      );
       expect(
         await dialog
           .getByLabel("Account label")
@@ -307,9 +267,9 @@ describe("custom API control center browser acceptance", () => {
       await page.keyboard.press("ArrowLeft");
       expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
 
-      const rawScope = dialog.getByText("https://mail.google.com/", { exact: true });
+      const rawScope = dialog.getByText("Mail.Send", { exact: true });
       expect(await rawScope.isVisible()).toBe(false);
-      await dialog.getByLabel("Account label").fill("Gmail — Product");
+      await dialog.getByLabel("Account label").fill("Outlook Mail — Product");
       await dialog.getByText("Workspace", { exact: true }).click();
       await dialog.getByLabel("Account label").press("Enter");
       await expectText(dialog, "What agents can do");
@@ -319,7 +279,7 @@ describe("custom API control center browser acceptance", () => {
       expect(await rawScope.isVisible()).toBe(true);
       await dialog.getByRole("button", { name: "Continue" }).click();
       await expectText(dialog, "Review the connection");
-      await expectText(dialog, "Gmail — Product");
+      await expectText(dialog, "Outlook Mail — Product");
       await expectText(dialog, "Workspace — shared with authorized workspace members");
       await dialog.getByRole("button", { name: "Back" }).click();
       await expectText(dialog, "What agents can do");
@@ -329,24 +289,26 @@ describe("custom API control center browser acceptance", () => {
 
       await addAccount.click();
       dialog = page.getByRole("dialog");
-      expect(await dialog.getByLabel("Account label").inputValue()).toBe("Gmail — Account 2");
+      expect(await dialog.getByLabel("Account label").inputValue()).toBe(
+        "Outlook Mail — Account 2",
+      );
       await dialog.getByRole("button", { name: "Continue" }).click();
       await dialog.getByRole("button", { name: "Continue" }).click();
       state.oauthFailuresRemaining = 1;
-      await dialog.getByRole("button", { name: "Continue to Google" }).click();
+      await dialog.getByRole("button", { name: "Continue to Microsoft" }).click();
       await expectText(dialog.getByRole("alert"), "Check your network and try again");
       expect((await dialog.getByRole("alert").textContent()) ?? "").not.toContain(
         "provider-oauth-debug-body",
       );
       await expectText(
         page.locator('[data-integration-instance="account-finance"]'),
-        "Gmail — Finance",
+        "Outlook Mail — Finance",
       );
       expect(state.oauthStarts).toHaveLength(1);
 
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
-        path: `${evidenceDir}pass-7-guided-connect-retry.png`,
+        path: `${evidenceDir}pass-6-guided-connect-retry.png`,
         fullPage: true,
       });
       await dialog.getByRole("button", { name: "Try again" }).click();
@@ -358,9 +320,11 @@ describe("custom API control center browser acceptance", () => {
       expect(retriedReturn.searchParams.get("api_integration_instance")).toBe(
         firstReturn.searchParams.get("api_integration_instance"),
       );
-      expect(retriedReturn.searchParams.get("api_integration_name")).toBe("Gmail — Account 2");
+      expect(retriedReturn.searchParams.get("api_integration_name")).toBe(
+        "Outlook Mail — Account 2",
+      );
       expect(state.oauthStarts[1]).toMatchObject({
-        definitionId: "google-gmail",
+        definitionId: "microsoft-outlook-mail",
         ownership: "personal",
       });
     } finally {
@@ -368,7 +332,7 @@ describe("custom API control center browser acceptance", () => {
     }
   }, 60_000);
 
-  test("pass 8: mobile permission-disabled journey remains usable and bounded", async () => {
+  test("pass 7: mobile permission-disabled journey remains usable and bounded", async () => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       hasTouch: true,
@@ -383,7 +347,7 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const reviewSetup = page.getByRole("button", { name: "Review Gmail setup" });
+      const reviewSetup = page.getByRole("button", { name: "Review Outlook Mail setup" });
       expect(await reviewSetup.isDisabled()).toBe(false);
       await reviewSetup.click();
       const dialog = page.getByRole("dialog");
@@ -396,7 +360,7 @@ describe("custom API control center browser acceptance", () => {
       expect(box?.height ?? 0).toBeLessThanOrEqual(844);
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
-        path: `${evidenceDir}pass-8-mobile-permission-forced-colors.png`,
+        path: `${evidenceDir}pass-7-mobile-permission-forced-colors.png`,
         fullPage: true,
       });
 
@@ -417,7 +381,6 @@ function readyState(): UiState {
     connectionsUnavailable: false,
     dense: false,
     loading: false,
-    mailInboxBinding: null,
     oauthFailuresRemaining: 0,
     oauthStarts: [],
   };
@@ -535,77 +498,6 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ authorizationUrl: `${webBaseUrl}/provider-consent` });
     }
     if (
-      request.method() === "GET" &&
-      url.pathname.endsWith("/integrations/api%3Agoogle-gmail/instances/account-finance/facets")
-    ) {
-      return json(gmailFeatures(state));
-    }
-    if (url.pathname.endsWith("/facets/mail-inbox")) {
-      if (request.method() === "PUT") {
-        const body = request.postDataJSON() as {
-          displayName: string;
-          config: Record<string, unknown>;
-        };
-        state.mailInboxBinding = mailInboxBinding(
-          state.mailInboxBinding?.version ? state.mailInboxBinding.version + 1 : 1,
-          "active",
-          body.config,
-        );
-        return json({
-          capabilityId: "api:google-gmail",
-          instanceKey: "account-finance",
-          facetKey: "mail-inbox",
-          status: "configured",
-          binding: state.mailInboxBinding,
-        });
-      }
-      if (request.method() === "DELETE") {
-        state.mailInboxBinding = state.mailInboxBinding
-          ? {
-              ...state.mailInboxBinding,
-              status: "disabled",
-              version: state.mailInboxBinding.version + 1,
-            }
-          : null;
-        return json({
-          capabilityId: "api:google-gmail",
-          instanceKey: "account-finance",
-          facetKey: "mail-inbox",
-          status: "removed",
-          binding: state.mailInboxBinding,
-          remainingOwners: [],
-        });
-      }
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/pause")) {
-      state.mailInboxBinding = {
-        ...state.mailInboxBinding!,
-        status: "paused",
-        version: state.mailInboxBinding!.version + 1,
-      };
-      return json({
-        capabilityId: "api:google-gmail",
-        instanceKey: "account-finance",
-        facetKey: "mail-inbox",
-        status: "paused",
-        binding: state.mailInboxBinding,
-      });
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/resume")) {
-      state.mailInboxBinding = {
-        ...state.mailInboxBinding!,
-        status: "active",
-        version: state.mailInboxBinding!.version + 1,
-      };
-      return json({
-        capabilityId: "api:google-gmail",
-        instanceKey: "account-finance",
-        facetKey: "mail-inbox",
-        status: "active",
-        binding: state.mailInboxBinding,
-      });
-    }
-    if (
       request.method() === "POST" &&
       url.pathname === `/v1/workspaces/${workspaceId}/integrations/preview`
     ) {
@@ -672,7 +564,6 @@ function workspace() {
 
 function integrationDefinitions() {
   const scopes: Record<string, string[]> = {
-    "google-gmail": ["openid", "email", "profile", "https://mail.google.com/"],
     "google-drive": ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
     "microsoft-outlook-mail": [
       "offline_access",
@@ -696,7 +587,6 @@ function integrationDefinitions() {
     ],
   };
   return [
-    ["google-gmail", "Gmail", "google", "gmail.googleapis.com"],
     ["google-drive", "Google Drive", "google", "www.googleapis.com"],
     ["microsoft-outlook-mail", "Outlook Mail", "microsoft", "graph.microsoft.com"],
     ["microsoft-outlook-calendar", "Outlook Calendar", "microsoft", "graph.microsoft.com"],
@@ -712,7 +602,7 @@ function integrationDefinitions() {
     ...(INTEGRATION_DEFINITION_PRESENTATIONS[id!]
       ? { presentation: INTEGRATION_DEFINITION_PRESENTATIONS[id!] }
       : {}),
-    facets: id === "google-gmail" ? gmailFacetDefinitions() : [],
+    facets: [],
   }));
 }
 
@@ -721,9 +611,9 @@ function connections(dense: boolean) {
     connection(financeConnectionId, "Finance credential", null),
     connection(salesConnectionId, "Sales credential", subjectId),
     {
-      ...connection(gmailConnectionId, "Gmail Finance credential", subjectId),
-      providerDomain: "gmail.googleapis.com",
-      grantedScopes: ["mail.read", "mail.send"],
+      ...connection(outlookConnectionId, "Outlook Mail Finance credential", subjectId),
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["Mail.Read", "Mail.Send"],
     },
   ];
   if (dense) {
@@ -768,20 +658,20 @@ function instances(dense: boolean) {
     instance("finance", "Linear — Finance", financeConnectionId, "workspace"),
     instance("sales", "Linear — Sales", salesConnectionId, "personal"),
     {
-      ...instance("account-finance", "Gmail — Finance", gmailConnectionId, "personal"),
-      capabilityId: "api:google-gmail",
-      pluginKey: "integration/google-gmail",
-      serverId: "api_google_gmail_account_finance",
-      name: "Gmail — Finance",
-      description: "Gmail messages, labels, drafts, and delivery.",
+      ...instance("account-finance", "Outlook Mail — Finance", outlookConnectionId, "personal"),
+      capabilityId: "api:microsoft-outlook-mail",
+      pluginKey: "integration/microsoft-outlook-mail",
+      serverId: "api_microsoft_outlook_mail_account_finance",
+      name: "Outlook Mail — Finance",
+      description: "Outlook mail, folders, drafts, and delivery.",
       protocol: "openapi",
-      definitionId: "google-gmail",
+      definitionId: "microsoft-outlook-mail",
       definitionProvenance: "curated",
-      providerDomain: "gmail.googleapis.com",
-      baseUrl: "https://gmail.googleapis.com/",
-      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
-      allowedTools: ["gmail_users_messages_list", "gmail_users_messages_send"],
-      revisionId: "openapi:gmail-v1",
+      providerDomain: "graph.microsoft.com",
+      baseUrl: "https://graph.microsoft.com/",
+      sourceUrl: "https://graph.microsoft.com/v1.0/$metadata",
+      allowedTools: ["outlook_mail_list_messages", "outlook_mail_send_message"],
+      revisionId: "openapi:outlook-mail-v1",
       contentSha256: "c".repeat(64),
     },
   ];
@@ -798,84 +688,6 @@ function instances(dense: boolean) {
     }
   }
   return values;
-}
-
-function gmailFacetDefinitions() {
-  return [
-    {
-      facetKey: "mail-inbox",
-      kind: "inbound_trigger",
-      configSchema: {
-        type: "object",
-        properties: {
-          folder: { type: "string", minLength: 1, maxLength: 256 },
-          unreadOnly: { type: "boolean" },
-        },
-        additionalProperties: false,
-      },
-      capabilities: { provider: "google-gmail", connectionRequired: true, cursor: "history_id" },
-    },
-    {
-      facetKey: "mail-delivery",
-      kind: "delivery_destination",
-      configSchema: {
-        type: "object",
-        properties: { fromAlias: { type: "string", minLength: 1, maxLength: 512 } },
-        additionalProperties: false,
-      },
-      capabilities: { provider: "google-gmail", connectionRequired: true, delivery: "email" },
-    },
-    {
-      facetKey: "account-identity",
-      kind: "identity_link",
-      configSchema: { type: "object", properties: {}, additionalProperties: false },
-      capabilities: { provider: "google", connectionRequired: true },
-    },
-  ];
-}
-
-function gmailFeatures(state: UiState) {
-  return {
-    capabilityId: "api:google-gmail",
-    instanceKey: "account-finance",
-    providerDomain: "gmail.googleapis.com",
-    connectionId: gmailConnectionId,
-    facets: gmailFacetDefinitions().map((definition) => ({
-      definition,
-      binding: definition.facetKey === "mail-inbox" ? state.mailInboxBinding : null,
-    })),
-  };
-}
-
-function mailInboxBinding(
-  version: number,
-  status: "active" | "paused" | "disabled",
-  config: Record<string, unknown>,
-) {
-  return {
-    id: "00000000-0000-4000-8000-000000000622",
-    facetKey: "mail-inbox",
-    kind: "inbound_trigger" as const,
-    bindingKey: "account-finance",
-    displayName: "Gmail — Finance — Mail inbox",
-    connectionId: gmailConnectionId,
-    status,
-    config,
-    version,
-    hasCursor: false,
-    lastSuccessAt: null,
-    lastErrorCode: null,
-    createdAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-    directlyOwned: true,
-    owners: [
-      {
-        kind: "direct" as const,
-        id: "facet:d358a95c79124370ff2e8e3c9d366cd95ff8ddf1f30dfde2c79dffc61d3627af",
-        removable: true,
-      },
-    ],
-  };
 }
 
 function instance(

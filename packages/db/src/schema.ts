@@ -5138,9 +5138,8 @@ export const sessionTurns = pgTable(
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
-    // Atomic per-turn codemode call budget counter (migration 0043). Incremented
-    // by a single conditional UPDATE at tools/call time; the row lock serializes
-    // concurrent reservations so exactly `codemodeMaxCallsPerTurn` succeed.
+    // Leftover unused counter from the removed per-turn Codemode call cap
+    // (migrations 0043/0205). New writers do not increment it; do not enforce.
     codemodeCallCount: integer("codemode_call_count").notNull().default(0),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
