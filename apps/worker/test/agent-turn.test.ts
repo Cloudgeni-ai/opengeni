@@ -107,6 +107,7 @@ import {
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
   structuredToolTransportForTurn,
   toolCallProducesRetainableSessionImage,
@@ -165,6 +166,28 @@ describe("workspace structured human-input policy", () => {
 
   // No-Claim: these pure boundary tests do not prove that a deployed worker has
   // reloaded a workspace setting or that an already-pending request was repaired.
+});
+
+describe("periodic workspace snapshot admission", () => {
+  const ready = {
+    firstProviderRequestStarted: true,
+    snapshotInFlight: false,
+    turnEndCaptureInProgress: false,
+  };
+
+  test("keeps checkpoint maintenance off the first-request critical path", () => {
+    expect(
+      shouldStartPeriodicWorkspaceSnapshot({ ...ready, firstProviderRequestStarted: false }),
+    ).toBe(false);
+    expect(shouldStartPeriodicWorkspaceSnapshot(ready)).toBe(true);
+  });
+
+  test("retains the existing single-flight and turn-end gates", () => {
+    expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, snapshotInFlight: true })).toBe(false);
+    expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, turnEndCaptureInProgress: true })).toBe(
+      false,
+    );
+  });
 });
 
 describe("Connected Machine durable stream finalization", () => {

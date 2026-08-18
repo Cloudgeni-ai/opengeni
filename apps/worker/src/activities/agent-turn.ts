@@ -942,6 +942,22 @@ export function shouldRunTurnEndWorkspacePersistence(input: {
 }
 
 /**
+ * Periodic workspace snapshots protect work performed during a long-running
+ * turn. Before the first provider request reaches the wire there is no
+ * mid-turn agent work to protect; snapshotting platform setup at that point can
+ * instead make the request wait behind the snapshot's workspace-write fence.
+ */
+export function shouldStartPeriodicWorkspaceSnapshot(input: {
+  firstProviderRequestStarted: boolean;
+  snapshotInFlight: boolean;
+  turnEndCaptureInProgress: boolean;
+}): boolean {
+  return (
+    input.firstProviderRequestStarted && !input.snapshotInFlight && !input.turnEndCaptureInProgress
+  );
+}
+
+/**
  * Temporal cancellation is delivery/transport state, never proof that the
  * dying activity crossed its mandatory sandbox-tool fence. If that fence
  * fails, surface the fence failure instead of retaining a misleading typed
@@ -3828,6 +3844,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
+    // The heartbeat snapshot is mid-session durability, not first-request
+    // preparation. Keep it off the startup critical path until a provider
+    // request has actually reached its transport boundary.
+    let firstProviderRequestStarted = false;
     // Turn-end capture needs the lease heartbeat to keep its holder alive, but
     // must prevent that same timer from starting another periodic snapshot
     // while it reads. This gate separates those two responsibilities.
@@ -4078,7 +4098,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
         const snapshotTurnId = turnId;
-        if (snapshotSession && snapshotTurnId && !snapshotInFlight && !turnEndCaptureInProgress) {
+        if (
+          snapshotSession &&
+          snapshotTurnId &&
+          shouldStartPeriodicWorkspaceSnapshot({
+            firstProviderRequestStarted,
+            snapshotInFlight: Boolean(snapshotInFlight),
+            turnEndCaptureInProgress,
+          })
+        ) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
@@ -6215,6 +6243,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   lastCodexRequestOpaqueArtifacts = fingerprints;
                 },
                 onModelRequestDiagnostic: (event) => {
+                  if (event.phase === "started") firstProviderRequestStarted = true;
                   if (
                     event.phase === "started" &&
                     firstModelRequestPreparationStartedAt !== null &&
@@ -6340,6 +6369,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           onModelRequestDiagnostic: (event) => {
             const requestKey = `${event.requestId}:${event.transportAttempt}`;
             if (event.phase === "started") {
+              firstProviderRequestStarted = true;
               modelRequestLifecycleMetricsFor(observability).start(
                 requestKey,
                 "supergrok-subscription",
@@ -9925,6 +9955,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ) {
             return;
           }
+          firstProviderRequestStarted = true;
           firstModelRequestPreparationRecorded = true;
           const preparationDurationMs = Math.max(
             0,
