@@ -333,6 +333,13 @@ describe("migration 0290 organization membership backfill", () => {
     const held = new Promise<void>((resolve) => {
       releaseHolder = resolve;
     });
+    // The peer must actually own the row lock before the backfill runs;
+    // starting its transaction is not the same as holding the lock, and racing
+    // the two makes this assertion nondeterministic.
+    let markHeld: (() => void) | null = null;
+    const holderAcquired = new Promise<void>((resolve) => {
+      markHeld = resolve;
+    });
     const holderTransaction = holder.begin(async (tx) => {
       await tx`select set_config('opengeni.account_id', ${legacy.organizationId}, true)`;
       await tx`
@@ -341,9 +348,11 @@ describe("migration 0290 organization membership backfill", () => {
           and access.subject_id = ${legacy.subjectId}
           and access.role = 'owner'
         for update`;
+      markHeld!();
       await held;
     });
     try {
+      await holderAcquired;
       const contendedRun = await runOrganizationMembershipBackfill(db, {
         organizationId: legacy.organizationId,
         limit: 25,
