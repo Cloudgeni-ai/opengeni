@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0294_organization_membership_lock_order.sql")) {
+        return includesActivation
+          ? "863f885db279e63fdc4e1f3665c7a5746cdcafcb3a046c43591e9d74658f69bd"
+          : "a849bac209792d73560eace0d7e4aaa9ba918e561fff431d835e73491b8bd107";
+      }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
           ? "af2db2108cf92384fbb58a843f6171c78afb47f20c8197f43e080451dfc4218b"
@@ -1020,7 +1025,8 @@ describe("release schema contract", () => {
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
-        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0),
+        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
+        (migrations.has("0294_organization_membership_lock_order.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1055,7 +1061,9 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0287_open_suffix_pending_tool_calls.sql")
+      migrations.has("0294_organization_membership_lock_order.sql")
+        ? "0294_organization_membership_lock_order.sql"
+        : migrations.has("0287_open_suffix_pending_tool_calls.sql")
         ? "0287_open_suffix_pending_tool_calls.sql"
         : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
         ? "0286_widen_task_note_expiry_ceiling.sql"
@@ -1151,6 +1159,12 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0263_organization_membership_lifecycle.sql")).toMatchObject({
       sha256: "1119554dc06a768c92f7189a97b438ebdc011747a6c8d7cefc992962f2293593",
+      deploymentMode: "rolling",
+    });
+    // OPE-275: the membership lifecycle lock-order repair. 0263 stays byte
+    // identical above; 0294 rewrites the three entry points in place.
+    expect(migrations.get("0294_organization_membership_lock_order.sql")).toMatchObject({
+      sha256: "456533b962b00e70281a1b32f708ff6cd8055e716ed0c231b0a2a21e1952f13b",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0285_organization_tenancy_inventory.sql")).toMatchObject({

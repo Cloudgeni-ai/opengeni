@@ -94,7 +94,15 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.
   All remaining APIs, resources, sessions, lists, and RLS behavior remain
-  workspace-owned/workspace-shared. See `docs/organization-tenancy.md`.
+  workspace-owned/workspace-shared. An organization-wide lifecycle seam
+  serializes on the transaction-scoped advisory key
+  `hashtextextended('organization-membership:<organization id>')` and may take no
+  lock stronger than `managed_accounts FOR KEY SHARE` before the canonical
+  workspace prefix (migration 0294, OPE-275): every ordinary workspace writer
+  holds its `workspaces` row and then reaches `managed_accounts` through the
+  account FK check of a row it inserts, so an organization-row `FOR UPDATE` held
+  across workspace acquisition is a deadlock. See
+  `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
 - Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.
