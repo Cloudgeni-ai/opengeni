@@ -17,6 +17,7 @@ import {
   canManageApiIntegrations,
   integrationQuickConnect,
   integrationRowBusy,
+  shouldScrollToDeepLinkedBundles,
 } from "./capabilities";
 
 function accessContext(
@@ -193,5 +194,22 @@ describe("integration row quick-connect guard", () => {
       }),
     ).toBe(true);
     expect(integrationRowBusy({ footer: { kind: "locked" } })).toBe(false);
+  });
+});
+
+describe("?section=packs deep link", () => {
+  test("waits for the catalog, then scrolls exactly once", () => {
+    // The first commit renders a Browse skeleton; resolving a 1000+ item
+    // catalog then inserts thousands of pixels above the Bundles section, so
+    // scrolling now lands the reader in the middle of the Browse grid.
+    expect(shouldScrollToDeepLinkedBundles("packs", true, false)).toBe(false);
+    expect(shouldScrollToDeepLinkedBundles("packs", false, false)).toBe(true);
+    // Once is once: a later refresh must not yank the page back.
+    expect(shouldScrollToDeepLinkedBundles("packs", false, true)).toBe(false);
+  });
+
+  test("an ordinary visit is never scrolled", () => {
+    expect(shouldScrollToDeepLinkedBundles(undefined, false, false)).toBe(false);
+    expect(shouldScrollToDeepLinkedBundles(undefined, true, false)).toBe(false);
   });
 });
