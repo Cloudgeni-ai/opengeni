@@ -89,12 +89,13 @@ const SANDBOX_OPERATION_NAMES = new Set([
 ]);
 
 /**
- * Closed set of organization-tenancy compatibility lanes (OPE-204 phase E).
+ * Closed set of organization-tenancy compatibility lanes (the tenancy
+ * migration's validate phase; see `docs/organization-tenancy.md`).
  *
  * Each entry names one legacy behaviour a live request can still take today.
  * The metric built from them is deliberately a COUNTER of lane USES, and it
  * measures exactly one thing: **is this lane still being exercised?** That is
- * the question OPE-204's cutover gate ("zero incompatible writers") actually
+ * the question the tenancy cutover gate ("zero incompatible writers") actually
  * asks, and it is answerable.
  *
  * It is emphatically NOT a burndown of unmigrated rows, and must never be

@@ -1,4 +1,4 @@
-// OPE-204 phase E: a pre-0277 `/workspace` writer with no recorded authority
+// Tenancy validate phase: a pre-0277 `/workspace` writer with no recorded authority
 // is a bounded compatibility lane, not a fault. It must be countable so an
 // operator can watch it drain, and the count must stay content-free and
 // separate from the structural failure signal operators page on.

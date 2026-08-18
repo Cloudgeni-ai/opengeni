@@ -1,4 +1,4 @@
-// OPE-204 phase E: the two connection compatibility lanes must be countable
+// Tenancy validate phase: the two connection compatibility lanes must be countable
 // while they are still live, so an operator can watch them drain. The counter
 // is content-free (lane name only) and must never change what the credential
 // resolution actually returns.
