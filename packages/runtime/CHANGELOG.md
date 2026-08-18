@@ -9,7 +9,7 @@
 - Updated dependencies [55e0417]
   - @opengeni/config@0.16.8
   - @opengeni/contracts@1.4.0
-  - @opengeni/sdk@2.0.0
+  - @opengeni/sdk@1.2.0
   - @opengeni/codemode@0.4.8
 
 ## 1.1.0

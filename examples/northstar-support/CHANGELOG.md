@@ -6,8 +6,8 @@
 
 - Updated dependencies [0a6c577]
 - Updated dependencies [b05130a]
-  - @opengeni/react@2.0.0
-  - @opengeni/sdk@2.0.0
+  - @opengeni/react@1.2.0
+  - @opengeni/sdk@1.2.0
 
 ## 0.0.112
 
