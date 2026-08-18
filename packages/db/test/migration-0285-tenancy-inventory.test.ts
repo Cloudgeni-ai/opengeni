@@ -37,12 +37,12 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 describe("migration 0285 tenancy inventory", () => {
   test("declares one read-only rolling seam that returns integers only", async () => {
@@ -128,7 +128,8 @@ describe("migration 0285 tenancy inventory", () => {
     } finally {
       await blank.release();
     }
-  });
+    // A blank database plus a full `migrate()` is far past bun's 5s default.
+  }, 180_000);
 
   test("counts the legacy populations for exactly the requested organization", async () => {
     if (!available) return;
@@ -190,7 +191,11 @@ describe("migration 0285 tenancy inventory", () => {
       sandboxBackend: "none",
     });
 
-    // Unclassified (legacy) variable set + a legacy_user connection.
+    // A workspace-scoped variable set + a legacy_user connection. (0285
+    // originally reported this row as `unclassified`; migration 0292 removed
+    // that counter - the shape check REQUIRES a NULL authority_id here, so the
+    // number was structurally `total - userScoped`. See
+    // migration-0292-truthful-tenancy-inventory-counters.test.ts.)
     await admin`
       insert into workspace_variable_sets (account_id, workspace_id, name, origin_workspace_id)
       values (${account!.id}, ${workspace!.id}, 'legacy set', ${workspace!.id})`;
@@ -219,7 +224,7 @@ describe("migration 0285 tenancy inventory", () => {
       };
       workspaceMemberSubjectsWithoutMembershipAnchor: number;
       sessions: { total: number; ownerless: number; userPrivate: number };
-      variableSets: { unclassified: number };
+      variableSets: { byScope: Record<string, number> };
       connections: Record<string, number>;
       documents: { total: number; legacyPersonalNullAuthority: number };
     };
@@ -232,7 +237,7 @@ describe("migration 0285 tenancy inventory", () => {
     expect(inventory.organizationMemberships.activeWithoutPersonalWorkspace).toBe(0);
     expect(inventory.workspaceMemberSubjectsWithoutMembershipAnchor).toBe(1);
     expect(inventory.sessions).toMatchObject({ total: 1, ownerless: 1, userPrivate: 0 });
-    expect(inventory.variableSets.unclassified).toBe(1);
+    expect(inventory.variableSets.byScope).toMatchObject({ workspace: 1 });
     expect(inventory.connections).toMatchObject({ legacy_user: 1 });
     // Content-free: the report never carries identities.
     expect(JSON.stringify(inventory)).not.toContain(anchored);

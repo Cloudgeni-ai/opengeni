@@ -30278,10 +30278,7 @@ export async function recordPendingSessionToolCallResult(
   );
 }
 
-export type OpenSuffixInterruptionKind =
-  | "human_input"
-  | "approval"
-  | "interaction_intervention";
+export type OpenSuffixInterruptionKind = "human_input" | "approval" | "interaction_intervention";
 
 export type OpenSuffixPendingToolCall = {
   callId: string;
@@ -55779,10 +55776,9 @@ export type ApplySessionTurnSettlementInput = {
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
    * interventions are public protocol; ordinary approvals remain in
-   * pendingApprovals. Pause also attaches the bounded open suffix on
-   * `session_pending_tool_calls`. Expand-era leftover SDK blobs still write
-   * here when they fit the 3 MiB envelope; oversized heaps store the open-suffix
-   * sentinel instead. Resume prefers the suffix and must not require
+   * pendingApprovals. Pause attaches the bounded open suffix on
+   * `session_pending_tool_calls` and stores the open-suffix sentinel here.
+   * Resume uses the suffix plus paired history and must not call
    * `RunState.fromString`.
    */
   runState?: {
