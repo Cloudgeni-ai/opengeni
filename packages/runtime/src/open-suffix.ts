@@ -1,8 +1,5 @@
 import { RunContext, type Agent } from "@openai/agents";
-import {
-  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
-  OPEN_SUFFIX_RUN_STATE_BLOB,
-} from "@opengeni/contracts";
+import { INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME } from "@opengeni/contracts";
 import { HUMAN_INPUT_TOOL_NAME } from "./run-events";
 import {
   extractOpenSuffixMembers,
@@ -84,15 +81,6 @@ export function extractOpenSuffixFromRunState(state: unknown): OpenSuffixMember[
     }
   }
   return [];
-}
-
-export function serializedRunStateForOpenSuffixPause(
-  compacted: string,
-  maximumJsonBytes = OPEN_SUFFIX_MAX_JSON_BYTES,
-): string {
-  return Buffer.byteLength(compacted, "utf8") > maximumJsonBytes
-    ? OPEN_SUFFIX_RUN_STATE_BLOB
-    : compacted;
 }
 
 export function interruptionKindForCallItem(
