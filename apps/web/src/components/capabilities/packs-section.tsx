@@ -438,7 +438,9 @@ function PackCard(props: {
         installReady={installReady}
         installLabel={installLabel}
         onOpenChange={(open) => {
-          if (!open && !reviewing && !props.busy) setInstallOpen(false);
+          // Close on outside click / Escape even mid-review or mid-install; a
+          // busy submit disables its own button rather than suppressing close.
+          if (!open) setInstallOpen(false);
         }}
         onSelectionChange={updateSelection}
         onReview={() => void reviewInstallation(selection)}

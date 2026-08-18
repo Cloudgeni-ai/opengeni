@@ -9,6 +9,7 @@ import {
   getAttachedBrowserDevice,
   listAttachedBrowserDevices,
   reconcileAttachedBrowserInventory,
+  revokeEnrollment,
 } from "../src";
 
 let available = true;
@@ -236,5 +237,63 @@ describe("attached browser endpoint registry", () => {
         },
       }),
     ).rejects.toBeInstanceOf(AttachedBrowserInventoryConflictError);
+  });
+
+  test("lets a re-enrolled machine reclaim a profile from its revoked enrollment", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const deviceId = crypto.randomUUID();
+    await reconcileAttachedBrowserInventory(client.db, {
+      ...scope,
+      snapshot: {
+        bridgeGeneration: "bridge-before-reinstall",
+        revision: 1,
+        devices: [device(deviceId, "Chrome before reinstall")],
+      },
+    });
+    expect(
+      await revokeEnrollment(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        enrollmentId: scope.enrollmentId,
+      }),
+    ).toEqual({ revoked: true });
+
+    const replacement = await createEnrollment(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      os: "macos",
+      arch: "arm64",
+    });
+    const reclaimed = await reconcileAttachedBrowserInventory(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      enrollmentId: replacement.id,
+      snapshot: {
+        bridgeGeneration: "bridge-after-reinstall",
+        revision: 0,
+        devices: [
+          {
+            ...device(deviceId, "Chrome after reinstall", 0),
+            connectionGeneration: "extension-after-reinstall",
+          },
+        ],
+      },
+    });
+
+    expect(reclaimed).toMatchObject({ accepted: true, changed: true });
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        deviceId,
+      }),
+    ).toMatchObject({
+      enrollmentId: replacement.id,
+      name: "Chrome after reinstall",
+      state: "connected",
+      inventoryRevision: 0,
+    });
   });
 });

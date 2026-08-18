@@ -11,7 +11,12 @@ import {
   GOOGLE_DRIVE_SYNC_BEHAVIOR,
   localConnectedGoogleDrivePreview,
 } from "@/lib/google-drive-connection";
-import type { AccessContext, ConnectionMetadata } from "@/types";
+import type {
+  AccessContext,
+  ApiIntegrationInstallationSummary,
+  ConnectionMetadata,
+  IntegrationDefinitionSummary,
+} from "@/types";
 
 import { IntegrationSheetBody, integrationDisclosureElementId } from "./integration-sheet";
 import {
@@ -135,7 +140,55 @@ function connectedDriveFixture(): ConnectionMetadata {
   return localConnectedGoogleDrivePreview("?previewGoogleDrive=connected", WORKSPACE_ID, true)!;
 }
 
-async function renderDriveSheet(connections: ConnectionMetadata[]) {
+const GOOGLE_DRIVE_DEFINITIONS = [
+  {
+    id: "google-drive",
+    name: "Google Drive",
+    summary: "Files, folders, permissions, and shared drives.",
+    protocol: "openapi",
+    provider: { id: "google", domain: "www.googleapis.com" },
+    authentication: { kind: "oauth2", scopes: [] },
+    facets: [],
+  },
+] as unknown as IntegrationDefinitionSummary[];
+
+function extraDriveAccount(
+  overrides: Partial<ApiIntegrationInstallationSummary> = {},
+): ApiIntegrationInstallationSummary {
+  return {
+    capabilityId: "api:google-drive",
+    pluginKey: "integration/google-drive",
+    installationVersion: 1,
+    instanceId: "instance-extra",
+    instanceKey: "account-extra",
+    displayName: "finance@example.com",
+    instanceVersion: 1,
+    serverId: "api_google_drive_account_extra",
+    name: "Google Drive",
+    description: null,
+    protocol: "openapi",
+    definitionId: "google-drive",
+    definitionProvenance: "curated",
+    providerDomain: "www.googleapis.com",
+    baseUrl: "https://www.googleapis.com/drive/v3/",
+    sourceUrl: null,
+    connected: true,
+    requiresConnection: true,
+    connectionId: "connection-extra",
+    ownership: "workspace",
+    allowedTools: ["drive_files_list"],
+    toolCount: 1,
+    approvalRequiredToolCount: 0,
+    revisionId: "rev-1",
+    contentSha256: "sha-1",
+    ...overrides,
+  } as unknown as ApiIntegrationInstallationSummary;
+}
+
+async function renderDriveSheet(
+  connections: ConnectionMetadata[],
+  instances: ApiIntegrationInstallationSummary[] = [],
+) {
   mutableContext.current = {
     client: {},
     accessContext: accessContext(["connections:read", "connections:write"]),
@@ -148,6 +201,8 @@ async function renderDriveSheet(connections: ConnectionMetadata[]) {
       connectionsLoaded: true,
       refresh: async () => {},
       replaceConnection: () => {},
+      definitions: GOOGLE_DRIVE_DEFINITIONS,
+      instances,
     });
     return (
       <Sheet open>
@@ -249,6 +304,78 @@ describe("Google Drive sync toggle", () => {
       });
       // No save request: the blanket toggle would overwrite per-source settings.
       expect(requestMock).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+describe("Google Drive extra accounts fold into the same row", () => {
+  test("an extra account needing reauth forces the whole row to Needs attention", async () => {
+    const rendered = await renderDriveSheet(
+      [connectedDriveFixture()],
+      [extraDriveAccount({ connected: false })],
+    );
+    try {
+      // A healthy primary must never roll a broken second account up to green.
+      expect(rendered.adapter.model.chip).toEqual({ label: "Needs attention", tone: "warn" });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("all-healthy accounts leave the primary chip alone", async () => {
+    const rendered = await renderDriveSheet([connectedDriveFixture()], [extraDriveAccount()]);
+    try {
+      expect(rendered.adapter.model.chip).toEqual({ label: "Connected", tone: "ok" });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the saved folders stay visible under the primary account", async () => {
+    const rendered = await renderDriveSheet([connectedDriveFixture()], [extraDriveAccount()]);
+    try {
+      const access = rendered.adapter.model.access!;
+      expect(access.title).toBe("Connected accounts");
+      expect(access.items).toHaveLength(2);
+      const primary = access.items[0]!;
+      expect(primary.meta).toBe("Primary");
+      expect(primary.subItems?.length).toBeGreaterThan(0);
+      expect(primary.subItemsEmptyMessage).toContain("No folders selected yet");
+      // The folder names and their sync meta reach the rendered sheet, not just
+      // the view-model.
+      for (const folder of primary.subItems ?? []) {
+        expect(rendered.sheet.textContent).toContain(folder.name);
+      }
+      expect(rendered.sheet.textContent).toMatch(/syncing|on request/);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the extras path keeps the Google limited-use disclosure wired to its actions", async () => {
+    // Read access was never granted, so the primary account's inline action is
+    // the one that asks Google for more - exactly what the disclosure describes.
+    const withoutSourceScope = connectedDriveFixture();
+    const metadata = withoutSourceScope.metadata as Record<string, unknown>;
+    metadata.selectedSources = [];
+    metadata.accessMode = "file_only";
+    const rendered = await renderDriveSheet([withoutSourceScope], [extraDriveAccount()]);
+    try {
+      const describedById = integrationDisclosureElementId("google-drive-access");
+      const addAccount = [...rendered.sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "+ Add account",
+      )!;
+      expect(addAccount.getAttribute("aria-describedby")).toBe(describedById);
+      const allowAccess = [...rendered.sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Allow folder access",
+      )!;
+      expect(allowAccess).toBeDefined();
+      expect(allowAccess.getAttribute("aria-describedby")).toBe(describedById);
+      expect(document.getElementById(describedById)?.textContent).toBe(
+        GOOGLE_DRIVE_ACCESS_DISCLOSURE,
+      );
     } finally {
       await rendered.unmount();
     }

@@ -1,8 +1,14 @@
-diff --git a/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
+diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-tag-7c21d377cb19cf3e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-ac46de758592501 b/.bun-tag-ac46de758592501
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index 21b58188472152339a1747df5cfe8dd256356cd1..5e99f9b77eba9314cb576d351200f078cec34b44 100644
+index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f9331b033 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
 @@ -26,10 +26,10 @@ export { setDefaultModelProvider } from './providers';
@@ -10,7 +16,7 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..5e99f9b77eba9314cb576d351200f078
  export { RunResult, StreamedRunResult } from './result';
  export { IndividualRunOptions, NonStreamRunOptions, run, RunConfig, Runner, StreamRunOptions, } from './run';
 -export type { ModelInputData, CallModelInputFilter, CallModelInputFilterArgs, ToolErrorFormatter, ToolErrorFormatterArgs, ToolExecutionConfig, ToolNameCollisionPolicy, ToolNotFoundBehavior, ToolErrorKind, ReasoningItemIdPolicy, RunErrorData, RunErrorHandler, RunErrorHandlerInput, RunErrorHandlerResult, RunErrorHandlers, RunErrorKind, } from './run';
-+export type { ModelInputData, CallModelInputFilter, CallModelInputFilterArgs, ToolErrorFormatter, ToolErrorFormatterArgs, ToolExecutionConfig, ToolNameCollisionPolicy, ToolNotFoundBehavior, ToolErrorKind, HistoryOwnership, ModelResponseRetention, ReasoningItemIdPolicy, RunErrorData, RunErrorHandler, RunErrorHandlerInput, RunErrorHandlerResult, RunErrorHandlers, RunErrorKind, } from './run';
++export type { ModelInputData, CallModelInputFilter, CallModelInputFilterArgs, ToolErrorFormatter, ToolErrorFormatterArgs, ToolExecutionConfig, ToolNameCollisionPolicy, ToolNotFoundBehavior, ResolveMissingFunctionTool, ToolErrorKind, HistoryOwnership, ModelResponseRetention, ReasoningItemIdPolicy, RunErrorData, RunErrorHandler, RunErrorHandlerInput, RunErrorHandlerResult, RunErrorHandlers, RunErrorKind, } from './run';
  export { RunContext } from './runContext';
  export type { AgentToolInvocation } from './agentToolInvocation';
 -export { RunState } from './runState';
@@ -19,13 +25,23 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..5e99f9b77eba9314cb576d351200f078
  export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
  export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
 diff --git a/dist/run.d.ts b/dist/run.d.ts
-index 7863d754f4d6a5e1bfb99b8cde39417796533741..67b753db052d409f58097afb1a4c074d0591fe1e 100644
+index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b909715db5c1a 100644
 --- a/dist/run.d.ts
 +++ b/dist/run.d.ts
-@@ -53,6 +53,17 @@ export type ToolErrorFormatter<TContext = unknown> = (args: ToolErrorFormatterAr
+@@ -53,6 +53,27 @@ export type ToolErrorFormatter<TContext = unknown> = (args: ToolErrorFormatterAr
   * SDK-side execution settings for local tool calls.
   */
  export type ToolNotFoundBehavior = 'raise_error' | 'return_error_to_model';
++/**
++ * Resolves a function tool that is not on the current configured Agent list.
++ * Used for progressive disclosure: deferred tools stay off the first-request
++ * schema but remain executable when the model names them.
++ */
++export type ResolveMissingFunctionTool = (args: {
++    name: string;
++    agent: Agent<any, any>;
++    toolCall: unknown;
++}) => Promise<import('./tool').FunctionTool | null | undefined> | import('./tool').FunctionTool | null | undefined;
 +/**
 + * Selects the owner of conversation history supplied to a run.
 + *
@@ -40,7 +56,7 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..67b753db052d409f58097afb1a4c074d
  /**
   * Configures settings for the entire agent run.
   */
-@@ -152,6 +163,18 @@ export type RunConfig = {
+@@ -152,6 +173,18 @@ export type RunConfig = {
       * system instructions or input items that will be sent to the model.
       */
      callModelInputFilter?: CallModelInputFilter;
@@ -59,7 +75,19 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..67b753db052d409f58097afb1a4c074d
      /**
       * Formats tool error messages that are returned to the model.
       * Returning `undefined` falls back to the SDK default message.
-@@ -174,6 +197,8 @@ type SharedRunOptions<TContext = undefined, TAgent extends Agent<any, any> = Age
+@@ -161,6 +194,11 @@ export type RunConfig = {
+      * Controls how run items are converted into model input for subsequent turns.
+      */
+     reasoningItemIdPolicy?: ReasoningItemIdPolicy;
++    /**
++     * Optional resolver for function calls whose name is missing from the
++     * current configured tool list. Unset preserves raise/return-error behavior.
++     */
++    resolveMissingFunctionTool?: ResolveMissingFunctionTool;
+ };
+ /**
+  * Common run options shared between streaming and non-streaming execution pathways.
+@@ -174,12 +212,15 @@ type SharedRunOptions<TContext = undefined, TAgent extends Agent<any, any> = Age
      session?: Session;
      sessionInputCallback?: SessionInputCallback;
      callModelInputFilter?: CallModelInputFilter;
@@ -68,8 +96,15 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..67b753db052d409f58097afb1a4c074d
      toolErrorFormatter?: ToolErrorFormatter;
      reasoningItemIdPolicy?: ReasoningItemIdPolicy;
      tracing?: TracingConfig;
+     sandbox?: SandboxRunConfig;
+     toolExecution?: ToolExecutionConfig;
+     toolNotFoundBehavior?: ToolNotFoundBehavior;
++    resolveMissingFunctionTool?: ResolveMissingFunctionTool;
+     toolNameCollisionPolicy?: ToolNameCollisionPolicy;
+     /**
+      * Error handlers keyed by error kind.
 diff --git a/dist/run.js b/dist/run.js
-index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f20132939fe9ed42 100644
+index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b3c49303d 100644
 --- a/dist/run.js
 +++ b/dist/run.js
 @@ -99,6 +99,20 @@ class LazyDefaultModelProvider {
@@ -93,7 +128,11 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
  async function run(agent, input, options) {
      const runner = getDefaultRunner();
      if (options?.stream) {
-@@ -142,6 +156,8 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -139,9 +153,12 @@ class Runner extends lifecycle_1.RunHooks {
+             sandbox: config.sandbox,
+             toolExecution: (0, runConfig_1.validateToolExecutionConfig)(config.toolExecution),
+             toolNotFoundBehavior: config.toolNotFoundBehavior ?? 'raise_error',
++            resolveMissingFunctionTool: config.resolveMissingFunctionTool,
              toolNameCollisionPolicy: (0, runConfig_1.validateToolNameCollisionPolicy)(config.toolNameCollisionPolicy),
              sessionInputCallback: config.sessionInputCallback,
              callModelInputFilter: config.callModelInputFilter,
@@ -102,7 +141,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              toolErrorFormatter: config.toolErrorFormatter,
              reasoningItemIdPolicy: config.reasoningItemIdPolicy,
          };
-@@ -188,6 +204,8 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -188,6 +205,8 @@ class Runner extends lifecycle_1.RunHooks {
          const sessionInputCallback = resolvedOptions.sessionInputCallback ?? this.config.sessionInputCallback;
          // Likewise allow callers to override callModelInputFilter on individual runs.
          const callModelInputFilter = resolvedOptions.callModelInputFilter ?? this.config.callModelInputFilter;
@@ -111,7 +150,15 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
          // Per-run callback can override runner-level tool error formatting defaults.
          const toolErrorFormatter = resolvedOptions.toolErrorFormatter ?? this.config.toolErrorFormatter;
          const reasoningItemIdPolicy = resolvedOptions.reasoningItemIdPolicy ??
-@@ -210,6 +228,8 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -195,6 +214,7 @@ class Runner extends lifecycle_1.RunHooks {
+             this.config.reasoningItemIdPolicy;
+         const toolExecution = (0, runConfig_1.validateToolExecutionConfig)(resolvedOptions.toolExecution ?? this.config.toolExecution);
+         const toolNotFoundBehavior = resolvedOptions.toolNotFoundBehavior ?? this.config.toolNotFoundBehavior;
++        const resolveMissingFunctionTool = resolvedOptions.resolveMissingFunctionTool ?? this.config.resolveMissingFunctionTool;
+         const toolNameCollisionPolicy = (0, runConfig_1.validateToolNameCollisionPolicy)(resolvedOptions.toolNameCollisionPolicy === undefined
+             ? this.config.toolNameCollisionPolicy
+             : resolvedOptions.toolNameCollisionPolicy);
+@@ -210,10 +230,13 @@ class Runner extends lifecycle_1.RunHooks {
              ...resolvedOptions,
              sessionInputCallback,
              callModelInputFilter,
@@ -120,7 +167,12 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              toolErrorFormatter,
              reasoningItemIdPolicy,
              toolExecution,
-@@ -235,24 +255,39 @@ class Runner extends lifecycle_1.RunHooks {
+             toolNotFoundBehavior,
++            resolveMissingFunctionTool,
+             toolNameCollisionPolicy,
+             tracing: tracingConfig,
+         };
+@@ -235,24 +258,39 @@ class Runner extends lifecycle_1.RunHooks {
          // When the server tracks conversation history we defer to it for previous turns so local session
          // persistence can focus solely on the new delta being generated in this process.
          const session = effectiveOptions.session;
@@ -171,7 +223,31 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              session,
              hasCallModelInputFilter,
              persistInput: sessionPersistence_1.saveStreamInputToSession,
-@@ -454,7 +489,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -414,11 +452,13 @@ class Runner extends lifecycle_1.RunHooks {
+         const hasSandboxOverride = typeof options.sandbox !== 'undefined';
+         const hasToolExecutionOverride = typeof options.toolExecution !== 'undefined';
+         const hasToolNotFoundBehaviorOverride = typeof options.toolNotFoundBehavior !== 'undefined';
++        const hasResolveMissingFunctionToolOverride = typeof options.resolveMissingFunctionTool !== 'undefined';
+         const hasToolNameCollisionPolicyOverride = typeof options.toolNameCollisionPolicy !== 'undefined';
+         const hasTracingOverride = typeof options.tracing !== 'undefined';
+         if (!hasSandboxOverride &&
+             !hasToolExecutionOverride &&
+             !hasToolNotFoundBehaviorOverride &&
++            !hasResolveMissingFunctionToolOverride &&
+             !hasToolNameCollisionPolicyOverride &&
+             !hasTracingOverride) {
+             return this.config;
+@@ -432,6 +472,9 @@ class Runner extends lifecycle_1.RunHooks {
+             ...(hasToolNotFoundBehaviorOverride
+                 ? { toolNotFoundBehavior: options.toolNotFoundBehavior }
+                 : {}),
++            ...(hasResolveMissingFunctionToolOverride
++                ? { resolveMissingFunctionTool: options.resolveMissingFunctionTool }
++                : {}),
+             ...(hasToolNameCollisionPolicyOverride
+                 ? { toolNameCollisionPolicy: options.toolNameCollisionPolicy }
+                 : {}),
+@@ -454,7 +497,10 @@ class Runner extends lifecycle_1.RunHooks {
                      ? options.context
                      : new runContext_1.RunContext(options.context), input, startingAgent, options.maxTurns === undefined
                      ? constants_1.DEFAULT_MAX_TURNS
@@ -183,7 +259,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -546,7 +584,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -546,7 +592,7 @@ class Runner extends lifecycle_1.RunHooks {
              let persistenceCheckpoint;
              let approvedToolCheckpointCompacted = false;
              let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
@@ -192,7 +268,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              let completedResultPersisted = false;
              const completeResult = (result) => {
                  completedResult = result;
-@@ -554,7 +592,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -554,7 +600,7 @@ class Runner extends lifecycle_1.RunHooks {
              };
              const persistNonStreamingResult = async (result) => {
                  const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
@@ -201,7 +277,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                  const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
                          !hasUnpersistedItems &&
-@@ -663,7 +701,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -663,7 +709,7 @@ class Runner extends lifecycle_1.RunHooks {
                              });
                              approvedToolCheckpointCompacted = true;
                              approvedToolCheckpointModelResponseCount =
@@ -210,7 +286,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                          }
                          if (options.signal?.aborted) {
                              persistenceCheckpoint = new result_1.RunResult(state);
-@@ -743,7 +781,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -743,7 +789,9 @@ class Runner extends lifecycle_1.RunHooks {
                          sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                          const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                          const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -221,7 +297,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                          await guardrailTracker.throwIfError();
                          state._lastTurnResponse = await (0, modelRetry_1.getResponseWithRetry)(preparedCall.model, {
                              systemInstructions: preparedCall.modelInput.instructions,
-@@ -772,7 +812,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -772,7 +820,7 @@ class Runner extends lifecycle_1.RunHooks {
                                  allTurnItems: preparedCall.turnInput,
                              });
                          }
@@ -230,7 +306,15 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -960,7 +1000,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -784,6 +832,7 @@ class Runner extends lifecycle_1.RunHooks {
+                         }
+                         const processedResponse = await (0, modelOutputs_1.processModelResponseAsync)(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
+                             allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
++                            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
+                         });
+                         state._lastProcessedResponse = processedResponse;
+                         await guardrailTracker.awaitCompletion();
+@@ -960,7 +1009,7 @@ class Runner extends lifecycle_1.RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -239,7 +323,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
          let currentTurnSpan;
          const parentUsageRecorder = (0, usageTracking_1.getRunnerParentUsageRecorder)(this);
          const recordUsage = (usage) => {
-@@ -971,7 +1011,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -971,7 +1020,7 @@ class Runner extends lifecycle_1.RunHooks {
          (0, usageTracking_1.setRunStateUsageRecorder)(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -248,7 +332,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1104,7 +1144,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1104,7 +1153,7 @@ class Runner extends lifecycle_1.RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -257,7 +341,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1190,7 +1230,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1190,7 +1239,9 @@ class Runner extends lifecycle_1.RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -268,7 +352,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1326,7 +1368,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1326,9 +1377,10 @@ class Runner extends lifecycle_1.RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -276,8 +360,11 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
 +                    result.state.recordModelResponse(result.state._lastTurnResponse);
                      const processedResponse = await (0, modelOutputs_1.processModelResponseAsync)(result.state._lastTurnResponse, currentAgent, preparedCall.tools, preparedCall.handoffs, result.state, [...preparedCall.turnInput, ...result.state._generatedItems], options.toolNotFoundBehavior, {
                          allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
++                        resolveMissingFunctionTool: options.resolveMissingFunctionTool,
                      });
-@@ -1473,7 +1515,10 @@ class Runner extends lifecycle_1.RunHooks {
+                     result.state._lastProcessedResponse = processedResponse;
+                     // Record the items emitted directly from the model response so we do not
+@@ -1473,7 +1525,10 @@ class Runner extends lifecycle_1.RunHooks {
                      ? options.context
                      : new runContext_1.RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? constants_1.DEFAULT_MAX_TURNS
@@ -289,7 +376,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1587,7 +1632,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1587,7 +1642,7 @@ class Runner extends lifecycle_1.RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -299,7 +386,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f2013293
          // is intentional when a filter removes everything.
          sessionInputUpdate?.(sourceItems, persistedItems);
 diff --git a/dist/run.mjs b/dist/run.mjs
-index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de6bf638de 100644
+index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf332ae94df 100644
 --- a/dist/run.mjs
 +++ b/dist/run.mjs
 @@ -59,6 +59,20 @@ class LazyDefaultModelProvider {
@@ -323,7 +410,11 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
  export async function run(agent, input, options) {
      const runner = getDefaultRunner();
      if (options?.stream) {
-@@ -102,6 +116,8 @@ export class Runner extends RunHooks {
+@@ -99,9 +113,12 @@ export class Runner extends RunHooks {
+             sandbox: config.sandbox,
+             toolExecution: validateToolExecutionConfig(config.toolExecution),
+             toolNotFoundBehavior: config.toolNotFoundBehavior ?? 'raise_error',
++            resolveMissingFunctionTool: config.resolveMissingFunctionTool,
              toolNameCollisionPolicy: validateToolNameCollisionPolicy(config.toolNameCollisionPolicy),
              sessionInputCallback: config.sessionInputCallback,
              callModelInputFilter: config.callModelInputFilter,
@@ -332,7 +423,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              toolErrorFormatter: config.toolErrorFormatter,
              reasoningItemIdPolicy: config.reasoningItemIdPolicy,
          };
-@@ -148,6 +164,8 @@ export class Runner extends RunHooks {
+@@ -148,6 +165,8 @@ export class Runner extends RunHooks {
          const sessionInputCallback = resolvedOptions.sessionInputCallback ?? this.config.sessionInputCallback;
          // Likewise allow callers to override callModelInputFilter on individual runs.
          const callModelInputFilter = resolvedOptions.callModelInputFilter ?? this.config.callModelInputFilter;
@@ -341,7 +432,15 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
          // Per-run callback can override runner-level tool error formatting defaults.
          const toolErrorFormatter = resolvedOptions.toolErrorFormatter ?? this.config.toolErrorFormatter;
          const reasoningItemIdPolicy = resolvedOptions.reasoningItemIdPolicy ??
-@@ -170,6 +188,8 @@ export class Runner extends RunHooks {
+@@ -155,6 +174,7 @@ export class Runner extends RunHooks {
+             this.config.reasoningItemIdPolicy;
+         const toolExecution = validateToolExecutionConfig(resolvedOptions.toolExecution ?? this.config.toolExecution);
+         const toolNotFoundBehavior = resolvedOptions.toolNotFoundBehavior ?? this.config.toolNotFoundBehavior;
++        const resolveMissingFunctionTool = resolvedOptions.resolveMissingFunctionTool ?? this.config.resolveMissingFunctionTool;
+         const toolNameCollisionPolicy = validateToolNameCollisionPolicy(resolvedOptions.toolNameCollisionPolicy === undefined
+             ? this.config.toolNameCollisionPolicy
+             : resolvedOptions.toolNameCollisionPolicy);
+@@ -170,10 +190,13 @@ export class Runner extends RunHooks {
              ...resolvedOptions,
              sessionInputCallback,
              callModelInputFilter,
@@ -350,7 +449,12 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              toolErrorFormatter,
              reasoningItemIdPolicy,
              toolExecution,
-@@ -195,24 +215,39 @@ export class Runner extends RunHooks {
+             toolNotFoundBehavior,
++            resolveMissingFunctionTool,
+             toolNameCollisionPolicy,
+             tracing: tracingConfig,
+         };
+@@ -195,24 +218,39 @@ export class Runner extends RunHooks {
          // When the server tracks conversation history we defer to it for previous turns so local session
          // persistence can focus solely on the new delta being generated in this process.
          const session = effectiveOptions.session;
@@ -401,7 +505,31 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              session,
              hasCallModelInputFilter,
              persistInput: saveStreamInputToSession,
-@@ -414,7 +449,10 @@ export class Runner extends RunHooks {
+@@ -374,11 +412,13 @@ export class Runner extends RunHooks {
+         const hasSandboxOverride = typeof options.sandbox !== 'undefined';
+         const hasToolExecutionOverride = typeof options.toolExecution !== 'undefined';
+         const hasToolNotFoundBehaviorOverride = typeof options.toolNotFoundBehavior !== 'undefined';
++        const hasResolveMissingFunctionToolOverride = typeof options.resolveMissingFunctionTool !== 'undefined';
+         const hasToolNameCollisionPolicyOverride = typeof options.toolNameCollisionPolicy !== 'undefined';
+         const hasTracingOverride = typeof options.tracing !== 'undefined';
+         if (!hasSandboxOverride &&
+             !hasToolExecutionOverride &&
+             !hasToolNotFoundBehaviorOverride &&
++            !hasResolveMissingFunctionToolOverride &&
+             !hasToolNameCollisionPolicyOverride &&
+             !hasTracingOverride) {
+             return this.config;
+@@ -392,6 +432,9 @@ export class Runner extends RunHooks {
+             ...(hasToolNotFoundBehaviorOverride
+                 ? { toolNotFoundBehavior: options.toolNotFoundBehavior }
+                 : {}),
++            ...(hasResolveMissingFunctionToolOverride
++                ? { resolveMissingFunctionTool: options.resolveMissingFunctionTool }
++                : {}),
+             ...(hasToolNameCollisionPolicyOverride
+                 ? { toolNameCollisionPolicy: options.toolNameCollisionPolicy }
+                 : {}),
+@@ -414,7 +457,10 @@ export class Runner extends RunHooks {
                      ? options.context
                      : new RunContext(options.context), input, startingAgent, options.maxTurns === undefined
                      ? DEFAULT_MAX_TURNS
@@ -413,7 +541,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -506,7 +544,7 @@ export class Runner extends RunHooks {
+@@ -506,7 +552,7 @@ export class Runner extends RunHooks {
              let persistenceCheckpoint;
              let approvedToolCheckpointCompacted = false;
              let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
@@ -422,7 +550,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              let completedResultPersisted = false;
              const completeResult = (result) => {
                  completedResult = result;
-@@ -514,7 +552,7 @@ export class Runner extends RunHooks {
+@@ -514,7 +560,7 @@ export class Runner extends RunHooks {
              };
              const persistNonStreamingResult = async (result) => {
                  const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
@@ -431,7 +559,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                  const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
                          !hasUnpersistedItems &&
-@@ -623,7 +661,7 @@ export class Runner extends RunHooks {
+@@ -623,7 +669,7 @@ export class Runner extends RunHooks {
                              });
                              approvedToolCheckpointCompacted = true;
                              approvedToolCheckpointModelResponseCount =
@@ -440,7 +568,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                          }
                          if (options.signal?.aborted) {
                              persistenceCheckpoint = new RunResult(state);
-@@ -703,7 +741,9 @@ export class Runner extends RunHooks {
+@@ -703,7 +749,9 @@ export class Runner extends RunHooks {
                          sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                          const artifacts = await prepareAgentArtifacts(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                          const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -451,7 +579,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                          await guardrailTracker.throwIfError();
                          state._lastTurnResponse = await getResponseWithRetry(preparedCall.model, {
                              systemInstructions: preparedCall.modelInput.instructions,
-@@ -732,7 +772,7 @@ export class Runner extends RunHooks {
+@@ -732,7 +780,7 @@ export class Runner extends RunHooks {
                                  allTurnItems: preparedCall.turnInput,
                              });
                          }
@@ -460,7 +588,15 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -920,7 +960,7 @@ export class Runner extends RunHooks {
+@@ -744,6 +792,7 @@ export class Runner extends RunHooks {
+                         }
+                         const processedResponse = await processModelResponseAsync(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
+                             allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
++                            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
+                         });
+                         state._lastProcessedResponse = processedResponse;
+                         await guardrailTracker.awaitCompletion();
+@@ -920,7 +969,7 @@ export class Runner extends RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -469,7 +605,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
          let currentTurnSpan;
          const parentUsageRecorder = getRunnerParentUsageRecorder(this);
          const recordUsage = (usage) => {
-@@ -931,7 +971,7 @@ export class Runner extends RunHooks {
+@@ -931,7 +980,7 @@ export class Runner extends RunHooks {
          setRunStateUsageRecorder(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -478,7 +614,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1064,7 +1104,7 @@ export class Runner extends RunHooks {
+@@ -1064,7 +1113,7 @@ export class Runner extends RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -487,7 +623,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1150,7 +1190,9 @@ export class Runner extends RunHooks {
+@@ -1150,7 +1199,9 @@ export class Runner extends RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await prepareAgentArtifacts(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -498,7 +634,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1286,7 +1328,7 @@ export class Runner extends RunHooks {
+@@ -1286,9 +1337,10 @@ export class Runner extends RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -506,8 +642,11 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
 +                    result.state.recordModelResponse(result.state._lastTurnResponse);
                      const processedResponse = await processModelResponseAsync(result.state._lastTurnResponse, currentAgent, preparedCall.tools, preparedCall.handoffs, result.state, [...preparedCall.turnInput, ...result.state._generatedItems], options.toolNotFoundBehavior, {
                          allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
++                        resolveMissingFunctionTool: options.resolveMissingFunctionTool,
                      });
-@@ -1433,7 +1475,10 @@ export class Runner extends RunHooks {
+                     result.state._lastProcessedResponse = processedResponse;
+                     // Record the items emitted directly from the model response so we do not
+@@ -1433,7 +1485,10 @@ export class Runner extends RunHooks {
                      ? options.context
                      : new RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? DEFAULT_MAX_TURNS
@@ -519,7 +658,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1547,7 +1592,7 @@ export class Runner extends RunHooks {
+@@ -1547,7 +1602,7 @@ export class Runner extends RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -529,10 +668,18 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de
          // is intentional when a filter removes everything.
          sessionInputUpdate?.(sourceItems, persistedItems);
 diff --git a/dist/runState.d.ts b/dist/runState.d.ts
-index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8de0e4863 100644
+index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db504028641 100644
 --- a/dist/runState.d.ts
 +++ b/dist/runState.d.ts
-@@ -53,6 +53,17 @@ import type { AgentToolInvocation } from './agentToolInvocation';
+@@ -16,6 +16,7 @@ import { AgentInputItem, UnknownContext } from './types';
+ import type { InputGuardrailResult, OutputGuardrailResult } from './guardrail';
+ import type { ToolInputGuardrailResult, ToolOutputGuardrailResult } from './toolGuardrail';
+ import { Tool } from './tool';
++import type { ResolveMissingFunctionTool } from './run';
+ import type { AgentToolInvocation } from './agentToolInvocation';
+ /**
+  * The schema version of the serialized run state. This is used to ensure that the serialized
+@@ -53,6 +54,22 @@ import type { AgentToolInvocation } from './agentToolInvocation';
   */
  export declare const CURRENT_SCHEMA_VERSION: "1.17";
  type ContextOverrideStrategy = 'merge' | 'replace';
@@ -546,11 +693,16 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8
 +     * tools that are no longer configured remain history only.
 +     */
 +    clientToolSearchRehydration?: ClientToolSearchRehydration;
++    /**
++     * Same resolver as live processModelResponse. Used when a pending function
++     * call is not on the configured Agent list after catalog preparation.
++     */
++    resolveMissingFunctionTool?: ResolveMissingFunctionTool;
 +};
  declare const pendingSessionHistoryTransactionSchema: z.ZodObject<{
      operationId: z.ZodString;
      transactionKind: z.ZodEnum<{
-@@ -4224,6 +4235,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4224,6 +4241,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Responses from the model so far.
       */
      _modelResponses: ModelResponse[];
@@ -561,7 +713,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8
      /**
       * Conversation identifier when the server manages conversation history.
       */
-@@ -4383,7 +4398,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4383,7 +4404,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Persisted sandbox session metadata for sandbox-agent resume.
       */
      _sandbox: z.infer<typeof sandboxStateSchema> | undefined;
@@ -573,7 +725,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8
      /**
       * Updates server-managed conversation identifiers as a single operation.
       */
-@@ -4392,6 +4410,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4392,6 +4416,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Updates runtime options for converting run items into turn input.
       */
      setReasoningItemIdPolicy(policy?: ReasoningItemIdPolicy): void;
@@ -582,7 +734,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -4511,8 +4531,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4511,8 +4537,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -594,7 +746,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8
      }): Promise<RunState<TContext, TAgent>>;
  }
 diff --git a/dist/runState.js b/dist/runState.js
-index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ecf768ae66 100644
+index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a3c49f6ad 100644
 --- a/dist/runState.js
 +++ b/dist/runState.js
 @@ -500,6 +500,15 @@ class RunState {
@@ -660,7 +812,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -1040,13 +1075,16 @@ class RunState {
+@@ -1040,13 +1075,18 @@ class RunState {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -669,6 +821,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
 +    static async fromString(initialAgent, str, options = {}) {
 +        return buildRunStateFromString(initialAgent, str, {
 +            clientToolSearchRehydration: options.clientToolSearchRehydration,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
 +        });
      }
      static async fromStringWithContext(initialAgent, str, context, options = {}) {
@@ -676,10 +829,11 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
              contextOverride: context,
              contextStrategy: options.contextStrategy,
 +            clientToolSearchRehydration: options.clientToolSearchRehydration,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
          });
      }
  }
-@@ -1837,6 +1875,19 @@ function selectSerializedRuntimeTools(args) {
+@@ -1837,6 +1877,19 @@ function selectSerializedRuntimeTools(args) {
      const callId = (0, toolSearch_1.resolveToolSearchCallId)(toolSearchCall);
      throw new errors_1.UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
  }
@@ -699,7 +853,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
  async function getConfiguredAgentTools(args) {
      const { agent, context, configuredToolsByAgent } = args;
      const existing = configuredToolsByAgent.get(agent);
-@@ -2074,6 +2125,11 @@ function assertDeferredFunctionCallProvenance(args) {
+@@ -2074,6 +2127,11 @@ function assertDeferredFunctionCallProvenance(args) {
      }
  }
  async function rehydrateToolSearchRuntimeTools(state, options) {
@@ -711,7 +865,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
      const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
      const configuredToolsByAgent = new Map();
      const capabilitySnapshotsByAgent = new Map();
-@@ -2204,6 +2260,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+@@ -2204,6 +2262,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
          const pendingCall = occurrencesByOutput.get(item).pendingCall;
          const toolSearchTool = (0, toolSearch_2.getClientToolSearchHelper)(snapshot.availableTools);
          const hasCustomExecutor = Boolean(toolSearchTool && (0, tool_1.getClientToolSearchExecutor)(toolSearchTool));
@@ -726,7 +880,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
          if (expectedRuntimeToolKeys.size === 0) {
              rehydrationRecords.set(item, {
                  pendingCall,
-@@ -2408,6 +2472,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2408,6 +2474,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      state._currentStep = stateJson.currentStep;
      state._originalInput = stateJson.originalInput;
      state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
@@ -735,7 +889,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
      state._lastTurnResponse = stateJson.lastModelResponse
          ? deserializeModelResponse(stateJson.lastModelResponse)
          : undefined;
-@@ -2436,6 +2502,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2436,6 +2504,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
          agentMap,
          schemaVersion,
@@ -743,8 +897,64 @@ index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ec
          serializedProcessedResponse: stateJson.lastProcessedResponse,
          prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
              shouldRestoreSerializedContext &&
+@@ -2447,6 +2516,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+             executionTools: currentCapabilitySnapshot.availableTools,
+             executionHandoffs: currentCapabilitySnapshot.handoffs,
+             executionFunctionToolsByCallId: currentCapabilitySnapshot.functionToolsByCallId,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
+         })
+         : undefined;
+     restorePendingAgentToolRunAliases(state, stateJson.pendingAgentToolRunAliases ?? {});
+@@ -3066,9 +3136,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                     (0, toolIdentity_1.getFunctionToolStateKeyForCall)(functionCall.toolCall) ?? functionCall.tool.name,
+                 ]);
+             }
+-            const resolvedTool = exactRuntimeTool ??
++            let resolvedTool = exactRuntimeTool ??
+                 (0, toolIdentity_1.resolveFunctionToolCall)(functionCall.toolCall, tools) ??
+-                (0, toolRehydration_1.getSerializedFunctionToolPlaceholder)({
++                null;
++            let boundViaMissingResolver = false;
++            if (!resolvedTool && options.resolveMissingFunctionTool) {
++                const missing = await options.resolveMissingFunctionTool({
++                    name: toolIdentity,
++                    agent: currentAgent,
++                    toolCall: functionCall.toolCall,
++                });
++                if (missing && missing.type === 'function') {
++                    const runtimeFunctionMap = (0, toolIdentity_1.buildFunctionToolLookupMap)([missing]);
++                    for (const [key, mapped] of runtimeFunctionMap) {
++                        tools.set(key, mapped);
++                    }
++                    resolvedTool = missing;
++                    boundViaMissingResolver = true;
++                }
++            }
++            if (!resolvedTool) {
++                resolvedTool = (0, toolRehydration_1.getSerializedFunctionToolPlaceholder)({
+                     agent: currentAgent,
+                     baseAgentTools,
+                     serializedTool: functionCall.tool,
+@@ -3076,6 +3164,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                     toolIdentity,
+                     allowSerializedExecutionToolPlaceholder,
+                 });
++            }
+             if (!resolvedTool) {
+                 throw new errors_1.UserError(`Tool ${toolIdentity} not found`);
+             }
+@@ -3086,7 +3175,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                 availableFunctionTools: [
+                     ...new Set([...tools.values(), resolvedTool]),
+                 ],
+-                preserveToolOnExecutionRehydration: Boolean(exactRuntimeTool),
++                preserveToolOnExecutionRehydration: Boolean(exactRuntimeTool) ||
++                    boundViaMissingResolver,
+             });
+         })),
+         functionToolsNotFound: serializedProcessedResponse.functionToolsNotFound ?? [],
 diff --git a/dist/runState.mjs b/dist/runState.mjs
-index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237ca685ae1d 100644
+index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b25f43496 100644
 --- a/dist/runState.mjs
 +++ b/dist/runState.mjs
 @@ -455,6 +455,15 @@ export class RunState {
@@ -810,7 +1020,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -995,13 +1030,16 @@ export class RunState {
+@@ -995,13 +1030,18 @@ export class RunState {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -819,6 +1029,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
 +    static async fromString(initialAgent, str, options = {}) {
 +        return buildRunStateFromString(initialAgent, str, {
 +            clientToolSearchRehydration: options.clientToolSearchRehydration,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
 +        });
      }
      static async fromStringWithContext(initialAgent, str, context, options = {}) {
@@ -826,10 +1037,11 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
              contextOverride: context,
              contextStrategy: options.contextStrategy,
 +            clientToolSearchRehydration: options.clientToolSearchRehydration,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
          });
      }
  }
-@@ -1791,6 +1829,19 @@ function selectSerializedRuntimeTools(args) {
+@@ -1791,6 +1831,19 @@ function selectSerializedRuntimeTools(args) {
      const callId = resolveToolSearchCallId(toolSearchCall);
      throw new UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
  }
@@ -849,7 +1061,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
  async function getConfiguredAgentTools(args) {
      const { agent, context, configuredToolsByAgent } = args;
      const existing = configuredToolsByAgent.get(agent);
-@@ -2028,6 +2079,11 @@ function assertDeferredFunctionCallProvenance(args) {
+@@ -2028,6 +2081,11 @@ function assertDeferredFunctionCallProvenance(args) {
      }
  }
  async function rehydrateToolSearchRuntimeTools(state, options) {
@@ -861,7 +1073,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
      const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
      const configuredToolsByAgent = new Map();
      const capabilitySnapshotsByAgent = new Map();
-@@ -2158,6 +2214,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+@@ -2158,6 +2216,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
          const pendingCall = occurrencesByOutput.get(item).pendingCall;
          const toolSearchTool = getClientToolSearchHelper(snapshot.availableTools);
          const hasCustomExecutor = Boolean(toolSearchTool && getClientToolSearchExecutor(toolSearchTool));
@@ -876,7 +1088,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
          if (expectedRuntimeToolKeys.size === 0) {
              rehydrationRecords.set(item, {
                  pendingCall,
-@@ -2362,6 +2426,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2362,6 +2428,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      state._currentStep = stateJson.currentStep;
      state._originalInput = stateJson.originalInput;
      state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
@@ -885,7 +1097,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
      state._lastTurnResponse = stateJson.lastModelResponse
          ? deserializeModelResponse(stateJson.lastModelResponse)
          : undefined;
-@@ -2390,6 +2456,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2390,6 +2458,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
          agentMap,
          schemaVersion,
@@ -893,6 +1105,62 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237c
          serializedProcessedResponse: stateJson.lastProcessedResponse,
          prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
              shouldRestoreSerializedContext &&
+@@ -2401,6 +2470,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+             executionTools: currentCapabilitySnapshot.availableTools,
+             executionHandoffs: currentCapabilitySnapshot.handoffs,
+             executionFunctionToolsByCallId: currentCapabilitySnapshot.functionToolsByCallId,
++            resolveMissingFunctionTool: options.resolveMissingFunctionTool,
+         })
+         : undefined;
+     restorePendingAgentToolRunAliases(state, stateJson.pendingAgentToolRunAliases ?? {});
+@@ -3020,9 +3090,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                     getFunctionToolStateKeyForCall(functionCall.toolCall) ?? functionCall.tool.name,
+                 ]);
+             }
+-            const resolvedTool = exactRuntimeTool ??
++            let resolvedTool = exactRuntimeTool ??
+                 resolveFunctionToolCall(functionCall.toolCall, tools) ??
+-                getSerializedFunctionToolPlaceholder({
++                null;
++            let boundViaMissingResolver = false;
++            if (!resolvedTool && options.resolveMissingFunctionTool) {
++                const missing = await options.resolveMissingFunctionTool({
++                    name: toolIdentity,
++                    agent: currentAgent,
++                    toolCall: functionCall.toolCall,
++                });
++                if (missing && missing.type === 'function') {
++                    const runtimeFunctionMap = buildFunctionToolLookupMap([missing]);
++                    for (const [key, mapped] of runtimeFunctionMap) {
++                        tools.set(key, mapped);
++                    }
++                    resolvedTool = missing;
++                    boundViaMissingResolver = true;
++                }
++            }
++            if (!resolvedTool) {
++                resolvedTool = getSerializedFunctionToolPlaceholder({
+                     agent: currentAgent,
+                     baseAgentTools,
+                     serializedTool: functionCall.tool,
+@@ -3030,6 +3118,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                     toolIdentity,
+                     allowSerializedExecutionToolPlaceholder,
+                 });
++            }
+             if (!resolvedTool) {
+                 throw new UserError(`Tool ${toolIdentity} not found`);
+             }
+@@ -3040,7 +3129,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+                 availableFunctionTools: [
+                     ...new Set([...tools.values(), resolvedTool]),
+                 ],
+-                preserveToolOnExecutionRehydration: Boolean(exactRuntimeTool),
++                preserveToolOnExecutionRehydration: Boolean(exactRuntimeTool) ||
++                    boundViaMissingResolver,
+             });
+         })),
+         functionToolsNotFound: serializedProcessedResponse.functionToolsNotFound ?? [],
 diff --git a/dist/runner/conversation.d.ts b/dist/runner/conversation.d.ts
 index 5e864ffbc632d2a0fff910297a323cee33111bb5..378603366576b5f940efb2b8b5dbd30c3f0c441a 100644
 --- a/dist/runner/conversation.d.ts
@@ -914,7 +1182,7 @@ index 5e864ffbc632d2a0fff910297a323cee33111bb5..378603366576b5f940efb2b8b5dbd30c
   * Tracks which items have already been sent to or received from the Responses API when the caller
   * supplies `conversationId`/`previousResponseId`. This ensures we only send the delta each turn.
 diff --git a/dist/runner/conversation.js b/dist/runner/conversation.js
-index d46c7789ca38cd08b3ac8ee635298ab848335c6a..332285d5ddc74a27bcbd69d3a839c6228c1c0879 100644
+index d46c7789ca38cd08b3ac8ee635298ab848335c6a..7dc6c44ab2ea56751aabbb939fe6891b2c340f3e 100644
 --- a/dist/runner/conversation.js
 +++ b/dist/runner/conversation.js
 @@ -12,7 +12,7 @@ Object.defineProperty(exports, "getTurnInput", { enumerable: true, get: function
@@ -985,7 +1253,7 @@ index d46c7789ca38cd08b3ac8ee635298ab848335c6a..332285d5ddc74a27bcbd69d3a839c622
          const injectedExactCloneIndexes = new Set();
          // Preserve a pointer to the original object backing each filtered clone so downstream
 diff --git a/dist/runner/conversation.mjs b/dist/runner/conversation.mjs
-index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..3540413d2bdac08df13084f0b98545bc13eb50b4 100644
+index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..2cd3fb151bcdfcf8405989ef89e295b939beb951 100644
 --- a/dist/runner/conversation.mjs
 +++ b/dist/runner/conversation.mjs
 @@ -7,7 +7,7 @@ export { getTurnInput } from "./items.mjs";
@@ -1055,13 +1323,29 @@ index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..3540413d2bdac08df13084f0b98545bc
          const consumedExactClones = new WeakSet();
          const injectedExactCloneIndexes = new Set();
          // Preserve a pointer to the original object backing each filtered clone so downstream
+diff --git a/dist/runner/modelOutputs.d.ts b/dist/runner/modelOutputs.d.ts
+index 3a4f8b679c3c4a9dadf24d0a03fa713ca14d0579..424262b4204e5141e5964895ce220c9bd150db60 100644
+--- a/dist/runner/modelOutputs.d.ts
++++ b/dist/runner/modelOutputs.d.ts
+@@ -6,9 +6,10 @@ import { RunState } from '../runState';
+ import type { AgentInputItem } from '../types';
+ import { Tool } from '../tool';
+ import type { ProcessedResponse } from './types';
+-import type { ToolNotFoundBehavior } from '../run';
++import type { ResolveMissingFunctionTool, ToolNotFoundBehavior } from '../run';
+ type ModelResponseProcessingOptions = {
+     allowPromptSuppliedTools?: boolean;
++    resolveMissingFunctionTool?: ResolveMissingFunctionTool;
+ };
+ /**
+  * Walks a raw model response and classifies each item so the runner can schedule follow-up work.
 diff --git a/dist/runner/modelOutputs.js b/dist/runner/modelOutputs.js
-index c9d44147563f79619b754013800494811c180e22..ddd315188141369162b826bf6fa80c7fb5ca31da 100644
+index c9d44147563f79619b754013800494811c180e22..cec577e405ee089f96db19470a153e7acd7defd6 100644
 --- a/dist/runner/modelOutputs.js
 +++ b/dist/runner/modelOutputs.js
-@@ -274,6 +274,33 @@ function buildGeneratedClientToolSearchOutputMap(modelResponse, tools, hasClient
+@@ -123,6 +123,66 @@ function resolveFunctionOrHandoff(toolCall, handoffMap, functionMap) {
      }
-     return generatedOutputs;
+     return { type: 'function', tool: functionTool };
  }
 +function mergeClientToolSearchExecutionTools(availableTools, runtimeTools) {
 +    const availableIndexByKey = new Map();
@@ -1090,10 +1374,43 @@ index c9d44147563f79619b754013800494811c180e22..ddd315188141369162b826bf6fa80c7f
 +        }
 +    }
 +}
- async function buildGeneratedClientToolSearchOutputMapAsync(args) {
-     const { agent, handoffs, modelResponse, replaceableRuntimeToolKeys, runContext, tools, } = args;
-     const clientToolSearchTool = (0, toolSearch_1.getClientToolSearchHelper)(tools);
-@@ -307,7 +334,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
++function rememberResolvedMissingFunctionTool(tool, functionMap, availableTools, loadedDeferredToolState) {
++    if (!tool || tool.type !== 'function') {
++        return false;
++    }
++    const runtimeFunctionMap = (0, toolIdentity_1.buildFunctionToolLookupMap)([tool]);
++    for (const [key, mapped] of runtimeFunctionMap) {
++        functionMap.set(key, mapped);
++    }
++    if (Array.isArray(availableTools) && !availableTools.includes(tool)) {
++        availableTools.push(tool);
++    }
++    const qualifiedName = (0, toolIdentity_1.getFunctionToolQualifiedName)(tool);
++    loadedDeferredToolState?.loadedToolNames?.add(tool.name);
++    if (qualifiedName) {
++        loadedDeferredToolState?.loadedToolNames?.add(qualifiedName);
++    }
++    return true;
++}
++async function resolveFunctionOrHandoffMaybeMissing(output, handoffMap, functionMap, agent, processingOptions, availableTools, loadedDeferredToolState) {
++    const resolved = resolveFunctionOrHandoff(output, handoffMap, functionMap);
++    if (resolved.type !== 'not_found' || !processingOptions?.resolveMissingFunctionTool) {
++        return resolved;
++    }
++    const tool = await processingOptions.resolveMissingFunctionTool({
++        name: resolved.toolName,
++        agent,
++        toolCall: output,
++    });
++    if (!rememberResolvedMissingFunctionTool(tool, functionMap, availableTools, loadedDeferredToolState)) {
++        return resolved;
++    }
++    return resolveFunctionOrHandoff(output, handoffMap, functionMap);
++}
+ function throwFunctionToolNotFound(toolName, agent) {
+     const message = `Tool ${toolName} not found in agent ${agent.name}.`;
+     (0, context_1.addErrorToCurrentSpan)({
+@@ -307,7 +367,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
                  runtimeTools: generatedOutput.runtimeTools,
              });
              generatedOutputs.set(toolSearchCall, generatedOutput);
@@ -1102,13 +1419,32 @@ index c9d44147563f79619b754013800494811c180e22..ddd315188141369162b826bf6fa80c7f
              continue;
          }
          generatedOutputs.set(toolSearchCall, {
+@@ -604,7 +664,8 @@ async function processModelResponseAsync(modelResponse, agent, tools, handoffs,
+         ((0, utils_1.getToolSearchExecution)(output) === 'client' ||
+             (typeof (0, utils_1.getToolSearchExecution)(output) === 'undefined' &&
+                 typeof clientToolSearchTool !== 'undefined')));
+-    if (!hasCustomClientToolSearchExecutor || !hasRelevantClientToolSearchCall) {
++    if ((!hasCustomClientToolSearchExecutor || !hasRelevantClientToolSearchCall) &&
++        !processingOptions.resolveMissingFunctionTool) {
+         return processModelResponse(modelResponse, agent, tools, handoffs, priorItems, toolNotFoundBehavior, processingOptions);
+     }
+     const items = [];
+@@ -795,7 +856,7 @@ async function processModelResponseAsync(modelResponse, agent, tools, handoffs,
+         if (output.type !== 'function_call') {
+             continue;
+         }
+-        const resolved = resolveFunctionOrHandoff(output, handoffMap, functionMap);
++        const resolved = await resolveFunctionOrHandoffMaybeMissing(output, handoffMap, functionMap, agent, processingOptions, availableTools, loadedDeferredToolState);
+         if (resolved.type === 'not_found') {
+             if (toolNotFoundBehavior !== 'return_error_to_model') {
+                 throwFunctionToolNotFound(resolved.toolName, agent);
 diff --git a/dist/runner/modelOutputs.mjs b/dist/runner/modelOutputs.mjs
-index 34dc1b761aee009ea97f2a26529f7246c44d018e..24a929cfd887fdb913992293e4129bbd10ce4646 100644
+index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f24482f069 100644
 --- a/dist/runner/modelOutputs.mjs
 +++ b/dist/runner/modelOutputs.mjs
-@@ -270,6 +270,33 @@ function buildGeneratedClientToolSearchOutputMap(modelResponse, tools, hasClient
+@@ -119,6 +119,66 @@ function resolveFunctionOrHandoff(toolCall, handoffMap, functionMap) {
      }
-     return generatedOutputs;
+     return { type: 'function', tool: functionTool };
  }
 +function mergeClientToolSearchExecutionTools(availableTools, runtimeTools) {
 +    const availableIndexByKey = new Map();
@@ -1137,10 +1473,43 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..24a929cfd887fdb913992293e4129bbd
 +        }
 +    }
 +}
- async function buildGeneratedClientToolSearchOutputMapAsync(args) {
-     const { agent, handoffs, modelResponse, replaceableRuntimeToolKeys, runContext, tools, } = args;
-     const clientToolSearchTool = getClientToolSearchHelper(tools);
-@@ -303,7 +330,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
++function rememberResolvedMissingFunctionTool(tool, functionMap, availableTools, loadedDeferredToolState) {
++    if (!tool || tool.type !== 'function') {
++        return false;
++    }
++    const runtimeFunctionMap = buildFunctionToolLookupMap([tool]);
++    for (const [key, mapped] of runtimeFunctionMap) {
++        functionMap.set(key, mapped);
++    }
++    if (Array.isArray(availableTools) && !availableTools.includes(tool)) {
++        availableTools.push(tool);
++    }
++    const qualifiedName = getFunctionToolQualifiedName(tool);
++    loadedDeferredToolState?.loadedToolNames?.add(tool.name);
++    if (qualifiedName) {
++        loadedDeferredToolState?.loadedToolNames?.add(qualifiedName);
++    }
++    return true;
++}
++async function resolveFunctionOrHandoffMaybeMissing(output, handoffMap, functionMap, agent, processingOptions, availableTools, loadedDeferredToolState) {
++    const resolved = resolveFunctionOrHandoff(output, handoffMap, functionMap);
++    if (resolved.type !== 'not_found' || !processingOptions?.resolveMissingFunctionTool) {
++        return resolved;
++    }
++    const tool = await processingOptions.resolveMissingFunctionTool({
++        name: resolved.toolName,
++        agent,
++        toolCall: output,
++    });
++    if (!rememberResolvedMissingFunctionTool(tool, functionMap, availableTools, loadedDeferredToolState)) {
++        return resolved;
++    }
++    return resolveFunctionOrHandoff(output, handoffMap, functionMap);
++}
+ function throwFunctionToolNotFound(toolName, agent) {
+     const message = `Tool ${toolName} not found in agent ${agent.name}.`;
+     addErrorToCurrentSpan({
+@@ -303,7 +363,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
                  runtimeTools: generatedOutput.runtimeTools,
              });
              generatedOutputs.set(toolSearchCall, generatedOutput);
@@ -1149,3 +1518,22 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..24a929cfd887fdb913992293e4129bbd
              continue;
          }
          generatedOutputs.set(toolSearchCall, {
+@@ -600,7 +660,8 @@ export async function processModelResponseAsync(modelResponse, agent, tools, han
+         (getToolSearchExecution(output) === 'client' ||
+             (typeof getToolSearchExecution(output) === 'undefined' &&
+                 typeof clientToolSearchTool !== 'undefined')));
+-    if (!hasCustomClientToolSearchExecutor || !hasRelevantClientToolSearchCall) {
++    if ((!hasCustomClientToolSearchExecutor || !hasRelevantClientToolSearchCall) &&
++        !processingOptions.resolveMissingFunctionTool) {
+         return processModelResponse(modelResponse, agent, tools, handoffs, priorItems, toolNotFoundBehavior, processingOptions);
+     }
+     const items = [];
+@@ -791,7 +852,7 @@ export async function processModelResponseAsync(modelResponse, agent, tools, han
+         if (output.type !== 'function_call') {
+             continue;
+         }
+-        const resolved = resolveFunctionOrHandoff(output, handoffMap, functionMap);
++        const resolved = await resolveFunctionOrHandoffMaybeMissing(output, handoffMap, functionMap, agent, processingOptions, availableTools, loadedDeferredToolState);
+         if (resolved.type === 'not_found') {
+             if (toolNotFoundBehavior !== 'return_error_to_model') {
+                 throwFunctionToolNotFound(resolved.toolName, agent);
