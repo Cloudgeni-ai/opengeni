@@ -686,4 +686,84 @@ describe("migration 0297 session ownership", () => {
       await admin.unsafe(`drop role if exists ${probeRole}`).catch(() => undefined);
     }
   }, 300_000);
+
+  test("the write path never attributes a subject the classifier calls unrepairable", async () => {
+    if (!shared) return;
+    // The exact shape where the backfill's candidate predicate could be more
+    // permissive than the classifier that authorizes it: an anchor whose
+    // subject is NOT a `user:` identity, owning a personal workspace, with a
+    // session created by that same non-`user:` subject. Every join condition
+    // the candidate CTE tests is satisfied; only the classifier's
+    // `created_by_subject_id LIKE 'user:%'` fence separates the two, and
+    // `external_lane_owns_row` is documented as permanently unrepairable.
+    //
+    // Unreachable through today's supported writers - 0263 revokes application
+    // DML on `organization_memberships`, and 0219/0263 gate provisioning to
+    // `user:%` - so this is seeded as durable state, exactly as a legacy or
+    // out-of-band row would arrive. The point is that the invariant is enforced
+    // HERE by construction rather than borrowed from two other migrations.
+    const fixture = await seedOrganization("external-lane-write");
+    const externalSubject = "api_key:00000000-0000-4000-8000-000000000003";
+    const [externalWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${fixture.organizationId}, 'external-lane-personal') returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${externalWorkspace!.id}, ${fixture.organizationId})
+    `;
+    await admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${fixture.organizationId}, ${externalSubject}, 'active', ${externalWorkspace!.id})
+    `;
+    const external = await insertSession(fixture, externalWorkspace!.id, {
+      created_by_kind: "subject",
+      created_by_subject_id: externalSubject,
+    });
+    expect(external.owner_organization_membership_id).toBeNull();
+    expect(external.owner_subject_id).toBeNull();
+
+    // The classifier's verdict is the contract the write path must obey.
+    const classification = await classify(fixture.organizationId);
+    expect(classification.sessions.repairablePersonalWorkspace).toBe(0);
+    expect(classification.sessions.unresolvedByReason).toEqual({ external_lane_owns_row: 1 });
+    expect(classification.sessions.unresolvedRows).toEqual([
+      { sessionId: external.id, reasonCode: "external_lane_owns_row" },
+    ]);
+
+    // A dry run must not promise an attribution the classifier refuses...
+    const preview = await backfill(fixture.organizationId, { dryRun: true });
+    expect(preview.personalWorkspaceCandidates).toBe(0);
+    expect(preview.parentInheritanceCandidates).toBe(0);
+
+    // ...and --apply must not perform one.
+    const applied = await backfill(fixture.organizationId, { dryRun: false });
+    expect(applied.personalWorkspaceAttributed).toBe(0);
+    expect(applied.parentInheritanceAttributed).toBe(0);
+    expect(applied.attributed).toBe(0);
+
+    const after = await readSession(external.id);
+    expect(after.owner_organization_membership_id).toBeNull();
+    expect(after.owner_subject_id).toBeNull();
+    expect(after.authority_epoch).toBe(external.authority_epoch);
+    expect(after.updated_at).toEqual(external.updated_at);
+
+    // Still unrepairable after the run, with the identical verdict.
+    const afterClassification = await classify(fixture.organizationId);
+    expect(afterClassification.sessions.unresolvedByReason).toEqual({
+      external_lane_owns_row: 1,
+    });
+
+    // A `user:` sibling in the same organization still converges, so the fence
+    // is a fence and not a switch that turned the backfill off.
+    const human = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+      created_by_kind: "subject",
+      created_by_subject_id: "user:alice-external-lane-write",
+    });
+    const humanRun = await backfill(fixture.organizationId, { dryRun: false });
+    expect(humanRun.personalWorkspaceAttributed).toBe(1);
+    const humanRow = await readSession(human.id);
+    expect(humanRow.owner_organization_membership_id).toBe(fixture.aliceMembershipId);
+    expect(humanRow.owner_subject_id).toBe("user:alice-external-lane-write");
+  }, 300_000);
 });

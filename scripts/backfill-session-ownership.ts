@@ -19,8 +19,15 @@
 // parent-inheritance closure migration 0225's own trigger would have produced.
 // Everything else is recorded unresolved by `--classify`, never guessed.
 //
-// Batches are idempotent and claimed with `FOR UPDATE ... SKIP LOCKED`, so this
-// command is safe to re-run, safe to interrupt, and safe to run concurrently.
+// Batches are idempotent and claimed with `FOR UPDATE ... SKIP LOCKED`, so the
+// SESSION ROWS are safe to re-run over, safe to interrupt, and safe to run
+// concurrently: an attributed row stops matching either candidate predicate.
+//
+// The `--run-key` LEDGER is not re-runnable, and that is deliberate. Each batch
+// opens its own receipt (`<run-key>:batch-N`) and the ledger refuses to re-open
+// a settled receipt, so re-running with the SAME `--run-key` fails on the first
+// already-settled batch instead of silently overwriting immutable evidence.
+// Resume or repeat with a NEW `--run-key` (or omit it, which records nothing).
 // Check `ledgerAvailable` in the output: `false` means the tenancy backfill
 // ledger migration is not present on this target and nothing was recorded.
 import { dbSearchPath, getSettings } from "@opengeni/config";

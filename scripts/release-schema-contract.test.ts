@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0297_session_ownership_classification_and_backfill.sql")) {
         return includesActivation
-          ? "b9a592f069b901cc16f7d79e11d7383abe436598d0c2f27bcb2751b29398dcf2"
-          : "bdfbc0a19b54e33a01c7f3124132e58541ab73b7250905293005da88563da3b4";
+          ? "37388f3a94e6a36a1d8005309457795e70a973ab8ae873244e11a93c510b1e54"
+          : "f51846dcb0de660471a31b32d2a67f4b013a70c086e456e2c7bc95c15d6d5226";
       }
       if (migrations.has("0292_truthful_tenancy_inventory_counters.sql")) {
         return includesActivation

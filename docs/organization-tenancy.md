@@ -599,6 +599,20 @@ never touches `visibility`, `authority_epoch`, or `updated_at`, appends no
 session event, and widens no read - every candidate is necessarily
 `workspace_shared`, which `session_visibility_isolation` short-circuits on.
 
+Its candidate predicate carries the classifier's `created_by_subject_id LIKE
+'user:%'` fence in its own SQL, on both the dry-run count and the `--apply`
+claim. The write path must never be more permissive than the classification
+that authorizes it: `external_lane_owns_row` is called permanently unrepairable
+here, so the seam refuses it by construction rather than relying on 0219/0263
+never having minted a non-`user:` anchor.
+
+Session rows are safe to re-run over - an attributed row stops matching either
+candidate predicate. A `--run-key` ledger is deliberately *not*: each batch
+opens its own `<run-key>:batch-N` receipt and the ledger refuses to re-open a
+settled one, so a repeat under the same key fails on the first settled batch
+instead of overwriting immutable evidence. Resume or repeat with a new
+`--run-key`, or omit it and record nothing.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace

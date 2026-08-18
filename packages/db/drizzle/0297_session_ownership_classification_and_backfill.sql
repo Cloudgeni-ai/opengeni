@@ -280,9 +280,8 @@ DECLARE
   ledger_available boolean;
   summary jsonb;
   receipt_id uuid;
-  unresolved_row record;
-  -- One verdict per session row. Re-executed for the ledger loop rather than
-  -- staged in a temp table: a temp relation outlives the call inside the
+  -- One verdict per session row. Re-executed for the ledger statement rather
+  -- than staged in a temp table: a temp relation outlives the call inside the
   -- caller's transaction and would collide on a second call in that same
   -- transaction. $1 is the organization id.
   classification_sql constant text := $classification$
@@ -409,15 +408,26 @@ BEGIN
     EXECUTE 'SELECT open_tenancy_backfill_receipt($1, $2, $3)'
       USING p_organization_id, 'sessions', p_run_key
       INTO receipt_id;
-    FOR unresolved_row IN EXECUTE format(
-      'SELECT session_id, verdict FROM (%1$s) classified '
-        || 'WHERE verdict NOT IN %2$s ORDER BY session_id',
+    -- One set-based statement, not one round trip per unresolved session. The
+    -- recorded set is identical; only the plpgsql loop is gone. `receipt_id` is
+    -- inlined as a literal because `classification_sql` already owns `$1`.
+    --
+    -- The ledger is recorded in full on purpose: this routine summarizes an
+    -- entire organization and the receipt is its evidence, so truncating it
+    -- would make the receipt a sample. The cost is therefore proportional to
+    -- the unresolved population, and the classification query is evaluated
+    -- once for the summary and once here - the deliberate trade against
+    -- materializing an unbounded row set in memory. `--classify` is opt-in and
+    -- writes no session row.
+    EXECUTE format(
+      'SELECT record_tenancy_backfill_unresolved(%3$L::uuid, unresolved.session_id, '
+        || 'unresolved.verdict) FROM ('
+        || 'SELECT session_id, verdict FROM (%1$s) classified '
+        || 'WHERE verdict NOT IN %2$s ORDER BY session_id) unresolved',
       classification_sql,
-      resolved_verdicts
-    ) USING p_organization_id LOOP
-      EXECUTE 'SELECT record_tenancy_backfill_unresolved($1, $2, $3)'
-        USING receipt_id, unresolved_row.session_id, unresolved_row.verdict;
-    END LOOP;
+      resolved_verdicts,
+      receipt_id
+    ) USING p_organization_id;
     -- `classified_count` is the population this run PROVED already carries a
     -- live, internally consistent owner; `skipped_count` is the deterministically
     -- repairable population this classification run deliberately did NOT touch.
@@ -523,7 +533,14 @@ BEGIN
     WHERE session_row.account_id = p_organization_id
       AND session_row.owner_organization_membership_id IS NULL
       AND session_row.owner_subject_id IS NULL
-      AND session_row.created_by_kind = 'subject';
+      AND session_row.created_by_kind = 'subject'
+      -- Same fence the classifier applies before it ever reaches
+      -- 'repairable_personal_workspace': a non-`user:` creator is
+      -- 'external_lane_owns_row', which this migration calls permanently
+      -- unrepairable. Without this line the write path would be more
+      -- permissive than the classifier that authorizes it, and a dry run
+      -- would promise an attribution the classifier refuses.
+      AND session_row.created_by_subject_id LIKE 'user:%';
 
     -- Only the inheritance backlog that exists RIGHT NOW. It deliberately
     -- does not model the closure a real run's root writes would create, so a
@@ -572,6 +589,9 @@ BEGIN
         AND session_row.owner_organization_membership_id IS NULL
         AND session_row.owner_subject_id IS NULL
         AND session_row.created_by_kind = 'subject'
+        -- See the dry-run branch: `external_lane_owns_row` is unrepairable by
+        -- construction here, not merely by the absence of a matching anchor.
+        AND session_row.created_by_subject_id LIKE 'user:%'
       ORDER BY session_row.id
       LIMIT p_limit
       FOR UPDATE OF session_row SKIP LOCKED
