@@ -14,6 +14,7 @@ import {
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
+  listTurnOpenSuffixToolCalls,
   type Database,
 } from "@opengeni/db";
 import {
@@ -527,8 +528,19 @@ export async function turnInput(
       decision?: unknown;
       message?: unknown;
     };
-    // Approvals are the one path that legitimately requires the RunState blob:
-    // a turn frozen mid-flight cannot be represented as plain history items.
+    const suffixInput = await openSuffixMessageInputIfReady(
+      db,
+      runtime,
+      agent,
+      trigger,
+      internalContext,
+      options,
+    );
+    if (suffixInput) {
+      return suffixInput;
+    }
+    // Expand-era leftover: writers without an open suffix still resume from the
+    // SDK RunState blob. New pauses persist interruption rows and prefer them.
     const state = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
@@ -554,6 +566,17 @@ export async function turnInput(
     };
   }
   if (trigger.type === "user.humanInputResponse") {
+    const suffixInput = await openSuffixMessageInputIfReady(
+      db,
+      runtime,
+      agent,
+      trigger,
+      internalContext,
+      options,
+    );
+    if (suffixInput) {
+      return suffixInput;
+    }
     const [state, resume] = await Promise.all([
       getLatestRunState(db, trigger.workspaceId, trigger.sessionId),
       getHumanInputResumeForEvent(db, trigger.workspaceId, trigger.sessionId, trigger),
@@ -588,6 +611,43 @@ export async function turnInput(
 function joinInternalContext(...parts: Array<string | undefined>): string | undefined {
   const content = parts.map((part) => part?.trim()).filter((part): part is string => Boolean(part));
   return content.length > 0 ? content.join("\n\n") : undefined;
+}
+
+async function openSuffixMessageInputIfReady(
+  db: Database,
+  runtime: OpenGeniRuntime,
+  agent: any,
+  trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
+  internalContext: string | undefined,
+  options: TurnInputOptions,
+): Promise<PreparedTurnInput | null> {
+  const suffixRows = await listTurnOpenSuffixToolCalls(
+    db,
+    trigger.workspaceId,
+    trigger.sessionId,
+    options.turnId,
+  );
+  if (suffixRows.length === 0) {
+    return null;
+  }
+  if (suffixRows.some((row) => row.resultItem == null)) {
+    throw new Error("Open suffix resume still has unresolved members");
+  }
+  return await messageInput(
+    db,
+    runtime,
+    agent,
+    trigger,
+    undefined,
+    internalContext,
+    [],
+    options.providerApi,
+    options.projectCanonicalHistory,
+    options.materializeModelHistory,
+    options.projectModelHistory,
+    options.loadActiveHistory,
+    options,
+  );
 }
 
 /** Build one inference from canonical history plus attempt-local operational context. */

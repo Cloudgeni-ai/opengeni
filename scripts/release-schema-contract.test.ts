@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
+        return includesActivation
+          ? "af2db2108cf92384fbb58a843f6171c78afb47f20c8197f43e080451dfc4218b"
+          : "2e30cb89c2746773cfee07c5042001f4616936cd29ff0632b6bbe18b4791de33";
+      }
       if (migrations.has("0286_widen_task_note_expiry_ceiling.sql")) {
         return includesActivation
           ? "89e0cab6b961f265045c28cd26ee1d3e33425d2be0c87ff4cfc67a54ea717c15"
@@ -1014,7 +1019,8 @@ describe("release schema contract", () => {
         (migrations.has("0283_editable_spreadsheet_authored_state.sql") ? 1 : 0) +
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
-        (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0),
+        (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
+        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1049,7 +1055,9 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0286_widen_task_note_expiry_ceiling.sql")
+      migrations.has("0287_open_suffix_pending_tool_calls.sql")
+        ? "0287_open_suffix_pending_tool_calls.sql"
+        : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
         ? "0286_widen_task_note_expiry_ceiling.sql"
         : migrations.has("0285_organization_tenancy_inventory.sql")
           ? "0285_organization_tenancy_inventory.sql"

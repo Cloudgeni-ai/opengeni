@@ -151,7 +151,7 @@ Reaching for the wrong store is the classic mistake.
 | Store                   | Job                                                                                                                                                       | Rule                                                                                                                                                                                                                                                                                                                                               |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `session_history_items` | **Conversation truth** fed to the model (default read path).                                                                                              | Protocol-preserving, replay-ready JSON exact for accepted user, agent, tool, and source content. The SDK persistence boundary omits only object properties whose JavaScript value is `undefined`, matching JSON wire semantics; other non-JSON graphs fail with a path. Content is never regex-scanned or rewritten because text resembles a credential. Dual-written as the agent streams. Compaction **supersedes, never deletes** (`active=false`); summary inserted at fractional position `boundary - 0.5`. |
-| `agent_run_states`      | **Requires-action resume only** — the serialized SDK `RunState` blob to resume a turn paused mid-flight for a human approval or structured-input tool call. | Never use as conversation memory. Canonical state remains exact; protocol compatibility repair is explicit and path-owned rather than content-shape inference. Historical non-record sandbox `exposedPorts` values receive one exact-path root + `sessionsByAgent[*]` repair before SDK validation; provider predeclared-port arrays remain provider state. |
+| `agent_run_states`      | **Requires-action leftover only (expand era).** New pauses persist the bounded open suffix on `session_pending_tool_calls` (pending call item, tied reasoning, interruption kind) plus paired `session_history_items`. Resume prefers that suffix and continues from history; it does not reconstruct synthetic SDK `RunState`. A leftover SDK blob may still be written when it fits the 3 MiB envelope; an oversized heap stores the open-suffix sentinel instead of failing the pause. | Never use as conversation memory. Canonical state remains exact; protocol compatibility repair is explicit and path-owned rather than content-shape inference. Historical non-record sandbox `exposedPorts` values receive one exact-path root + `sessionsByAgent[*]` repair before SDK validation; provider predeclared-port arrays remain provider state. |
 | `session_events`        | **Exact append-only human/audit timeline** — drives replay/SSE/UI.                                                                                         | Accepted payloads remain exact in canonical storage and replay. Separately named monitoring/public projections may be deterministically bounded without replacing the stored payload. **Must never be fed back to the model.** Per-session monotonic `sequence`.                                                                                   |
 
 SDK-origin in-flight call and result receipts in `session_pending_tool_calls`,
@@ -164,7 +164,12 @@ and never silently repairs arbitrary callers. Completed pending tool receipts
 retain the model-facing SDK result item separately from the exact
 `agent.toolCall.output` audit value, allowing worker-death recovery to publish
 the same complete event projection as the live path without exposing its extra
-MCP fields to later model requests.
+MCP fields to later model requests. A `requires_action` pause additionally
+stamps `interruption_kind` and `tied_reasoning_items` on those receipts so
+unpaired calls never enter model-facing history; resume promotes reasoning +
+call + bounded result as one pair. Side-effecting approvals invoke through the
+existing MCP execute-once fence immediately and, if sibling interruptions
+remain, stay `requires_action` without a model call.
 
 Generated image bytes are permanent workspace artifacts, not another memory
 store. Native provider base64 is replaced before durable history/event/RunState
@@ -177,8 +182,10 @@ not enter the model-facing prefix. See
 [`image-generation.md`](image-generation.md).
 
 Serving workers fail closed before decoding an active transcript above 15 MiB,
-8,192 rows, 131,072 JSON nodes, or 65,536 object properties. Approval `RunState`
-retains its distinct 3 MiB / 65,536-node / 32,768-property envelope. Oversized state is never silently
+8,192 rows, 131,072 JSON nodes, or 65,536 object properties. Approval leftover
+`RunState` retains its distinct 3 MiB / 65,536-node / 32,768-property envelope
+on both insert and read; pause writes the open-suffix sentinel instead of that
+heap when the leftover does not fit. Oversized state is never silently
 trimmed or compacted inside a serving worker; repair and forensic work belongs
 in a bounded non-serving execution class.
 
@@ -191,8 +198,10 @@ selects that revision.
 Actionable human-input state is also separate from all three memory stores.
 `session_human_input_requests` binds a structured question set and its
 first-writer-wins answer/skip/expiry/cancellation to one exact turn execution
-generation. It is atomically installed with the `agent_run_states` checkpoint
-and `requires_action` events/status. Events tell clients to reconcile; the row
+generation. It is atomically installed with the open-suffix pending-tool
+receipts, a leftover or sentinel `agent_run_states` row, and `requires_action`
+events/status. A crash cannot expose a pending request without durable completed-pair
+history **and** the open suffix. Events tell clients to reconcile; the row
 is the authoritative pending-request read model. See
 [`human-input.md`](human-input.md).
 
@@ -723,7 +732,7 @@ child/fork session or after-commit admission worker.
 stateDiagram-v2
   [*] --> queued: human/API Send or Steer
   queued --> running: workflow claims the next prompt
-  running --> requires_action: approval or structured input needed (RunState saved)
+  running --> requires_action: approval or structured input needed (open suffix saved)
   requires_action --> running: decision or response advances the same turn
   running --> recovering: deploy / worker death / lease loss
   recovering --> running: a newer attempt resumes the same turn
@@ -738,7 +747,7 @@ Key transitions (canonical: `apps/worker/src/workflows/session.ts`):
 
 - **Only human/API prompts are reorderable queue rows.** The one compact queue surface also projects canonical pending machine inputs directly from `session_system_updates`: attached to the eligible human prompt they will join, or grouped as standalone incoming updates. Events only invalidate that projection. The current inference, same-turn recovery, and compaction are not queue work.
 - **Machine-input batching preserves executable authority.** Ordinary notices may coalesce only when their frozen personal-MCP delegation snapshots are identical; differing snapshots form separate turns. Agent Steer remains authoritative over ordinary notices that join it. The active-turn and queued-turn surfaces disclose only server/provider summaries, never credential or owner identifiers.
-- **Structured human input is not an approval or a queue prompt.** When workspace setting `agentHumanInputEnabled` is not false, `request_human_input` freezes the current SDK tool call; answer, allowed skip, expiry, or cancellation is injected as structured output into that same call. Disabled workspaces omit the tool and reject stale/forged structured-input boundaries before `requires_action`. The request row, SDK checkpoint, events, and `requires_action` status are installed atomically. See [`human-input.md`](human-input.md).
+- **Structured human input is not an approval or a queue prompt.** When workspace setting `agentHumanInputEnabled` is not false, `request_human_input` freezes the current SDK tool call; answer, allowed skip, expiry, or cancellation is injected as structured output into that same call. Disabled workspaces omit the tool and reject stale/forged structured-input boundaries before `requires_action`. The request row, open suffix, events, and `requires_action` status are installed atomically. See [`human-input.md`](human-input.md).
 - **Every requires-action boundary admits one resume event.** Ordinary approval decisions and structured-input responses share the same durable gate, so parallel or mixed interruptions advance and re-freeze serially instead of settling two tool calls against one trigger.
 - **Connector approval never replaces causal identity.** A connector Ask request records the initiating turn actor and creation attempt before interruption. The authenticated approver is recorded separately in the same transaction as `user.approvalDecision`; the resumed attempt may execute the approved request, but cannot replace its requester, policy version, action fingerprint, or connection/tool/action identity.
 - **Send appends; Steer inserts at the head and supersedes the current attempt.** Both result in ordinary prompt execution once admitted by the session/workspace gate.
@@ -1271,7 +1280,7 @@ The current map:
   retain their existing exact contracts; MCP monitoring never fetches large
   historical rig scripts, checks, change payloads, or verification logs merely
   to discard them after serialization.
-- **Three memory stores + control state + envelope.** See §3.5: `session_history_items` (model truth), `agent_run_states` (requires-action resume), `session_events` (audit), `session_human_input_requests` (actionable structured-input state), and `sandbox_session_envelopes` (sandbox recovery). Workspace knowledge memory (`knowledge_memories`, human-reviewed) is separate again — see §3.5.
+- **Three memory stores + control state + envelope.** See §3.5: `session_history_items` (model truth), `session_pending_tool_calls` (in-flight receipts and the requires-action open suffix), `agent_run_states` (expand-era leftover blob or sentinel), `session_events` (audit), `session_human_input_requests` (actionable structured-input state), and `sandbox_session_envelopes` (sandbox recovery). Workspace knowledge memory (`knowledge_memories`, human-reviewed) is separate again — see §3.5.
 - **Actor-private pre-session drafts.** `new_session_drafts` is the server-authoritative composer state before a session exists, separate from established-session `composer_drafts` so the latter keeps its mandatory session foreign key. Rows are revisioned and protected by FORCE RLS on both workspace and authenticated subject; browser storage, `File`/`Blob`, object URLs, raw bytes, and signed URLs are never draft authority. A create carries `expectedNewSessionDraftRevision`; the durable initializer deletes only that exact revision after the initial events, turn, and wake row have been installed in the same transaction. Any failed initialization preserves the draft, and a newer sibling-tab revision survives an older create. Canonical: `packages/core/src/application/new-session-drafts.ts`, `packages/db/src/new-session-drafts.ts`, `packages/db/drizzle/0118_new_session_drafts.sql`.
 - **pgvector documents.** `document_bases`/`documents`/`document_chunks` with `embedding vector(3072)`. No ANN index (vector search is a sequential scan; keyword search uses a GIN FTS index); embedding model is stored per chunk and filtered on at search time. Documents carry source metadata + `aclTags` (retrieval filters, not authz); `knowledge_memories` stores reviewed workspace memory with its own FTS index.
 - **Object storage.** `s3-compatible` (MinIO local), `aws-s3`, `azure-blob`, `gcs` for file bytes + resumable voice-recording chunks/segments. S3-compatible presigned URLs are **host-bound** (host is part of the signature): `OPENGENI_OBJECT_STORAGE_ENDPOINT` is the public URL embedded in browser links, optional `OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` is the API/worker transport URL, and `OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT` is independently supplied to agent sandboxes. Server-side `HEAD`/read/write/delete operations use the internal endpoint when configured and otherwise the public endpoint. Direct upload completion validates provider HEAD metadata before making the file ready, while a completed-request retry re-enters the row lock and idempotently repairs a missing `file.uploaded` usage event. Retained-evidence content uses provider-native bounded reads (`Range` on S3, ranged download on GCS/Azure) through the authenticated workspace API and never full-read-then-slice or the ordinary signed download URL. Unfinalized file PUTs are retained through URL expiry plus cleanup grace. Resumable transcription uses a separate exact-subject FORCE-RLS manifest/object ledger: chunks and normalized WAV segments are server-written/read with size+SHA verification, terminal objects become immediately cleanup-eligible, abandoned objects become due at recording expiry, and the existing file-upload reaper settles each provider delete independently before a bounded expiry purge may remove transcript/metadata rows.
