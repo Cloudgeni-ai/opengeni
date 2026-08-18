@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0288_confirm_time_rule_rebaseline.sql")) {
+      if (migrations.has("0289_confirm_time_rule_rebaseline.sql")) {
         return includesActivation
-          ? "c2d21a556c5ae04beb80a2bda8e3ba9425b54b0e63d7782ee7642be74c648026"
-          : "ea5d06d2d3cb0f5cabef651babc8738d924104a8adf3cd0727b49b8892cd18e6";
+          ? "688559799d0019b3342811911721b3ec43e74c0191e36427fd73a4d71c9c93ff"
+          : "e8ab4c8c9fa12ac6c7bd1e29872c97a82f3deb1277dae096fe229cc5ed5bbc40";
       }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
@@ -1026,7 +1026,7 @@ describe("release schema contract", () => {
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
-        (migrations.has("0288_confirm_time_rule_rebaseline.sql") ? 1 : 0),
+        (migrations.has("0289_confirm_time_rule_rebaseline.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1061,8 +1061,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0288_confirm_time_rule_rebaseline.sql")
-        ? "0288_confirm_time_rule_rebaseline.sql"
+      migrations.has("0289_confirm_time_rule_rebaseline.sql")
+        ? "0289_confirm_time_rule_rebaseline.sql"
         : migrations.has("0287_open_suffix_pending_tool_calls.sql")
           ? "0287_open_suffix_pending_tool_calls.sql"
           : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
