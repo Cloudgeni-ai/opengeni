@@ -7004,6 +7004,12 @@ export const sessionPendingToolCalls = pgTable(
     callType: text("call_type").notNull(),
     callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
     callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
+    interruptionKind: text("interruption_kind"),
+    tiedReasoningItems: losslessJsonb("tied_reasoning_items")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    tiedReasoningItemsCodecVersion: losslessCodecVersion("tied_reasoning_items_codec_version"),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
@@ -7027,6 +7033,14 @@ export const sessionPendingToolCalls = pgTable(
       table.workspaceId,
       table.sessionId,
       table.turnId,
+    ),
+    interruptionKindValid: check(
+      "session_pending_tool_calls_interruption_kind_chk",
+      sql`${table.interruptionKind} is null or ${table.interruptionKind} in ('human_input', 'approval', 'interaction_intervention')`,
+    ),
+    tiedReasoningItemsArray: check(
+      "session_pending_tool_calls_tied_reasoning_items_chk",
+      sql`jsonb_typeof(${table.tiedReasoningItems}) = 'array'`,
     ),
   }),
 );
