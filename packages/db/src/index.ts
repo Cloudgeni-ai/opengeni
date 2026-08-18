@@ -17600,6 +17600,36 @@ export async function inventoryOrganizationTenancy(
   );
 }
 
+/**
+ * Organization-tenancy phase D classification assertion (0291) for Variable Sets, Rigs, and
+ * Connected Machines. Read-only over every resource table: it proves each row
+ * already carries an explicit terminal authority classification and never
+ * rewrites one. Supplying `runKey` additionally records the verdicts durably
+ * through the 0286 tenancy backfill ledger (one receipt per family plus one
+ * append-only unresolved row per resource that could not be proven); the
+ * result reports `ledgerAvailable` so a run that could not record its
+ * obligations is visible rather than silent. A run key may be used once - the
+ * ledger refuses to re-open a settled receipt.
+ */
+export async function verifyOrganizationResourceClassification(
+  db: Database,
+  input: { organizationId: string; runKey?: string | null },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select verify_organization_resource_classification(
+          ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {

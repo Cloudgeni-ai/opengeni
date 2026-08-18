@@ -434,7 +434,10 @@ describe("Skill installation authority UI", () => {
     }
   });
 
-  test("keeps read access while disabling the enabled-strip removal shortcut", async () => {
+  // The enabled Connectors strip can no longer contain a Skill at all: Skills
+  // are Bundles and their authority, their remove affordance, and their
+  // administrator guidance all live in the Bundles section instead.
+  test("the enabled Connectors strip offers no Skill removal shortcut", async () => {
     const skill = installedCuratedSkill();
     const onOpen = mock((_item: CapabilityCatalogItem) => {});
     const onDisable = mock((_item: CapabilityCatalogItem) => {});
@@ -444,7 +447,6 @@ describe("Skill installation authority UI", () => {
         busyId={null}
         connectionHealth={() => ({ state: "none" })}
         logoUrl={() => null}
-        canManageSkills={false}
         onOpen={onOpen}
         onDisable={onDisable}
       />,
@@ -453,14 +455,13 @@ describe("Skill installation authority UI", () => {
       const inspect = rendered.container.querySelector<HTMLButtonElement>(
         '[data-capability-id="skill:terraform-style-guide"]',
       );
-      const remove = [...rendered.container.querySelectorAll("button")].find(
-        (button) => button.textContent?.trim() === "Remove",
-      );
       expect(inspect?.disabled).toBe(false);
-      expect(remove?.disabled).toBe(true);
-      expect(remove?.title).toContain("Workspace administrator permission is required");
+      expect(
+        [...rendered.container.querySelectorAll("button")].map((button) =>
+          button.textContent?.trim(),
+        ),
+      ).not.toContain("Remove");
       await act(async () => inspect!.click());
-      await act(async () => remove!.click());
       expect(onOpen).toHaveBeenCalledWith(skill);
       expect(onDisable).not.toHaveBeenCalled();
     } finally {
