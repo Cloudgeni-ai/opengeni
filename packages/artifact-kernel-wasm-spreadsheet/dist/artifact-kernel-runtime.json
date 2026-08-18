@@ -5,8 +5,8 @@
     "target": "wasm-web",
     "modality": "spreadsheet",
     "packageName": "@opengeni/artifact-kernel-wasm-spreadsheet",
-    "packageVersion": "0.2.12",
-    "artifactToolVersion": "0.2.12",
+    "packageVersion": "0.2.13",
+    "artifactToolVersion": "0.2.13",
     "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
     "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
     "abiVersion": 1,
@@ -49,12 +49,12 @@
     {
       "path": "index.d.ts",
       "bytes": 2306,
-      "sha256": "sha256:a76e609f652f952cc46225277783aa31b1de1fe229d44107660830136edf55c5"
+      "sha256": "sha256:8f8e8a69b664d716c1f2f74e5cf806da411956e39e920a8b3f6a22b9cf259a82"
     },
     {
       "path": "index.js",
       "bytes": 2263,
-      "sha256": "sha256:907219d807f46c53ab42d652d1aa350a0c9489d09c6d2464bf6e84a56b0b21e5"
+      "sha256": "sha256:f005afce9ecc10a9e77d8d96fe8098183182bef9314f53e9a7d170ba44c6b135"
     }
   ]
 }
