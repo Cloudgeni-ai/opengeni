@@ -593,6 +593,23 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0291's classification assertion seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and it lives in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches it. (Its inner capability predicate
+    -- IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.verify_organization_resource_classification(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.verify_organization_resource_classification(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to
