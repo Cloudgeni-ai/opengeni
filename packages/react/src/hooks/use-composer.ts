@@ -841,6 +841,16 @@ export function useComposer(
             setRestoredResources(fetched.resources);
             setAnnotations(fetched.annotations ?? []);
             setPolicy(fetchedPolicy);
+          } else {
+            // Keep the in-flight edit, but the fetched row is still the OCC
+            // base. First hydrate has no local policy until this read lands;
+            // without it autosave cannot persist the typed text.
+            lastSavedSignature.current = draftSignature(draftPayload(fetched));
+            if (!policyRef.current) {
+              const fetchedPolicy = policyFromDraft(fetched);
+              policyRef.current = fetchedPolicy;
+              setPolicy(fetchedPolicy);
+            }
           }
         }
       } catch (cause) {
@@ -993,7 +1003,7 @@ export function useComposer(
       currentPolicy,
       resolveSendExtras(sendExtrasRef.current).resources ?? [],
     );
-  }, [annotations, durableDrafts, restoredResources, targetKey, value]);
+  }, [annotations, durableDrafts, policy, restoredResources, targetKey, value]);
 
   const adoptDraftBase = useCallback(
     (next: ComposerDraft): void => {

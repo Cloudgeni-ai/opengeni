@@ -2231,6 +2231,72 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("typing before first hydrate still autosaves against the fetched OCC base", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const saved: Array<{ text: string; model: string; expectedRevision: number }> = [];
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saved.push({
+          text: request.text,
+          model: request.model,
+          expectedRevision: request.expectedRevision,
+        });
+        return {
+          revision: request.expectedRevision + 1,
+          text: request.text,
+          resources: request.resources,
+          annotations: request.annotations ?? [],
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          latencyMode: request.latencyMode,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.draftLoading).toBe(true);
+    await flushing(() => hook.result.current.setValue("Typed before the draft read returned"));
+    await flushing(async () => {
+      resolveDraft({
+        revision: 0,
+        text: "",
+        resources: [],
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: null,
+      });
+      await Promise.resolve();
+    });
+    await flush(600);
+    expect(hook.result.current.value).toBe("Typed before the draft read returned");
+    expect(hook.result.current.policy).toEqual({
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    });
+    expect(saved).toEqual([
+      {
+        text: "Typed before the draft read returned",
+        model: "scripted-model",
+        expectedRevision: 0,
+      },
+    ]);
+    await hook.unmount();
+  });
+
   test("history already present at mount is treated as a projection, not live traffic", async () => {
     let reads = 0;
     const client = fakeClient({
