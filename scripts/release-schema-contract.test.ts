@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0294_session_snapshot_and_pin_visibility.sql")) {
+        return includesActivation
+          ? "b662170ea90f078a91a72ff5c76ef49ebff3982660092bdb0d629f8f4b81da85"
+          : "a5600661533a23e2184bdb3f0f2a976cb93e98bf330da5fc0c1d7bff56c149cb";
+      }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
           ? "af2db2108cf92384fbb58a843f6171c78afb47f20c8197f43e080451dfc4218b"
@@ -1020,7 +1025,8 @@ describe("release schema contract", () => {
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
-        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0),
+        (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
+        (migrations.has("0294_session_snapshot_and_pin_visibility.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1055,7 +1061,9 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0287_open_suffix_pending_tool_calls.sql")
+      migrations.has("0294_session_snapshot_and_pin_visibility.sql")
+        ? "0294_session_snapshot_and_pin_visibility.sql"
+        : migrations.has("0287_open_suffix_pending_tool_calls.sql")
         ? "0287_open_suffix_pending_tool_calls.sql"
         : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
         ? "0286_widen_task_note_expiry_ceiling.sql"
