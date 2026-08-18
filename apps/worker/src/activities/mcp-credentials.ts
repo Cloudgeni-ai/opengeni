@@ -9,6 +9,7 @@ import {
   type ResolveConnectionCredentialResult,
   type SessionTurnForExecution,
 } from "@opengeni/db";
+import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
 
 export function connectionTokenResolverForTurn(input: {
   db: Database;
@@ -21,6 +22,8 @@ export function connectionTokenResolverForTurn(input: {
   attemptId: string;
   turn: SessionTurnForExecution;
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
+  /** Optional; used only for content-free compatibility-lane counters. */
+  observability?: Observability | null | undefined;
 }): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
   const hostResolver = input.connectionCredentials?.mcpCredentials;
   const baseResolver = hostResolver
@@ -68,6 +71,10 @@ export function connectionTokenResolverForTurn(input: {
     // legacy path - it cannot be authorized by exact identity, so it keeps the
     // unprivileged resolution the old short-circuit used.
     if (subjectScope === "workspace" && !request.connectionRef.connectionId) {
+      // This lane writes no `connection_use_audit_facts` row, so this counter is
+      // the only evidence it was taken. Lane name only - never the server,
+      // provider domain, connection, or subject.
+      recordTenancyCompatibilityLaneUse(input.observability, "connection_pre_snapshot_ref");
       return await baseResolver(request);
     }
     const credentialUseContext = {
@@ -118,11 +125,20 @@ export function connectionTokenResolverForTurn(input: {
         },
       };
     };
+    // One place records the `legacy_user` lane for both resolution paths: the
+    // scope comes back on the resolver result when the DB resolver authorized
+    // internally, and on the resolution itself when the host resolver did.
+    const recordAuthorizedScope = (scope: "workspace" | "user" | "legacy_user" | undefined) => {
+      if (scope === "legacy_user") {
+        recordTenancyCompatibilityLaneUse(input.observability, "connection_legacy_user");
+      }
+    };
     if (!hostResolver) {
       const result = await baseResolver({
         ...request,
         connectionUseContext: credentialUseContext,
       });
+      if (result.status === "ok") recordAuthorizedScope(result.connectionUseAttribution?.scope);
       return withProviderRequestAuthorization(result);
     }
     const authorization = await authorize(credentialUseContext);
@@ -137,6 +153,7 @@ export function connectionTokenResolverForTurn(input: {
         ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       };
     }
+    recordAuthorizedScope(authorization.attribution.scope);
     const result = await baseResolver({
       ...request,
       connectionUseContext: credentialUseContext,
