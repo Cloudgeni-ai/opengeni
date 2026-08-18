@@ -33,6 +33,7 @@ function descriptor(
       conflictsWith: [],
     },
     provenance: { source: "human", sourceIdHash: null, trust: "personal" },
+    activationAuthority: null,
     expiresAt: null,
     retrievalHandle: `preference://${preferenceId}/revisions/${revisionId}?sha256=${"a".repeat(64)}`,
   };
