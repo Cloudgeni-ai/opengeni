@@ -26,6 +26,7 @@ import {
   getWorkspaceKnowledgeChangeProposalSummary,
   getWorkspaceKnowledgeClaimInitiatingHuman,
   nestedPostgresSqlState,
+  rebaselineWorkspaceInstructionPolicyKnowledgeProposal,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -33,6 +34,10 @@ import {
   derivedGovernedLearningOperationId,
 } from "./company-brain-governed-writes";
 import { publishGovernedLearningEventToSlack } from "./governed-learning-slack-publication";
+
+// A confirmation may need to lose a race with a concurrent activation more
+// than once before it lands, but it must not retry forever.
+const REBASELINE_ATTEMPTS = 3;
 
 export class RememberError extends Error {
   readonly name = "RememberError";
@@ -91,6 +96,7 @@ export type RememberRouterOptions = {
   learningRouter?: Pick<ReturnType<typeof createCompanyBrainLearningPolicyRouter>, "write">;
   createNote?: typeof createTaskNote;
   archiveNote?: typeof archiveTaskNote;
+  rebaselineProposal?: typeof rebaselineWorkspaceInstructionPolicyKnowledgeProposal;
   activateHumanConfirmed?: typeof activateHumanConfirmedLearningDecision;
   confirmKnowledgeClaim?: typeof confirmRememberKnowledgeClaim;
   proposalSummary?: typeof getWorkspaceKnowledgeChangeProposalSummary;
@@ -107,7 +113,7 @@ export type RememberRouterOptions = {
 /** Deterministic UUID-shaped id derived from the caller's remember operation id. */
 export function derivedRememberOperationId(
   operationId: string,
-  stage: "note" | "note-archive" | "promotion" | "evaluation" | "activation",
+  stage: "note" | "note-archive" | "promotion" | "evaluation" | "activation" | "rebaseline",
 ): string {
   const bytes = Buffer.from(
     createHash("sha256")
@@ -242,6 +248,8 @@ export function createRememberRouter(options: RememberRouterOptions): {
     options.learningRouter ?? createCompanyBrainLearningPolicyRouter({ db: options.db });
   const createNote = options.createNote ?? createTaskNote;
   const archiveNote = options.archiveNote ?? archiveTaskNote;
+  const rebaselineProposal =
+    options.rebaselineProposal ?? rebaselineWorkspaceInstructionPolicyKnowledgeProposal;
   const activateHumanConfirmed =
     options.activateHumanConfirmed ?? activateHumanConfirmedLearningDecision;
   const confirmKnowledgeClaim = options.confirmKnowledgeClaim ?? confirmRememberKnowledgeClaim;
@@ -418,12 +426,17 @@ export function createRememberRouter(options: RememberRouterOptions): {
       }
       // The database capability proves the exact human answered the bound
       // question with `save` on this session/turn generation before writing.
-      let activation: GovernedLearningActivationReceipt;
-      try {
-        activation = await activateHumanConfirmed(options.db, {
+      // The human has already answered "save". If the head moved since this
+      // rule was proposed, re-asking them would be the alternative; instead
+      // rebaseline onto the current head and retry. The successor reuses this
+      // same knowledge proposal, so the confirmation stays bound to exactly the
+      // content the human approved. Bounded, because each retry can lose
+      // another race with a concurrent activation.
+      const activateOnce = async (): Promise<GovernedLearningActivationReceipt> =>
+        await activateHumanConfirmed(options.db, {
           caller: {
             workspaceId: attempt.workspaceId,
-            subjectId: proposal.initiatingHumanSubjectId,
+            subjectId: proposal.initiatingHumanSubjectId!,
           },
           request: {
             operationId: derivedGovernedLearningOperationId(request.operationId, "activation"),
@@ -431,9 +444,44 @@ export function createRememberRouter(options: RememberRouterOptions): {
             humanInputRequestId: request.humanInputRequestId,
           },
         });
-      } catch (error) {
-        throw asRememberFailure(error);
+      let activation: GovernedLearningActivationReceipt | null = null;
+      let lastFailure: unknown;
+      for (
+        let attemptIndex = 0;
+        attemptIndex < REBASELINE_ATTEMPTS && !activation;
+        attemptIndex++
+      ) {
+        try {
+          activation = await activateOnce();
+        } catch (error) {
+          lastFailure = error;
+          if (
+            proposal.targetKind !== "instruction_policy" ||
+            !(asRememberFailure(error) instanceof RememberError) ||
+            attemptIndex === REBASELINE_ATTEMPTS - 1
+          ) {
+            throw asRememberFailure(error);
+          }
+          try {
+            await rebaselineProposal(options.db, {
+              accountId: attempt.accountId,
+              workspaceId: attempt.workspaceId,
+              knowledgeProposalId: proposal.id,
+              initiatingHumanSubjectId: proposal.initiatingHumanSubjectId!,
+              operationId: derivedRememberOperationId(
+                `${request.operationId}:${attemptIndex}`,
+                "rebaseline",
+              ),
+            });
+          } catch {
+            // The rebaseline is the recovery, not the outcome the caller asked
+            // for. If it cannot land, the honest answer is still the actionable
+            // stale-baseline failure rather than an internal recovery error.
+            throw asRememberFailure(error);
+          }
+        }
       }
+      if (!activation) throw asRememberFailure(lastFailure);
       try {
         await notifyActivation({
           db: options.db,

@@ -242,8 +242,10 @@ describe("remember rule-lane hardening (real PostgreSQL)", () => {
     expect(replay.proposalId).toBe(first.proposalId);
   }, 180_000);
 
-  // Item 1: a moved head surfaced as an untyped error with no guidance.
-  test("a stale baseline at confirm time is a typed, actionable failure", async () => {
+  // Item 3: two open proposals for one target used to strand the loser - the
+  // human answered "save" and the confirm still hard-failed on a stale
+  // baseline. It must now rebaseline onto the current head and complete.
+  test("a confirmation stranded by a moved head rebaselines and completes", async () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
     await seedActiveHead(f, "Existing human policy.");
@@ -260,20 +262,118 @@ describe("remember rule-lane hardening (real PostgreSQL)", () => {
     });
     expect(first.status).toBe("confirmation_required");
     if (first.status !== "confirmation_required") return;
+    const secondRule = "Always request review before merging.";
     const second = await router.remember({
       attempt: f.attempt,
       request: {
         operationId: crypto.randomUUID(),
         lane: "instruction_policy",
         scope: "workspace",
-        content: "Always request review before merging.",
+        content: secondRule,
         reason: "A second hard rule stated by the user.",
       },
     });
     expect(second.status).toBe("confirmation_required");
     if (second.status !== "confirmation_required") return;
 
-    // Confirm the first: the head advances and strands the second proposal.
+    // Confirming the first advances the head and strands the second.
+    const firstAnswer = await answeredRememberInput(
+      f,
+      first.proposalId!,
+      RULE,
+      ["save"],
+      RULE_PROMPT,
+    );
+    const firstConfirmed = await router.confirm({
+      attempt: f.attempt,
+      request: {
+        target: "proposal",
+        operationId: crypto.randomUUID(),
+        proposalId: first.proposalId!,
+        decisionReceiptId: first.learning!.receiptId,
+        humanInputRequestId: firstAnswer,
+      },
+    });
+    expect(firstConfirmed.status).toBe("activated");
+
+    // The human answers the second question; it must still land.
+    const secondAnswer = await answeredRememberInput(
+      f,
+      second.proposalId!,
+      secondRule,
+      ["save"],
+      RULE_PROMPT,
+    );
+    const secondConfirmed = await router.confirm({
+      attempt: f.attempt,
+      request: {
+        target: "proposal",
+        operationId: crypto.randomUUID(),
+        proposalId: second.proposalId!,
+        decisionReceiptId: second.learning!.receiptId,
+        humanInputRequestId: secondAnswer,
+      },
+    });
+    expect(secondConfirmed.status).toBe("activated");
+    if (secondConfirmed.status !== "activated") return;
+    expect(secondConfirmed.activation).toMatchObject({
+      destination: "instruction_policy",
+      authorityKind: "human_confirmed",
+    });
+
+    // Both rules activated in sequence, so the head advanced twice past the
+    // seed and the content the human approved is what became active.
+    const head = await getWorkspaceInstructionPolicyBaseline(client.db, {
+      workspaceId: f.grant.workspaceId,
+      target: { kind: "policy", scope: "global", roleKey: null },
+    });
+    expect(head.expectedActivationVersion).toBe(3);
+    const [active] = await shared.admin<Array<{ content: string }>>`
+      select revision.content
+      from workspace_instruction_policy_heads head
+      join workspace_instruction_policy_revisions revision on revision.id = head.revision_id
+      where head.workspace_id = ${f.grant.workspaceId}`;
+    expect(active?.content).toBe(secondRule);
+  }, 180_000);
+
+  // Item 1: when the rebaseline cannot succeed either (the proposal is gone),
+  // the caller still gets one typed, actionable failure rather than a raw
+  // SQLSTATE 40001 with no guidance.
+  test("an unrecoverable stale baseline is a typed, actionable failure", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    await seedActiveHead(f, "Existing human policy.");
+    const router = createRememberRouter({
+      db: client.db,
+      // Stand in for a rebaseline that cannot land - the head keeps moving, or
+      // the stranded proposal is no longer there to rebase.
+      rebaselineProposal: async () => {
+        throw new Error("rebaseline unavailable");
+      },
+    });
+    const first = await router.remember({
+      attempt: f.attempt,
+      request: {
+        operationId: crypto.randomUUID(),
+        lane: "instruction_policy",
+        scope: "workspace",
+        content: RULE,
+        reason: "Hard rule stated by the user.",
+      },
+    });
+    if (first.status !== "confirmation_required") return;
+    const secondRule = "Always request review before merging.";
+    const second = await router.remember({
+      attempt: f.attempt,
+      request: {
+        operationId: crypto.randomUUID(),
+        lane: "instruction_policy",
+        scope: "workspace",
+        content: secondRule,
+        reason: "A second hard rule stated by the user.",
+      },
+    });
+    if (second.status !== "confirmation_required") return;
     const firstAnswer = await answeredRememberInput(
       f,
       first.proposalId!,
@@ -291,11 +391,10 @@ describe("remember rule-lane hardening (real PostgreSQL)", () => {
         humanInputRequestId: firstAnswer,
       },
     });
-
     const secondAnswer = await answeredRememberInput(
       f,
       second.proposalId!,
-      "Always request review before merging.",
+      secondRule,
       ["save"],
       RULE_PROMPT,
     );
