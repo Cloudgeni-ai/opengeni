@@ -1003,7 +1003,7 @@ export function useComposer(
       currentPolicy,
       resolveSendExtras(sendExtrasRef.current).resources ?? [],
     );
-  }, [annotations, durableDrafts, policy, restoredResources, targetKey, value]);
+  }, [annotations, durableDrafts, restoredResources, targetKey, value]);
 
   const adoptDraftBase = useCallback(
     (next: ComposerDraft): void => {
