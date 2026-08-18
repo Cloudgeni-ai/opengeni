@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 1.4.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- Updated dependencies [6937eaf]
+- Updated dependencies [e6c2fee]
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/db@1.4.0
+  - @opengeni/storage@0.2.100
+  - @opengeni/contracts@1.4.0
+  - @opengeni/documents@0.6.3
+  - @opengeni/events@0.3.117
+  - @opengeni/config@0.16.8
+  - @opengeni/observability@0.7.11
+  - @opengeni/runtime@1.1.1
+
 ## 1.3.0
 
 ### Minor Changes

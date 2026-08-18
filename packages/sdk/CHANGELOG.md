@@ -1,5 +1,17 @@
 # @opengeni/sdk
 
+## 2.0.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+
 ## 1.1.1
 
 ### Patch Changes
