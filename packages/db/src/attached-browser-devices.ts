@@ -16,12 +16,7 @@ import {
 } from "./interaction-revisions";
 import * as schema from "./schema";
 
-const ATTACHED_DEVICE_LIVE_LIFECYCLES = [
-  "starting",
-  "active",
-  "suspending",
-  "restoring",
-] as const;
+const ATTACHED_DEVICE_LIVE_LIFECYCLES = ["starting", "active", "suspending", "restoring"] as const;
 // `ending` stays off this list so an in-flight `/end` can finish physical
 // teardown (`stopCapture` + helper exit) after Chrome reconnects.
 

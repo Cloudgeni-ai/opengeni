@@ -2277,9 +2277,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error &&
-        props.supportsLiveFrames &&
-        (!generationLoss || props.reconnectLabel) ? (
+        {props.error && props.supportsLiveFrames && (!generationLoss || props.reconnectLabel) ? (
           <button
             type="button"
             onClick={props.onReconnect}

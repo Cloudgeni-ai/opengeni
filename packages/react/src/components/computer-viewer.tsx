@@ -434,8 +434,7 @@ export function ComputerViewer({
     [computer, notifyError, perform, rfbStream],
   );
 
-  const hideGenericCreate =
-    suppressGenericCreate && liveRelevant.length === 0;
+  const hideGenericCreate = suppressGenericCreate && liveRelevant.length === 0;
   const generationLossSelected =
     selectedRegistrySession !== null && isAttachedChromeGenerationLoss(selectedRegistrySession);
   const generationLossFrames = isAttachedChromeGenerationLossError(frames.error);
@@ -588,7 +587,9 @@ export function ComputerViewer({
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={
-                  generationLossSelected || generationLossFrames ? () => undefined : frames.reconnect
+                  generationLossSelected || generationLossFrames
+                    ? () => undefined
+                    : frames.reconnect
                 }
                 onError={(cause) => notifyError(cause, "Desktop input failed.")}
               />
