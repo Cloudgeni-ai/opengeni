@@ -174,6 +174,11 @@ export const PreferenceRegistryEvent = z.object({
 });
 export type PreferenceRegistryEvent = z.infer<typeof PreferenceRegistryEvent>;
 
+export const PreferenceRegistryActivationAuthority = z.enum(["human_confirmed", "automatic"]);
+export type PreferenceRegistryActivationAuthority = z.infer<
+  typeof PreferenceRegistryActivationAuthority
+>;
+
 export const PreferenceRegistryDescriptor = z.object({
   id: z.string().uuid(),
   stableKey: PreferenceRegistryStableKey,
@@ -185,6 +190,18 @@ export const PreferenceRegistryDescriptor = z.object({
   contentHash: hash,
   precedence: PreferenceRegistryPrecedence,
   provenance: PreferenceRegistryDescriptorProvenance,
+  // How the active revision became active, derived from the governed-learning
+  // activation receipt rather than stored on the revision. `provenance.trust`
+  // stays the frozen creation-time fact - a revision proposed by an agent is
+  // `untrusted_proposal` forever, which is correct and immutable - while this
+  // says whether a human explicitly confirmed the activation or policy
+  // activated it automatically. Null when the revision became active outside
+  // governed learning, so no receipt describes it.
+  // Defaulted, not merely nullable: snapshots written before this field
+  // existed are immutable and their stored JSON simply has no answer. Parsing
+  // those as null is the truthful reading, and it keeps their pinned
+  // descriptor hash valid because the stored text is untouched.
+  activationAuthority: PreferenceRegistryActivationAuthority.nullable().default(null),
   expiresAt: z.string().datetime().nullable(),
   retrievalHandle: z.string().min(1).max(512),
 });
