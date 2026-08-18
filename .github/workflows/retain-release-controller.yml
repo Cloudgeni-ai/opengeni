@@ -1,0 +1,38 @@
+name: Retain Release Controller
+run-name: retain-release-controller:${{ inputs.controller_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      controller_sha:
+        description: Exact current main SHA to retain as immutable workflow authority.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retain-release-controller-${{ inputs.controller_sha }}
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    name: Retain exact current-main controller
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out trusted current main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Retain exact current-main workflow authority
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+        run: node scripts/check-release-pr-automation.mjs retain-release-controller

@@ -1,6 +1,6 @@
 name: Release source admission
 
-# This reusable gate is loaded from the caller's immutable trusted-base ref.
+# This reusable gate is loaded from the caller's immutable retained controller ref.
 # It executes no release-source bytes and grants no mutation authority.
 on:
   workflow_call:
@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       controller_sha:
-        description: Exact retained trusted Version-PR base running this workflow.
+        description: Exact retained trusted controller running this workflow.
         required: true
         type: string
 
