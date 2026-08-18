@@ -4079,6 +4079,8 @@ async function createOwnedSession(
   return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     ...input,
   });
 }

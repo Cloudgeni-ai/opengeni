@@ -141,7 +141,7 @@ async function frozenFixture() {
     sessionStatus: "requires_action",
     activeTurnId: claimed.turn.id,
     runState: {
-      serializedRunState: "frozen-state",
+      serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
       pendingApprovals: [],
       humanInputRequests: [
         {
