@@ -513,7 +513,9 @@ describe("durable structured human input", () => {
         },
       }),
     ).toEqual({ accepted: true, registered: true });
-    const reasoning = [{ type: "reasoning", id: "rs_open", content: [{ type: "input_text", text: "ask" }] }];
+    const reasoning = [
+      { type: "reasoning", id: "rs_open", content: [{ type: "input_text", text: "ask" }] },
+    ];
     expect(
       await attachOpenSuffixToPendingToolCalls(client.db, {
         accountId: grant.accountId,
@@ -566,7 +568,9 @@ describe("durable structured human input", () => {
         sessionStatus: "requires_action",
         activeTurnId: claim.turn.id,
         runState: {
-          serializedRunState: JSON.stringify({ pad: "x".repeat(APPROVAL_RUN_STATE_MAX_JSON_BYTES) }),
+          serializedRunState: JSON.stringify({
+            pad: "x".repeat(APPROVAL_RUN_STATE_MAX_JSON_BYTES),
+          }),
           pendingApprovals: [],
         },
         events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],

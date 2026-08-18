@@ -15,13 +15,17 @@ describe("workspace Memory V1 prompt mode", () => {
     expect(resolveWorkspaceMemoryPromptMode("not-an-object")).toBe("retrieval_only");
   });
 
-  test("keeps legacy standing composition only as an explicit opt-out", () => {
+  test("retires legacy standing composition without breaking a stored setting", () => {
+    // A workspace that opted in before the retirement keeps the stored value in
+    // its passthrough settings bag; it must simply stop meaning anything rather
+    // than failing validation and taking the workspace down with it.
     expect(resolveWorkspaceMemoryPromptMode({ memoryPromptMode: "legacy_standing" })).toBe(
-      "legacy_standing",
+      "retrieval_only",
     );
+    // It can no longer be selected.
     expect(
       UpdateWorkspaceSettingsRequest.safeParse({ memoryPromptMode: "legacy_standing" }).success,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("accepts explicit retrieval-only", () => {

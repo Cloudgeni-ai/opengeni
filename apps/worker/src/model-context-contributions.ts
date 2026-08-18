@@ -5,7 +5,7 @@ import type {
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
   SandboxBackend,
-  WorkspaceMemoryPromptMode,
+  HistoricalMemoryPromptMode,
 } from "@opengeni/contracts";
 import { composeRuntimeSkills, type RuntimeSkillActivation } from "@opengeni/runtime";
 
@@ -58,7 +58,7 @@ export type CompanyBrainContributionReceipt = Readonly<{
   attemptId: string;
   turnId: string;
   sessionRole: "root" | "child";
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   instructionPolicySnapshotId: string;
   preferenceSnapshotId: string | null;
   companyProfileSnapshotId: string;
@@ -76,7 +76,7 @@ export function buildCompanyBrainContributionReceipt(input: {
   attemptId: string;
   turnId: string;
   nestedAgentDepth: number;
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   instructionPolicy: ResolvedWorkspaceInstructionPolicySnapshot;
   workspaceAgentInstructions: string | null;
   preferences: PreferenceRegistrySnapshot | null;

@@ -432,7 +432,9 @@ describe("accepted-turn Company Brain context selection", () => {
       turnContextSnapshotSource: "legacy_first_claim",
       selectedMemoryCount: 1,
     });
-    expect(legacySelected.workspaceMemory).toContain("Explicit legacy standing keeps injection.");
+    // The mode is still recorded on the receipt as a historical fact, but the
+    // standing block itself is retired: nothing is composed into the prompt.
+    expect(legacySelected.workspaceMemory).toBeNull();
   }, 180_000);
 
   test("freezes mode and bounded legacy workspace instructions when the turn is accepted", async () => {
@@ -549,11 +551,9 @@ describe("accepted-turn Company Brain context selection", () => {
       visibleMemoryCount: 2,
       omittedMemoryCount: 0,
     });
-    expect(first.workspaceMemory).toContain("Pinned architecture discovery.");
-    expect(first.workspaceMemory).not.toContain("after turn acceptance");
-    expect(first.workspaceMemory!.indexOf("Pinned architecture discovery.")).toBeLessThan(
-      first.workspaceMemory!.indexOf("Secondary implementation discovery."),
-    );
+    // Candidate selection, ordering and the budget are still exercised through
+    // the receipt above; the standing block they used to render into is gone.
+    expect(first.workspaceMemory).toBeNull();
     const [durableReceipt] = await shared.admin<
       Array<{ memorySelections: Array<Record<string, unknown>> }>
     >`
@@ -601,7 +601,7 @@ describe("accepted-turn Company Brain context selection", () => {
     expect(replay.receipt.memoryEnabled).toBe(true);
     expect(replay.receipt.memoryPromptMode).toBe("legacy_standing");
     expect(replay.receipt.selectedMemoryCount).toBe(2);
-    expect(replay.workspaceMemory).not.toContain("newer row");
+    expect(replay.workspaceMemory).toBeNull();
 
     await correctWorkspaceMemory(client.db, {
       accountId: f.grant.accountId,
@@ -625,8 +625,8 @@ describe("accepted-turn Company Brain context selection", () => {
       authorizationOmittedMemoryCount: 2,
       omittedMemoryCount: 2,
     });
-    expect(shrunk.workspaceMemory).toContain("currently empty");
-    expect(shrunk.workspaceMemory).not.toContain("Hash-drifted content");
+    // Revocation and hash drift still shrink the visible set on the receipt.
+    expect(shrunk.workspaceMemory).toBeNull();
   }, 180_000);
 
   test("derives root and child containment and denies cross-session, cross-tenant, and direct runtime table access", async () => {
@@ -909,16 +909,9 @@ describe("accepted-turn Company Brain context selection", () => {
     );
     expect(selected.receipt.authorizationOmittedMemoryCount).toBe(0);
     expect(selected.receipt.omittedMemoryCount).toBe(selected.receipt.budgetOmittedMemoryCount);
-    expect(selected.workspaceMemory).toContain("bounded-00-");
-    expect(selected.workspaceMemory!.indexOf("bounded-00-")).toBeLessThan(
-      selected.workspaceMemory!.indexOf("bounded-51-"),
-    );
-    expect(selected.workspaceMemory).not.toContain("bounded-01-");
-    expect(Buffer.byteLength(selected.workspaceMemory!, "utf8")).toBeLessThan(16_000);
-    for (const renderedLine of selected
-      .workspaceMemory!.split("\n")
-      .filter((candidateLine) => candidateLine.startsWith("- ["))) {
-      expect(renderedLine.endsWith("x".repeat(700))).toBe(true);
-    }
+    // The budget still bounds which whole entries are selected - that is what
+    // the receipt counts above prove. What is gone is the block they used to be
+    // rendered into, so there is no prompt text left to assert against.
+    expect(selected.workspaceMemory).toBeNull();
   }, 180_000);
 });
