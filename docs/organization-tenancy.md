@@ -442,6 +442,52 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
+The membership and personal-workspace half of the phase is the operator command
+`bun run db:backfill-organization-memberships --organization-id <uuid>`
+(`--dry-run`, `--limit`, default 25, max 100). It drains exactly two of those
+counts - `workspaceMemberSubjectsWithoutMembershipAnchor` (humans who held
+workspace access before 0219 and never re-authenticated afterwards, so the
+managed-access hook never provisioned them) and
+`organizationMemberships.activeWithoutPersonalWorkspace`.
+
+Provisioning goes through the existing lifecycle authority, never a second one:
+the driver calls the same shared `ensureManagedHumanPersonalWorkspace` helper
+the Better Auth managed-access hook calls, over 0219's
+`ensure_managed_human_personal_workspace` SECURITY DEFINER capability. The
+driver holds no authority logic and writes no organization-tenancy table
+directly. Migration 0290 adds only the read-only enumeration it was missing -
+`list_organization_membership_backfill_anchors(uuid, text[])` and
+`list_organization_memberships_without_personal_workspace(uuid, integer)` -
+because `organization_memberships` is FORCE RLS with zero direct application
+privileges. Both are strictly read-only definer seams over an exact
+organization scope; the new `organization_membership_backfill` lifecycle marker
+is added to that table's policy `USING` clause only, so it is structurally
+incapable of authorizing a write. Every other table the driver reads
+(`workspaces`, `workspace_memberships`, `managed_accounts`, `auth_users`) is an
+ordinary account-scoped application-role read.
+
+A candidate is provisioned only on complete deterministic evidence: a live
+Better Auth login identity for the exact subject, an organization whose own
+external identity *is* that human, and a persisted owner-role workspace
+membership. Anything else is recorded unresolved with a bounded reason code and
+left completely untouched - `missing_login_identity`,
+`organization_identity_mismatch` (the human is a member of someone else's
+organization, where the only provisioning path is 0263 invitation acceptance
+bound to their own authenticated session - a human act, not a backfill),
+`missing_owner_workspace_membership` (workspace access is not ownership), and
+`membership_terminal_status` (reactivating a suspended or revoked anchor is an
+explicit owner-authorized 0263 action). Consequently at most one subject per
+organization is ever backfill-provisionable, which is the honest consequence of
+never inferring authority rather than a limitation to work around.
+
+Each candidate is claimed independently with `FOR UPDATE SKIP LOCKED` on its
+exact owner workspace membership and provisioned in its own transaction, so the
+command is idempotent, resumable, and safe to run repeatedly and concurrently: a
+held claim is reported `contended` and picked up by the next pass, never blocked
+on and never double-provisioned. `--dry-run` classifies and writes nothing at
+all. Durable receipt/unresolved-ledger persistence is the separate backfill
+ledger slice; today the command's structured JSON report is the operator record.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
