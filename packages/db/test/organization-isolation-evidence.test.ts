@@ -467,15 +467,9 @@ async function seedFixture(db: SharedTestDatabase, runtime: DbClient): Promise<F
   const resources = await seedResources(db, runtime, orgA.accountId, orgA.workspaceId);
 
   // The same human owns one private session in each organization. Revoking one
-  // membership must hide exactly one of them.
-  await db.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-    values (
-      ${orgB.accountId}, ${orgB.workspaceId}, ${humanSubjectId}, 'admin',
-      '["sessions:read","sessions:create","sessions:control"]'::jsonb
-    )
-    on conflict do nothing
-  `;
+  // membership must hide exactly one of them. `bootstrapWorkspace` already gave
+  // this subject an owner `workspace_memberships` row in both primary
+  // workspaces, so no extra membership seeding is needed here.
   const privateSessionA = await seedPrivateSession(db, runtime, {
     accountId: orgA.accountId,
     workspaceId: orgA.workspaceId,
@@ -515,10 +509,15 @@ describe("organization tenancy isolation evidence", () => {
     `;
     expect(role).toEqual({ superuser: false, bypassRls: false, inherit: false });
 
+    // `MEMBER`, not `USAGE`. `opengeni_app` is created NOINHERIT, so `USAGE`
+    // (privileges inherited without `SET ROLE`) is false even when membership
+    // IS granted — a `GRANT <owner> TO opengeni_app` would sail past a `USAGE`
+    // probe while still permitting `SET ROLE <owner>` and therefore a total RLS
+    // bypass. `MEMBER` is the predicate that actually detects that grant.
     const owners = await shared.admin<{ tableName: string; isMember: boolean }[]>`
       select
         relation.relname as "tableName",
-        pg_has_role('opengeni_app', relation.relowner, 'USAGE') as "isMember"
+        pg_has_role('opengeni_app', relation.relowner, 'MEMBER') as "isMember"
       from pg_class relation
       join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
       where namespace_row.nspname = current_schema()
@@ -817,7 +816,7 @@ describe("organization tenancy isolation evidence", () => {
     expect(unprotected).toEqual([...REVIEWED_UNPROTECTED_ACCOUNT_TABLES]);
   });
 
-  test("the reviewed directory tables are cross-organization readable by design, and only they are", async () => {
+  test("the reviewed directory tables are cross-organization readable by design", async () => {
     if (!fixture) return;
     // Honest evidence rather than an over-claim: `workspaces` /
     // `workspace_memberships` / `auth_identities` deliberately carry no RLS, so
@@ -825,16 +824,27 @@ describe("organization tenancy isolation evidence", () => {
     // organization B's context. Their boundary lives in `@opengeni/core` access
     // resolution. If RLS is ever added to them this assertion fails and the
     // reviewed exception list above must be updated in the same change.
+    //
+    // The exhaustiveness half — that these are the ONLY account-carrying tables
+    // without row security — is owned by the preceding catalog sweep, which
+    // pins the unprotected set to `REVIEWED_UNPROTECTED_ACCOUNT_TABLES` exactly.
+    // This test executes the actual cross-organization read for the two
+    // directory tables the fixture seeds.
     const leaked = await underContext(
       { accountId: fixture.orgB.accountId, workspaceId: fixture.orgB.workspaceId },
       async (tx) => {
         const [workspace] = await tx<{ count: number }[]>`
           select count(*)::int as count from workspaces where id = ${fixture!.orgA.workspaceId}
         `;
-        return workspace?.count ?? 0;
+        const [membership] = await tx<{ count: number }[]>`
+          select count(*)::int as count from workspace_memberships
+          where workspace_id = ${fixture!.orgA.workspaceId}
+            and subject_id = ${fixture!.humanSubjectId}
+        `;
+        return { workspaces: workspace?.count ?? 0, memberships: membership?.count ?? 0 };
       },
     );
-    expect(leaked).toBe(1);
+    expect(leaked).toEqual({ workspaces: 1, memberships: 1 });
   });
 
   test("an active membership in another organization is not authority in this one", async () => {
@@ -933,8 +943,8 @@ describe("organization tenancy isolation evidence", () => {
       where id = ${fixture.orgA.membershipId}
     `;
     try {
-      // Immediate: the very next transaction on the same pooled runtime
-      // connection already denies. No cache flush, no reconnect, no epoch bump.
+      // Immediate: the very next transaction on the same runtime connection
+      // pool already denies. No cache flush, no reconnect, no epoch bump.
       expect(await visibleResources(ctxA, [sessionA])).toEqual([]);
       // Scoped: organization B's membership is untouched.
       expect(await visibleResources(ctxB, [sessionB])).toEqual([sessionB.family]);
