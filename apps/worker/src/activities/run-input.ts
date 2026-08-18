@@ -9,8 +9,6 @@ import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItemsPaged,
   getFilesForSubject,
-  getLatestRunState,
-  getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
@@ -85,7 +83,6 @@ export type TurnInputOptions = {
   providerApi: HistoryProviderApi;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
-  materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
   loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
   /** Bounded critical-path timings; telemetry failures never affect preparation. */
@@ -522,88 +519,8 @@ export async function turnInput(
       options,
     );
   }
-  if (trigger.type === "user.approvalDecision") {
-    const payload = trigger.payload as {
-      approvalId?: unknown;
-      decision?: unknown;
-      message?: unknown;
-    };
-    const suffixInput = await openSuffixMessageInputIfReady(
-      db,
-      runtime,
-      agent,
-      trigger,
-      internalContext,
-      options,
-    );
-    if (suffixInput) {
-      return suffixInput;
-    }
-    // Expand-era leftover: writers without an open suffix still resume from the
-    // SDK RunState blob. New pauses persist interruption rows and prefer them.
-    const state = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
-    if (!state) {
-      throw new Error("No saved run state is available for approval decision");
-    }
-    const serializedRunState = resumeRunState(state);
-    const prepared = await runtime.prepareInput(agent, {
-      kind: "approval",
-      serializedRunState: options.materializeSerializedRunState
-        ? await options.materializeSerializedRunState(serializedRunState)
-        : serializedRunState,
-      approvalId: String(payload.approvalId ?? ""),
-      decision: payload.decision === "approve" ? "approve" : "reject",
-      ...(typeof payload.message === "string" ? { message: payload.message } : {}),
-    });
-    return {
-      input: prepared,
-      persistedHistoryCount: prepared.persistedHistoryCount,
-      providerArtifactCandidates: {
-        knownHistoryItemIds: [],
-        historyItemIds: [],
-        runStateId: state.id,
-      },
-    };
-  }
-  if (trigger.type === "user.humanInputResponse") {
-    const suffixInput = await openSuffixMessageInputIfReady(
-      db,
-      runtime,
-      agent,
-      trigger,
-      internalContext,
-      options,
-    );
-    if (suffixInput) {
-      return suffixInput;
-    }
-    const [state, resume] = await Promise.all([
-      getLatestRunState(db, trigger.workspaceId, trigger.sessionId),
-      getHumanInputResumeForEvent(db, trigger.workspaceId, trigger.sessionId, trigger),
-    ]);
-    if (!state) {
-      throw new Error("No saved run state is available for human-input response");
-    }
-    if (!resume) {
-      throw new Error("Human-input response does not resolve to a durable request");
-    }
-    const serializedRunState = resumeRunState(state);
-    const prepared = await runtime.prepareInput(agent, {
-      kind: "human_input",
-      serializedRunState: options.materializeSerializedRunState
-        ? await options.materializeSerializedRunState(serializedRunState)
-        : serializedRunState,
-      toolCallId: resume.toolCallId,
-    });
-    return {
-      input: prepared,
-      persistedHistoryCount: prepared.persistedHistoryCount,
-      providerArtifactCandidates: {
-        knownHistoryItemIds: [],
-        historyItemIds: [],
-        runStateId: state.id,
-      },
-    };
+  if (trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse") {
+    return await openSuffixMessageInput(db, runtime, agent, trigger, internalContext, options);
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }
@@ -613,14 +530,14 @@ function joinInternalContext(...parts: Array<string | undefined>): string | unde
   return content.length > 0 ? content.join("\n\n") : undefined;
 }
 
-async function openSuffixMessageInputIfReady(
+async function openSuffixMessageInput(
   db: Database,
   runtime: OpenGeniRuntime,
   agent: any,
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
   internalContext: string | undefined,
   options: TurnInputOptions,
-): Promise<PreparedTurnInput | null> {
+): Promise<PreparedTurnInput> {
   const suffixRows = await listTurnOpenSuffixToolCalls(
     db,
     trigger.workspaceId,
@@ -628,7 +545,7 @@ async function openSuffixMessageInputIfReady(
     options.turnId,
   );
   if (suffixRows.length === 0) {
-    return null;
+    throw new Error("Open suffix resume has no interruption rows");
   }
   if (suffixRows.some((row) => row.resultItem == null)) {
     throw new Error("Open suffix resume still has unresolved members");

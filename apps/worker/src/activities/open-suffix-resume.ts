@@ -139,10 +139,7 @@ export function openSuffixPairPresentInHistory(
       sawCall = true;
       continue;
     }
-    if (
-      sawCall &&
-      (type === "function_call_result" || type === "computer_call_result")
-    ) {
+    if (sawCall && (type === "function_call_result" || type === "computer_call_result")) {
       return true;
     }
   }
@@ -338,12 +335,13 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   if (!resultItem) {
     throw new Error(`Open suffix resume for ${target.callId} has no result item`);
   }
-  const history = await getActiveSessionHistoryItems(
-    input.db,
-    input.workspaceId,
-    input.sessionId,
-  );
-  if (!openSuffixPairPresentInHistory(history.map((row) => row.item), callId)) {
+  const history = await getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId);
+  if (
+    !openSuffixPairPresentInHistory(
+      history.map((row) => row.item),
+      callId,
+    )
+  ) {
     const historyItems = openSuffixHistoryItems(target, resultItem);
     if (historyItems.length === 0) {
       throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
@@ -372,12 +370,9 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
       return { action: "cancelled" };
     }
   }
-  const remaining = (await listTurnOpenSuffixToolCalls(
-    input.db,
-    input.workspaceId,
-    input.sessionId,
-    input.turnId,
-  )).filter((row) => row.resultItem == null);
+  const remaining = (
+    await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId)
+  ).filter((row) => row.resultItem == null);
   if (remaining.length === 0) {
     return { action: "continue" };
   }
