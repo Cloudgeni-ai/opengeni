@@ -101,7 +101,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       objectKey,
       expiresAt: signed.expiresAt,
     });
-    // 0283-adjacent (OPE-203): every principal-facing signed URL issuance is a
+    // Every principal-facing signed URL issuance is a
     // metadata-only audit fact. Awaited before the URL leaves the platform:
     // no recorded fact, no bearer capability. Never the URL or object key.
     await recordAuditEvent(db, {

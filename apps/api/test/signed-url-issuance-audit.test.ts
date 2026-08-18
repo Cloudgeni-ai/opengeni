@@ -1,4 +1,4 @@
-// OPE-203: every principal-facing signed object-storage URL issuance is a
+// Every principal-facing signed object-storage URL issuance is a
 // metadata-only audit fact, recorded before the bearer URL leaves the
 // platform. The fact carries the subject, target file, and expiry - never the
 // signed URL or the object key.

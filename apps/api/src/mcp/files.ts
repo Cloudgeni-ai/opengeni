@@ -47,7 +47,7 @@ export function buildFilesMcpServer(deps: ApiRouteDeps, grant: AccessGrant): Mcp
         throw new Error(`file is ${file.status}`);
       }
       const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
-      // OPE-203: principal-facing signed URL issuance is a metadata-only audit
+      // Principal-facing signed URL issuance is a metadata-only audit
       // fact, awaited before the URL leaves the platform. Never the URL/key.
       await recordAuditEvent(deps.db, {
         accountId: grant.accountId,

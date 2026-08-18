@@ -3,7 +3,7 @@ import { getSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { createObjectStorage, DOWNLOAD_URL_TTL_SECONDS, UPLOAD_URL_TTL_SECONDS } from "../src";
 
-describe("signed-URL TTL policy (OPE-203)", () => {
+describe("signed-URL TTL policy", () => {
   test("the default TTLs are the revocation residual windows - change deliberately", () => {
     // A signed object-storage URL is a bearer capability with no provider-side
     // revocation: revocation prevents NEW mints immediately (route-time
