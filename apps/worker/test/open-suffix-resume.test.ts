@@ -32,7 +32,7 @@ describe("open suffix resume helpers", () => {
       name: "request_human_input",
       callId: "call_human",
       status: "completed",
-      output: { type: "text", text: "{\"requestId\":\"req\"}" },
+      output: { type: "text", text: '{"requestId":"req"}' },
     };
     expect(openSuffixHistoryItems(row, resultItem)).toEqual([
       row.tiedReasoningItems[0],
@@ -161,9 +161,10 @@ describe("open suffix resume helpers", () => {
         raw: remaining[0]!.callItem,
       },
     ]);
-    expect(remainingRunStatePendingApprovalsFromSuffix(remaining).map((item) => (item as { id: string }).id)).toEqual([
-      "call_mcp",
-      "call_interact",
-    ]);
+    expect(
+      remainingRunStatePendingApprovalsFromSuffix(remaining).map(
+        (item) => (item as { id: string }).id,
+      ),
+    ).toEqual(["call_mcp", "call_interact"]);
   });
 });
