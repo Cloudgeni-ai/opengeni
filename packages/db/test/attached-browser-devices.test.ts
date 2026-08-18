@@ -211,7 +211,7 @@ async function activateAttachedBrowser(
     headless: false,
     identityId: null,
     baseRevisionId: null,
-    linkedComputerSessionId,
+    linkedComputerSessionId: linkedComputerSessionId ?? null,
     capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
   });
   const controller = {
