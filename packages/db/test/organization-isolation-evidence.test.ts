@@ -11,7 +11,7 @@ import {
 } from "../src";
 
 // ---------------------------------------------------------------------------
-// OPE-204 slice 9 — cross-organization / RLS / immediate-revocation evidence.
+// Organization-tenancy slice 9 — cross-organization / RLS / immediate-revocation evidence.
 //
 // Organizations (`managed_accounts.id`) are hard non-sharing tenants. This file
 // is the durable *executed* evidence for that claim: it drives a real
