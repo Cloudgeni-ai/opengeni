@@ -1120,7 +1120,13 @@ async function createWorkspaceInstructionPolicySourceProposal(
           baselineRevision: currentHead?.revision ?? null,
           baselineContentHash: currentHead?.contentHash ?? null,
           baselineActivationVersion: currentActivationVersion,
-          baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
+          // The head's activated_at may carry microseconds (the governed
+          // learning SQL controller writes clock_timestamp()), and the draft
+          // trigger compares it exactly. A JS Date truncates to milliseconds,
+          // so copy the stored value in SQL instead of round-tripping it.
+          baselineActivatedAt: currentRow
+            ? sql`(select ${schema.workspaceInstructionPolicyHeads.activatedAt} from ${schema.workspaceInstructionPolicyHeads} where ${schema.workspaceInstructionPolicyHeads.id} = ${currentRow.id})`
+            : null,
           draftRevisionId: draft.id,
           draftRevision: draft.revision,
           draftContentHash: draft.contentHash,
