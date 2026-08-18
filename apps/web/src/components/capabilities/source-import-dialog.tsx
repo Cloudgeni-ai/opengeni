@@ -422,8 +422,8 @@ function PluginComponentCard({
             </select>
           ) : (
             <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-2xs leading-4 text-fg-muted">
-              No active exact-domain Connection exists. Connect that account in Connected services
-              first, then retry this preview.
+              No active exact-domain Connection exists. Connect that account from its integration
+              row (or its Custom API) on Capabilities first, then retry this preview.
             </p>
           )}
         </div>
