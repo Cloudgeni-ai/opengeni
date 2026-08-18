@@ -521,8 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0286_tenancy_backfill_ledger.sql")) {
-        return includesActivation ? "05b59e05ed7b9a35b766d23bab9aa203b148d468f863639c84b1c52103b80021" : "d1b646bfdd72b2d6c9f8375bb2ed3846c4f37f124ad348f6eb480f7b02f12aca";
+      if (migrations.has("0288_tenancy_backfill_ledger.sql")) {
+        return includesActivation
+          ? "30c624284e909df5256f7ffcb53d16c81336462339d25884ba4e2a7f696fa6a4"
+          : "1a49ff07ec9fca78992733793966c795dd036946b55b6ae933ed6afe92f68b8f";
       }
       if (migrations.has("0285_organization_tenancy_inventory.sql")) {
         return includesActivation
@@ -1011,7 +1013,7 @@ describe("release schema contract", () => {
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +
         (migrations.has("0283_editable_spreadsheet_authored_state.sql") ? 1 : 0) +
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
-        (migrations.has("0286_tenancy_backfill_ledger.sql") ? 1 : 0) +
+        (migrations.has("0288_tenancy_backfill_ledger.sql") ? 1 : 0) +
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
@@ -1047,8 +1049,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0286_tenancy_backfill_ledger.sql")
-        ? "0286_tenancy_backfill_ledger.sql"
+      migrations.has("0288_tenancy_backfill_ledger.sql")
+        ? "0288_tenancy_backfill_ledger.sql"
         : migrations.has("0285_organization_tenancy_inventory.sql")
           ? "0285_organization_tenancy_inventory.sql"
           : migrations.has("0284_truthful_human_confirmed_review_reason.sql")

@@ -1,4 +1,4 @@
-// Migration 0286: the tenancy backfill receipt and unresolved-row ledger.
+// Migration 0288: the tenancy backfill receipt and unresolved-row ledger.
 // Phase D requires backfill to "record backfill receipts and unresolved rows
 // without widening access" - so the ledger must be write-reachable ONLY through
 // its lifecycle seam, must be append-only for unresolved evidence, and must be
@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, migrate, type DbClient } from "../src";
 
-const migrationUrl = new URL("../drizzle/0286_tenancy_backfill_ledger.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0288_tenancy_backfill_ledger.sql", import.meta.url);
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -22,7 +22,7 @@ let admin: postgres.Sql;
 let client: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0286-tenancy-backfill-ledger");
+  shared = await acquireSharedTestDatabase("migration-0288-tenancy-backfill-ledger");
   if (!shared) {
     available = false;
     if (requireRealDatabase) throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but no database");
@@ -30,12 +30,12 @@ beforeAll(async () => {
   }
   admin = shared.admin;
   client = createDb(shared.appUrl);
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 // postgres.js query objects are thenables rather than real Promises, and
 // bun's `expect(...).rejects` hangs on them instead of settling. Await
@@ -58,7 +58,7 @@ async function seedOrganization(label: string): Promise<string> {
   return rows[0]!.id;
 }
 
-describe("migration 0286 tenancy backfill ledger", () => {
+describe("migration 0288 tenancy backfill ledger", () => {
   test("declares a rolling lifecycle-only ledger that cannot carry proposed authority", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

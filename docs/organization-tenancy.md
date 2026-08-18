@@ -430,7 +430,7 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-The receipt/unresolved ledger is migration 0286: `tenancy_backfill_receipts`
+The receipt/unresolved ledger is migration 0288: `tenancy_backfill_receipts`
 (one idempotent row per organization, resource family, and run key, carrying
 classified/skipped/unresolved counts) and `tenancy_backfill_unresolved_rows`
 (one append-only row per resource that could not be classified deterministically,
