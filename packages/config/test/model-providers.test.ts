@@ -696,6 +696,7 @@ describe("configuredModels", () => {
     expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.imageGeneration.runnable).toBe(true);
+    expect(resolved.model.capabilities.inputModalities).toEqual(["text", "image"]);
     expect(resolved.model.capabilities.reasoning).toMatchObject({
       efforts: ["low", "medium", "high", "xhigh"],
       defaultEffort: "high",
