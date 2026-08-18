@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Fail closed when a migration backfills a FORCE-RLS table without relaxing the
- * owner-only posture first (OPE-276).
+ * owner-only posture first.
  *
  *   bun scripts/check-migration-rls-backfills.ts
  *

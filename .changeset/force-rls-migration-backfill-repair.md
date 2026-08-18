@@ -1,9 +1,8 @@
 ---
 "@opengeni/db": patch
-"@opengeni/testing": patch
 ---
 
-Repair the migration-time backfills that silently matched zero rows under a non-superuser table owner, and stop the class from recurring (OPE-276).
+Repair the migration-time backfills that silently matched zero rows under a non-superuser table owner, and stop the class from recurring.
 
 `FORCE ROW LEVEL SECURITY` binds the table *owner*, not merely ordinary roles, and OpenGeni migrates as a non-superuser owner without `BYPASSRLS`. No tenant GUC is set during a migration, so a bare `UPDATE`/`DELETE`/`INSERT ... SELECT`/`DO $$` backfill over a workspace-scoped table matched **zero rows and reported success**. The hazard was invisible in CI because the test harness migrates as a superuser.
 

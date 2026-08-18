@@ -1,4 +1,4 @@
-// Migration 0296 (OPE-276): `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER,
+// Migration 0296: `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER,
 // and OpenGeni migrates as a NON-superuser owner without BYPASSRLS. No tenant
 // GUC is set during a migration, so 0256's and 0262's `origin_workspace_id`
 // backfills matched ZERO rows and reported success on every real deployment.
@@ -85,14 +85,14 @@ describe("migration 0296 repairs the FORCE-RLS backfill no-ops", () => {
     // Better Auth self-organization shape is what 0263's owner backfill targets.
     await admin.unsafe(`
       insert into managed_accounts (id, name, external_source, external_id)
-        values ('${ACCOUNT}', 'ope276-account', 'better-auth:user', 'ope276-external');
-      insert into workspaces (id, account_id, name) values ('${WORKSPACE}', '${ACCOUNT}', 'ope276-workspace');
+        values ('${ACCOUNT}', 'rlsbackfill-account', 'better-auth:user', 'rlsbackfill-external');
+      insert into workspaces (id, account_id, name) values ('${WORKSPACE}', '${ACCOUNT}', 'rlsbackfill-workspace');
       insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
-        values ('${ACCOUNT}', 'user:ope276-external', 'active', '${WORKSPACE}');
+        values ('${ACCOUNT}', 'user:rlsbackfill-external', 'active', '${WORKSPACE}');
       insert into connections (id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
         values ('${CONNECTION}', '${ACCOUNT}', '${WORKSPACE}', null, 'example.com', 'api_key', 'ciphertext');
       insert into enrollments (id, account_id, workspace_id, pubkey)
-        values ('${ENROLLMENT}', '${ACCOUNT}', '${WORKSPACE}', 'ope276-pubkey');
+        values ('${ENROLLMENT}', '${ACCOUNT}', '${WORKSPACE}', 'rlsbackfill-pubkey');
     `);
 
     // The mechanism itself: with no tenant GUC the owner sees nothing.
@@ -177,14 +177,14 @@ describe("migration 0296 repairs the FORCE-RLS backfill no-ops", () => {
     // subject GUC the authority-binding trigger reads is still set at INSERT.
     await admin.unsafe(`
       insert into workspaces (id, account_id, name)
-        values ('${personalWorkspace}', '${ACCOUNT}', 'ope276-personal');
+        values ('${personalWorkspace}', '${ACCOUNT}', 'rlsbackfill-personal');
       insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
-        values ('${ACCOUNT}', 'ope276-subject', 'active', '${personalWorkspace}');
-      select set_config('opengeni.subject_id', 'ope276-subject', true);
+        values ('${ACCOUNT}', 'rlsbackfill-subject', 'active', '${personalWorkspace}');
+      select set_config('opengeni.subject_id', 'rlsbackfill-subject', true);
       insert into connections (
         id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted
       ) values (
-        '${personalConnection}', '${ACCOUNT}', '${WORKSPACE}', 'ope276-subject',
+        '${personalConnection}', '${ACCOUNT}', '${WORKSPACE}', 'rlsbackfill-subject',
         'example.com', 'oauth2', 'ciphertext'
       );
     `);
@@ -214,8 +214,8 @@ describe("migration 0296 repairs the FORCE-RLS backfill no-ops", () => {
     });
     const before = await snapshotQuery();
     expect(before.memberships).toEqual([
-      { subjectId: "ope276-subject", role: "member" },
-      { subjectId: "user:ope276-external", role: "owner" },
+      { subjectId: "rlsbackfill-subject", role: "member" },
+      { subjectId: "user:rlsbackfill-external", role: "owner" },
     ]);
 
     const ledger = postgres(ownerUrl, { max: 1, onnotice: () => undefined });

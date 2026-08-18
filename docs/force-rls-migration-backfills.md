@@ -1,4 +1,4 @@
-# FORCE-RLS migration backfills (OPE-276)
+# FORCE-RLS migration backfills
 
 Canonical home for one migration hazard class: a data backfill that runs during
 a migration over a table with `FORCE ROW LEVEL SECURITY`, matches **zero rows**,
@@ -90,7 +90,7 @@ assertion *inside* the window so a silent no-op fails loudly.
   FORCE-RLS table outside a window. It runs as the `migration-rls-backfills` CI
   guard whenever `packages/db/drizzle/` changes, and its unit test
   (`scripts/check-migration-rls-backfills.test.ts`) also pins the shipped ledger.
-- The pre-OPE-276 offenders are recorded in `GRANDFATHERED_MIGRATIONS` and
+- The offenders that predate this guard are recorded in `GRANDFATHERED_MIGRATIONS` and
   `GRANDFATHERED_VACUOUS_GUARDS`. Migration bytes are frozen by the release
   schema-contract hash ladder and cannot be rewritten. **Do not add to those
   lists.**
@@ -199,7 +199,7 @@ carries an owner-role policy), `0235` (RLS is enabled *after* the backfill),
 ### Genuinely no-oped, NOT repaired here - each needs its own reviewed repair
 
 These are real and were newly discovered while establishing the blast radius.
-They are deliberately out of scope for the OPE-276 repair because each one either
+They are deliberately out of scope for the 0296 repair because each one either
 re-derives live session-lifecycle state, needs immutability triggers disabled
 again, or would change authority, and must be reviewed on its own:
 

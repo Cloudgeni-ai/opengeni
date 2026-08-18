@@ -698,7 +698,7 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
  * `NOSUPERUSER NOBYPASSRLS` login role - OpenGeni's documented production
  * migration principal (`docs/deployment.md`).
  *
- * Why this exists (OPE-276): `acquireSharedTestDatabase` and
+ * Why this exists: `acquireSharedTestDatabase` and
  * `acquireBlankTestDatabase` both hand out the container SUPERUSER, for whom
  * `FORCE ROW LEVEL SECURITY` never engages. A migration-time backfill over a
  * FORCE-RLS table therefore looks correct in CI while matching ZERO rows on a

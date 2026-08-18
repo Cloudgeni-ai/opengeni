@@ -453,7 +453,7 @@ function fullPlan(
       // another file is a real conflict; catch it while the fix is one command.
       "migration-ordinals",
       // A migration-time backfill over a FORCE-RLS table silently matches zero
-      // rows for the non-superuser owner OpenGeni migrates as (OPE-276).
+      // rows for the non-superuser owner OpenGeni migrates as.
       "migration-rls-backfills",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-276: repair the migration-time backfills that silently matched zero rows
+-- Repair the migration-time backfills that silently matched zero rows
 -- on every deployment whose migration principal is a NON-superuser table owner
 -- without BYPASSRLS (OpenGeni's documented posture, docs/deployment.md).
 --
@@ -135,7 +135,7 @@ BEGIN
     OR unrepaired_memberships > 0
   THEN
     RAISE EXCEPTION
-      'OPE-276 repair did not converge: % workspace-scope connection(s), % workspace-scope enrollment(s) with a NULL origin_workspace_id, and % self-organization membership(s) still not owner',
+      'FORCE-RLS backfill repair did not converge: % workspace-scope connection(s), % workspace-scope enrollment(s) with a NULL origin_workspace_id, and % self-organization membership(s) still not owner',
       unrepaired_connections, unrepaired_enrollments, unrepaired_memberships
       USING ERRCODE = '55000';
   END IF;

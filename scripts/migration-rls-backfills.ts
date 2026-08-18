@@ -1,5 +1,5 @@
 /**
- * Static analysis for OPE-276: migration-time backfills that silently no-op
+ * Static analysis for migration-time backfills that silently no-op
  * under OpenGeni's production migration principal.
  *
  * `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER, not merely ordinary roles;
@@ -32,7 +32,7 @@ import { join } from "node:path";
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
 /**
- * Migrations that shipped before OPE-276 identified this class. Their bytes are
+ * Migrations that shipped before this class was identified. Their bytes are
  * frozen by the release schema-contract hash ladder and cannot be rewritten, so
  * they are recorded here instead. `0296_force_rls_backfill_noop_repair.sql`
  * repairs the instances that genuinely lost data; the rest are classified in
@@ -114,7 +114,7 @@ export const GRANDFATHERED_MIGRATIONS: readonly string[] = [
 /**
  * Migrations whose `DO $$ ... IF EXISTS (SELECT ... FROM <FORCE-RLS table>)
  * ... RAISE EXCEPTION` preflight guard reads zero rows for the same reason, so
- * the guard passes vacuously and never fires. These shipped before OPE-276.
+ * the guard passes vacuously and never fires. These predate the guard.
  * The safety of those cutovers came from `VALIDATE CONSTRAINT` / `SET NOT NULL`
  * / unique-index builds, which are internal scans and DO bypass RLS - never
  * from the `DO` block.
