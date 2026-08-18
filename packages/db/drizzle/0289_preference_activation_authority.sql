@@ -112,6 +112,12 @@ BEGIN
           AND receipt.workspace_id = p_workspace_id
           AND receipt.destination = 'preference'
           AND receipt.destination_revision_id = revision.id
+          AND NOT EXISTS (
+            SELECT 1 FROM governed_learning_activation_undo_receipts undo
+            WHERE undo.account_id = receipt.account_id
+              AND undo.activation_receipt_id = receipt.id
+          )
+        ORDER BY receipt.created_at DESC, receipt.id DESC
         LIMIT 1
       ),
       'expiresAt', CASE
@@ -175,11 +181,8 @@ BEGIN
 
   RETURN NEXT;
 END;
-$function$
+$function$;
 
-
-RESET statement_timeout;
-RESET lock_timeout;
 
 -- The receipts table stays closed to the runtime role: reads go through a
 -- definer accessor, exactly as the inspection surfaces in 0270 do. This one is
@@ -194,12 +197,22 @@ LANGUAGE sql
 STABLE
 SECURITY DEFINER
 AS $$
-  SELECT receipt.destination_revision_id, receipt.authority_kind
+  SELECT DISTINCT ON (receipt.destination_revision_id)
+    receipt.destination_revision_id, receipt.authority_kind
   FROM governed_learning_activation_receipts receipt
   WHERE receipt.workspace_id = p_workspace_id
     AND receipt.destination = 'preference'
     AND receipt.destination_revision_id = ANY(p_revision_ids)
-    AND opengeni_private.workspace_rls_visible(receipt.account_id, receipt.workspace_id);
+    AND opengeni_private.workspace_rls_visible(receipt.account_id, receipt.workspace_id)
+    -- An activation that was undone no longer describes how the revision is
+    -- active now: a later ordinary activation of the same revision is not
+    -- governed learning's doing, and must not inherit its authority.
+    AND NOT EXISTS (
+      SELECT 1 FROM governed_learning_activation_undo_receipts undo
+      WHERE undo.account_id = receipt.account_id
+        AND undo.activation_receipt_id = receipt.id
+    )
+  ORDER BY receipt.destination_revision_id, receipt.created_at DESC, receipt.id DESC;
 $$;
 
 DO $preference_activation_authority_access$
@@ -219,3 +232,6 @@ BEGIN
   END IF;
 END
 $preference_activation_authority_access$;
+
+RESET statement_timeout;
+RESET lock_timeout;

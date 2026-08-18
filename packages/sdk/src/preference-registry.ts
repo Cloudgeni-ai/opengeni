@@ -101,6 +101,8 @@ export type PreferenceRegistryEvent = {
   createdAt: string;
 };
 
+export type PreferenceRegistryActivationAuthority = "human_confirmed" | "automatic";
+
 export type PreferenceRegistryDescriptor = {
   id: string;
   stableKey: string;
@@ -112,6 +114,13 @@ export type PreferenceRegistryDescriptor = {
   contentHash: string;
   precedence: PreferenceRegistryPrecedence;
   provenance: PreferenceRegistryDescriptorProvenance;
+  /**
+   * How the active revision became active. `provenance.trust` stays the frozen
+   * creation-time fact; this is the separate activation question. Null when the
+   * revision became active outside governed learning, or when the descriptor
+   * predates this field.
+   */
+  activationAuthority: PreferenceRegistryActivationAuthority | null;
   expiresAt: string | null;
   retrievalHandle: string;
 };
