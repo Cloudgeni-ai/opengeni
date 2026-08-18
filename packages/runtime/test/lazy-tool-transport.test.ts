@@ -1883,8 +1883,8 @@ describe("OpenAI/Azure native client tool search", () => {
       new Set([SERVER_ID]),
     );
     await agent.getAllTools(undefined as never);
-    const tool = await runtime.resolveAuthorizedFunctionTool(`mcp.${WEATHER_TOOL}`);
-    expect(tool?.name).toBe(WEATHER_TOOL);
+    const resolved = await runtime.resolveAuthorizedFunctionTool(`mcp.${WEATHER_TOOL}`);
+    expect(resolved?.name).toBe(WEATHER_TOOL);
   });
 
   test("returns a typed model-visible error for a revoked native name", async () => {
@@ -2105,18 +2105,9 @@ describe("OpenAI/Azure native client tool search", () => {
     };
     const bound = resumedInternals._lastProcessedResponse.functions[0]?.tool;
     expect(bound).toBeDefined();
-    let output: unknown;
-    try {
-      output = await bound!.invoke(
-        resumedInternals._context,
-        JSON.stringify({ city: "Tromso" }),
-      );
-    } catch (error) {
-      throw new Error(
-        `bound invoke failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    expect(output).toBe("sandbox-fresh:Tromso");
+    await expect(
+      bound!.invoke(resumedInternals._context, JSON.stringify({ city: "Tromso" })),
+    ).resolves.toBe("sandbox-fresh:Tromso");
     expect(executions).toBe(1);
   });
 });
