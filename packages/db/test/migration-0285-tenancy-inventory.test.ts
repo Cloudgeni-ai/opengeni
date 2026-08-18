@@ -37,12 +37,12 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 describe("migration 0285 tenancy inventory", () => {
   test("declares one read-only rolling seam that returns integers only", async () => {
@@ -191,10 +191,10 @@ describe("migration 0285 tenancy inventory", () => {
     });
 
     // A workspace-scoped variable set + a legacy_user connection. (0285
-    // originally reported this row as `unclassified`; migration 0287 removed
+    // originally reported this row as `unclassified`; migration 0289 removed
     // that counter - the shape check REQUIRES a NULL authority_id here, so the
     // number was structurally `total - userScoped`. See
-    // migration-0287-truthful-tenancy-inventory-counters.test.ts.)
+    // migration-0289-truthful-tenancy-inventory-counters.test.ts.)
     await admin`
       insert into workspace_variable_sets (account_id, workspace_id, name, origin_workspace_id)
       values (${account!.id}, ${workspace!.id}, 'legacy set', ${workspace!.id})`;

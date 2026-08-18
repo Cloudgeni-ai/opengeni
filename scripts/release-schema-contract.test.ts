@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0287_truthful_tenancy_inventory_counters.sql")) {
+      if (migrations.has("0289_truthful_tenancy_inventory_counters.sql")) {
         return includesActivation
-          ? "c80578fd5380834a04cd0d9ec428269e41c8d0eaa6a1499c3a32d03efe3797c5"
-          : "5e1742ae092970cf84f64dfc0665b4437c953893ac5f0c532086c6c1d18987d7";
+          ? "c73f9d7814af71826673dba034600e9efa090aa6370f641fc0982571d476965a"
+          : "7cf952990d84e4dbf65e046fe9783ff58250033eaf32a3e66ff23f454891235e";
       }
       if (migrations.has("0288_attached_browser_reenrollment.sql")) {
         return includesActivation
@@ -1032,7 +1032,7 @@ describe("release schema contract", () => {
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
         (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
-        (migrations.has("0287_truthful_tenancy_inventory_counters.sql") ? 1 : 0),
+        (migrations.has("0289_truthful_tenancy_inventory_counters.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1067,8 +1067,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0287_truthful_tenancy_inventory_counters.sql")
-        ? "0287_truthful_tenancy_inventory_counters.sql"
+      migrations.has("0289_truthful_tenancy_inventory_counters.sql")
+        ? "0289_truthful_tenancy_inventory_counters.sql"
         : migrations.has("0288_attached_browser_reenrollment.sql")
           ? "0288_attached_browser_reenrollment.sql"
           : migrations.has("0287_open_suffix_pending_tool_calls.sql")
@@ -1171,8 +1171,8 @@ describe("release schema contract", () => {
       sha256: "a225b10590a065397ee35c810e6fb962e451b1745677ac4a0212431e60f2b3b6",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0287_truthful_tenancy_inventory_counters.sql")).toMatchObject({
-      sha256: "d11aa9722c947a7b927a9ad97c55db715f5ce80ef893016407d27534ebe5f897",
+    expect(migrations.get("0289_truthful_tenancy_inventory_counters.sql")).toMatchObject({
+      sha256: "f78f5f0c5e44c0758fb37d9f72903449fd7127145e55aaa38cce146c0a7b54e8",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0283_editable_spreadsheet_authored_state.sql")).toMatchObject({

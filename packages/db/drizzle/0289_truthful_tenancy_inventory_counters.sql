@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0287: remove the three untruthful `unclassified` counters from the
+-- Migration 0289: remove the three untruthful `unclassified` counters from the
 -- read-only organization tenancy inventory seam (0285).
 --
 -- WHAT WAS WRONG
@@ -281,7 +281,7 @@ $$;
 
 -- CREATE OR REPLACE preserves the existing ACL, so this re-grant is a no-op on
 -- an already-migrated database. It is retained only so a fresh install that
--- creates opengeni_app between 0285 and 0287 still converges.
+-- creates opengeni_app between 0285 and 0289 still converges.
 DO $tenancy_inventory_0287_grant$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
