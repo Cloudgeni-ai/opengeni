@@ -789,16 +789,16 @@ async function materializeTaskNoteKnowledge(
  * different-immutable-input failure. Strip exactly those two fields, and only
  * for that request kind, so every other lane's hash stays byte-identical.
  */
-function identityRequest(
-  request: CompanyBrainGovernedWriteRequestType,
-): CompanyBrainGovernedWriteRequestType {
+function identityRequest(request: CompanyBrainGovernedWriteRequestType): unknown {
   if (!isInstructionPolicyProposal(request)) return request;
   const {
     expectedCurrentRevisionId: _revision,
     expectedActivationVersion: _version,
     ...rest
   } = request;
-  return rest as CompanyBrainGovernedWriteRequestType;
+  // Deliberately no longer the request union: this value only ever feeds the
+  // identity hash, never a code path that reads those fields.
+  return rest;
 }
 
 function isInstructionPolicyProposal(

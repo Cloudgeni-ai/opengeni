@@ -161,6 +161,16 @@ export class WorkspaceInstructionPolicyOnboardingProposalContentError extends Er
   }
 }
 
+/**
+ * The exact diagnostic `activate_human_confirmed_learning_decision` raises when
+ * a proposal's compare-and-set baseline no longer matches the live head. It is
+ * matched by message because the SQLSTATE (40001) is shared with other
+ * conflicts. Kept here so the SQL and the code that keys recovery off it cannot
+ * drift apart silently - the migration test pins the same string.
+ */
+export const INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC =
+  "instruction-policy proposal baseline is stale";
+
 export class WorkspaceInstructionPolicyOnboardingProposalStaleError extends Error {
   readonly name = "WorkspaceInstructionPolicyOnboardingProposalStaleError";
   readonly code = "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE";
@@ -804,6 +814,11 @@ async function getOnboardingProposalBySourceVersionInTransaction(
         eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceId, input.sourceId),
         eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceVersion, input.sourceVersion),
       ),
+    )
+    .orderBy(
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.baselineActivationVersion),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
     )
     .limit(1);
   return row ?? null;

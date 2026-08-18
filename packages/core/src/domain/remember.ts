@@ -17,6 +17,7 @@ import {
 } from "@opengeni/contracts";
 import {
   type Database,
+  INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC,
   WorkspaceInstructionPolicyOnboardingProposalStaleError,
   activateHumanConfirmedLearningDecision,
   archiveTaskNote,
@@ -58,7 +59,7 @@ export class RememberError extends Error {
 // outermost message.
 function mentionsStaleInstructionBaseline(error: unknown): boolean {
   for (let current = error, depth = 0; current instanceof Error && depth < 8; depth += 1) {
-    if (current.message.includes("instruction-policy proposal baseline is stale")) return true;
+    if (current.message.includes(INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC)) return true;
     current = current.cause;
   }
   return false;

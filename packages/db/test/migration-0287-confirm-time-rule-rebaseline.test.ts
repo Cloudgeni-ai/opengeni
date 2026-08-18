@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC } from "../src";
 
 const migrationUrl = new URL("../drizzle/0287_confirm_time_rule_rebaseline.sql", import.meta.url);
 
@@ -31,8 +32,9 @@ describe("migration 0287 confirm-time rule rebaseline", () => {
     expect(sql).toContain(
       "AND proposal.baseline_activation_version = current_instruction_activation_version",
     );
-    // The stale signal the confirm path keys its rebaseline off must survive.
-    expect(sql).toContain("instruction-policy proposal baseline is stale");
+    // The stale signal the confirm path keys its rebaseline off must survive,
+    // and must stay byte-identical to the constant the code matches on.
+    expect(sql).toContain(INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC);
     // CREATE OR REPLACE drops proconfig; the pin must be re-applied.
     expect(sql).toContain(
       "ALTER FUNCTION %I.activate_human_confirmed_learning_decision(uuid,uuid,uuid,uuid,uuid) ",
