@@ -12153,6 +12153,8 @@ export const SessionControlResponse = z.object({
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
+export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
+
 export const CreateSessionRequest = withVariableSetIdAlias(
   {
     /**
@@ -12176,10 +12178,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // agentInstructions rides, composed AFTER the workspace persona so it refines
     // it for this one session — how a host delivers per-agent-type prompts without
     // leaking them into the user-visible timeline (it is NEVER emitted as an
-    // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
-    // matches the codebase's largest free-form string convention (workspace
-    // variable set variable values). Absent ⇒ byte-identical to today.
-    instructions: z.string().trim().min(1).max(32768).optional(),
+    // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
+    // shared durable session-instruction contract. Absent ⇒ byte-identical to
+    // today.
+    instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     // Immutable prompt-policy role binding for matching one activated role
     // policy. This never derives from or grants a human workspace membership
     // role. Existing callers may continue to use normalized metadata.role as a
