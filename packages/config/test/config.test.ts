@@ -403,6 +403,51 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
+describe("canonical organization-tenancy activation opt-out", () => {
+  test("defaults to the reversible pre-activation posture", () => {
+    expect(withEnv({}, () => getSettings()).organizationTenancyCanonicalActivationEnabled).toBe(
+      false,
+    );
+  });
+
+  test("parses an explicit decline and an explicit acceptance without truthy-string coercion", () => {
+    // The whole point of the switch is that an operator can write it out to say
+    // "no". A z.coerce.boolean() field would read "false" as TRUE and activate
+    // the one-way boundary for exactly the operator who tried to decline it.
+    for (const declined of ["false", "0", "no", "off", "FALSE"]) {
+      expect(
+        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: declined }, () =>
+          getSettings(),
+        ).organizationTenancyCanonicalActivationEnabled,
+      ).toBe(false);
+    }
+    for (const accepted of ["true", "1", "yes", "on", "TRUE"]) {
+      expect(
+        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: accepted }, () =>
+          getSettings(),
+        ).organizationTenancyCanonicalActivationEnabled,
+      ).toBe(true);
+    }
+  });
+
+  test("is independent of every other tenancy-adjacent posture", () => {
+    // Activation must never be inferred from managed product access or the
+    // delegation posture: it is one explicit operator statement.
+    const settings = withEnv(
+      {
+        OPENGENI_ENVIRONMENT: "test",
+        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+        OPENGENI_PUBLIC_BASE_URL: "https://opengeni.example.com",
+        OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret-value",
+        OPENGENI_DELEGATION_SECRET: "delegation-secret-value",
+      },
+      () => getSettings(),
+    );
+    expect(settings.productAccessMode).toBe("managed");
+    expect(settings.organizationTenancyCanonicalActivationEnabled).toBe(false);
+  });
+});
+
 describe("Temporal connection security", () => {
   test("keeps the local default plaintext and enables TLS for an API key", () => {
     expect(temporalConnectionOptions(withEnv({}, () => getSettings()))).toEqual({

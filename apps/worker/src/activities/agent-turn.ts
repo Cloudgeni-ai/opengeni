@@ -91,7 +91,6 @@ import {
   SandboxRigConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
-  APPROVAL_RUN_STATE_MAX_JSON_BYTES,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getLiveEnrollmentConnection,
@@ -128,11 +127,9 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
-  compactMcpResultCustomDataRunState,
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
-  serializedRunStateForOpenSuffixPause,
   releaseMcpResultCustomDataFromSdkEvent,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
@@ -450,11 +447,9 @@ import {
 } from "./recording";
 import {
   collectRetainedScreenshotReceipts,
-  collectRetainedScreenshotRunStateReceipts,
   compactRetainedScreenshotHistory,
   compactRetainedScreenshotRunState,
   materializeRetainedScreenshotHistory,
-  materializeRetainedScreenshotRunState,
   sdkEventContainsInlineImage,
   retainComputerScreenshot,
   toolOutputContainsInlineImage,
@@ -466,7 +461,6 @@ import {
   assertGeneratedImageHistoryRetained,
   collectGeneratedImageReceipts,
   collectGeneratedImageArtifactReceipts,
-  collectGeneratedImageRunStateArtifactReceipts,
   compactGeneratedImageHistory,
   compactGeneratedImageRunState,
   compactGeneratedImageSdkEvent,
@@ -474,7 +468,6 @@ import {
   generatedImagesFromHistory,
   isCompletedGeneratedImageSdkEvent,
   projectGeneratedImageHistoryForModel,
-  projectGeneratedImageRunStateForModel,
   retainGeneratedImage,
   type GeneratedImageReceipt,
   type GeneratedImageOutput,
@@ -483,10 +476,7 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
-import {
-  interruptionCallIdsFromPause,
-  settleOpenSuffixResumeIfNeeded,
-} from "./open-suffix-resume";
+import { interruptionCallIdsFromPause, settleOpenSuffixResumeIfNeeded } from "./open-suffix-resume";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import {
   ChannelAPartialMutationError,
@@ -501,6 +491,7 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -2426,24 +2417,14 @@ export function shouldStartOnTurnRecording(params: {
 /**
  * Decide the EXPLICIT computer-use tool transport for THIS turn.
  *
- * The runtime's SDK-mirrored capability would otherwise pick hosted-vs-function
- * tools by string-sniffing the bound model instance's constructor name for
- * "ChatCompletions" (supportsStructuredToolOutputTransport). That is fragile: a
- * wrapped / proxied / minified model instance defeats the sniff and a
- * chat-completions provider would silently get the HOSTED `computer_use_preview`
- * tool it 400s on every turn. So the mode is decided HERE — the worker's model
- * resolution is the ONE place a provider's true wire identity is authoritative —
- * and threaded to the runtime as an explicit flag (buildAgent → computerToolMode):
- *   • codex-subscription → "function-image": the ChatGPT/Codex backend rejects
- *     hosted tool types but SEES structured `input_image` tool results.
- *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
- *     receive a screenshot through a proven visual transport, so computer use fails
- *     closed instead of serializing the image as text.
- *   • Vercel Gateway providers → "disabled": their curated models support ordinary
- *     function tools and vision input, not OpenAI's hosted computer tool.
- *   • everything else — built-in Azure/OpenAI responses, registry "responses"
- *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
- *     null) — → "hosted": real Responses hosted-tool support.
+ * Computer-use is ordinary `computer_*` function tools bound to the live
+ * desktop. The worker picks the mode from the resolved provider so the runtime
+ * never string-sniffs the model instance:
+ *   • catalogue `inputModalities` must include `image`, or computer-use is off
+ *   • Responses wires (Azure/OpenAI, Gateway, Codex, legacy client) →
+ *     "function-image": screenshot results are structured `{type:'image'}`
+ *   • Chat Completions → "disabled": tool results on that wire are text, so a
+ *     screenshot would become a base64 string rather than an image the model sees
  *
  * Pure + exported so the mapping is unit-testable without a live turn.
  */
@@ -2454,7 +2435,7 @@ export function computerToolModeForTurn(
   } | null,
 ): ComputerToolMode {
   if (!resolvedModel) {
-    return "hosted"; // legacy built-in Responses client — real hosted support
+    return "function-image";
   }
   if (!modelSupportsImageInputForTurn(resolvedModel)) {
     return "disabled";
@@ -2462,16 +2443,10 @@ export function computerToolModeForTurn(
   if (resolvedModel.provider.kind === "codex-subscription") {
     return "function-image";
   }
-  if (
-    resolvedModel.provider.kind === "vercel-gateway-managed" ||
-    resolvedModel.provider.kind === "vercel-gateway-workspace"
-  ) {
-    return "disabled";
-  }
   if (resolvedModel.provider.api === "chat") {
     return "disabled";
   }
-  return "hosted";
+  return "function-image";
 }
 
 /** Gateway models do not advertise OpenAI's hosted apply_patch/view_image tool types. */
@@ -4464,8 +4439,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
         generatedImageReceiptsByProviderItemId,
       );
-    const compactApprovalRunState = (serialized: string): string =>
-      compactMcpResultCustomDataRunState(compactMediaRunState(serialized));
     // Explicit image-producing tools cross the durable session-media boundary.
     // Incidental frames returned by click/scroll actions remain unretained; an
     // intentional computer_screenshot or view_image result must never be lost
@@ -4535,22 +4508,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sessionId: input.sessionId,
         history,
       });
-    };
-    const materializeScreenshotRunState = async (serialized: string) => {
-      collectRetainedScreenshotRunStateReceipts(serialized, retainedScreenshotReceiptsByCallId);
-      collectGeneratedImageRunStateArtifactReceipts(serialized, generatedImageReceiptsByArtifactId);
-      const withScreenshots = modelCanReceiveRetainedSessionImages
-        ? await materializeRetainedScreenshotRunState({
-            db,
-            objectStorage,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            serialized,
-          })
-        : serialized;
-      return projectGeneratedImageRunStateForModel(
-        compactGeneratedImageRunState(withScreenshots, generatedImageReceiptsByProviderItemId),
-      );
     };
     let providerArtifactCandidates: Awaited<
       ReturnType<typeof turnInput>
@@ -8029,6 +7986,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rootSessionId: mcpCredentialRootSessionId,
         attemptId: input.attemptId,
         turn,
+        observability,
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
@@ -8873,17 +8831,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   // typed input_image content. Chat wires have no proven typed image
                   // result transport and therefore receive no view_image tool.
                   structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
-                  // EXPLICIT computer-use tool transport, derived from the resolved provider's
-                  // authoritative wire identity (codex → function-image, chat → disabled,
-                  // responses → hosted) so the runtime never string-sniffs the model instance's
-                  // constructor name. See {@link computerToolModeForTurn}.
+                  // EXPLICIT computer-use tool transport. See {@link computerToolModeForTurn}.
                   computerToolMode: computerToolModeForTurn(resolvedModel),
                   ...(promptCacheKey ? { promptCacheKey } : {}),
                 }
               : // LEGACY global-client fallback (resolveTurnModel returned null → the model
                 // is not in the registry, served by the built-in OpenAI/Azure Responses
-                // client). That backend has real hosted support, so pin computerToolMode to
-                // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
+                // client). Pin computerToolMode to function-image EXPLICITLY rather than
+                // leaving the runtime to sniff the instance.
                 {
                   computerToolMode: computerToolModeForTurn(null),
                   promptCacheKey: input.sessionId,
@@ -9789,7 +9744,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerApi,
             projectCanonicalHistory: generatedImageHistoryProjector,
             materializeModelHistory: materializeScreenshotHistory,
-            materializeSerializedRunState: materializeScreenshotRunState,
             projectModelHistory: modelHistoryProjector,
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
@@ -10917,10 +10871,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: serializedRunStateForOpenSuffixPause(
-                  compactApprovalRunState(stream.state.toString()),
-                  APPROVAL_RUN_STATE_MAX_JSON_BYTES,
-                ),
+                serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
                 pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,

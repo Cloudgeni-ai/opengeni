@@ -38,7 +38,7 @@ created it. That creation attempt is immutable provenance; a recovery attempt
 does not replace it.
 
 The worker atomically writes the bounded open-suffix pending-tool receipts,
-an `agent_run_states` leftover blob or sentinel, all new human-input rows, the
+an `agent_run_states` sentinel, all new human-input rows, the
 requested events, and the session's `requires_action` status. A crash therefore
 cannot expose a request without durable completed-pair history and the open
 suffix, or a suffix without its request. On recovery,
