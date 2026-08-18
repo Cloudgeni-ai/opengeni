@@ -510,10 +510,10 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-The phase's data source is the read-only inventory seam (migration 0285):
-`bun run db:inventory-tenancy --organization-id <uuid>` reports content-free
-counts of every legacy-attribution population - ownerless sessions, resources
-without an explicit authority classification (variable sets, rigs, machines),
+The phase's data source is the read-only inventory seam (migration 0285,
+corrected by 0292): `bun run db:inventory-tenancy --organization-id <uuid>`
+reports content-free counts of every legacy-attribution population - ownerless
+sessions, Variable Sets / Rigs / Connected Machines **per authority lane**,
 connections per authority lane, humans with workspace access but no
 organization-membership anchor, active memberships per lifecycle status,
 unattributed workspace writers, and the two linked-input gates (documents
@@ -522,6 +522,41 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
+**There is no "unclassified" count for Variable Sets, Rigs, or Connected
+Machines, and one must not be reintroduced without new schema.** 0285 reported
+one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
+constraints (`workspace_variable_sets_authority_shape_check`,
+`rigs_authority_shape_check`, `enrollments_authority_shape_check`) *require* a
+NULL `authority_id` for every organization- and workspace-scoped row, so that
+predicate was structurally `total - userScoped`: every correctly classified row
+was reported as unmigrated and the number could never drain to zero. No
+corrected predicate exists either, because `authority_scope` **defaults to
+`'workspace'`** (0230 for Variable Sets and Rigs, 0262 for Connected Machines),
+making an unmigrated legacy row indistinguishable from a deliberately
+workspace-scoped one, and nothing else separates them:
+
+- **Variable Sets** - `origin_workspace_id` (added 0230, never backfilled) is
+  NULL for every pre-0254 row and non-NULL for every row `create_scoped_variable_set`
+  writes. That is a real fact, but it means "predates the scoped lifecycle", not
+  "lacks an explicit authority classification": this phase classifies a reviewed
+  legacy row explicitly *as* workspace-owned, which writes nothing, so a fully
+  reviewed row still reads NULL.
+- **Rigs** - `origin_workspace_id` is not even a legacy marker. `createRig`
+  retains a live non-scoped branch that inserts through Drizzle without it, so
+  new rows keep arriving with a NULL origin today.
+- **Connected Machines** - 0262 added `origin_workspace_id` and backfilled it
+  from `workspace_id` in the same statement, while the ordinary
+  `createEnrollment` upsert still leaves it NULL. The polarity is inverted: NULL
+  marks a *post*-0262 ordinary row.
+
+`byScope` reports every authority distinction the schema can truthfully make,
+and any non-user-scoped total is derivable from it. Restoring a classification
+counter requires first adding a durable classification-decision fact to these
+tables - contrast the documents gate, whose
+`authority_kind = 'personal' AND authority_id IS NULL` names a genuine
+post-migration invariant violation (`documents_authority_chk`, 0258) and is
+therefore truthful and drainable.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
@@ -529,6 +564,27 @@ per active membership, stable authority uniqueness, provider-account collision
 rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
+
+`packages/db/test/organization-isolation-evidence.test.ts` is the executed
+cross-organization evidence suite for this phase. Against a real PostgreSQL
+database, driven as the genuine non-superuser `NOBYPASSRLS` `opengeni_app`
+login, it proves - each denial paired with a positive control under the owning
+organization - that no seeded resource family (session, session event, Variable
+Set, Rig, Connected Machine, enrollment, connection, file, Document base,
+Document, knowledge memory, scheduled task, API key) crosses an organization
+boundary by read, forged workspace id, sibling workspace, insert, update, or
+delete; that a missing account or workspace context denies rather than widens;
+that forging `opengeni.organization_tenancy_lifecycle` opens no authority table
+because the runtime role holds no privilege on any table gated only by a
+caller-settable GUC; that every account-carrying table the runtime role can
+touch enforces FORCE RLS apart from the reviewed `workspaces` /
+`workspace_memberships` / `auth_identities` directory exceptions whose boundary
+is enforced in `@opengeni/core`; that an active membership in another
+organization is not authority in this one and revoking one membership stops
+access on the very next transaction while leaving the other organization and
+the retained rows intact; and that FORCE RLS still binds a non-superuser
+`SECURITY DEFINER` owner, which is the property every capability seam here
+depends on.
 
 #### Compatibility-lane telemetry
 
