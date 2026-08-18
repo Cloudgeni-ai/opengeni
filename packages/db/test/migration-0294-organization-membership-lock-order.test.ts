@@ -14,14 +14,14 @@ import {
   type DbClient,
 } from "../src";
 
-// OPE-275. Before migration 0294 the organization membership lifecycle locked
+// Before migration 0294 the organization membership lifecycle locked
 // `managed_accounts` FOR UPDATE and only then reached for `workspaces`, while
 // every ordinary workspace writer locks its `workspaces` row first and then
 // reaches `managed_accounts` implicitly through the account FK check of a row it
 // inserts. `FOR KEY SHARE` (what an FK check takes) conflicts with `FOR UPDATE`,
 // so the two orders formed a cycle and Postgres aborted one side with 40P01:
 //
-//   transition_session_visibility   holds workspaces       waits managed_accounts
+//   ordinary workspace writer       holds workspaces       waits managed_accounts
 //   prepare_organization_membership holds managed_accounts waits workspaces
 //
 // 0294 replaces the organization-row `FOR UPDATE` with a transaction-scoped
@@ -235,7 +235,8 @@ describe("migration 0294 organization membership lock order", () => {
   test("an ordinary workspace-row holder and a membership suspend no longer form a cycle", async () => {
     if (!shared || !client) return;
     const org = await provisionOrganization();
-    // Exactly the first row lock `transition_session_visibility` takes.
+    // Exactly the first row lock a live workspace-scoped lifecycle function
+    // such as `confirm_remember_knowledge_claim` (0274) takes.
     const holder = await shared.admin.reserve();
     let holderSqlState: string | null = null;
     let lifecycleFailure: unknown;
@@ -349,7 +350,7 @@ describe("migration 0294 organization membership lock order", () => {
       .sort()
       .join(" ");
     console.log(
-      `[OPE-275] ${iterations} iterations x ${visibilityWritersPerIteration} concurrent ` +
+      `[membership lock order] ${iterations} iterations x ${visibilityWritersPerIteration} concurrent ` +
         `visibility writers: clientDeadlocks=${deadlocks} serverDeadlocks=${serverDeadlocks} ` +
         `states={${summary}}`,
     );

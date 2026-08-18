@@ -316,7 +316,7 @@ request.
 
 The membership lifecycle spans an entire organization, so it must agree with
 every ordinary workspace writer about lock order. Migration
-`0294_organization_membership_lock_order.sql` (OPE-275) fixes the one place
+`0294_organization_membership_lock_order.sql` fixes the one place
 where it did not.
 
 **What was wrong.** `prepare_organization_membership_protocol_settlements`, the

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0294 (OPE-275): correct the organization-membership lifecycle lock
+-- Migration 0294: correct the organization-membership lifecycle lock
 -- order.
 --
 -- THE BUG
@@ -17,15 +17,15 @@
 --
 -- Every ordinary workspace writer is forced into the opposite order and cannot
 -- avoid it. It locks its `workspaces` row first (AGENTS.md's canonical
--- event-write prefix; `transition_session_visibility` from 0225 takes it
--- `FOR UPDATE`), and then reaches `managed_accounts` IMPLICITLY through the
--- account foreign-key check of a row it inserts - `sessions`, `session_events`,
--- `session_turns`, `session_goals` and `session_system_updates` all reference
--- `managed_accounts`, and an FK check takes `FOR KEY SHARE` on the referenced
--- row. `FOR KEY SHARE` conflicts with `FOR UPDATE`, so the two writers form a
--- textbook cycle:
+-- event-write prefix; a live workspace-scoped lifecycle function such as
+-- `confirm_remember_knowledge_claim` from 0274 takes it `FOR UPDATE`), and then
+-- reaches `managed_accounts` IMPLICITLY through the account foreign-key check
+-- of a row it inserts - `sessions`, `session_events`, `session_turns`,
+-- `session_goals` and `session_system_updates` all reference `managed_accounts`,
+-- and an FK check takes `FOR KEY SHARE` on the referenced row. `FOR KEY SHARE`
+-- conflicts with `FOR UPDATE`, so the two writers form a textbook cycle:
 --
---     transition_session_visibility   holds workspaces       waits managed_accounts
+--     ordinary workspace writer       holds workspaces       waits managed_accounts
 --     prepare_organization_membership holds managed_accounts waits workspaces
 --
 -- An administrator suspending or offboarding a member concurrently with any
@@ -127,7 +127,7 @@ BEGIN
 $old_prepare$  PERFORM 1 FROM managed_accounts account
   WHERE account.id = account_id_value FOR UPDATE;
 $old_prepare$,
-$new_prepare$  -- OPE-275: the organization fence is an advisory lock, not a row lock.
+$new_prepare$  -- Lock-order repair: the organization fence is an advisory lock, not a row lock.
   -- `FOR UPDATE` on managed_accounts conflicts with the FK `FOR KEY SHARE`
   -- every ordinary workspace writer takes, and this seam reaches for
   -- `workspaces` afterwards, so holding it inverted the canonical order.
@@ -141,7 +141,7 @@ $new_prepare$
       (
 $old_command$  PERFORM 1 FROM managed_accounts account WHERE account.id = account_id_value FOR UPDATE;
 $old_command$,
-$new_command$  -- OPE-275: advisory organization fence plus a non-conflicting row lock
+$new_command$  -- Lock-order repair: advisory organization fence plus a non-conflicting row lock
   -- (see the header: `FOR UPDATE` here inverted the canonical order).
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'organization-membership:' || account_id_value::text, 0
@@ -159,7 +159,7 @@ $old_wrapper$,
 $new_wrapper$  -- The organization advisory fence is the organization-lifecycle prefix. It
   -- makes the following non-locking identity reads stable against another
   -- membership command without conflicting with the FK `FOR KEY SHARE` that
-  -- every ordinary workspace writer takes on this same row (OPE-275).
+  -- every ordinary workspace writer takes on this same row.
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'organization-membership:' || account_id_value::text, 0
   ));
@@ -254,7 +254,7 @@ $membership_lock_order_verification$;
 
 COMMENT ON FUNCTION prepare_organization_membership_protocol_settlements(jsonb) IS
   'Locks the exact turns whose pending protocol state a suspend/offboard must settle. '
-  'Lock order (OPE-275): advisory organization fence '
+  'Lock order: advisory organization fence '
   '(hashtextextended(''organization-membership:<organization id>'')) -> managed_accounts '
   'FOR KEY SHARE -> per-workspace workspace_inference_controls FOR SHARE + workspaces '
   'FOR KEY SHARE -> organization_memberships FOR UPDATE -> sessions FOR NO KEY UPDATE -> '
@@ -274,7 +274,7 @@ BEGIN
       pg_catalog.current_schema(),
       'Migration 0263 organization membership lifecycle body, wrapped by '
       'organization_membership_command since migration 0275. Takes the same advisory '
-      'organization fence and managed_accounts FOR KEY SHARE as its wrapper (OPE-275); the '
+      'organization fence and managed_accounts FOR KEY SHARE as its wrapper; the '
       'advisory lock is transaction-scoped and re-grantable, so the nested acquisition is a '
       'no-op within one command transaction.'
     );
@@ -287,5 +287,5 @@ COMMENT ON FUNCTION organization_membership_command(jsonb) IS
   'change_role, suspend, reactivate, offboard, retention). Mutual exclusion between '
   'concurrent commands for one organization is the advisory fence '
   'hashtextextended(''organization-membership:<organization id>''), not a managed_accounts '
-  'row lock (OPE-275). CAS on organization_memberships.authorization_revision and the '
+  'row lock. CAS on organization_memberships.authorization_revision and the '
   'operation-receipt idempotency are unchanged.';

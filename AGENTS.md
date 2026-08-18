@@ -106,7 +106,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   lifecycle seam serializes on the transaction-scoped advisory key
   `hashtextextended('organization-membership:<organization id>')` and may take no
   lock stronger than `managed_accounts FOR KEY SHARE` before the canonical
-  workspace prefix (migration 0294, OPE-275): every ordinary workspace writer
+  workspace prefix (migration 0294): every ordinary workspace writer
   holds its `workspaces` row and then reaches `managed_accounts` through the
   account FK check of a row it inserts, so an organization-row `FOR UPDATE` held
   across workspace acquisition is a deadlock. See

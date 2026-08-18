@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0294_organization_membership_lock_order.sql")) {
         return includesActivation
-          ? "05d11afa071aca53217c37e7f059c01edf9c814b6c14c9108debe605dce0a965"
-          : "cb5e1409f735b053475c8b6ae611c6adfa0943c73d8f2f33130e1f5ab2c5b757";
+          ? "4f35b0023179c286dbb146d255a525fdd0ef76798d7ae7ec4a365a026dba5b58"
+          : "18ba0a68e230197edaf8ad3090a10ab145b37de173622dd0a1d6a6f5425ad9fe";
       }
       if (migrations.has("0292_truthful_tenancy_inventory_counters.sql")) {
         return includesActivation
@@ -1205,10 +1205,10 @@ describe("release schema contract", () => {
       sha256: "1119554dc06a768c92f7189a97b438ebdc011747a6c8d7cefc992962f2293593",
       deploymentMode: "rolling",
     });
-    // OPE-275: the membership lifecycle lock-order repair. 0263 stays byte
+    // The membership lifecycle lock-order repair. 0263 stays byte
     // identical above; 0294 rewrites the three entry points in place.
     expect(migrations.get("0294_organization_membership_lock_order.sql")).toMatchObject({
-      sha256: "456533b962b00e70281a1b32f708ff6cd8055e716ed0c231b0a2a21e1952f13b",
+      sha256: "0047827f6b9682f14ddf32d5bfdf84378089c7dbb032010213a6a14cf2625ef1",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0285_organization_tenancy_inventory.sql")).toMatchObject({
