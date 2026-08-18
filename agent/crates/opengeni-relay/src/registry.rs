@@ -229,41 +229,34 @@ impl ChannelRegistry {
         }
         chan.last_touch = now;
 
-        // Epoch fence (clients only): reject a stale viewer; advance the floor.
-        // The authority-epoch floor (0281) applies the same fence to the
-        // session authority epoch when the token carries the claim.
-        if let Some(authority_epoch) = viewer.authority {
-            if authority_epoch < chan.authority_floor {
-                self.metrics.record_open_rejected();
-                if chan.agent.is_none() && chan.client.is_none() {
-                    let was_fresh = fresh;
-                    drop(channels);
-                    if was_fresh {
-                        self.maybe_remove_empty(key);
-                    }
-                } else {
-                    drop(channels);
+        // Epoch fences (clients only): reject a stale viewer, then advance the
+        // floors. The authority-epoch floor (0281) applies the same fence to
+        // the session authority epoch when the token carries the claim. Both
+        // rejections are evaluated BEFORE either floor advances, so a rejected
+        // attach never moves a floor.
+        let authority_stale = viewer
+            .authority
+            .is_some_and(|epoch| epoch < chan.authority_floor);
+        let lease_stale = viewer.lease.is_some_and(|epoch| epoch < chan.epoch_floor);
+        if authority_stale || lease_stale {
+            self.metrics.record_open_rejected();
+            // Drop the channel entry if it was created fresh just for this
+            // rejected attach and is otherwise empty.
+            if chan.agent.is_none() && chan.client.is_none() {
+                let was_fresh = fresh;
+                drop(channels);
+                if was_fresh {
+                    self.maybe_remove_empty(key);
                 }
-                return Err(AttachError::StaleEpoch);
+            } else {
+                drop(channels);
             }
+            return Err(AttachError::StaleEpoch);
+        }
+        if let Some(authority_epoch) = viewer.authority {
             chan.authority_floor = chan.authority_floor.max(authority_epoch);
         }
         if let Some(epoch) = viewer.lease {
-            if epoch < chan.epoch_floor {
-                self.metrics.record_open_rejected();
-                // Drop the channel entry if it was created fresh just for this
-                // rejected attach and is otherwise empty.
-                if chan.agent.is_none() && chan.client.is_none() {
-                    let was_fresh = fresh;
-                    drop(channels);
-                    if was_fresh {
-                        self.maybe_remove_empty(key);
-                    }
-                } else {
-                    drop(channels);
-                }
-                return Err(AttachError::StaleEpoch);
-            }
             chan.epoch_floor = chan.epoch_floor.max(epoch);
         }
 

@@ -195,8 +195,9 @@ pub(crate) mod conn {
             }
         };
 
-        // 2. Resolve + authorize the key (token + channel-key scope).
-        let (key, role, resume_from_seq) = match authorize(&open, query, state) {
+        // 2. Resolve + authorize the key (token + channel-key scope). A client's
+        // fence claims come from this exact token verification.
+        let (key, role, resume_from_seq, viewer) = match authorize(&open, query, state) {
             Ok(parts) => parts,
             Err(reason) => {
                 tracing::warn!(reason = %reason, ws = %query.ws, agent = %query.agent, port = query.port, "relay open rejected");
@@ -206,12 +207,8 @@ pub(crate) mod conn {
             }
         };
 
-        // 3. Attach (the epoch fence is applied for a client), ack, replay.
+        // 3. Attach (the epoch fences are applied for a client), ack, replay.
         let now = Instant::now();
-        let viewer = match role {
-            Role::Client => client_epochs(&open, state),
-            Role::Agent => ViewerEpochs::default(),
-        };
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel::<RelayMessage>(OUTBOUND_QUEUE);
         let attached =
             match state
@@ -350,7 +347,7 @@ pub(crate) mod conn {
         open: &v1::StreamOpen,
         query: &DialQuery,
         state: &RelayState,
-    ) -> Result<(ChannelKey, Role, u64), String> {
+    ) -> Result<(ChannelKey, Role, u64, ViewerEpochs), String> {
         let channel = open
             .channel
             .as_ref()
@@ -411,28 +408,22 @@ pub(crate) mod conn {
                 if claims.port != key.port {
                     return Err("viewer token port does not match the channel key".to_string());
                 }
-                // The epoch fence is applied at attach (the floor); see client_epoch.
+                // The epoch fences are applied at attach (the floors), from the
+                // claims of THIS exact verification — no re-verify, no window
+                // where an expiring token attaches unfenced.
+                return Ok((
+                    key,
+                    role,
+                    open.resume_from_seq,
+                    ViewerEpochs {
+                        lease: Some(claims.lease_epoch),
+                        authority: claims.authority_epoch,
+                    },
+                ));
             }
         }
 
-        Ok((key, role, open.resume_from_seq))
-    }
-
-    /// The viewer epoch claims (the fence floor sources) from the token: the
-    /// lease epoch plus the optional session authority epoch (0281). Returns the
-    /// empty claims when the token does not re-verify (already authorized in
-    /// `authorize`, so this is the steady-state extraction). Only called for a
-    /// CLIENT; a pre-0281 token carries no authority claim and enforces nothing
-    /// beyond the lease fence.
-    fn client_epochs(open: &v1::StreamOpen, state: &RelayState) -> ViewerEpochs {
-        match token::verify_stream_token(&state.config.stream_token_secret, &open.token, unix_now())
-        {
-            Ok(c) => ViewerEpochs {
-                lease: Some(c.lease_epoch),
-                authority: c.authority_epoch,
-            },
-            Err(_) => ViewerEpochs::default(),
-        }
+        Ok((key, role, open.resume_from_seq, ViewerEpochs::default()))
     }
 
     /// Write a `StreamOpenAck` over the socket.

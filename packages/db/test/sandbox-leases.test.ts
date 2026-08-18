@@ -846,6 +846,25 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect((await readHolder())?.viewer_authority_epoch).toBe(5);
 
+    // A DIFFERENT subject reusing the holder id starts a fresh (subject,
+    // epoch) pair: the previous subject's higher epoch must not be carried.
+    const otherSubject = `user:${crypto.randomUUID()}`;
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      viewerSubjectId: otherSubject,
+      viewerAuthorityEpoch: 2,
+    });
+    expect(await readHolder()).toMatchObject({
+      viewer_subject_id: otherSubject,
+      viewer_authority_epoch: 2,
+    });
+
     // The 0281 CHECK rejects a non-positive epoch and a blank subject.
     const zeroEpoch = await admin`
       update sandbox_lease_holders set viewer_authority_epoch = 0

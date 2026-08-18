@@ -214,6 +214,8 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const secret = resolveStreamTokenSecret(settings)!;
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
+    // 0281: the selfhosted lane threads the authority claims end-to-end.
+    expect(claims?.authorityEpoch).toBe(1);
     expect(cell?.leaseEpoch).toBe(7);
     expect(cell?.url).not.toContain(cell!.token);
   });
@@ -233,6 +235,7 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const secret = resolveStreamTokenSecret(settings)!;
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
+    expect(claims?.authorityEpoch).toBe(1);
     expect(cell?.leaseEpoch).toBe(7);
     // Desktop cell must carry resolution.
     expect(cell?.resolution).toBeDefined();

@@ -17525,6 +17525,57 @@ export async function getSessionAuthorityEpoch(
   );
 }
 
+/**
+ * Mint-time live-authority recheck for a human viewer subject (0281). True
+ * when the subject currently holds workspace authority the same way the
+ * route-time access builder derives it: a `workspace_memberships` row whose
+ * owning organization membership (when one exists) is active, or an active
+ * organization membership whose personal-workspace pointer is exactly this
+ * workspace (managed personal workspaces deliberately have no membership
+ * row). Never infers authority any other way; a deleted membership row and a
+ * suspended/revoked organization membership are both false.
+ */
+export async function subjectHasLiveWorkspaceAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      const [membershipRow] = await rawRows<{ present: number }>(
+        scopedDb,
+        sql`select 1 as present from workspace_memberships
+          where subject_id = ${input.subjectId}
+            and workspace_id = ${input.workspaceId}
+          limit 1`,
+      );
+      const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_self_organization_memberships(${input.subjectId}) as result`,
+      );
+      const organizationMemberships = OrganizationMember.array().parse(
+        organizationMembershipResult?.result ?? [],
+      );
+      const selfOrganizationMembership = organizationMemberships.find(
+        (organizationMembership) => organizationMembership.organizationId === input.accountId,
+      );
+      if (membershipRow) {
+        // Mirror the access builder's inactive-organization filter: a
+        // persisted membership row is dead while its organization membership
+        // is suspended/revoked. A subject with no organization membership at
+        // all (legacy/standalone) keeps its persisted row's authority.
+        return !selfOrganizationMembership || selfOrganizationMembership.status === "active";
+      }
+      return (
+        selfOrganizationMembership?.status === "active" &&
+        selfOrganizationMembership.personalWorkspaceId === input.workspaceId
+      );
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {
@@ -33050,14 +33101,23 @@ async function upsertLeaseHolder(
       do update set last_heartbeat_at = now(),
         viewer_subject_id = coalesce(excluded.viewer_subject_id,
           sandbox_lease_holders.viewer_subject_id),
-        -- The recorded authority epoch is monotone: a re-acquire may raise it
-        -- (a fresh mint after a revocation bump) but never lower it, and an
-        -- attach without the claim preserves the recorded value.
-        viewer_authority_epoch = greatest(
-          coalesce(excluded.viewer_authority_epoch,
-            sandbox_lease_holders.viewer_authority_epoch),
-          coalesce(sandbox_lease_holders.viewer_authority_epoch,
-            excluded.viewer_authority_epoch))
+        -- The recorded (subject, epoch) pair stays coherent. Same subject (or
+        -- a claimless rolling-window attach): the epoch is monotone - a
+        -- re-acquire may raise it but never lower it. A DIFFERENT subject
+        -- reusing the holder id starts a fresh pair; carrying the previous
+        -- subject's higher epoch would misattribute authority evidence.
+        viewer_authority_epoch = case
+          when excluded.viewer_subject_id is not null
+            and sandbox_lease_holders.viewer_subject_id is not null
+            and excluded.viewer_subject_id
+              is distinct from sandbox_lease_holders.viewer_subject_id
+            then excluded.viewer_authority_epoch
+          else greatest(
+            coalesce(excluded.viewer_authority_epoch,
+              sandbox_lease_holders.viewer_authority_epoch),
+            coalesce(sandbox_lease_holders.viewer_authority_epoch,
+              excluded.viewer_authority_epoch))
+        end
   `);
 }
 

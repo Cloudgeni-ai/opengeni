@@ -232,13 +232,20 @@ for a historical row whose authority was never recorded. Since migration
 0281 the live-stream surface is bound to the same authority: a scoped stream
 token (`ogs_`, 120 s TTL unchanged) minted for a viewer carries the
 authenticated viewer subject and the session's live authority epoch, the
-viewer lease holder records the same pair (monotone - a stale lower claim
-never lowers the recorded epoch), the API re-verifies a human subject's
-current workspace membership at every mint and degrades to `transport:null`
-when it is gone, and the selfhosted relay rejects an attach whose recorded
-authority claim is below the channel's authority floor. A pre-0281 token
-without the claims still attaches during the rolling window and enforces
-nothing new.
+viewer lease holder records the same pair (per-subject monotone - a stale
+lower claim never lowers a subject's recorded epoch, while a different
+subject reusing the holder id starts a fresh pair), the API re-verifies a
+human subject's live workspace authority at every mint through the same
+model the route uses - a membership row whose owning organization membership
+is active, or an active organization membership's personal-workspace pointer
+(managed personal workspaces deliberately have no membership row) - and
+degrades to `transport:null` when that authority is gone. Delegated
+token-borne grants are authorized by their signed token, not rows, and keep
+their route authorization. The selfhosted relay rejects an attach whose
+authority claim is below the live channel's authority floor; the floor is
+defense-in-depth that dies with the channel, while mint refusal plus the
+120 s TTL remain the revocation authority. A pre-0281 token without the
+claims still attaches during the rolling window and enforces nothing new.
 Connection-use audit facts and variable-set audit events carry the same
 attribution since migration 0280: every `connection_use_audit_facts` row
 records the frozen causal initiator and the session authority

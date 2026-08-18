@@ -50,7 +50,7 @@ import {
   type LeaseSnapshot,
   type SandboxRecord,
   getSessionAuthorityEpoch,
-  getWorkspaceGrant,
+  subjectHasLiveWorkspaceAuthority,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -208,7 +208,8 @@ export async function attachViewer(
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
   const viewerId = input.viewerId ?? crypto.randomUUID();
-  const attachAuthorityEpoch = input.viewerSubjectId
+  const attachSubjectId = claimableSubjectId(input.viewerSubjectId ?? null);
+  const attachAuthorityEpoch = attachSubjectId
     ? await getSessionAuthorityEpoch(db, { accountId, workspaceId, sessionId: session.id })
     : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
@@ -235,7 +236,7 @@ export async function attachViewer(
       kind: "viewer",
       holderId: viewerId,
       subjectId: session.id,
-      ...(input.viewerSubjectId ? { viewerSubjectId: input.viewerSubjectId } : {}),
+      ...(attachSubjectId ? { viewerSubjectId: attachSubjectId } : {}),
       ...(attachAuthorityEpoch !== null ? { viewerAuthorityEpoch: attachAuthorityEpoch } : {}),
       backend: session.sandboxBackend,
       os: session.sandboxOs,
@@ -674,15 +675,29 @@ export type DesktopStreamMint = {
   leaseEpoch: number;
 };
 
+/** A subject claim must satisfy the StreamTokenPayload bounds and the 0281
+ *  holder CHECK (non-blank, <= 512). An out-of-bounds subject (possible only
+ *  from a host-signed delegated token) is omitted from the claims rather than
+ *  turning the mint into a 500. */
+function claimableSubjectId(subjectId: string | null): string | null {
+  if (!subjectId) return null;
+  const trimmed = subjectId.trim();
+  return trimmed.length >= 1 && subjectId.length <= 512 ? subjectId : null;
+}
+
 /**
  * Resolve the viewer-facing authority claims stamped into a scoped stream
  * token and recorded on the viewer holder (0281): the authenticated viewer
  * subject and the session's LIVE authority epoch. Re-verifies a human
- * subject's current workspace membership at mint time - a viewer whose
- * membership was removed since the route authorized them degrades to null
- * (transport:null) instead of receiving a fresh token. API-key and service
- * principals are not workspace members; their route authorization stands.
- * Identity and epoch only - never a secret value.
+ * (`user:`) subject's current workspace authority at mint time through the
+ * same model the route-time access builder uses - a membership row with an
+ * active owning organization membership, or an active organization
+ * membership's personal-workspace pointer - so a viewer whose authority was
+ * revoked since the route authorized them degrades to null (transport:null)
+ * instead of receiving a fresh token. Delegated token-borne grants
+ * (`subjectDelegated`) are authorized by their signed token, not by rows this
+ * check can see; they keep their route authorization, as do API-key and
+ * service principals. Identity and epoch only - never a secret value.
  */
 async function resolveViewerAuthorityClaims(
   db: ViewerServices["db"],
@@ -691,6 +706,7 @@ async function resolveViewerAuthorityClaims(
     workspaceId: string;
     sessionId: string;
     subjectId: string | null;
+    subjectDelegated?: boolean;
   },
 ): Promise<{ subjectId?: string; authorityEpoch: number } | null> {
   const authorityEpoch = await getSessionAuthorityEpoch(db, {
@@ -701,14 +717,19 @@ async function resolveViewerAuthorityClaims(
   if (authorityEpoch === null) {
     return null;
   }
-  if (input.subjectId?.startsWith("user:")) {
-    const membership = await getWorkspaceGrant(db, input.subjectId, input.workspaceId);
-    if (!membership) {
+  if (input.subjectId?.startsWith("user:") && input.subjectDelegated !== true) {
+    const live = await subjectHasLiveWorkspaceAuthority(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+    });
+    if (!live) {
       return null;
     }
   }
+  const subjectId = claimableSubjectId(input.subjectId);
   return {
-    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
+    ...(subjectId ? { subjectId } : {}),
     authorityEpoch,
   };
 }
@@ -717,6 +738,10 @@ export type MintDesktopStreamInput = {
   accountId: string;
   workspaceId: string;
   resourceSubjectId?: string;
+  /** True when the route grant is a signed delegated token (metadata.delegated):
+   *  its authority is the token, not membership rows, so the mint-time
+   *  live-authority recheck does not apply. */
+  resourceSubjectDelegated?: boolean;
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
@@ -787,6 +812,9 @@ export async function mintDesktopStream(
     workspaceId,
     sessionId: session.id,
     subjectId: input.resourceSubjectId ?? null,
+    ...(input.resourceSubjectDelegated !== undefined
+      ? { subjectDelegated: input.resourceSubjectDelegated }
+      : {}),
   });
   if (!viewerAuthority) {
     return null;
@@ -997,6 +1025,8 @@ export type MintTerminalStreamInput = {
   accountId: string;
   workspaceId: string;
   resourceSubjectId?: string;
+  /** See MintDesktopStreamInput.resourceSubjectDelegated. */
+  resourceSubjectDelegated?: boolean;
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
@@ -1053,6 +1083,9 @@ export async function mintTerminalStream(
     workspaceId,
     sessionId: session.id,
     subjectId: input.resourceSubjectId ?? null,
+    ...(input.resourceSubjectDelegated !== undefined
+      ? { subjectDelegated: input.resourceSubjectDelegated }
+      : {}),
   });
   if (!viewerAuthority) {
     return null;

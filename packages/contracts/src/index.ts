@@ -2452,9 +2452,12 @@ export const StreamTokenPayload = z.object({
   // rolling compatibility: old verifiers strip it, old mints omit it.
   subjectId: z.string().min(1).max(512).optional(),
   // The session authority epoch observed at mint (0281). The relay tracks the
-  // highest value presented per channel and rejects tokens below that floor,
-  // so an in-TTL token minted before an authority revocation cannot outlive
-  // the epoch advance once any current viewer has attached.
+  // highest value presented per LIVE channel and rejects tokens below that
+  // floor. The floor is defense-in-depth, not the revocation authority: it
+  // lives only as long as the channel does (both sides detached, the
+  // half-open reaper, or a relay restart reset it), so a stale in-TTL token
+  // can still attach to a fresh channel. Real revocation is the mint refusing
+  // to issue new tokens plus the 120 s TTL bounding the old ones.
   authorityEpoch: z.number().int().positive().optional(),
 });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;

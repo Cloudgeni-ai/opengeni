@@ -295,6 +295,81 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     expect(afterRemoval).toBeNull();
   }, 60_000);
 
+  test("0281 — a managed PERSONAL-workspace human mints (no membership row by design); suspension degrades", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const human = `user:${crypto.randomUUID()}`;
+    // Slice A+B: personal-workspace authority is the ACTIVE organization
+    // membership's pointer; deliberately NO workspace_memberships row.
+    await admin`
+      insert into organization_memberships
+        (account_id, subject_id, status, personal_workspace_id, role)
+      values (${accountId}, ${human}, 'active', ${workspaceId}, 'member')`;
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe(human);
+    expect(claims!.authorityEpoch).toBe(1);
+
+    // A suspended organization membership is a live revocation: degrade.
+    await admin`
+      update organization_memberships set status = 'suspended'
+      where account_id = ${accountId} and subject_id = ${human}`;
+    const suspended = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: human,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(suspended).toBeNull();
+  }, 60_000);
+
+  test("0281 — a delegated token-borne user grant keeps its route authorization (no rows to re-check)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const delegatedHuman = `user:${crypto.randomUUID()}`;
+
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        resourceSubjectId: delegatedHuman,
+        resourceSubjectDelegated: true,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
+    expect(mint).not.toBeNull();
+    const claims = await verifyStreamToken(SECRET, mint!.token);
+    expect(claims!.subjectId).toBe(delegatedHuman);
+    expect(claims!.authorityEpoch).toBe(1);
+  }, 60_000);
+
   test("0281 — an API-key principal keeps its route authorization; the token still pins the authority epoch", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
