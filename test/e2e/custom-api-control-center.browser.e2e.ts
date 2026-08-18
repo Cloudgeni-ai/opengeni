@@ -360,7 +360,7 @@ describe("custom API control center browser acceptance", () => {
       expect(box?.height ?? 0).toBeLessThanOrEqual(844);
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
-        path: `${evidenceDir}pass-8-mobile-permission-forced-colors.png`,
+        path: `${evidenceDir}pass-7-mobile-permission-forced-colors.png`,
         fullPage: true,
       });
 
