@@ -128,7 +128,10 @@ describe("migration 0285 tenancy inventory", () => {
     } finally {
       await blank.release();
     }
-  });
+    // Explicit timeout: this replays the WHOLE migration chain against a blank
+    // database (no template clone), which already exceeds bun's 5s default on a
+    // loaded machine and grows with every migration added after 0285.
+  }, 180_000);
 
   test("counts the legacy populations for exactly the requested organization", async () => {
     if (!available) return;
