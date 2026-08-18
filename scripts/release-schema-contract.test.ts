@@ -522,7 +522,9 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0284_truthful_human_confirmed_review_reason.sql")) {
-        return includesActivation ? "1e752e5d61ead8b60309ea52f47125b8b9af586fc85e452a5ab488b24f157a27" : "3020e929f041038334ce80d0cdafb6449ab89cfd83242d14726a340015bfc6b5";
+        return includesActivation
+          ? "1e752e5d61ead8b60309ea52f47125b8b9af586fc85e452a5ab488b24f157a27"
+          : "3020e929f041038334ce80d0cdafb6449ab89cfd83242d14726a340015bfc6b5";
       }
       if (migrations.has("0283_editable_spreadsheet_authored_state.sql")) {
         return includesActivation
