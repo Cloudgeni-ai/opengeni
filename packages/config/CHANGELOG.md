@@ -1,5 +1,12 @@
 # @opengeni/config
 
+## 0.16.8
+
+### Patch Changes
+
+- Updated dependencies [edd2b12]
+  - @opengeni/contracts@1.4.0
+
 ## 0.16.7
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 1.4.0
+
+### Minor Changes
+
+- edd2b12: Raise the durable per-session system-instruction limit from 32768 to 65536 characters across the public and first-party MCP contracts.
+
 ## 1.3.0
 
 ### Minor Changes
