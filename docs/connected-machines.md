@@ -142,8 +142,13 @@ Rules to keep in mind:
   available for context, but the platform never `git clone`s onto the user's
   real filesystem — the machine uses its own git auth.
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
-  target the backend is the machine itself, so leave it off (or `"none"`) and
-  point at the machine with `targetSandboxId`.
+  target the backend is the machine itself, so leave it off and point at the
+  machine with `targetSandboxId`.
+- **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
+  machine-primary home**, even when the parent is `backend: none`. Omitted
+  `sandbox` still shares the creator's box only when no machine is named.
+  Explicit `sandbox: "shared"` or `{ groupId }` plus a machine target is a
+  **422**.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
