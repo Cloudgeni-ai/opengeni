@@ -522,9 +522,12 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0289_confirm_time_rule_rebaseline.sql")) {
+        return includesActivation ? "2f9f15d09983b852d4a648f5392cb005ccdd34f133e000ccddf0764740e989af" : "abfa6253daf2698a65ac87a95b44d9f998680374852d23358d374f2b235fa058";
+      }
+      if (migrations.has("0288_attached_browser_reenrollment.sql")) {
         return includesActivation
-          ? "688559799d0019b3342811911721b3ec43e74c0191e36427fd73a4d71c9c93ff"
-          : "e8ab4c8c9fa12ac6c7bd1e29872c97a82f3deb1277dae096fe229cc5ed5bbc40";
+          ? "7bf8653b2dd42c53ac011274a9df81d60d0545020252c2492c8dbc55f7c62cfb"
+          : "dc3a44166456c5a19a42b9d6d98a83730ff08c4322e9d830a1dbcdf517788ce6";
       }
       if (migrations.has("0287_open_suffix_pending_tool_calls.sql")) {
         return includesActivation
@@ -1026,6 +1029,7 @@ describe("release schema contract", () => {
         (migrations.has("0285_organization_tenancy_inventory.sql") ? 1 : 0) +
         (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0) +
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
+        (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
         (migrations.has("0289_confirm_time_rule_rebaseline.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
@@ -1063,40 +1067,42 @@ describe("release schema contract", () => {
     expect(contract.latestMigration).toBe(
       migrations.has("0289_confirm_time_rule_rebaseline.sql")
         ? "0289_confirm_time_rule_rebaseline.sql"
-        : migrations.has("0287_open_suffix_pending_tool_calls.sql")
-          ? "0287_open_suffix_pending_tool_calls.sql"
-          : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
-            ? "0286_widen_task_note_expiry_ceiling.sql"
-            : migrations.has("0285_organization_tenancy_inventory.sql")
-              ? "0285_organization_tenancy_inventory.sql"
-              : migrations.has("0284_truthful_human_confirmed_review_reason.sql")
-                ? "0284_truthful_human_confirmed_review_reason.sql"
-                : migrations.has("0283_editable_spreadsheet_authored_state.sql")
-                  ? "0283_editable_spreadsheet_authored_state.sql"
-                  : migrations.has("0282_variable_set_session_attach_attribution.sql")
-                    ? "0282_variable_set_session_attach_attribution.sql"
-                    : migrations.has("0281_viewer_holder_authority_claims.sql")
-                      ? "0281_viewer_holder_authority_claims.sql"
-                      : migrations.has("0280_connection_and_variable_set_audit_attribution.sql")
-                        ? "0280_connection_and_variable_set_audit_attribution.sql"
-                        : migrations.has("0279_workspace_connection_use_lane.sql")
-                          ? "0279_workspace_connection_use_lane.sql"
-                          : migrations.has("0278_workspace_membership_removal_fencing.sql")
-                            ? "0278_workspace_membership_removal_fencing.sql"
-                            : migrations.has("0277_workspace_writer_authority_attribution.sql")
-                              ? "0277_workspace_writer_authority_attribution.sql"
-                              : migrations.has("0276_onboarding_proposal_initiating_human_guc.sql")
-                                ? "0276_onboarding_proposal_initiating_human_guc.sql"
-                                : migrations.has("0275_scheduled_connection_authority.sql")
-                                  ? "0275_scheduled_connection_authority.sql"
-                                  : migrations.has("0274_human_confirmed_knowledge_review.sql")
-                                    ? "0274_human_confirmed_knowledge_review.sql"
-                                    : migrations.has("0272_human_confirmed_learning_activation.sql")
-                                      ? "0272_human_confirmed_learning_activation.sql"
+        : migrations.has("0288_attached_browser_reenrollment.sql")
+          ? "0288_attached_browser_reenrollment.sql"
+          : migrations.has("0287_open_suffix_pending_tool_calls.sql")
+            ? "0287_open_suffix_pending_tool_calls.sql"
+            : migrations.has("0286_widen_task_note_expiry_ceiling.sql")
+              ? "0286_widen_task_note_expiry_ceiling.sql"
+              : migrations.has("0285_organization_tenancy_inventory.sql")
+                ? "0285_organization_tenancy_inventory.sql"
+                : migrations.has("0284_truthful_human_confirmed_review_reason.sql")
+                  ? "0284_truthful_human_confirmed_review_reason.sql"
+                  : migrations.has("0283_editable_spreadsheet_authored_state.sql")
+                    ? "0283_editable_spreadsheet_authored_state.sql"
+                    : migrations.has("0282_variable_set_session_attach_attribution.sql")
+                      ? "0282_variable_set_session_attach_attribution.sql"
+                      : migrations.has("0281_viewer_holder_authority_claims.sql")
+                        ? "0281_viewer_holder_authority_claims.sql"
+                        : migrations.has("0280_connection_and_variable_set_audit_attribution.sql")
+                          ? "0280_connection_and_variable_set_audit_attribution.sql"
+                          : migrations.has("0279_workspace_connection_use_lane.sql")
+                            ? "0279_workspace_connection_use_lane.sql"
+                            : migrations.has("0278_workspace_membership_removal_fencing.sql")
+                              ? "0278_workspace_membership_removal_fencing.sql"
+                              : migrations.has("0277_workspace_writer_authority_attribution.sql")
+                                ? "0277_workspace_writer_authority_attribution.sql"
+                                : migrations.has(
+                                      "0276_onboarding_proposal_initiating_human_guc.sql",
+                                    )
+                                  ? "0276_onboarding_proposal_initiating_human_guc.sql"
+                                  : migrations.has("0275_scheduled_connection_authority.sql")
+                                    ? "0275_scheduled_connection_authority.sql"
+                                    : migrations.has("0274_human_confirmed_knowledge_review.sql")
+                                      ? "0274_human_confirmed_knowledge_review.sql"
                                       : migrations.has(
-                                            "0271_company_brain_retrieval_only_default.sql",
+                                            "0272_human_confirmed_learning_activation.sql",
                                           )
-                                        ? "0271_company_brain_retrieval_only_default.sql"
+                                        ? "0272_human_confirmed_learning_activation.sql"
                                         : migrations.has(
                                               "0271_company_brain_retrieval_only_default.sql",
                                             )
@@ -1157,6 +1163,10 @@ describe("release schema contract", () => {
     );
     expect(migrations.get("0285_organization_tenancy_inventory.sql")).toMatchObject({
       sha256: "942c606d0d85064f427d2374aba9851c5c3087a49764b9f61bef76d3b8dac0f7",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0288_attached_browser_reenrollment.sql")).toMatchObject({
+      sha256: "a225b10590a065397ee35c810e6fb962e451b1745677ac4a0212431e60f2b3b6",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0283_editable_spreadsheet_authored_state.sql")).toMatchObject({

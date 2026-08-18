@@ -159,10 +159,25 @@ export async function reconcileAttachedBrowserInventory(
         let changed = false;
         for (const device of snapshot.devices) {
           const existing = byId.get(device.id);
+          let reclaimingRevokedEnrollment = false;
           if (existing && existing.enrollmentId !== input.enrollmentId) {
-            throw new AttachedBrowserInventoryConflictError(
-              "attached browser device id is already owned by another enrollment",
-            );
+            const [previousEnrollment] = await tx
+              .select({ status: schema.enrollments.status })
+              .from(schema.enrollments)
+              .where(
+                and(
+                  eq(schema.enrollments.id, existing.enrollmentId),
+                  eq(schema.enrollments.accountId, input.accountId),
+                  eq(schema.enrollments.workspaceId, input.workspaceId),
+                ),
+              )
+              .limit(1);
+            if (previousEnrollment?.status !== "revoked") {
+              throw new AttachedBrowserInventoryConflictError(
+                "attached browser device id is already owned by another active enrollment",
+              );
+            }
+            reclaimingRevokedEnrollment = true;
           }
           if (!existing) {
             await tx.insert(schema.attachedBrowserDevices).values({
@@ -189,10 +204,12 @@ export async function reconcileAttachedBrowserInventory(
             changed = true;
             continue;
           }
-          const materialChanged = !sameAnnouncement(existing, device);
+          const materialChanged =
+            reclaimingRevokedEnrollment || !sameAnnouncement(existing, device);
           await tx
             .update(schema.attachedBrowserDevices)
             .set({
+              enrollmentId: input.enrollmentId,
               name: device.name,
               profileLabel: device.profileLabel,
               browserName: device.browserName,
