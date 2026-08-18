@@ -939,6 +939,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // inert workflow client keeps both rows waiting so the browser can inspect
       // the exact server-authoritative order.
       await composer.fill("A second prompt queued from the composer");
+      await waitForComposerDraftText(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A second prompt queued from the composer",
+      );
       await composer.press("Enter");
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
       await queueChip.click();
@@ -1008,6 +1015,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
+      await waitForComposerDraftText(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A second prompt queued from the composer (edited)",
+      );
       await composer.press("Enter");
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
 
