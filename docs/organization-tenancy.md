@@ -520,7 +520,6 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
-<<<<<<< HEAD
 #### Variable Sets, Rigs, and Connected Machines need no data rewrite
 
 These three families are already terminally classified, and the phase D
@@ -575,7 +574,6 @@ matches zero rows and reports success on such a deployment, and only appears to
 work in the test harness, which migrates as a superuser for whom FORCE RLS never
 engages. Any future classification work on these tables must run behind the same
 kind of capability-claiming seam.
-=======
 **There is no "unclassified" count for Variable Sets, Rigs, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
@@ -610,7 +608,6 @@ tables - contrast the documents gate, whose
 `authority_kind = 'personal' AND authority_id IS NULL` names a genuine
 post-migration invariant violation (`documents_authority_chk`, 0258) and is
 therefore truthful and drainable.
->>>>>>> origin/main
 
 ### E. Validate
 
