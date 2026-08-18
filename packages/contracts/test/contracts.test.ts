@@ -52,6 +52,7 @@ import {
   SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
   SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
   SESSION_MCP_SERVERS_MAX,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   Session,
   SessionGoal,
   SessionRealtimeInboundEntry,
@@ -1162,19 +1163,19 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("rejects per-session instructions over the 32768-char cap", () => {
+  test("accepts 65536-character per-session instructions and rejects larger values", () => {
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "inspect repo",
-        instructions: "x".repeat(32769),
+        instructions: "x".repeat(SESSION_INSTRUCTIONS_MAX_CHARACTERS + 1),
       }),
     ).toThrow();
     // Exactly at the cap is accepted.
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      instructions: "x".repeat(32768),
+      instructions: "x".repeat(SESSION_INSTRUCTIONS_MAX_CHARACTERS),
     });
-    expect(payload.instructions?.length).toBe(32768);
+    expect(payload.instructions?.length).toBe(SESSION_INSTRUCTIONS_MAX_CHARACTERS);
   });
 
   test("rejects the removed turnInstructions request field", () => {

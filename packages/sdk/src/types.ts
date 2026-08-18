@@ -2378,7 +2378,7 @@ export type CreateSessionRequest = {
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
-  // user-visible timeline. Trimmed, non-empty, max 32768 chars.
+  // user-visible timeline. Trimmed, non-empty, max 65536 chars.
   instructions?: string | undefined;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole?: string | undefined;

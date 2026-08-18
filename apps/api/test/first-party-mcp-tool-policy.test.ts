@@ -5,6 +5,7 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   Permission,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
@@ -251,6 +252,11 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
+      expect(tool?.inputSchema).toMatchObject({
+        properties: {
+          instructions: { maxLength: SESSION_INSTRUCTIONS_MAX_CHARACTERS },
+        },
+      });
       for (const arguments_ of [
         { initialMessage: "bad cwd", workingDir: "/tmp" },
         {
