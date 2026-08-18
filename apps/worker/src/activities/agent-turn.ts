@@ -483,10 +483,7 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
-import {
-  interruptionCallIdsFromPause,
-  settleOpenSuffixResumeIfNeeded,
-} from "./open-suffix-resume";
+import { interruptionCallIdsFromPause, settleOpenSuffixResumeIfNeeded } from "./open-suffix-resume";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import {
   ChannelAPartialMutationError,
