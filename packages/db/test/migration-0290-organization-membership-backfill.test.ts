@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {
   createDb,
+  drainOrganizationMembershipBackfill,
   listOrganizationMembershipBackfillCandidates,
   runOrganizationMembershipBackfill,
   type Database,
@@ -55,8 +56,9 @@ afterAll(async () => {
 async function legacyOrganization(options?: {
   withLoginIdentity?: boolean;
   ownerRole?: string;
+  userId?: string;
 }): Promise<{ organizationId: string; workspaceId: string; userId: string; subjectId: string }> {
-  const userId = crypto.randomUUID();
+  const userId = options?.userId ?? crypto.randomUUID();
   const subjectId = `user:${userId}`;
   if (options?.withLoginIdentity !== false) {
     await admin`
@@ -250,19 +252,22 @@ describe("migration 0290 organization membership backfill", () => {
   test("a subject without an owner-role workspace membership is unresolved", async () => {
     if (!available) return;
     const legacy = await legacyOrganization({ ownerRole: "member" });
-    const candidates = await listOrganizationMembershipBackfillCandidates(db, {
+    const page = await listOrganizationMembershipBackfillCandidates(db, {
       organizationId: legacy.organizationId,
       limit: 25,
     });
-    expect(candidates).toEqual([
-      {
-        subjectId: legacy.subjectId,
-        resolution: "unresolved",
-        reasonCode: "missing_owner_workspace_membership",
-        organizationMembershipId: null,
-        personalWorkspaceId: null,
-      },
-    ]);
+    expect(page).toEqual({
+      nextCursor: null,
+      candidates: [
+        {
+          subjectId: legacy.subjectId,
+          resolution: "unresolved",
+          reasonCode: "missing_owner_workspace_membership",
+          organizationMembershipId: null,
+          personalWorkspaceId: null,
+        },
+      ],
+    });
     await runOrganizationMembershipBackfill(db, {
       organizationId: legacy.organizationId,
       limit: 25,
@@ -396,12 +401,254 @@ describe("migration 0290 organization membership backfill", () => {
       dryRun: true,
     });
     expect(bounded.counts.inspected).toBe(2);
+    // A bounded pass that did not reach the end hands back the cursor that
+    // resumes it - the whole reason repeated passes converge.
+    expect(bounded.startCursor).toBeNull();
+    expect(bounded.nextCursor).toBe(bounded.candidates[1]!.subjectId);
     const full = await runOrganizationMembershipBackfill(db, {
       organizationId: legacy.organizationId,
       limit: 25,
       dryRun: true,
     });
     expect(full.counts.inspected).toBe(5);
+    // A pass that saw the whole stream reports no cursor: that is what stops
+    // a drain instead of it re-reading one window forever.
+    expect(full.nextCursor).toBeNull();
+  }, 180_000);
+
+  test("repeated passes reach a subject that sorts behind the whole --limit window", async () => {
+    if (!available) return;
+    // The exact non-convergence shape: MORE subjects than --limit, with the one
+    // subject that is actually provisionable sorting LAST. A fixed `limit`
+    // window with no cursor returns the same first two subjects on every pass,
+    // so the owner is never even inspected, let alone provisioned.
+    const tag = `t${crypto.randomUUID().replaceAll("-", "")}`;
+    const ownerUserId = `${tag}zzz00`;
+    const legacy = await legacyOrganization({ userId: ownerUserId });
+    const extraSubjects: string[] = [];
+    for (let index = 0; index < 7; index += 1) {
+      const extraId = `${tag}aaa${String(index).padStart(2, "0")}`;
+      extraSubjects.push(`user:${extraId}`);
+      await admin`
+        insert into auth_users (id, name, email)
+        values (${extraId}, 'extra', ${`${extraId}@example.test`})`;
+      await admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${legacy.organizationId}, ${legacy.workspaceId}, ${`user:${extraId}`}, 'member')`;
+    }
+    const everySubject = [...extraSubjects, legacy.subjectId].sort();
+    expect(everySubject[everySubject.length - 1]).toBe(legacy.subjectId);
+
+    // Non-vacuity: with --limit 2 the owner is genuinely outside the first
+    // window, so this test can only pass if the cursor actually advances.
+    const firstWindow = await runOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: true,
+    });
+    expect(firstWindow.candidates.map((candidate) => candidate.subjectId)).not.toContain(
+      legacy.subjectId,
+    );
+    expect(firstWindow.nextCursor).not.toBeNull();
+
+    // Chained bounded passes: strictly increasing, disjoint, and complete.
+    const windows: string[][] = [];
+    let cursor: string | null = null;
+    for (let pass = 0; pass < 20; pass += 1) {
+      const report: Awaited<ReturnType<typeof runOrganizationMembershipBackfill>> =
+        await runOrganizationMembershipBackfill(db, {
+          organizationId: legacy.organizationId,
+          limit: 2,
+          dryRun: true,
+          afterSubjectId: cursor,
+        });
+      expect(report.startCursor).toBe(cursor);
+      expect(report.counts.inspected).toBeLessThanOrEqual(2);
+      windows.push(report.candidates.map((candidate) => candidate.subjectId));
+      cursor = report.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    const walked = windows.flat();
+    expect(walked).toEqual(everySubject);
+    expect(new Set(walked).size).toBe(walked.length);
+    expect(windows.length).toBeGreaterThan(1);
+
+    // And the write path converges the same way: one drain provisions the
+    // owner that a fixed window could never have reached.
+    const drain = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: false,
+    });
+    expect(drain.drained).toBe(true);
+    expect(drain.lastCursor).toBeNull();
+    expect(drain.counts).toMatchObject({ inspected: 8, provisioned: 1, failed: 0 });
+    // The seven access-only humans are recorded, never guessed.
+    expect(drain.unresolved).toHaveLength(7);
+    const anchors = await anchorRows(legacy.organizationId);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]!.subject_id).toBe(legacy.subjectId);
+    expect(anchors[0]!.personal_workspace_id).not.toBeNull();
+
+    // Idempotent: a second drain converges to already_anchored, provisions
+    // nothing, and still terminates.
+    const again = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: false,
+    });
+    expect(again.drained).toBe(true);
+    expect(again.counts).toMatchObject({
+      inspected: 8,
+      provisioned: 0,
+      alreadyAnchored: 1,
+      failed: 0,
+    });
+    expect(await anchorRows(legacy.organizationId)).toHaveLength(1);
+  }, 180_000);
+
+  test("a membership-only subject behind the window is never starved by workspace access", async () => {
+    if (!available) return;
+    // Population 2 (an anchor with no personal workspace and no workspace
+    // access at all) sorts behind a full --limit window of population 1. The
+    // old merge took `sort().slice(0, limit)` over a set already at `limit`,
+    // which dropped this subject on every pass forever.
+    const tag = `t${crypto.randomUUID().replaceAll("-", "")}`;
+    const legacy = await legacyOrganization({ userId: `${tag}zzz00` });
+    for (let index = 0; index < 4; index += 1) {
+      const extraId = `${tag}aaa${String(index).padStart(2, "0")}`;
+      await admin`
+        insert into auth_users (id, name, email)
+        values (${extraId}, 'extra', ${`${extraId}@example.test`})`;
+      await admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${legacy.organizationId}, ${legacy.workspaceId}, ${`user:${extraId}`}, 'member')`;
+    }
+    const pendingUserId = `${tag}mmm00`;
+    const pendingSubject = `user:${pendingUserId}`;
+    await admin`
+      insert into auth_users (id, name, email)
+      values (${pendingUserId}, 'pending', ${`${pendingUserId}@example.test`})`;
+    await admin`
+      select set_config('opengeni.organization_tenancy_lifecycle', 'managed_human_provisioning', false)`;
+    const [pendingAnchor] = await admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, status, role)
+      values (${legacy.organizationId}, ${pendingSubject}, 'provisioning', 'member')
+      returning id`;
+    await admin`select set_config('opengeni.organization_tenancy_lifecycle', '', false)`;
+
+    // Non-vacuity: the first --limit 2 window is pure population 1, so the
+    // membership-only subject is provably outside it.
+    const firstWindow = await runOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: true,
+    });
+    expect(firstWindow.candidates.map((candidate) => candidate.subjectId)).toEqual([
+      `user:${tag}aaa00`,
+      `user:${tag}aaa01`,
+    ]);
+
+    const seen: Array<{ subjectId: string; organizationMembershipId: string | null }> = [];
+    let cursor: string | null = null;
+    for (let pass = 0; pass < 20; pass += 1) {
+      const report: Awaited<ReturnType<typeof runOrganizationMembershipBackfill>> =
+        await runOrganizationMembershipBackfill(db, {
+          organizationId: legacy.organizationId,
+          limit: 2,
+          dryRun: true,
+          afterSubjectId: cursor,
+        });
+      for (const candidate of report.candidates) {
+        seen.push({
+          subjectId: candidate.subjectId,
+          organizationMembershipId: candidate.organizationMembershipId,
+        });
+      }
+      cursor = report.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    expect(seen.map((entry) => entry.subjectId)).toEqual(
+      [`user:${tag}aaa00`, `user:${tag}aaa01`, `user:${tag}aaa02`, `user:${tag}aaa03`,
+        pendingSubject, legacy.subjectId].sort(),
+    );
+    expect(seen.find((entry) => entry.subjectId === pendingSubject)).toEqual({
+      subjectId: pendingSubject,
+      organizationMembershipId: pendingAnchor!.id,
+    });
+  }, 180_000);
+
+  test("a walk stopped by --max-passes resumes exactly where it stopped", async () => {
+    if (!available) return;
+    const tag = `t${crypto.randomUUID().replaceAll("-", "")}`;
+    const legacy = await legacyOrganization({ userId: `${tag}zzz00` });
+    for (let index = 0; index < 5; index += 1) {
+      const extraId = `${tag}aaa${String(index).padStart(2, "0")}`;
+      await admin`
+        insert into auth_users (id, name, email)
+        values (${extraId}, 'extra', ${`${extraId}@example.test`})`;
+      await admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${legacy.organizationId}, ${legacy.workspaceId}, ${`user:${extraId}`}, 'member')`;
+    }
+    const stopped = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: true,
+      maxPasses: 2,
+    });
+    expect(stopped).toMatchObject({ passes: 2, drained: false });
+    expect(stopped.counts.inspected).toBe(4);
+    expect(stopped.lastCursor).toBe(`user:${tag}aaa03`);
+
+    const resumed = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 2,
+      dryRun: true,
+      afterSubjectId: stopped.lastCursor,
+    });
+    expect(resumed.drained).toBe(true);
+    expect(resumed.counts.inspected).toBe(2);
+  }, 180_000);
+
+  test("the enumeration seam rejects a cursor that is not a user subject", async () => {
+    if (!available) return;
+    const legacy = await legacyOrganization();
+    let driverFailure: unknown = null;
+    try {
+      await listOrganizationMembershipBackfillCandidates(db, {
+        organizationId: legacy.organizationId,
+        limit: 25,
+        afterSubjectId: "api_key:nope",
+      });
+    } catch (error) {
+      driverFailure = error;
+    }
+    expect(String(driverFailure)).toContain("cursor must be a 'user:' subject id");
+
+    // The SQL seam refuses it independently of the driver's own guard.
+    let seamFailure: unknown = null;
+    try {
+      await withRlsContext(
+        db,
+        { accountId: legacy.organizationId, workspaceId: null },
+        async (scopedDb) => {
+          await rawRows(
+            scopedDb,
+            sql`select list_organization_memberships_without_personal_workspace(
+              ${legacy.organizationId}, 25, ${"api_key:nope"}::text
+            )`,
+          );
+        },
+      );
+    } catch (error) {
+      seamFailure = error;
+    }
+    expect(seamFailure).not.toBeNull();
+    const cause = (seamFailure as { cause?: { message?: string } }).cause;
+    expect(cause?.message ?? String(seamFailure)).toContain("membership backfill cursor is invalid");
   }, 180_000);
 
   test("the enumeration seam rejects a cross-organization scope", async () => {

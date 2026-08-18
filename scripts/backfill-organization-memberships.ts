@@ -8,10 +8,16 @@
 //   bun run db:backfill-organization-memberships --organization-id <uuid> --dry-run
 //   bun run db:backfill-organization-memberships --organization-id <uuid> --limit 25
 //
+// `--limit` bounds ONE pass; the command walks the whole organization by
+// chaining bounded passes on a keyset cursor until the ordered subject stream
+// is exhausted, so a run genuinely converges instead of re-reading the first
+// `--limit` subjects. `--max-passes` (default 1000) is a safety stop: a run
+// that hits it reports `drained: false` plus the `lastCursor` that resumes it.
+//
 // Every candidate this command cannot resolve from deterministic evidence is
 // reported unresolved with a reason code and left completely untouched.
 import { dbSearchPath, getSettings } from "@opengeni/config";
-import { createDb, runOrganizationMembershipBackfill, type DbClient } from "@opengeni/db";
+import { createDb, drainOrganizationMembershipBackfill, type DbClient } from "@opengeni/db";
 
 function argument(name: string): string | null {
   const index = process.argv.indexOf(name);
@@ -28,6 +34,12 @@ async function main(): Promise<void> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new Error("--limit must be an integer from 1 to 100");
   }
+  const rawMaxPasses = argument("--max-passes") ?? "1000";
+  const maxPasses = Number(rawMaxPasses);
+  if (!Number.isInteger(maxPasses) || maxPasses < 1) {
+    throw new Error("--max-passes must be a positive integer");
+  }
+  const afterSubjectId = argument("--after-subject-id");
   const dryRun = process.argv.includes("--dry-run");
   const settings = getSettings();
   const searchPath = dbSearchPath(settings);
@@ -37,10 +49,12 @@ async function main(): Promise<void> {
     max: 2,
   });
   try {
-    const report = await runOrganizationMembershipBackfill(client.db, {
+    const report = await drainOrganizationMembershipBackfill(client.db, {
       organizationId,
       limit,
       dryRun,
+      maxPasses,
+      ...(afterSubjectId ? { afterSubjectId } : {}),
     });
     console.log(JSON.stringify(report, null, 2));
     if (report.counts.failed > 0) process.exitCode = 1;

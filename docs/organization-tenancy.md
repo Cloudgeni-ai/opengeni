@@ -522,7 +522,8 @@ cross-organization request.
 
 The membership and personal-workspace half of the phase is the operator command
 `bun run db:backfill-organization-memberships --organization-id <uuid>`
-(`--dry-run`, `--limit`, default 25, max 100). It drains exactly two of those
+(`--dry-run`, `--limit`, default 25, max 100, `--max-passes`, default 1000,
+`--after-subject-id`). It drains exactly two of those
 counts - `workspaceMemberSubjectsWithoutMembershipAnchor` (humans who held
 workspace access before 0219 and never re-authenticated afterwards, so the
 managed-access hook never provisioned them) and
@@ -535,7 +536,7 @@ the Better Auth managed-access hook calls, over 0219's
 driver holds no authority logic and writes no organization-tenancy table
 directly. Migration 0290 adds only the read-only enumeration it was missing -
 `list_organization_membership_backfill_anchors(uuid, text[])` and
-`list_organization_memberships_without_personal_workspace(uuid, integer)` -
+`list_organization_memberships_without_personal_workspace(uuid, integer, text)` -
 because `organization_memberships` is FORCE RLS with zero direct application
 privileges. Both are strictly read-only definer seams over an exact
 organization scope; the new `organization_membership_backfill` lifecycle marker
@@ -561,9 +562,22 @@ never inferring authority rather than a limitation to work around.
 Each candidate is claimed independently with `FOR UPDATE SKIP LOCKED` on its
 exact owner workspace membership and provisioned in its own transaction, so the
 command is idempotent, resumable, and safe to run repeatedly and concurrently: a
-held claim is reported `contended` and picked up by the next pass, never blocked
+held claim is reported `contended` and picked up by a later run, never blocked
 on and never double-provisioned. `--dry-run` classifies and writes nothing at
-all. Durable receipt/unresolved-ledger persistence is the separate backfill
+all.
+
+`--limit` bounds **one pass**, and a pass is a **keyset window**, not a fixed
+one. Both populations are ordered by `subject_id`, each is read `limit`-deep
+from the same exclusive cursor, and the merged window is therefore a true
+prefix of the merged ordered stream - so neither population can starve the
+other, and the pass hands back the `nextCursor` that resumes it. One command
+invocation chains those passes until the stream is exhausted (`drained: true`,
+`lastCursor: null`), bounded by `--max-passes`; a run stopped by that bound
+reports `drained: false` and the `lastCursor` that `--after-subject-id`
+resumes. This is what makes repeated runs *converge*: a subject the driver
+cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
+over an organization with more than `n` `user:`-kind subjects would return the
+same first `n` rows on every pass and never reach subject `n + 1` at all. Durable receipt/unresolved-ledger persistence is the separate backfill
 ledger slice; today the command's structured JSON report is the operator record.
 
 ### E. Validate

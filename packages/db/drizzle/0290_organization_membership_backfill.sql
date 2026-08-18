@@ -134,9 +134,18 @@ $body$;
 -- organizationMemberships.activeWithoutPersonalWorkspace; this returns the
 -- exact bounded, deterministically ordered subjects behind that count so the
 -- driver can converge them through the same lifecycle seam.
+--
+-- p_after_subject_id is the resumable keyset cursor. Without it a bounded pass
+-- would return the same first p_limit subjects forever, so an organization
+-- whose first p_limit rows cannot be resolved from deterministic evidence
+-- (they stay in this population permanently) would starve every subject behind
+-- them. The cursor is strictly exclusive and the ordering is the same
+-- subject_id ordering the driver merges on, so repeated passes walk the whole
+-- population exactly once instead of re-reading one window.
 CREATE OR REPLACE FUNCTION list_organization_memberships_without_personal_workspace(
   p_organization_id uuid,
-  p_limit integer DEFAULT 25
+  p_limit integer DEFAULT 25,
+  p_after_subject_id text DEFAULT NULL
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -163,6 +172,16 @@ BEGIN
     RAISE EXCEPTION 'membership backfill limit must be 1..100'
       USING ERRCODE = '22023';
   END IF;
+  IF p_after_subject_id IS NOT NULL
+    AND (
+      p_after_subject_id <> pg_catalog.btrim(p_after_subject_id)
+      OR pg_catalog.length(p_after_subject_id) NOT BETWEEN 1 AND 1024
+      OR p_after_subject_id NOT LIKE 'user:%'
+    )
+  THEN
+    RAISE EXCEPTION 'membership backfill cursor is invalid'
+      USING ERRCODE = '22023';
+  END IF;
 
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle',
@@ -182,6 +201,10 @@ BEGIN
     WHERE candidate.account_id = p_organization_id
       AND candidate.personal_workspace_id IS NULL
       AND candidate.status IN ('active', 'provisioning')
+      AND (
+        p_after_subject_id IS NULL
+        OR candidate.subject_id > p_after_subject_id
+      )
     ORDER BY candidate.subject_id
     LIMIT p_limit
   ) pending;
@@ -212,7 +235,7 @@ BEGIN
     data_schema, data_schema
   );
   EXECUTE format(
-    'ALTER FUNCTION %I.list_organization_memberships_without_personal_workspace(uuid,integer) '
+    'ALTER FUNCTION %I.list_organization_memberships_without_personal_workspace(uuid,integer,text) '
       || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
@@ -222,14 +245,14 @@ $membership_backfill_search_path$;
 REVOKE ALL ON FUNCTION
   list_organization_membership_backfill_anchors(uuid, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION
-  list_organization_memberships_without_personal_workspace(uuid, integer) FROM PUBLIC;
+  list_organization_memberships_without_personal_workspace(uuid, integer, text) FROM PUBLIC;
 DO $membership_backfill_grant$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT EXECUTE ON FUNCTION
       list_organization_membership_backfill_anchors(uuid, text[]) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
-      list_organization_memberships_without_personal_workspace(uuid, integer) TO opengeni_app;
+      list_organization_memberships_without_personal_workspace(uuid, integer, text) TO opengeni_app;
   END IF;
 END
 $membership_backfill_grant$;

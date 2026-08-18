@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0290_organization_membership_backfill.sql")) {
         return includesActivation
-          ? "1eb2902f582e77c1f8f350f9d21a5d78b10bb6cbc50ad42a9c3e52914e25f9eb"
-          : "7d7035ea98fab185118534d04d1e953f01f3fc15617c236bc38f573bf8ff9e5e";
+          ? "dc10c02d5a80cbe4e7333ad59ba44e469dfd3c1a9c28c512088aa05db6591b34"
+          : "5a5bf4ccc99d2c6c4964f40e25a5bd9a42e71302aea5948da808af76a8c9cbe3";
       }
       if (migrations.has("0288_attached_browser_reenrollment.sql")) {
         return includesActivation

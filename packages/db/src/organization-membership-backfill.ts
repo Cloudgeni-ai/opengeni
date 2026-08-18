@@ -32,6 +32,18 @@
  *    neither double-provisions; the seam's own row locks are the final
  *    authority. Running the command again converges rather than duplicating,
  *    and `--dry-run` writes nothing at all.
+ *
+ * 4. **A bounded pass is a keyset window, never a fixed window.** Both
+ *    populations are ordered by `subject_id`, and a pass reads only subjects
+ *    strictly greater than `afterSubjectId`. This is what makes repeated passes
+ *    *converge* rather than re-read: a subject the driver cannot resolve stays
+ *    in its population forever (a missing login identity is not going to
+ *    appear because we looked again), so a fixed `LIMIT n` window over an
+ *    organization with more than `n` subjects would return the same first `n`
+ *    rows on every pass and never reach subject `n + 1`. Each source is read
+ *    `limit`-deep from the same cursor before the merge, so the merged window
+ *    is a true prefix of the merged ordered stream and one population can
+ *    never starve the other.
  */
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
@@ -89,19 +101,53 @@ export type OrganizationMembershipBackfillOutcome =
   | { subjectId: string; outcome: "contended" }
   | { subjectId: string; outcome: "failed"; reasonCode: string };
 
+export type OrganizationMembershipBackfillCounts = {
+  inspected: number;
+  provisioned: number;
+  alreadyAnchored: number;
+  unresolved: number;
+  contended: number;
+  failed: number;
+};
+
 export type OrganizationMembershipBackfillReport = {
   organizationId: string;
   dryRun: boolean;
+  /** The exclusive keyset cursor this pass started after (`null` = from the
+   *  beginning of the ordered subject stream). */
+  startCursor: string | null;
+  /** Feed this back as `afterSubjectId` to continue. `null` means this pass
+   *  reached the end of the ordered stream: the organization is drained. */
+  nextCursor: string | null;
   candidates: OrganizationMembershipBackfillCandidate[];
   results: OrganizationMembershipBackfillOutcome[];
-  counts: {
-    inspected: number;
-    provisioned: number;
-    alreadyAnchored: number;
-    unresolved: number;
-    contended: number;
-    failed: number;
-  };
+  counts: OrganizationMembershipBackfillCounts;
+};
+
+/** One full walk of an organization: repeated bounded passes, cursor-chained. */
+export type OrganizationMembershipBackfillDrainReport = {
+  organizationId: string;
+  dryRun: boolean;
+  limit: number;
+  passes: number;
+  /** True when the walk reached the end of the ordered stream. False only when
+   *  `maxPasses` stopped it first, and then `lastCursor` resumes it. */
+  drained: boolean;
+  lastCursor: string | null;
+  counts: OrganizationMembershipBackfillCounts;
+  unresolved: Array<{
+    subjectId: string;
+    reasonCode: OrganizationMembershipBackfillUnresolvedReason;
+  }>;
+  /** Claimed by a peer run during this walk. Not a failure and not skipped
+   *  work: re-running the command from the start converges them. */
+  contended: string[];
+  failed: Array<{ subjectId: string; reasonCode: string }>;
+};
+
+export type OrganizationMembershipBackfillPage = {
+  candidates: OrganizationMembershipBackfillCandidate[];
+  nextCursor: string | null;
 };
 
 type AnchorRow = {
@@ -128,18 +174,38 @@ function textArray(values: readonly string[]) {
       )}]::text[]`;
 }
 
+function assertCursor(afterSubjectId: string | null | undefined): string | null {
+  if (afterSubjectId === null || afterSubjectId === undefined) return null;
+  if (
+    afterSubjectId !== afterSubjectId.trim() ||
+    afterSubjectId.length < 1 ||
+    afterSubjectId.length > 1024 ||
+    !afterSubjectId.startsWith(SUBJECT_PREFIX)
+  ) {
+    throw new Error("Organization membership backfill cursor must be a 'user:' subject id");
+  }
+  return afterSubjectId;
+}
+
 /**
- * Enumerate the bounded, deterministically ordered backfill candidate set for
- * one organization and classify each one. Strictly read-only: safe to call
- * repeatedly, and the exact query `--dry-run` reports.
+ * Enumerate one bounded, deterministically ordered, keyset-paged backfill
+ * candidate window for one organization and classify each candidate. Strictly
+ * read-only: safe to call repeatedly, and the exact query `--dry-run` reports.
+ *
+ * The window is the first `limit` subjects strictly greater than
+ * `afterSubjectId` in the merge of both populations. `nextCursor` is the last
+ * subject of that window when more may remain, and `null` once the stream is
+ * exhausted - which is the only thing that makes repeated passes terminate on
+ * a drained organization instead of re-reading one window forever.
  */
 export async function listOrganizationMembershipBackfillCandidates(
   db: Database,
-  input: { organizationId: string; limit: number },
-): Promise<OrganizationMembershipBackfillCandidate[]> {
+  input: { organizationId: string; limit: number; afterSubjectId?: string | null },
+): Promise<OrganizationMembershipBackfillPage> {
   if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) {
     throw new Error("Organization membership backfill limit must be an integer from 1 to 100");
   }
+  const afterSubjectId = assertCursor(input.afterSubjectId);
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
@@ -160,6 +226,7 @@ export async function listOrganizationMembershipBackfillCandidates(
            and workspace.account_id = access.account_id
           where access.account_id = ${input.organizationId}
             and access.subject_id like ${`${SUBJECT_PREFIX}%`}
+            and (${afterSubjectId}::text is null or access.subject_id > ${afterSubjectId}::text)
           group by access.subject_id
           order by access.subject_id
           limit ${input.limit}
@@ -176,7 +243,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         scopedDb,
         sql`
           select list_organization_memberships_without_personal_workspace(
-            ${input.organizationId}, ${input.limit}
+            ${input.organizationId}, ${input.limit}, ${afterSubjectId}::text
           ) as result
         `,
       );
@@ -191,8 +258,22 @@ export async function listOrganizationMembershipBackfillCandidates(
         }
       }
 
-      const subjectIds = [...ownerMembershipBySubject.keys()].sort().slice(0, input.limit);
-      if (subjectIds.length === 0) return [];
+      // Both sources were read `limit`-deep from the SAME cursor, so the first
+      // `limit` of their sorted union is exactly the first `limit` of the
+      // merged ordered stream: anything the slice drops sorts strictly after
+      // the kept tail and is reached by the next pass under `nextCursor`.
+      // Neither population can therefore starve the other.
+      const merged = [...ownerMembershipBySubject.keys()].sort();
+      const subjectIds = merged.slice(0, input.limit);
+      // More may remain when the merge was truncated, or when either source
+      // filled its own window (there may be a `limit + 1`-th row behind it).
+      const mayHaveMore =
+        merged.length > input.limit ||
+        accessRows.length >= input.limit ||
+        pendingRows.length >= input.limit;
+      const nextCursor =
+        mayHaveMore && subjectIds.length > 0 ? subjectIds[subjectIds.length - 1]! : null;
+      if (subjectIds.length === 0) return { candidates: [], nextCursor: null };
 
       // Owner-role proof for any subject that entered only through population 2.
       const missingOwnerProof = subjectIds.filter(
@@ -252,7 +333,7 @@ export async function listOrganizationMembershipBackfillCandidates(
       );
       const organization = organizationRows[0] ?? null;
 
-      return subjectIds.map((subjectId): OrganizationMembershipBackfillCandidate => {
+      const candidates = subjectIds.map((subjectId): OrganizationMembershipBackfillCandidate => {
         const anchor = anchorBySubject.get(subjectId) ?? null;
         if (anchor && (anchor.status === "suspended" || anchor.status === "revoked")) {
           return {
@@ -311,6 +392,7 @@ export async function listOrganizationMembershipBackfillCandidates(
           personalWorkspaceId: null,
         };
       });
+      return { candidates, nextCursor };
     },
   );
 }
@@ -370,14 +452,25 @@ export async function provisionOrganizationMembershipBackfillCandidate(
 /**
  * Run one bounded backfill pass over an organization. Safe to run repeatedly
  * and concurrently; `dryRun` inspects and classifies without writing anything.
+ *
+ * One pass is one keyset window. Chain `report.nextCursor` back in as
+ * `afterSubjectId` to walk the whole organization, or call
+ * `drainOrganizationMembershipBackfill` which does exactly that.
  */
 export async function runOrganizationMembershipBackfill(
   db: Database,
-  input: { organizationId: string; limit: number; dryRun: boolean },
+  input: {
+    organizationId: string;
+    limit: number;
+    dryRun: boolean;
+    afterSubjectId?: string | null;
+  },
 ): Promise<OrganizationMembershipBackfillReport> {
-  const candidates = await listOrganizationMembershipBackfillCandidates(db, {
+  const startCursor = assertCursor(input.afterSubjectId);
+  const { candidates, nextCursor } = await listOrganizationMembershipBackfillCandidates(db, {
     organizationId: input.organizationId,
     limit: input.limit,
+    afterSubjectId: startCursor,
   });
   const results: OrganizationMembershipBackfillOutcome[] = [];
   for (const candidate of candidates) {
@@ -425,6 +518,8 @@ export async function runOrganizationMembershipBackfill(
   return {
     organizationId: input.organizationId,
     dryRun: input.dryRun,
+    startCursor,
+    nextCursor,
     candidates,
     results,
     counts: {
@@ -435,5 +530,84 @@ export async function runOrganizationMembershipBackfill(
       contended: countOf("contended"),
       failed: countOf("failed"),
     },
+  };
+}
+
+/**
+ * Walk an entire organization by chaining bounded passes on the keyset cursor
+ * until the ordered stream is exhausted.
+ *
+ * `maxPasses` is a safety stop, not the termination condition: a walk that hits
+ * it reports `drained: false` and a `lastCursor` that resumes it exactly where
+ * it stopped. Because the cursor is strictly increasing, this terminates on
+ * every organization - including one whose first `limit` subjects are all
+ * permanently unresolvable, which is precisely the shape a fixed window could
+ * never get past.
+ */
+export async function drainOrganizationMembershipBackfill(
+  db: Database,
+  input: {
+    organizationId: string;
+    limit: number;
+    dryRun: boolean;
+    maxPasses?: number;
+    afterSubjectId?: string | null;
+  },
+): Promise<OrganizationMembershipBackfillDrainReport> {
+  const maxPasses = input.maxPasses ?? 1000;
+  if (!Number.isInteger(maxPasses) || maxPasses < 1) {
+    throw new Error("Organization membership backfill maxPasses must be a positive integer");
+  }
+  const counts: OrganizationMembershipBackfillCounts = {
+    inspected: 0,
+    provisioned: 0,
+    alreadyAnchored: 0,
+    unresolved: 0,
+    contended: 0,
+    failed: 0,
+  };
+  const unresolved: OrganizationMembershipBackfillDrainReport["unresolved"] = [];
+  const contended: string[] = [];
+  const failed: OrganizationMembershipBackfillDrainReport["failed"] = [];
+  let cursor = assertCursor(input.afterSubjectId);
+  let passes = 0;
+  let drained = false;
+  while (passes < maxPasses) {
+    const report = await runOrganizationMembershipBackfill(db, {
+      organizationId: input.organizationId,
+      limit: input.limit,
+      dryRun: input.dryRun,
+      afterSubjectId: cursor,
+    });
+    passes += 1;
+    for (const key of Object.keys(counts) as Array<keyof OrganizationMembershipBackfillCounts>) {
+      counts[key] += report.counts[key];
+    }
+    for (const result of report.results) {
+      if (result.outcome === "unresolved") {
+        unresolved.push({ subjectId: result.subjectId, reasonCode: result.reasonCode });
+      } else if (result.outcome === "contended") {
+        contended.push(result.subjectId);
+      } else if (result.outcome === "failed") {
+        failed.push({ subjectId: result.subjectId, reasonCode: result.reasonCode });
+      }
+    }
+    cursor = report.nextCursor;
+    if (cursor === null) {
+      drained = true;
+      break;
+    }
+  }
+  return {
+    organizationId: input.organizationId,
+    dryRun: input.dryRun,
+    limit: input.limit,
+    passes,
+    drained,
+    lastCursor: cursor,
+    counts,
+    unresolved,
+    contended,
+    failed,
   };
 }
