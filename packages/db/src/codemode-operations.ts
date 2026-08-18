@@ -55,15 +55,6 @@ export class CodemodeToolApprovalRequiredError extends Error {
   }
 }
 
-export class CodemodeCallBudgetExceededError extends Error {
-  readonly code = "codemode_call_budget_exhausted";
-
-  constructor() {
-    super("Codemode call budget is exhausted for this turn");
-    this.name = "CodemodeCallBudgetExceededError";
-  }
-}
-
 export class CodemodePayloadTooLargeError extends Error {
   readonly code = "codemode_payload_too_large";
 
@@ -81,13 +72,12 @@ export type SubmitCodemodeOperationInput = {
   attemptId: string;
   executionGeneration: number;
   call: AttemptToolCallValue;
-  callLimit: number;
 };
 
 /**
  * Bind one caller-provided operation id to one exact catalog call. Duplicate
  * submission of identical bytes is free and returns the same row; repurposing
- * the id fails. Admission, budget reservation and insert share one turn lock.
+ * the id fails. Admission and insert share one turn lock.
  */
 export async function submitCodemodeOperation(
   db: Database,
@@ -120,7 +110,6 @@ export async function submitCodemodeOperation(
             status: schema.sessionTurns.status,
             activeAttemptId: schema.sessionTurns.activeAttemptId,
             executionGeneration: schema.sessionTurns.executionGeneration,
-            callCount: schema.sessionTurns.codemodeCallCount,
           })
           .from(schema.sessionTurns)
           .where(
@@ -141,10 +130,6 @@ export async function submitCodemodeOperation(
         ) {
           throw new CodemodeOperationNotExecutableError();
         }
-        if (!Number.isInteger(input.callLimit) || input.callLimit < 1) {
-          throw new CodemodeCallBudgetExceededError();
-        }
-        if (turn.callCount >= input.callLimit) throw new CodemodeCallBudgetExceededError();
 
         const [catalogRow] = await tx
           .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
@@ -179,25 +164,6 @@ export async function submitCodemodeOperation(
         if (catalogEntry.approval === "human") {
           throw new CodemodeToolApprovalRequiredError();
         }
-
-        const [counter] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            codemodeCallCount: sql`${schema.sessionTurns.codemodeCallCount} + 1`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.status, "running"),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
-              sql`${schema.sessionTurns.codemodeCallCount} < ${input.callLimit}`,
-            ),
-          )
-          .returning({ count: schema.sessionTurns.codemodeCallCount });
-        if (!counter) throw new CodemodeCallBudgetExceededError();
 
         const [created] = await tx
           .insert(schema.sessionAttemptCodemodeCalls)

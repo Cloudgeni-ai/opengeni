@@ -1069,7 +1069,6 @@ describe("sandbox preparation profiles", () => {
 
   test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
     const local = withEnv({}, () => getSettings());
-    expect(local.codemodeMaxCallsPerTurn).toBe(200);
     expect(local.ogtoolPackageSpec).toBeUndefined();
     expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
@@ -1079,13 +1078,12 @@ describe("sandbox preparation profiles", () => {
     const configured = withEnv(
       {
         OPENGENI_PRODUCT_ACCESS_MODE: "configured",
-        OPENGENI_CODEMODE_MAX_CALLS_PER_TURN: "17",
         OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
     );
-    expect(configured.codemodeMaxCallsPerTurn).toBe(17);
+    expect(configured.ogtoolPackageSpec).toBe("@opengeni/ogtool@0.1.0");
     expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",

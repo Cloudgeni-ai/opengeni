@@ -56,7 +56,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     delegationSecret: "test-delegation-secret",
     streamTokenSecret: undefined,
     streamControlEnabled: false,
-    codemodeMaxCallsPerTurn: 200,
     environmentsEncryptionKey: undefined,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,

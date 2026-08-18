@@ -50,12 +50,12 @@ cannot use this surface, and the Codemode bearer cannot use the ordinary MCP
 mount as a back door.
 
 The caller supplies a UUID operation id. The first valid submission atomically
-binds it to the exact request digest, reserves one turn budget slot, and creates
-a durable `queued` row. An identical submission is a free idempotent replay. The
-same id with different bytes is a conflict. Catalog absence, stale authority,
-unknown tools, approval-required tools, invalid payloads, and exhausted budgets
-fail before execution; approval-required tools must be called through the model
-path so the normal human approval lifecycle remains authoritative.
+binds it to the exact request digest and creates a durable `queued` row. An
+identical submission is a free idempotent replay. The same id with different
+bytes is a conflict. Catalog absence, stale authority, unknown tools,
+approval-required tools, and invalid payloads fail before execution;
+approval-required tools must be called through the model path so the normal
+human approval lifecycle remains authoritative.
 
 ## Dispatch and execution
 
