@@ -2,6 +2,7 @@ import {
   CompanyBrainGovernedWriteAttempt,
   REMEMBER_HUMAN_INPUT_SAVE_OPTION,
   REMEMBER_HUMAN_INPUT_SKIP_OPTION,
+  TASK_NOTE_MAX_LIFETIME_DAYS,
   RememberConfirmReceipt,
   RememberConfirmRequest,
   RememberReceipt,
@@ -228,7 +229,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
         operationId: derivedRememberOperationId(request.operationId, "note"),
         kind: "decision",
         text: request.content,
-        expiresInDays: 30,
+        expiresInDays: TASK_NOTE_MAX_LIFETIME_DAYS,
       });
       // A user-directed rule must bind to the exact current activation
       // baseline of its target; a workspace with an active head is the norm.
