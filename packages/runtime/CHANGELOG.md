@@ -1,5 +1,20 @@
 # @opengeni/runtime
 
+## 1.1.0
+
+### Minor Changes
+
+- 4c2d958: Scoped stream tokens (`ogs_`, 120 s TTL unchanged) now carry the authenticated viewer subject and the session's live authority epoch (migration 0281). The viewer lease holder records the same pair monotonically, the API re-verifies a human viewer's current workspace membership at every mint and degrades the stream to `transport:null` when membership is gone, and the selfhosted relay fences an attach whose authority claim is below the channel's recorded floor. Pre-0281 tokens keep working during the rolling window and enforce nothing new.
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@0.4.7
+  - @opengeni/config@0.16.7
+  - @opengeni/sdk@1.1.1
+
 ## 1.0.3
 
 ### Patch Changes
