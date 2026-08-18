@@ -76,7 +76,7 @@ describe("BrowserControlClient", () => {
         return success({ browserSessionId, controllerGeneration, observation }, 201);
       },
     });
-    const placement = await localPlacement();
+    const placement = await localPlacement({ placementPrivateWrites: true });
     try {
       const client = new BrowserControlClient(placement.session, {
         adminToken,
@@ -561,7 +561,7 @@ describe("BrowserControlClient", () => {
       );
       expect(placement.finalizations).toBe(0);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
-        if (!path.includes("opengeni-browser-control-client")) continue;
+        if (!path.includes("opengeni-private/browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();
       }
     } finally {
@@ -1008,6 +1008,7 @@ async function localPlacement(
   options: {
     confinePrivateReads?: boolean;
     fakeControllerStartup?: boolean;
+    placementPrivateWrites?: boolean;
     streamWrites?: boolean;
   } = {},
 ): Promise<{
@@ -1085,8 +1086,22 @@ async function localPlacement(
             return typeof content === "string" ? Buffer.byteLength(content) : content.byteLength;
           },
         }),
+    ...(options.placementPrivateWrites
+      ? {
+          async writePlacementPrivate({ path, content, createParents }) {
+            if (!path.startsWith("/tmp/opengeni-private/")) {
+              throw new TypeError("placement-private path is invalid");
+            }
+            if (createParents) await mkdir(dirname(path), { recursive: true });
+            const value = typeof content === "string" ? content : new TextDecoder().decode(content);
+            fixture.writes.push({ path, content: value });
+            await writeFile(path, content, { mode: 0o600 });
+            return typeof content === "string" ? Buffer.byteLength(content) : content.byteLength;
+          },
+        }
+      : {}),
     async readFile({ path, maxBytes }) {
-      if (options.confinePrivateReads && path.includes("opengeni-browser-control-client")) {
+      if (options.confinePrivateReads && path.includes("opengeni-private/browser-control-client")) {
         throw new Error("fixture confines native reads to its workspace");
       }
       const value = await readFile(path);
