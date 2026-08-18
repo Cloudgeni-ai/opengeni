@@ -3812,6 +3812,9 @@ export function sessionAuthorizationOperationForHttp(
     if (verb === "PUT") return "session.composer.write";
     return null;
   }
+  // Same HTTP gate as POST /events. Delivery `steer` is re-authorized inside
+  // acceptSessionUserMessageWithOutcome after the body is parsed.
+  if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
