@@ -2889,6 +2889,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             resourceSubjectId: grant.subjectId,
+            resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2899,6 +2900,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             resourceSubjectId: grant.subjectId,
+            resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2910,6 +2912,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         session,
+        viewerSubjectId: grant.subjectId,
         waitSignal: c.req.raw.signal,
         ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });
@@ -2938,6 +2941,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               accountId: grant.accountId,
               workspaceId,
               resourceSubjectId: grant.subjectId,
+              resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
               lease,
@@ -2948,6 +2952,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               accountId: grant.accountId,
               workspaceId,
               resourceSubjectId: grant.subjectId,
+              resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
               lease,
