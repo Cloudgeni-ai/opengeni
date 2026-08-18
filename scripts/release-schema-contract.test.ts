@@ -522,7 +522,9 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0286_widen_task_note_expiry_ceiling.sql")) {
-        return includesActivation ? "89e0cab6b961f265045c28cd26ee1d3e33425d2be0c87ff4cfc67a54ea717c15" : "f62d97773beb9833d226e99fa9751e61720ac125c5999bf923b03f398444527f";
+        return includesActivation
+          ? "89e0cab6b961f265045c28cd26ee1d3e33425d2be0c87ff4cfc67a54ea717c15"
+          : "f62d97773beb9833d226e99fa9751e61720ac125c5999bf923b03f398444527f";
       }
       if (migrations.has("0285_organization_tenancy_inventory.sql")) {
         return includesActivation
