@@ -25,6 +25,7 @@ import {
   type SessionAuthorizationOperation,
 } from "@opengeni/contracts";
 import {
+  getSessionAuthorityEpoch,
   acquireLease,
   activateComputerSession,
   completeComputerSessionEnd,
@@ -542,6 +543,18 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           }
           const stream = relayed
             ? await (async () => {
+                // 0281: stamp the authenticated viewer subject and the live
+                // session authority epoch into the relay stream token.
+                const relayAuthorityEpoch = await getSessionAuthorityEpoch(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId: record.sourceSessionId,
+                });
+                if (relayAuthorityEpoch === null) {
+                  throw new BrowserControlUnsupportedError(
+                    "stream authority is unavailable for this session",
+                  );
+                }
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
                   sessionId: record.sourceSessionId,
@@ -549,6 +562,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                   leaseEpoch: record.tokenGeneration,
                   port: relayed.channel.port,
                   ttlSeconds: request.expiresInSeconds,
+                  subjectId: grant.subjectId,
+                  authorityEpoch: relayAuthorityEpoch,
                 });
                 return {
                   kind: "relay" as const,

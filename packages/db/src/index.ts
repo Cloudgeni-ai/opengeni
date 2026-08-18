@@ -17500,6 +17500,31 @@ export async function getScheduledVariableSetExpectedGenerationForAttempt(
  * activity that materializes a sandbox for a run whose session carries an
  * variableSet attachment. Do not call from API routes: values are write-only.
  */
+/**
+ * Live session authority epoch, for stamping viewer-facing claims (stream
+ * tokens, viewer holders). Identity/epoch only; NULL when the session is not
+ * visible in this workspace.
+ */
+export async function getSessionAuthorityEpoch(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<number | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ epoch: number }>(
+        scopedDb,
+        sql`select authority_epoch::int as epoch from sessions
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and id = ${input.sessionId}`,
+      );
+      return row?.epoch ?? null;
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {
@@ -32235,6 +32260,12 @@ export interface AcquireLeaseInput {
   // (viewer). A workflow-local activity id is not a valid turn holder id.
   holderId: string;
   subjectId?: string | null; // the attributing session within the group
+  /** Viewer holders only (0281): the authenticated viewer subject recorded on
+   *  the holder row - identity only, never a secret value. */
+  viewerSubjectId?: string;
+  /** Viewer holders only (0281): the session authority epoch observed at
+   *  attach, mirrored into the scoped stream token's claims. */
+  viewerAuthorityEpoch?: number;
   backend: string; // sessions.sandbox_backend
   os?: string; // default 'linux'
   // The container image this run resolves (Modal image ref / docker image). Stamped on
@@ -33004,13 +33035,29 @@ async function upsertLeaseHolder(
   kind: LeaseHolderKind,
   holderId: string,
   subjectId: string | null,
+  viewerAuthority: { subjectId: string | null; authorityEpoch: number | null } = {
+    subjectId: null,
+    authorityEpoch: null,
+  },
 ): Promise<void> {
   await tx.execute(sql`
     insert into sandbox_lease_holders
-      (account_id, workspace_id, lease_id, kind, holder_id, subject_id, last_heartbeat_at)
-    values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId}, now())
+      (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at)
+    values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId},
+      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now())
     on conflict (lease_id, kind, holder_id)
-      do update set last_heartbeat_at = now()
+      do update set last_heartbeat_at = now(),
+        viewer_subject_id = coalesce(excluded.viewer_subject_id,
+          sandbox_lease_holders.viewer_subject_id),
+        -- The recorded authority epoch is monotone: a re-acquire may raise it
+        -- (a fresh mint after a revocation bump) but never lower it, and an
+        -- attach without the claim preserves the recorded value.
+        viewer_authority_epoch = greatest(
+          coalesce(excluded.viewer_authority_epoch,
+            sandbox_lease_holders.viewer_authority_epoch),
+          coalesce(sandbox_lease_holders.viewer_authority_epoch,
+            excluded.viewer_authority_epoch))
   `);
 }
 
@@ -33195,7 +33242,10 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+            subjectId: input.viewerSubjectId ?? null,
+            authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          });
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
           return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
         }
@@ -33228,7 +33278,10 @@ async function acquireLeaseOnce(
           where id = ${row.id} and liveness = 'cold'
           returning id
         `);
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+            subjectId: input.viewerSubjectId ?? null,
+            authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          });
           const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
           // casRows.length === 0 cannot happen under the held row lock (defensive):
           // a lost CAS means a sibling flipped it first, so we attach.
@@ -33260,7 +33313,10 @@ async function acquireLeaseOnce(
         // collapse expires_at and let the warming-death reaper reset/drain the
         // lease before instance_id is recorded (F1). A WARM attach uses the plain
         // TTL as before.
-        await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+        await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
+          subjectId: input.viewerSubjectId ?? null,
+          authorityEpoch: input.viewerAuthorityEpoch ?? null,
+        });
         const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
         const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
         return { role: "attached" as const, lease: mapLeaseRow(updated) };

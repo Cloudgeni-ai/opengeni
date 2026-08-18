@@ -7467,6 +7467,11 @@ export const sandboxLeaseHolders = pgTable(
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
+    // Viewer holders only (0281): the authenticated viewer subject and the
+    // session authority epoch observed at attach - identities and epochs
+    // only, mirrored into the scoped stream token's claims.
+    viewerSubjectId: text("viewer_subject_id"),
+    viewerAuthorityEpoch: integer("viewer_authority_epoch"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

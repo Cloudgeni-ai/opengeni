@@ -77,6 +77,28 @@ impl std::fmt::Display for AttachError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnGen(u64);
 
+/// The client stream-token epoch claims applied at attach: the lease-epoch
+/// fence plus the optional session authority-epoch fence (0281). Both `None`
+/// for an agent side.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ViewerEpochs {
+    /// The lease-epoch fence claim (`Some` for a client, `None` for an agent).
+    pub lease: Option<u64>,
+    /// The session authority-epoch claim (0281); `None` for a pre-0281 token.
+    pub authority: Option<u64>,
+}
+
+impl ViewerEpochs {
+    /// A lease-epoch-only claim (a pre-0281 token, or a fixture).
+    #[must_use]
+    pub fn lease_only(epoch: u64) -> Self {
+        Self {
+            lease: Some(epoch),
+            authority: None,
+        }
+    }
+}
+
 /// The outcome of a successful attach: the seq the peer should resume sending from,
 /// the frames to replay immediately, and this connection's generation handle.
 #[derive(Debug)]
@@ -119,6 +141,11 @@ struct LiveChannel {
     to_agent: Direction,
     /// The highest viewer epoch seen — the stale-viewer fence floor.
     epoch_floor: u64,
+    /// The highest session AUTHORITY epoch any viewer presented (0281). A
+    /// viewer whose token carries a lower authority epoch was minted before an
+    /// authority revocation and is rejected; tokens without the claim
+    /// (pre-0281 mints) enforce nothing and never advance the floor.
+    authority_floor: u64,
     /// When the channel was created / last touched (for half-open reaping).
     last_touch: Instant,
 }
@@ -166,9 +193,10 @@ impl ChannelRegistry {
     }
 
     /// Attach a side to its channel. Registers the side's outbound `sink`, advances
-    /// the epoch floor (for a client), and returns the resume cursor + any frames to
-    /// replay to this side. A `viewer_epoch` is `Some(epoch)` for a CLIENT (the
-    /// fence) and `None` for an AGENT.
+    /// the epoch floors (for a client), and returns the resume cursor + any frames
+    /// to replay to this side. `viewer.lease` is `Some(epoch)` for a CLIENT (the
+    /// fence) and `None` for an AGENT; `viewer.authority` is the optional session
+    /// authority-epoch claim (0281).
     ///
     /// `resume_from_seq` is the seq the RECONNECTING side last processed; the relay
     /// replays the OTHER side's buffered frames from there toward this side.
@@ -180,7 +208,7 @@ impl ChannelRegistry {
         &self,
         key: &ChannelKey,
         role: Role,
-        viewer_epoch: Option<u64>,
+        viewer: ViewerEpochs,
         resume_from_seq: u64,
         sink: PeerSink,
         now: Instant,
@@ -193,6 +221,7 @@ impl ChannelRegistry {
             to_client: Direction::default(),
             to_agent: Direction::default(),
             epoch_floor: 0,
+            authority_floor: 0,
             last_touch: now,
         });
         if fresh {
@@ -201,7 +230,25 @@ impl ChannelRegistry {
         chan.last_touch = now;
 
         // Epoch fence (clients only): reject a stale viewer; advance the floor.
-        if let Some(epoch) = viewer_epoch {
+        // The authority-epoch floor (0281) applies the same fence to the
+        // session authority epoch when the token carries the claim.
+        if let Some(authority_epoch) = viewer.authority {
+            if authority_epoch < chan.authority_floor {
+                self.metrics.record_open_rejected();
+                if chan.agent.is_none() && chan.client.is_none() {
+                    let was_fresh = fresh;
+                    drop(channels);
+                    if was_fresh {
+                        self.maybe_remove_empty(key);
+                    }
+                } else {
+                    drop(channels);
+                }
+                return Err(AttachError::StaleEpoch);
+            }
+            chan.authority_floor = chan.authority_floor.max(authority_epoch);
+        }
+        if let Some(epoch) = viewer.lease {
             if epoch < chan.epoch_floor {
                 self.metrics.record_open_rejected();
                 // Drop the channel entry if it was created fresh just for this
@@ -484,10 +531,24 @@ mod tests {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(16);
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(16);
 
-        reg.attach(&key(), Role::Agent, None, 0, agent_tx, now)
-            .unwrap();
-        reg.attach(&key(), Role::Client, Some(0), 0, client_tx, now)
-            .unwrap();
+        reg.attach(
+            &key(),
+            Role::Agent,
+            ViewerEpochs::default(),
+            0,
+            agent_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            client_tx,
+            now,
+        )
+        .unwrap();
         assert!(reg.is_paired(&key()));
 
         // agent → client.
@@ -512,13 +573,28 @@ mod tests {
         let (c_tx, _c_rx) = tokio::sync::mpsc::channel(16);
         let (stale_tx, _s_rx) = tokio::sync::mpsc::channel(16);
 
-        reg.attach(&key(), Role::Agent, None, 0, a_tx, now).unwrap();
-        // A viewer at epoch 5 advances the floor to 5.
-        reg.attach(&key(), Role::Client, Some(5), 0, c_tx, now)
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
             .unwrap();
+        // A viewer at epoch 5 advances the floor to 5.
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(5),
+            0,
+            c_tx,
+            now,
+        )
+        .unwrap();
         // A viewer at epoch 4 (a swapped-away generation) is REJECTED.
         let err = reg
-            .attach(&key(), Role::Client, Some(4), 0, stale_tx, now)
+            .attach(
+                &key(),
+                Role::Client,
+                ViewerEpochs::lease_only(4),
+                0,
+                stale_tx,
+                now,
+            )
             .unwrap_err();
         assert_eq!(err, AttachError::StaleEpoch);
         assert_eq!(reg.metrics().opens_rejected(), 1);
@@ -540,14 +616,42 @@ mod tests {
         let (agent_b_tx, _ab) = tokio::sync::mpsc::channel(16);
         let (client_b_tx, mut client_b_rx) = tokio::sync::mpsc::channel(16);
 
-        reg.attach(&key_a, Role::Agent, None, 0, agent_a_tx, now)
-            .unwrap();
-        reg.attach(&key_a, Role::Client, Some(0), 0, client_a_tx, now)
-            .unwrap();
-        reg.attach(&key_b, Role::Agent, None, 0, agent_b_tx, now)
-            .unwrap();
-        reg.attach(&key_b, Role::Client, Some(0), 0, client_b_tx, now)
-            .unwrap();
+        reg.attach(
+            &key_a,
+            Role::Agent,
+            ViewerEpochs::default(),
+            0,
+            agent_a_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_a,
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            client_a_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_b,
+            Role::Agent,
+            ViewerEpochs::default(),
+            0,
+            agent_b_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_b,
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            client_b_tx,
+            now,
+        )
+        .unwrap();
 
         // A frame on channel A reaches A's viewer only.
         reg.forward(&key_a, Role::Agent, frame(0, "secretA"), now);
@@ -573,14 +677,42 @@ mod tests {
         let (agent_b_tx, _agent_b_rx) = tokio::sync::mpsc::channel(16);
         let (client_b_tx, mut client_b_rx) = tokio::sync::mpsc::channel(16);
 
-        reg.attach(&key_a, Role::Agent, None, 0, agent_a_tx, now)
-            .unwrap();
-        reg.attach(&key_a, Role::Client, Some(0), 0, client_a_tx, now)
-            .unwrap();
-        reg.attach(&key_b, Role::Agent, None, 0, agent_b_tx, now)
-            .unwrap();
-        reg.attach(&key_b, Role::Client, Some(0), 0, client_b_tx, now)
-            .unwrap();
+        reg.attach(
+            &key_a,
+            Role::Agent,
+            ViewerEpochs::default(),
+            0,
+            agent_a_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_a,
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            client_a_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_b,
+            Role::Agent,
+            ViewerEpochs::default(),
+            0,
+            agent_b_tx,
+            now,
+        )
+        .unwrap();
+        reg.attach(
+            &key_b,
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            client_b_tx,
+            now,
+        )
+        .unwrap();
 
         assert!(reg.forward(&key_a, Role::Agent, frame(0, "shell-a"), now));
         assert!(reg.forward(&key_b, Role::Agent, frame(0, "shell-b"), now));
@@ -599,7 +731,8 @@ mod tests {
         let reg = registry();
         let now = Instant::now();
         let (a_tx, _a_rx) = tokio::sync::mpsc::channel(16);
-        reg.attach(&key(), Role::Agent, None, 0, a_tx, now).unwrap();
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
+            .unwrap();
 
         // The agent produces 3 frames while the client is absent — buffered in the
         // to_client ring.
@@ -610,7 +743,14 @@ mod tests {
         // The client attaches (reconnect) resuming from seq 1 — it replays f1, f2.
         let (c_tx, _c_rx) = tokio::sync::mpsc::channel(16);
         let attached = reg
-            .attach(&key(), Role::Client, Some(0), 1, c_tx, now)
+            .attach(
+                &key(),
+                Role::Client,
+                ViewerEpochs::lease_only(0),
+                1,
+                c_tx,
+                now,
+            )
             .unwrap();
         let seqs: Vec<u64> = attached.replay.iter().map(|f| f.seq).collect();
         assert_eq!(seqs, vec![1, 2]);
@@ -623,9 +763,17 @@ mod tests {
         let (a_tx, _a_rx) = tokio::sync::mpsc::channel(16);
         // The client's sink has capacity 1; the second frame sheds (buffer_drop).
         let (c_tx, _c_rx) = tokio::sync::mpsc::channel::<RelayMessage>(1);
-        reg.attach(&key(), Role::Agent, None, 0, a_tx, now).unwrap();
-        reg.attach(&key(), Role::Client, Some(0), 0, c_tx, now)
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
             .unwrap();
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            c_tx,
+            now,
+        )
+        .unwrap();
 
         assert!(reg.forward(&key(), Role::Agent, frame(0, "a"), now));
         // The queue (cap 1) is full; the next forward sheds.
@@ -639,9 +787,17 @@ mod tests {
         let now = Instant::now();
         let (a_tx, _a_rx) = tokio::sync::mpsc::channel(16);
         let (c_tx, _c_rx) = tokio::sync::mpsc::channel(16);
-        reg.attach(&key(), Role::Agent, None, 0, a_tx, now).unwrap();
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
+            .unwrap();
         let client = reg
-            .attach(&key(), Role::Client, Some(0), 0, c_tx, now)
+            .attach(
+                &key(),
+                Role::Client,
+                ViewerEpochs::lease_only(0),
+                0,
+                c_tx,
+                now,
+            )
             .unwrap();
         reg.forward(&key(), Role::Agent, frame(0, "x"), now);
 
@@ -654,7 +810,14 @@ mod tests {
         // The client reconnects resuming from 1 → replays y (seq 1).
         let (c2_tx, _c2_rx) = tokio::sync::mpsc::channel(16);
         let attached = reg
-            .attach(&key(), Role::Client, Some(0), 1, c2_tx, now)
+            .attach(
+                &key(),
+                Role::Client,
+                ViewerEpochs::lease_only(0),
+                1,
+                c2_tx,
+                now,
+            )
             .unwrap();
         assert_eq!(
             attached.replay.iter().map(|f| f.seq).collect::<Vec<_>>(),
@@ -672,13 +835,13 @@ mod tests {
         let now = Instant::now();
         let (a1_tx, _a1) = tokio::sync::mpsc::channel(16);
         let first = reg
-            .attach(&key(), Role::Agent, None, 0, a1_tx, now)
+            .attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a1_tx, now)
             .unwrap();
         // The agent reconnects (a new connection, new gen) BEFORE the old one's
         // teardown lands.
         let (a2_tx, mut a2_rx) = tokio::sync::mpsc::channel(16);
         let second = reg
-            .attach(&key(), Role::Agent, None, 0, a2_tx, now)
+            .attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a2_tx, now)
             .unwrap();
         assert_ne!(first.gen, second.gen);
 
@@ -687,8 +850,15 @@ mod tests {
 
         // A client → agent input still reaches the NEW agent connection.
         let (c_tx, _c_rx) = tokio::sync::mpsc::channel(16);
-        reg.attach(&key(), Role::Client, Some(0), 0, c_tx, now)
-            .unwrap();
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            c_tx,
+            now,
+        )
+        .unwrap();
         assert!(reg.forward(&key(), Role::Client, frame(0, "input"), now));
         match a2_rx.recv().await.unwrap() {
             RelayMessage::Frame(f) => assert_eq!(&f.data[..], b"input"),
@@ -702,9 +872,17 @@ mod tests {
         let now = Instant::now();
         let (a_tx, _a_rx) = tokio::sync::mpsc::channel(16);
         let (c_tx, mut c_rx) = tokio::sync::mpsc::channel(16);
-        reg.attach(&key(), Role::Agent, None, 0, a_tx, now).unwrap();
-        reg.attach(&key(), Role::Client, Some(0), 0, c_tx, now)
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
             .unwrap();
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(0),
+            0,
+            c_tx,
+            now,
+        )
+        .unwrap();
 
         let close = RelayMessage::Close(v1::StreamClose {
             channel_id: "ch".to_string(),
@@ -718,5 +896,56 @@ mod tests {
             other => panic!("expected a close, got {other:?}"),
         }
         assert!(!reg.is_paired(&key()));
+    }
+
+    #[tokio::test]
+    async fn authority_floor_rejects_stale_and_ignores_absent_claims() {
+        let reg = registry();
+        let now = Instant::now();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel(4);
+        reg.attach(&key(), Role::Agent, ViewerEpochs::default(), 0, a_tx, now)
+            .unwrap();
+        // A viewer with authority epoch 3 establishes the floor.
+        let (c_tx, _c_rx) = tokio::sync::mpsc::channel(4);
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs {
+                lease: Some(1),
+                authority: Some(3),
+            },
+            0,
+            c_tx,
+            now,
+        )
+        .unwrap();
+        // A viewer minted before the authority revocation (epoch 2) is stale.
+        let (stale_tx, _stale_rx) = tokio::sync::mpsc::channel(4);
+        assert!(matches!(
+            reg.attach(
+                &key(),
+                Role::Client,
+                ViewerEpochs {
+                    lease: Some(1),
+                    authority: Some(2)
+                },
+                0,
+                stale_tx,
+                now
+            )
+            .unwrap_err(),
+            AttachError::StaleEpoch
+        ));
+        // A pre-0281 token without the claim enforces nothing and still attaches.
+        let (legacy_tx, _legacy_rx) = tokio::sync::mpsc::channel(4);
+        reg.attach(
+            &key(),
+            Role::Client,
+            ViewerEpochs::lease_only(1),
+            0,
+            legacy_tx,
+            now,
+        )
+        .unwrap();
     }
 }

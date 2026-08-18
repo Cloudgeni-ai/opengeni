@@ -66,6 +66,15 @@ mock.module("@opengeni/db", () => ({
     }
     return null;
   },
+  // 0281: the mint resolves the session's live authority epoch before minting;
+  // the fake db has no live session row, so answer for the test workspace.
+  getSessionAuthorityEpoch: async (
+    db: never,
+    input: { accountId: string; workspaceId: string; sessionId: string },
+  ) => {
+    if (input.workspaceId === WS) return 1;
+    return realDb.getSessionAuthorityEpoch(db, input);
+  },
 }));
 
 // Import mints AFTER the db mock is installed so the mock binding is active.

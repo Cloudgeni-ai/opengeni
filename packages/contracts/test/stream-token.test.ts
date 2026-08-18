@@ -48,6 +48,20 @@ describe("StreamTokenPayload sign/verify", () => {
     expect(await verifyStreamToken("a-different-secret", token)).toBeNull();
   });
 
+  test("0281 authority claims round-trip; the schema rejects malformed claims", async () => {
+    const claims = payload({ subjectId: "user:abc", authorityEpoch: 9 });
+    const verified = await verifyStreamToken(SECRET, await signStreamToken(SECRET, claims));
+    expect(verified?.subjectId).toBe("user:abc");
+    expect(verified?.authorityEpoch).toBe(9);
+    // Optional for the rolling window: a claimless payload still parses.
+    expect(payload().subjectId).toBeUndefined();
+    expect(payload().authorityEpoch).toBeUndefined();
+    // An epoch must be a positive integer; a subject must be non-empty.
+    expect(() => payload({ authorityEpoch: 0 })).toThrow();
+    expect(() => payload({ authorityEpoch: 1.5 })).toThrow();
+    expect(() => payload({ subjectId: "" })).toThrow();
+  });
+
   test("verify rejects a tampered payload (signature no longer matches)", async () => {
     const token = await signStreamToken(SECRET, payload());
     const [encoded, signature] = token.slice("ogs_".length).split(".");

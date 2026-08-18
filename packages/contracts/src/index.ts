@@ -2448,6 +2448,14 @@ export const StreamTokenPayload = z.object({
   // Short TTL (120s default); rotation is event-driven under the epoch fence,
   // not on a keepalive clock.
   exp: z.number().int().positive(),
+  // The authenticated subject the token was minted for (0281). Optional for
+  // rolling compatibility: old verifiers strip it, old mints omit it.
+  subjectId: z.string().min(1).max(512).optional(),
+  // The session authority epoch observed at mint (0281). The relay tracks the
+  // highest value presented per channel and rejects tokens below that floor,
+  // so an in-TTL token minted before an authority revocation cannot outlive
+  // the epoch advance once any current viewer has attached.
+  authorityEpoch: z.number().int().positive().optional(),
 });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 

@@ -228,8 +228,17 @@ suspended grant fences a NEW direct mutation immediately
 retained process's next mutation (`authority_unattributed`) - in both cases the
 running provider process is never terminated or re-owned, and the fence
 consumes no workspace generation. The lifecycle still never infers ownership
-for a historical row whose authority was never recorded; stream-token
-invalidation remains in the separate live-access hardening program.
+for a historical row whose authority was never recorded. Since migration
+0281 the live-stream surface is bound to the same authority: a scoped stream
+token (`ogs_`, 120 s TTL unchanged) minted for a viewer carries the
+authenticated viewer subject and the session's live authority epoch, the
+viewer lease holder records the same pair (monotone - a stale lower claim
+never lowers the recorded epoch), the API re-verifies a human subject's
+current workspace membership at every mint and degrades to `transport:null`
+when it is gone, and the selfhosted relay rejects an attach whose recorded
+authority claim is below the channel's authority floor. A pre-0281 token
+without the claims still attaches during the rolling window and enforces
+nothing new.
 Connection-use audit facts and variable-set audit events carry the same
 attribution since migration 0280: every `connection_use_audit_facts` row
 records the frozen causal initiator and the session authority

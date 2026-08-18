@@ -142,7 +142,7 @@ pub(crate) mod conn {
     use opengeni_agent_stream::codec::RelayMessage;
     use opengeni_agent_stream::ChannelKey;
 
-    use crate::registry::{AttachError, Role};
+    use crate::registry::{AttachError, Role, ViewerEpochs};
     use crate::token::{self, TokenError};
 
     /// The bound on the per-connection outbound queue (the peer-sink). A slow socket
@@ -208,15 +208,15 @@ pub(crate) mod conn {
 
         // 3. Attach (the epoch fence is applied for a client), ack, replay.
         let now = Instant::now();
-        let viewer_epoch: Option<u64> = match role {
-            Role::Client => client_epoch(&open, state),
-            Role::Agent => None,
+        let viewer = match role {
+            Role::Client => client_epochs(&open, state),
+            Role::Agent => ViewerEpochs::default(),
         };
         let (peer_tx, peer_rx) = tokio::sync::mpsc::channel::<RelayMessage>(OUTBOUND_QUEUE);
         let attached =
             match state
                 .registry
-                .attach(&key, role, viewer_epoch, resume_from_seq, peer_tx, now)
+                .attach(&key, role, viewer, resume_from_seq, peer_tx, now)
             {
                 Ok(a) => a,
                 Err(AttachError::StaleEpoch) => {
@@ -418,13 +418,21 @@ pub(crate) mod conn {
         Ok((key, role, open.resume_from_seq))
     }
 
-    /// The viewer epoch (the fence floor source) from the token. Returns None when
-    /// the token does not re-verify (already authorized in `authorize`, so this is
-    /// the steady-state extraction). Only called for a CLIENT.
-    fn client_epoch(open: &v1::StreamOpen, state: &RelayState) -> Option<u64> {
-        token::verify_stream_token(&state.config.stream_token_secret, &open.token, unix_now())
-            .ok()
-            .map(|c| c.lease_epoch)
+    /// The viewer epoch claims (the fence floor sources) from the token: the
+    /// lease epoch plus the optional session authority epoch (0281). Returns the
+    /// empty claims when the token does not re-verify (already authorized in
+    /// `authorize`, so this is the steady-state extraction). Only called for a
+    /// CLIENT; a pre-0281 token carries no authority claim and enforces nothing
+    /// beyond the lease fence.
+    fn client_epochs(open: &v1::StreamOpen, state: &RelayState) -> ViewerEpochs {
+        match token::verify_stream_token(&state.config.stream_token_secret, &open.token, unix_now())
+        {
+            Ok(c) => ViewerEpochs {
+                lease: Some(c.lease_epoch),
+                authority: c.authority_epoch,
+            },
+            Err(_) => ViewerEpochs::default(),
+        }
     }
 
     /// Write a `StreamOpenAck` over the socket.
