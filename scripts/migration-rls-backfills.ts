@@ -281,7 +281,15 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       const statement = stripComments(rawStatement);
       const head = statement.trim().replace(/\s+/g, " ");
 
-      if (/set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement)) {
+      // A DDL statement that merely *defines* a routine whose body mentions
+      // set_config must not latch this: the GUC is set when that routine is
+      // called, not when it is created. Latching here silently suppressed
+      // every later candidate in the file - and "CREATE FUNCTION ... then
+      // backfill" is exactly the shape this repo's authority migrations take.
+      if (
+        !DDL_ONLY.test(head) &&
+        /set_config\s*\(\s*'opengeni\.(account_id|workspace_id)'/i.test(statement)
+      ) {
         tenantGuc = true;
       }
 
