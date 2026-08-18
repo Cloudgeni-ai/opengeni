@@ -29,12 +29,13 @@ describe("enrollment bearer credential generation", () => {
   });
 
   test("a legacy generationless bearer parses only as generation 1", async () => {
-    const encodedPayload = Buffer.from(JSON.stringify(baseClaims()), "utf8").toString("base64url");
+    const claims = baseClaims();
+    const encodedPayload = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
     const signature = createHmac("sha256", SECRET).update(encodedPayload).digest("base64url");
     const legacyToken = `oge_${encodedPayload}.${signature}`;
 
     const verified = await verifyEnrollmentBearer(SECRET, legacyToken);
-    expect(verified).toEqual({ ...baseClaims(), credentialGeneration: 1 });
+    expect(verified).toEqual({ ...claims, credentialGeneration: 1 });
   });
 
   test("non-positive generations and malformed signed JSON fail closed", async () => {
