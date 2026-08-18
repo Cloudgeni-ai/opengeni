@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0283_organization_tenancy_inventory.sql")) {
         return includesActivation
-          ? "805d678611ff5cde211a7807c1c2a9c351249eb7b0c4bc7eb2c7ebc190d9d410"
-          : "fb3b581285801dbf8b0ba0d24c8e8de2b695d6b4f98fd14d9fd93d2823fe5f9c";
+          ? "2b7340fde68776a8494b1dc1111e0e0a53bb278854198c0ae5e6b6fe648cbe04"
+          : "d49fc6bfd71873e4644cdc1b8a484dbbe7be3c96e72c348005f6ab3857be83d6";
       }
       if (migrations.has("0282_variable_set_session_attach_attribution.sql")) {
         return includesActivation
@@ -1106,7 +1106,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0283_organization_tenancy_inventory.sql")).toMatchObject({
-      sha256: "4b17d3cf509eb50f11bbfd80ab1bef71149ba150695dd6d40d7f6a0c386cc440",
+      sha256: "b8cc0b67d58a53d48424f43d937b9a38be887866a696e7300424ff1ea8a9f31e",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0282_variable_set_session_attach_attribution.sql")).toMatchObject({
