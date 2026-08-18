@@ -946,6 +946,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer",
       );
+      await waitFor(
+        async () => !(await desktopPage.getByRole("button", { name: "Send message" }).isDisabled()),
+        { timeoutMs: 10_000 },
+      );
       await composer.press("Enter");
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
       await queueChip.click();
@@ -1021,6 +1025,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         manager.id,
         "A second prompt queued from the composer (edited)",
+      );
+      await waitFor(
+        async () => !(await desktopPage.getByRole("button", { name: "Send message" }).isDisabled()),
+        { timeoutMs: 10_000 },
       );
       await composer.press("Enter");
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();

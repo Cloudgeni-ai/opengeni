@@ -441,7 +441,9 @@ user-facing private toggle is not yet safe:
 `test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
 if any product package starts naming either entry point or authorizing either
 operation. The first real caller must land together with an update to this
-section and to that test.
+section and to that test. Later migrations may replace `fork_session_content`
+only to copy newly required session columns (0289 copies typed reasoning and
+latency); they still must not wire a product caller.
 
 ## Referential integrity
 

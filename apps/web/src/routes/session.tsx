@@ -1115,14 +1115,22 @@ function SessionChatPane(props: {
   const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
   const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, model);
-  const composerPolicyValid = Boolean(
+  const matchesFrozenSessionPolicy = Boolean(
     composerPolicy &&
+    composerPolicy.model === props.session.model &&
+    composerPolicy.reasoningEffort === props.session.reasoningEffort &&
+    composerPolicy.latencyMode === props.session.latencyMode,
+  );
+  const catalogComboValid = Boolean(
     selectedPolicyRow?.selectable &&
     (props.session.codexCompactionMode !== "remote_v2" ||
       selectedPolicyRow.catalog.source === "codex") &&
     effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
     (latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
+  );
+  const composerPolicyValid = Boolean(
+    composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
   );
   const composerPolicyError =
     composerPolicy && !modelCatalog.loading && !composerPolicyValid
