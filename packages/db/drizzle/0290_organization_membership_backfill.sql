@@ -193,9 +193,19 @@ BEGIN
     'membershipId', pending.id,
     'status', pending.status,
     'personalWorkspaceId', NULL
-  ) ORDER BY pending.subject_id), '[]'::jsonb)
+  ) ORDER BY pending.subject_id COLLATE "C"), '[]'::jsonb)
   INTO result
   FROM (
+    -- `COLLATE "C"` is load-bearing, not cosmetic. The driver merges this page
+    -- with its own workspace-access page in JavaScript and re-sorts the union
+    -- with the default comparator, which is code-unit (byte) order. The
+    -- database's default collation is locale-aware (`en_US.utf8` in practice),
+    -- where `_` is ignorable and case is secondary, so `user:Alpha_two` sorts
+    -- BEFORE `user:a_b` in JavaScript and AFTER it in the database. A keyset
+    -- cursor taken from the JavaScript order would then skip every subject the
+    -- database considers already behind it - a silent, permanent drop that
+    -- still reports `drained: true`. Pinning both sides to `C` makes the two
+    -- orders identical.
     SELECT candidate.id, candidate.subject_id, candidate.status
     FROM organization_memberships candidate
     WHERE candidate.account_id = p_organization_id
@@ -203,9 +213,9 @@ BEGIN
       AND candidate.status IN ('active', 'provisioning')
       AND (
         p_after_subject_id IS NULL
-        OR candidate.subject_id > p_after_subject_id
+        OR candidate.subject_id COLLATE "C" > p_after_subject_id COLLATE "C"
       )
-    ORDER BY candidate.subject_id
+    ORDER BY candidate.subject_id COLLATE "C"
     LIMIT p_limit
   ) pending;
 

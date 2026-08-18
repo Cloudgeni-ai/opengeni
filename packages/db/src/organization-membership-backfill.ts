@@ -174,6 +174,31 @@ function textArray(values: readonly string[]) {
       )}]::text[]`;
 }
 
+/**
+ * The single subject-id order this driver uses, on BOTH sides of the seam.
+ *
+ * Both source queries page with `COLLATE "C"`, which compares the UTF-8 bytes -
+ * i.e. code point order. This comparator reproduces exactly that in JavaScript.
+ * The default `Array#sort` comparator would very nearly do it, but it compares
+ * UTF-16 *code units*, so a supplementary-plane subject id (encoded as a
+ * surrogate pair, `0xD800..0xDFFF`) sorts below `U+E000..U+FFFF` in JavaScript
+ * and above it in the database. The guards here admit arbitrary 1024-character
+ * `user:` text, so that disagreement is reachable; a keyset cursor taken from a
+ * merged order that disagrees with the database silently skips subjects and
+ * still reports a drained population.
+ */
+function compareSubjectIds(left: string, right: string): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; ) {
+    const leftPoint = left.codePointAt(index)!;
+    const rightPoint = right.codePointAt(index)!;
+    if (leftPoint !== rightPoint) return leftPoint < rightPoint ? -1 : 1;
+    index += leftPoint > 0xffff ? 2 : 1;
+  }
+  if (left.length === right.length) return 0;
+  return left.length < right.length ? -1 : 1;
+}
+
 function assertCursor(afterSubjectId: string | null | undefined): string | null {
   if (afterSubjectId === null || afterSubjectId === undefined) return null;
   if (
@@ -226,9 +251,12 @@ export async function listOrganizationMembershipBackfillCandidates(
            and workspace.account_id = access.account_id
           where access.account_id = ${input.organizationId}
             and access.subject_id like ${`${SUBJECT_PREFIX}%`}
-            and (${afterSubjectId}::text is null or access.subject_id > ${afterSubjectId}::text)
+            and (
+              ${afterSubjectId}::text is null
+              or access.subject_id collate "C" > ${afterSubjectId}::text collate "C"
+            )
           group by access.subject_id
-          order by access.subject_id
+          order by access.subject_id collate "C"
           limit ${input.limit}
         `,
       );
@@ -263,7 +291,11 @@ export async function listOrganizationMembershipBackfillCandidates(
       // merged ordered stream: anything the slice drops sorts strictly after
       // the kept tail and is reached by the next pass under `nextCursor`.
       // Neither population can therefore starve the other.
-      const merged = [...ownerMembershipBySubject.keys()].sort();
+      //
+      // That argument only holds while this merge order and the two source
+      // orders are the SAME order. Both sources page with `COLLATE "C"`; this
+      // reproduces it exactly. See `compareSubjectIds`.
+      const merged = [...ownerMembershipBySubject.keys()].sort(compareSubjectIds);
       const subjectIds = merged.slice(0, input.limit);
       // More may remain when the merge was truncated, or when either source
       // filled its own window (there may be a `limit + 1`-th row behind it).

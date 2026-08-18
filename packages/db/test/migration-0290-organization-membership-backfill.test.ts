@@ -580,6 +580,110 @@ describe("migration 0290 organization membership backfill", () => {
     });
   }, 180_000);
 
+  test("subject ids whose database collation disagrees with the merge order are never skipped", async () => {
+    if (!available) return;
+    // Both source queries page with `subject_id > cursor` / `ORDER BY
+    // subject_id`, and the driver merges their pages with a JavaScript sort.
+    // The database's default collation is locale-aware (`en_US.utf8` here),
+    // where `_` is ignorable and case is a secondary difference; JavaScript
+    // sorts by code unit. Without `COLLATE "C"` on both sides the two orders
+    // disagree, the keyset cursor advances past subjects the database still
+    // considers ahead of it, and the walk reports `drained: true` having
+    // permanently skipped them - including, here, the only provisionable one.
+    const tag = `t${crypto.randomUUID().replaceAll("-", "")}`;
+    // Deliberately mixed-case and underscored. Under `C` every uppercase letter
+    // precedes `_`, which precedes every lowercase letter; under `en_US.utf8`
+    // case folds together and `_` is ignorable, so the two orders interleave
+    // completely differently.
+    const ownerSuffix = "M_m";
+    const accessSuffixes = [
+      "A_a",
+      "Aa",
+      "B_b",
+      "Bb",
+      "C_c",
+      "Cc",
+      "Z_z",
+      "a_b",
+      "ab",
+      "b_c",
+      "bc",
+      "c_d",
+      "cd",
+    ];
+    const pendingSuffix = "N_n";
+
+    const legacy = await legacyOrganization({ userId: `${tag}${ownerSuffix}` });
+    for (const suffix of accessSuffixes) {
+      const extraId = `${tag}${suffix}`;
+      await admin`
+        insert into auth_users (id, name, email)
+        values (${extraId}, 'collation', ${`${extraId}@example.test`})`;
+      await admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${legacy.organizationId}, ${legacy.workspaceId}, ${`user:${extraId}`}, 'member')`;
+    }
+    const pendingUserId = `${tag}${pendingSuffix}`;
+    const pendingSubject = `user:${pendingUserId}`;
+    await admin`
+      insert into auth_users (id, name, email)
+      values (${pendingUserId}, 'collation pending', ${`${pendingUserId}@example.test`})`;
+    await admin`
+      select set_config('opengeni.organization_tenancy_lifecycle', 'managed_human_provisioning', false)`;
+    await admin`
+      insert into organization_memberships (account_id, subject_id, status, role)
+      values (${legacy.organizationId}, ${pendingSubject}, 'provisioning', 'member')`;
+    await admin`select set_config('opengeni.organization_tenancy_lifecycle', '', false)`;
+
+    const expected = [
+      ...accessSuffixes.map((suffix) => `user:${tag}${suffix}`),
+      legacy.subjectId,
+      pendingSubject,
+    ];
+
+    // Non-vacuity. This fixture only exercises the hazard on a database whose
+    // DEFAULT collation disagrees with the merge order; on a `C`-collated
+    // database the two orders coincide and there is nothing to reproduce.
+    const defaultCollationOrder = (
+      await admin<Array<{ subject_id: string }>>`
+        select subject_id
+        from workspace_memberships
+        where account_id = ${legacy.organizationId}
+        order by subject_id`
+    ).map((row) => row.subject_id);
+    const mergeOrder = [...defaultCollationOrder].sort();
+    if (defaultCollationOrder.join(" ") === mergeOrder.join(" ")) return;
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let pass = 0; pass < 40; pass += 1) {
+      const report: Awaited<ReturnType<typeof runOrganizationMembershipBackfill>> =
+        await runOrganizationMembershipBackfill(db, {
+          organizationId: legacy.organizationId,
+          limit: 3,
+          dryRun: true,
+          afterSubjectId: cursor,
+        });
+      for (const candidate of report.candidates) seen.push(candidate.subjectId);
+      cursor = report.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    // Every subject exactly once: no skip, and no duplicate re-inspection.
+    expect([...seen].sort()).toEqual([...expected].sort());
+    expect(new Set(seen).size).toBe(seen.length);
+
+    // The same property through the operator-facing walk, whose `drained: true`
+    // is exactly the claim that silently became false.
+    const drain = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 3,
+      dryRun: true,
+    });
+    expect(drain.drained).toBe(true);
+    expect(drain.counts.inspected).toBe(expected.length);
+  }, 180_000);
+
   test("a walk stopped by --max-passes resumes exactly where it stopped", async () => {
     if (!available) return;
     const tag = `t${crypto.randomUUID().replaceAll("-", "")}`;
