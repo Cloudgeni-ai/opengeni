@@ -30,9 +30,48 @@ import {
   withRestoredSessionActivityRlsContext,
   withRlsContext,
 } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import { lockSessionEventWriteRows } from "./session-control";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import * as schema from "./schema";
+
+/**
+ * Bounded replay of one exact organization-lifecycle transaction after a
+ * PostgreSQL deadlock abort.
+ *
+ * The lifecycle SECURITY DEFINER seam takes the organization row
+ * (`managed_accounts FOR UPDATE`) before it takes the account's `workspaces`
+ * rows `FOR KEY SHARE`. An ordinary workspace writer necessarily takes the
+ * opposite order: it locks its `workspaces` row first and only then reaches
+ * `managed_accounts` implicitly, through the account foreign-key check of a row
+ * it inserts (`session_events`, `session_goals`, `session_system_updates`, ...),
+ * which needs `FOR KEY SHARE` on the same organization row. PostgreSQL resolves
+ * that inversion by aborting one of the two transactions with `40P01`.
+ *
+ * Replay is exact rather than approximate: the whole lifecycle command runs in
+ * one transaction keyed by its caller-supplied operation id
+ * (`organization_membership_operation_receipts`) plus its CAS revisions, and a
+ * deadlock abort rolls back every durable effect, so re-running the identical
+ * command either applies it once or observes the newer authoritative state.
+ *
+ * Only `40P01` is replayed. `40001` is the lifecycle's own authoritative
+ * stale-revision / stale-epoch conflict and must reach the caller unchanged,
+ * and the original failure is rethrown untouched once the budget is spent.
+ *
+ * This is a caller-side mitigation, not the fix: the lock-order inversion lives
+ * in the SQL seam and can only be removed by a migration.
+ */
+async function withOrganizationLifecycleDeadlockReplay<T>(operation: () => Promise<T>): Promise<T> {
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= maxAttempts || nestedPostgresSqlState(error) !== "40P01") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 20));
+    }
+  }
+}
 
 type CommandBase = {
   organizationId: string;
@@ -492,16 +531,18 @@ export async function updateOrganizationMember(
     ...(transition.role === undefined ? {} : { role: transition.role }),
     ...(transition.reason === undefined ? {} : { reason: transition.reason }),
   };
-  return await db.transaction(async (tx) => {
-    if (transition.kind === "suspend" || transition.kind === "offboard") {
-      const settlements = await prepareOrganizationMembershipProtocolSettlements(
-        tx as unknown as Database,
-        command,
-      );
-      await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
-    }
-    return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
-  });
+  return await withOrganizationLifecycleDeadlockReplay(async () =>
+    db.transaction(async (tx) => {
+      if (transition.kind === "suspend" || transition.kind === "offboard") {
+        const settlements = await prepareOrganizationMembershipProtocolSettlements(
+          tx as unknown as Database,
+          command,
+        );
+        await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
+      }
+      return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+    }),
+  );
 }
 
 export async function getOrganizationRetentionPolicy(

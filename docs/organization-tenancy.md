@@ -312,6 +312,33 @@ memberships for the subject and derives role-bounded account plus owner-only
 personal-workspace grants; inactive organizations disappear on the next
 request.
 
+### Known lock-order inversion: organization row before workspace rows
+
+`prepare_organization_membership_protocol_settlements()` and
+`organization_membership_command()` both take the organization row
+(`managed_accounts FOR UPDATE`) as their FIRST lock, then walk the account's
+`workspaces` rows `FOR KEY SHARE`. Every ordinary workspace writer takes the
+opposite order and cannot avoid it: it locks its own `workspaces` row first
+(`transition_session_visibility()` takes `FOR UPDATE`) and only afterwards
+reaches the same organization row implicitly, through the account foreign-key
+check of a row it inserts - `session_events`, `session_goals`,
+`session_system_updates`, `sessions`, and `session_turns` all reference
+`managed_accounts`, and an insert therefore needs `managed_accounts FOR KEY
+SHARE`, which conflicts with the lifecycle's `FOR UPDATE`.
+
+A suspend/offboard that runs concurrently with an ordinary workspace write in
+the same organization can therefore deadlock; PostgreSQL aborts one transaction
+with `40P01`. This is not a client bug: neither side can reorder its own locks
+without changing SQL. Removing it means the lifecycle seam must stop holding an
+exclusive `managed_accounts` lock across workspace-row acquisition - for example
+by taking organization-level mutual exclusion through an advisory lock and
+downgrading the row lock to `FOR KEY SHARE` - which requires a migration.
+
+Until then, `updateOrganizationMember()` replays that exact transaction on
+`40P01` (bounded, same operation id and CAS revisions, and a deadlock abort
+leaves nothing durable), so the inversion is not visible to callers. `40001`
+remains the authoritative stale-revision conflict and is never replayed.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
