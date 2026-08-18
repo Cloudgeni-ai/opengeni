@@ -779,6 +779,28 @@ async function materializeTaskNoteKnowledge(
   };
 }
 
+/**
+ * The identity of a governed write is what was asked for, not the
+ * compare-and-set baseline it happened to read on the way in. An
+ * instruction-policy proposal carries the live head revision/version so the CAS
+ * can reject a stale write, but hashing those into the operation identity made
+ * an ordinary turn-recovery replay of the same operationId look like a
+ * different operation once the head moved, which surfaced as a replayed-with-
+ * different-immutable-input failure. Strip exactly those two fields, and only
+ * for that request kind, so every other lane's hash stays byte-identical.
+ */
+function identityRequest(request: CompanyBrainGovernedWriteRequestType): unknown {
+  if (!isInstructionPolicyProposal(request)) return request;
+  const {
+    expectedCurrentRevisionId: _revision,
+    expectedActivationVersion: _version,
+    ...rest
+  } = request;
+  // Deliberately no longer the request union: this value only ever feeds the
+  // identity hash, never a code path that reads those fields.
+  return rest;
+}
+
 function isInstructionPolicyProposal(
   request: CompanyBrainGovernedWriteRequestType,
 ): request is InstructionPolicyProposalRequest {
@@ -910,7 +932,10 @@ export async function writeCompanyBrainGovernedProposal(
 ): Promise<CompanyBrainGovernedWriteResult> {
   const attempt = CompanyBrainGovernedWriteAttempt.parse(rawInput.attempt);
   const request = CompanyBrainGovernedWriteRequest.parse(rawInput.request);
-  const inputHash = scopedKnowledgeInputHash({ attempt, request });
+  const inputHash = scopedKnowledgeInputHash({
+    attempt,
+    request: identityRequest(request),
+  });
   const actorSubjectId = `service:company-brain-governed-write:${inputHash}`;
   const evidenceOperationId = derivedOperationId(request.operationId, "task-note-evidence");
   const claimOperationId = derivedOperationId(request.operationId, "task-note-claim");

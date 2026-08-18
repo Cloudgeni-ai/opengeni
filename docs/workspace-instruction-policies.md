@@ -67,7 +67,8 @@ Documents, or knowledge authority. One transaction:
 
 1. locks the workspace and checks the exact target's active-head baseline;
 2. fences the operation ID against every instruction-policy mutation kind;
-3. converges the natural `(source id, source version, target)` identity;
+3. converges the natural `(source id, source version, target, baseline
+   activation version)` identity;
 4. creates a normal inactive instruction-policy revision with `onboarding`
    provenance and the immutable proposal UUID as its provenance source ID; and
 5. appends the immutable proposal evidence with bounded source/version,
@@ -80,11 +81,26 @@ version in the additive deactivation ledger, which callers obtain from the
 bounded `inactiveHeads` list projection.
 A changed boundary returns
 `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE`. Reusing the same
-source version for the same target with different content, confidence, or
-baseline returns `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT`.
+source version for the same target with different content or confidence
+returns `WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT`.
+
+A *different baseline* is deliberately not a conflict. One knowledge proposal
+may own more than one inactive instruction-policy proposal, at most one per
+baseline activation version. This exists for a single case: the head moved
+after a human already confirmed a rule, and `remember_confirm` rebaselines onto
+the current head rather than discarding their answer. The successor reuses the
+exact immutable source facts, so the human's confirmation - which is bound to
+the knowledge proposal ID, not the instruction-policy proposal - still
+describes precisely what activates. Activation resolves the live head first and
+selects the proposal bound to it; when no candidate matches, the stale boundary
+is raised so the confirm path can rebaseline again.
+
 Empty and oversized content use the typed `..._EMPTY` and `..._OVERSIZED`
 responses. Exact operation replay returns the original proposal; changed input
 under that operation ID returns `WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED`.
+The compare-and-set baseline is not part of that identity: it is staleness
+detection at write time, so an ordinary turn-recovery replay of the same
+operation ID stays idempotent even when the head moved underneath it.
 
 The proposal table is append-only, uses `FORCE ROW LEVEL SECURITY`, and receives
 only `SELECT`/`INSERT` runtime privileges. PostgreSQL validates that its linked
@@ -100,6 +116,12 @@ an exact `knowledge_change_proposals` row, exact supporting claim/evidence,
 explicit target, and caller-supplied active-head revision/version baseline. Its
 draft records `knowledge_proposal` provenance with the Knowledge proposal UUID
 as source ID; the proposal source version is the exact content hash.
+
+Because it inherits that lifecycle, it also inherits the per-baseline proposal
+identity described above: one Knowledge proposal may own more than one inactive
+instruction-policy proposal, at most one per baseline activation version, which
+is what lets `remember_confirm` rebaseline a human's confirmation onto a head
+that moved underneath it.
 
 Migration `0255_company_brain_governed_write_proposals.sql` extends the existing
 database validator to require that the Knowledge proposal has workspace scope,
