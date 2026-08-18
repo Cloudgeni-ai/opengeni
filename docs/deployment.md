@@ -383,7 +383,7 @@ subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself -
 what is reversible before activation, what becomes forward-recovery-only after,
 and the exact preconditions - and this section owns the operator procedure.
 
-The switch that governs whether a deployment may cross the boundary at all is
+The named switch for declining or deferring the boundary is
 `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`. It defaults to
 `false` in both `.env.example` and the chart's `config` map, and leaving it at
 `false` is the supported way to decline or defer activation indefinitely: the
@@ -391,9 +391,26 @@ deployment keeps the legacy workspace-owned lane and an image rollback stays an
 ordinary deployment decision. Every rolling tenancy migration still applies
 normally with the switch off.
 
-`0264_connection_authority_runtime_activation.sql` is the one tenancy cutover
-that has already run this path; a pre-0264 image must never be started again.
-For each subsequent activation:
+Be precise about what that switch is today: **no runtime path reads it.**
+Canonical activation is unshipped, so the setting reserves the name, pins the
+safe default in the chart and `.env.example`, and gives every future activation
+slice one gate to consult. It is an operator declaration, not an enforced
+interlock - `false` does not by itself prevent an activation migration from
+being applied, and step 3 below is therefore a procedural gate rather than a
+runtime one. `docs/organization-tenancy.md` owns the switch's full contract.
+
+Two tenancy cutovers have already run this maintenance path, and a pre-0264 or
+pre-0275 image must never be started again:
+
+- `0264_connection_authority_runtime_activation.sql` activated canonical
+  Connection authority; and
+- `0275_scheduled_connection_authority.sql` froze common-user Connection
+  authority on scheduled-task revisions.
+
+Both declare `-- deployment-mode: maintenance`, both reject a live application
+with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
+`ACCESS EXCLUSIVE` locks that include `organization_user_resource_grants`, and
+neither has a down-migration. For each subsequent activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -404,8 +421,9 @@ For each subsequent activation:
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
 3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only. Never flip it on a running pre-activation
-   generation as a way to "test" activation;
+   new image generation only - this records the operator's acceptance of the
+   one-way boundary and is not yet enforced by any runtime path. Never flip it
+   on a running pre-activation generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero

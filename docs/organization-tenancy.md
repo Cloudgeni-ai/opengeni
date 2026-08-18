@@ -498,16 +498,29 @@ before canonical activation" is a per-subsystem statement:
   membership, null fork provenance, `authority_scope = 'workspace'`), so a
   compatible earlier application image can still read and write them and an
   image rollback remains an ordinary deployment decision.
-- **Already one way.** `0264_connection_authority_runtime_activation.sql`
-  declares `-- deployment-mode: maintenance`. It proves there are no other
-  `opengeni_app` sessions both before and after taking `ACCESS EXCLUSIVE` locks
-  on `sessions`, `session_turns`, `session_system_updates`,
-  `session_system_update_outbox`, `scheduled_tasks`, and `connections`, rejects a
-  live application with SQLSTATE `55000`, and additionally rejects every
-  executable pre-activation common-user Connection source as a durable data
-  fence. Old workers neither materialize accepted connection authority nor carry
-  the exact attempt/use fences, so after 0264 commits the Connection surface has
-  no rollback boundary left - only forward recovery.
+- **Already one way.** Two tenancy migrations declare
+  `-- deployment-mode: maintenance` and have already crossed their boundary.
+  - `0264_connection_authority_runtime_activation.sql` proves there are no other
+    `opengeni_app` sessions both before and after taking `ACCESS EXCLUSIVE` locks
+    on `sessions`, `session_turns`, `session_system_updates`,
+    `session_system_update_outbox`, `scheduled_tasks`, and `connections`, rejects
+    a live application with SQLSTATE `55000`, and additionally rejects every
+    executable pre-activation common-user Connection source as a durable data
+    fence. Old workers neither materialize accepted connection authority nor
+    carry the exact attempt/use fences, so after 0264 commits the Connection
+    surface has no rollback boundary left - only forward recovery.
+  - `0275_scheduled_connection_authority.sql` repeats that shape for scheduled
+    work: the same `pg_stat_activity` drain guard and SQLSTATE `55000`, then
+    `ACCESS EXCLUSIVE` locks on `sessions`, `session_turns`,
+    `session_system_updates`, `scheduled_tasks`, `scheduled_task_runs`,
+    `connections`, and `organization_user_resource_grants`. It freezes
+    common-user Connection authority on scheduled-task revisions, admits one
+    immutable copy per stable occurrence, and rejects every remaining
+    queued/dispatched agent run, every active task carrying activated Connection
+    delegation, and every active personal-resource task whose creator is not an
+    active organization member. An old writer must never be restarted after it
+    either; see [`architecture.md`](architecture.md) and
+    [`deployment.md`](deployment.md).
 
 The remaining phase-F work named in [F. Activate](#f-activate) has therefore not
 crossed its boundary yet.
@@ -550,12 +563,14 @@ is run:
    `workspaceWriters.admissions.legacyUnattributed`, and
    `workspaceWriters.retainedProcesses.legacyUnattributed`. A single non-zero
    counter for a consumed population is a blocker.
-   The `variableSets`/`rigs`/`machines` `unclassified` counters are *not*
-   drain-to-zero gates: the `*_authority_shape_check` constraints require every
-   `organization`/`workspace`-scoped row to hold a null `authority_id`, so that
-   counter is by construction the non-user-scoped population rather than an
-   unmigrated backlog. Reconcile those resources through their `byScope`
-   breakdown against the reviewed classification instead.
+   Variable Sets, Rigs, and Connected Machines contribute no drain-to-zero
+   counter here, and one must not be invented: nothing in their schema separates
+   an unmigrated legacy row from a deliberately organization- or
+   workspace-scoped one, so no truthful unmigrated-population count exists for
+   them (see [D. Backfill](#d-backfill)). Reconcile those three families through
+   their `byScope` breakdown against the reviewed classification instead -
+   `byScope` reports every authority distinction the schema can truthfully make,
+   and any non-user-scoped total is derivable from it.
 2. **Parity evidence.** The phase-E read-only shadow comparison shows the
    proposed effective scope equals the legacy effective scope for every compared
    read. No mismatch may be resolved by falling back to user authority.
@@ -604,7 +619,7 @@ consult.
 
 - Do not restart a pre-activation image after an activation migration has
   committed, and do not attempt a mixed-version rolling rollback across one.
-  This already applies to `0264`.
+  This already applies to `0264` and `0275`.
 - Do not run an activation migration with a live application. The
   `opengeni_app` session guard aborts with SQLSTATE `55000` and rolls its
   transaction back cleanly; treat that as the contract, not as a race to retry.
