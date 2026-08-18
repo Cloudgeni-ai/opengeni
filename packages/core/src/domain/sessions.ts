@@ -1960,15 +1960,16 @@ export async function createSessionForRequestWithOutcome(
   // so the session row + first turn honestly reflect where the agent runs (the
   // Machines dashboard, the turn's warm-metering, and the file-download plane all
   // key off this). GUARDS: (1) only when not inheriting a shared box
-  // (inheritedBackend undefined) — a shared/{groupId} spawn is literally the
-  // creator's box and must NOT be relabeled; a named targetSandboxId already
-  // forced an own-box default above, so child machine targets take this path
-  // too; (2) only when the target's kind is actually "selfhosted" —
-  // targetSandboxId also accepts a first-class MODAL sandbox id (resolveTarget),
-  // which must never be mislabeled. A not-found / non-selfhosted / modal target
-  // falls through to the default; the seed swap in createAndStartSession still
-  // validates ownership/liveness and 422s a bad target. (3) only when the feature
-  // flags that make the worker actually take the machine-primary path are ON
+  // (inheritedBackend undefined). Named targetSandboxId already 422s
+  // shared/{groupId} and defaults omission to own-box above, so this check is a
+  // backstop if those placement rules change; a shared spawn without a target
+  // is still literally the creator's box and must NOT be relabeled; (2) only
+  // when the target's kind is actually "selfhosted" — targetSandboxId also
+  // accepts a first-class MODAL sandbox id (resolveTarget), which must never be
+  // mislabeled. A not-found / non-selfhosted / modal target falls through to the
+  // default; the seed swap in createAndStartSession still validates
+  // ownership/liveness and 422s a bad target. (3) only when the feature flags
+  // that make the worker actually take the machine-primary path are ON
   // (sandboxOwnershipEnabled + sandboxSelfhostedEnabled/routing) — otherwise the
   // worker ignores the active pointer and a home="selfhosted" turn would fall to
   // the registry client with no bound agentId and throw; with the flags off we

@@ -650,6 +650,29 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     });
   }, 60_000);
 
+  test("explicit {groupId} plus targetSandboxId ⇒ 422 (a machine target cannot join a sibling group)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "pin to a machine while joining a group",
+        sandbox: { groupId: parent.sandboxGroupId },
+        targetSandboxId: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
+    });
+  }, 60_000);
+
   test("targetSandboxId is consumed (seedTargetSandbox path) — rejects on a backend:'none' session", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

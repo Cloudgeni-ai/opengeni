@@ -13,6 +13,9 @@
 //   - sandbox_os is derived from the targeted machine's enrollment OS on the SAME
 //     guards: a macOS machine target ⇒ 'macos', a linux machine target ⇒ 'linux',
 //     and a flags-off create leaves the "linux" default (worker ignores the pointer).
+//   - a child of backend:'none' or a boxed (modal) parent, with only
+//     targetSandboxId (sandbox + sandboxBackend omitted) ⇒ own selfhosted home,
+//     own group, pointer seeded — honest-label, not caller sandboxBackend.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
@@ -363,7 +366,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(turnRow?.sandbox_backend).toBe("modal");
   }, 60_000);
 
-  test("a child of a backend:'none' manager with a machine target (sandbox omitted) ⇒ own selfhosted home", async () => {
+  test("a child of a backend:'none' manager with a machine target (sandbox and sandboxBackend omitted) ⇒ own selfhosted home", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
     const parent = await createSessionForRequest(
@@ -377,13 +380,46 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     );
     expect(parent.sandboxBackend).toBe("none");
 
+    // Documented client path: omit sandbox and sandboxBackend; only name the
+    // machine. Honest-label must still win over the "modal" deployment default.
     const child = await createSessionForRequest(
       deps(bus),
       grant(accountId, workspaceId, parent.id),
       workspaceId,
       {
         initialMessage: "run the worker on the connected machine",
-        sandboxBackend: "selfhosted",
+        targetSandboxId: sandboxId,
+      },
+    );
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.sandboxBackend).toBe("selfhosted");
+    expect(child.sandboxGroupId).toBe(child.id);
+    expect(child.sandboxGroupId).not.toBe(parent.sandboxGroupId);
+    expect(child.activeSandboxId).toBe(sandboxId);
+    const [turnRow] = await admin<{ sandbox_backend: string }[]>`
+      select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
+    expect(turnRow?.sandbox_backend).toBe("selfhosted");
+  }, 60_000);
+
+  test("a child of a boxed (modal) manager with a machine target (sandbox omitted) ⇒ own selfhosted home, not the parent's group", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the cloud box",
+      },
+    );
+    expect(parent.sandboxBackend).toBe("modal");
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "run the worker on the connected machine",
         targetSandboxId: sandboxId,
       },
     );
