@@ -368,6 +368,11 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
+  // Retired: never registered, so these are never consulted. The map must stay
+  // total over the tool-name union, which still carries both names so that
+  // previously written scheduled-task snapshots keep parsing.
+  memory_save: { sessionRequired: true, allOf: ["documents:search"] },
+  memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
   preference_registry_summary: {
     sessionRequired: true,
     allOf: ["workspace:read"],

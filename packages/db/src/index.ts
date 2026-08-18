@@ -13310,7 +13310,7 @@ export async function resolveWorkspaceMemoryBlock(
   if (
     !workspace ||
     !resolveWorkspaceMemoryEnabled(workspace.settings) ||
-    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+    resolveWorkspaceMemoryPromptMode() === "retrieval_only"
   ) {
     return null;
   }

@@ -2497,6 +2497,8 @@ export type FirstPartyMcpToolName =
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
+  | "memory_save"
+  | "memory_correct"
   | "preference_registry_summary"
   | "preference_registry_get"
   | "task_notes_list"

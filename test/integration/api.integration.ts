@@ -7487,8 +7487,9 @@ describe("API component integration", () => {
       await prepared.close();
       prepared = null;
 
-      // This fixture exercises the legacy Memory V1 write surface, which is
-      // retained only under the explicit legacy_standing rollback mode.
+      // A workspace that stored the retired opt-out must still work normally:
+      // the value is accepted and ignored, and every other setting on the bag
+      // keeps its stored meaning.
       await updateWorkspaceSettings(dbClient.db, workspaceId, {
         memoryEnabled: true,
         memoryPromptMode: "legacy_standing",
@@ -7516,125 +7517,10 @@ describe("API component integration", () => {
       const memoryTools = (await prepared.mcpServers[0]!.listTools())
         .map((tool) => tool.name)
         .sort();
-      expect(memoryTools).toEqual([
-        "opengeni__memory_correct",
-        "opengeni__memory_save",
-        "opengeni__memory_search",
-      ]);
+      // Memory V1 writes are retired: selecting them by name does not register
+      // them, and the stored opt-out does not bring them back.
+      expect(memoryTools).toEqual(["opengeni__memory_search"]);
 
-      const saved = JSON.parse(
-        mcpText(
-          await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
-            text: "Staging deploys from main only, via opengeni-ops.",
-            kind: "procedural",
-            confidence: 0.91,
-          }),
-        ),
-      ) as McpMutationReceiptType;
-      expect(saved).toMatchObject({
-        outcome: "created",
-        changed: true,
-        resource: { type: "knowledge_memory", state: "active" },
-        facts: { deduped: false },
-      });
-      expect(JSON.stringify(saved)).not.toContain(
-        "Staging deploys from main only, via opengeni-ops.",
-      );
-      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.resource.id)).toMatchObject({
-        id: saved.resource.id,
-        status: "active",
-        kind: "procedural",
-        createdBySessionId: session.id,
-        metadata: { origin: "agent" },
-      });
-
-      const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter(
-        (event) => event.type === "memory.saved",
-      );
-      expect(saveEvents).toHaveLength(1);
-      expect(saveEvents[0]?.payload).toMatchObject({
-        memoryId: saved.resource.id,
-        kind: "procedural",
-        preview: "Staging deploys from main only, via opengeni-ops.",
-      });
-      expect(
-        ((saveEvents[0]?.payload as { preview?: string } | undefined)?.preview ?? "").length,
-      ).toBeLessThanOrEqual(120);
-
-      const search = JSON.parse(
-        mcpText(
-          await prepared.mcpServers[0]!.callTool("opengeni__memory_search", {
-            query: "how does staging deploy",
-            limit: 3,
-          }),
-        ),
-      ) as {
-        results: Array<{
-          memory: { id: string; usageCount: number };
-          score: number;
-          matchType: string;
-        }>;
-      };
-      expect(search.results[0]?.memory.id).toBe(saved.resource.id);
-      expect(search.results[0]!.score).toBeGreaterThan(0);
-      expect(search.results[0]!.memory.usageCount).toBe(1);
-
-      const superseded = JSON.parse(
-        mcpText(
-          await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
-            id: saved.resource.id.slice(0, 8),
-            reason: "Deployment branch changed",
-            replacement_text: "Staging deploys from release only, via opengeni-ops.",
-          }),
-        ),
-      ) as McpMutationReceiptType;
-      expect(superseded).toMatchObject({
-        outcome: "updated",
-        resource: { id: saved.resource.id, state: "superseded" },
-        facts: { correctionAction: "superseded" },
-      });
-      const replacementId = superseded.relatedResources?.[0]?.id;
-      expect(typeof replacementId).toBe("string");
-      expect(superseded.relatedResources?.[0]?.state).toBe("active");
-      expect(JSON.stringify(superseded)).not.toContain(
-        "Staging deploys from release only, via opengeni-ops.",
-      );
-      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.resource.id)).toMatchObject({
-        status: "superseded",
-        supersededById: replacementId,
-      });
-
-      const archived = JSON.parse(
-        mcpText(
-          await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
-            id: replacementId!,
-            reason: "Staging deploy process moved into a runbook.",
-          }),
-        ),
-      ) as McpMutationReceiptType;
-      expect(archived).toMatchObject({
-        resource: { id: replacementId, state: "archived" },
-        facts: { correctionAction: "archived" },
-      });
-      expect(await getKnowledgeMemory(dbClient.db, workspaceId, replacementId!)).toMatchObject({
-        status: "archived",
-      });
-
-      const correctionEvents = (
-        await listSessionEvents(dbClient.db, workspaceId, session.id)
-      ).filter((event) => event.type === "memory.corrected");
-      expect(correctionEvents).toHaveLength(2);
-      expect(correctionEvents[0]?.payload).toMatchObject({
-        memoryId: saved.resource.id,
-        action: "superseded",
-        reason: "Deployment branch changed",
-        replacementMemoryId: replacementId,
-      });
-      expect(correctionEvents[1]?.payload).toMatchObject({
-        memoryId: replacementId,
-        action: "archived",
-        reason: "Staging deploy process moved into a runbook.",
-      });
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);

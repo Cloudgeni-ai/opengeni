@@ -2332,13 +2332,10 @@ describe("DB integration", () => {
       set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
       where id = ${grant.workspaceId}::uuid
     `);
-    const block = await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId);
-    expect(block).toContain("## Workspace memory");
-    expect(block).toContain("### Preferences");
-    expect(block).toContain("Prefer Terraform for infra.");
-    expect(block).toContain("Staging deploys from main.");
-    // Episodic is excluded from the injected block.
-    expect(block).not.toContain("one-off thing");
+    // The standing block is retired: even a workspace that stored the old
+    // opt-out composes nothing into the prompt. The rows themselves are
+    // untouched and still reachable through search.
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
     // Candidate containment removes the broad block and legacy preference-kind
     // records only from agent retrieval. The canonical row remains available
@@ -2380,8 +2377,7 @@ describe("DB integration", () => {
       set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
       where id = ${empty.workspaceId}::uuid
     `);
-    const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
-    expect(emptyBlock).toContain("currently empty");
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId)).toBeNull();
   });
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {

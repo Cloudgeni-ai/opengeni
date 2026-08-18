@@ -813,6 +813,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_complete",
   "goal_pause",
   "memory_search",
+  "memory_save",
+  "memory_correct",
   "preference_registry_summary",
   "preference_registry_get",
   "task_notes_list",
@@ -983,8 +985,15 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
+// Names kept so previously written data still parses - immutable scheduled-task
+// execution snapshots recorded the tool set that was default at the time, and
+// they are strictly re-parsed on replay. Retiring a tool must not strand an
+// accepted occurrence. These are never registered, never default, and never
+// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  "memory_save",
+  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1019,6 +1028,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     // Memory V1 writes are retired entirely; `remember` and task-note
     // promotion own durable agent writes.
+    name !== "memory_save" &&
+    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -1802,13 +1813,16 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
-// Memory V1's standing prompt block is retired. The mode survives as a
-// single-value enum rather than being deleted outright because
-// `workspaces.settings` is a passthrough bag: a stored `legacy_standing` from
-// before this release must not fail settings validation, it must simply stop
-// meaning anything. Historical snapshots keep their recorded value; see
-// HistoricalMemoryPromptMode.
-export const WorkspaceMemoryPromptMode = z.enum(["retrieval_only"]);
+// Memory V1's standing prompt block is retired, but the enum deliberately still
+// ACCEPTS `legacy_standing`. `.passthrough()` only preserves unknown keys - it
+// does not rescue a known key holding a value the enum rejects - so collapsing
+// this to one value would fail the whole settings parse for any workspace that
+// opted in. Every resolver here is "parse the bag, fall back on failure", so
+// that single rejection would silently revert memoryEnabled,
+// agentHumanInputEnabled, codexCompactionDefault, voiceInput and Slack summon
+// to their defaults. The value is accepted and then ignored: see
+// resolveWorkspaceMemoryPromptMode.
+export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
 export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
 
 /**
@@ -1860,13 +1874,12 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 /**
  * Memory V1 prompt mode. Always `retrieval_only`: the standing pinned/recency
  * block is retired, so an absent, unrecognized, or stored-`legacy_standing`
- * setting all resolve the same way. Kept as a function, and as a one-value
- * enum, so callers and the frozen SQL snapshot keep agreeing without every
- * call site having to learn that the choice is gone.
+ * setting all resolve the same way. Kept as a function so the call sites and
+ * the frozen SQL snapshot keep agreeing without each one having to learn that
+ * the choice is gone.
  */
-export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? (parsed.data.memoryPromptMode ?? "retrieval_only") : "retrieval_only";
+export function resolveWorkspaceMemoryPromptMode(): "retrieval_only" {
+  return "retrieval_only";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
