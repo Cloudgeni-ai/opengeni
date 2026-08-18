@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Session-visibility contract stabilization (OPE-204 slice 10).
+// Session-visibility contract stabilization (organization-tenancy slice 10).
 //
 // Migration 0225 shipped two privileged SECURITY DEFINER lifecycle surfaces -
 // `transition_session_visibility` and `fork_session_content` - plus a matching
