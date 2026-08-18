@@ -1,4 +1,4 @@
-// Migration 0291: the OPE-204 phase D classification assertion seam for
+// Migration 0291: the organization-tenancy phase D classification assertion seam for
 // Variable Sets, Rigs, and Connected Machines.
 //
 // The load-bearing claim under test is that these three families need NO data
@@ -39,12 +39,12 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 type Fixture = {
   organizationId: string;

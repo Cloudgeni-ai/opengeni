@@ -1,4 +1,4 @@
-// OPE-204 phase D classification assertion for Variable Sets, Rigs, and
+// Organization-tenancy phase D classification assertion for Variable Sets, Rigs, and
 // Connected Machines. Read-only over every resource table - it proves each row
 // already carries an explicit terminal authority classification and rewrites
 // nothing. Usage:

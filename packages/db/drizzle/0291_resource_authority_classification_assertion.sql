@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- Migration 0291: explicit resource-classification assertion and receipt seam
--- for Variable Sets, Rigs, and Connected Machines (OPE-204 phase D, slices 4-5).
+-- for Variable Sets, Rigs, and Connected Machines (organization-tenancy phase D, slices 4-5).
 --
 -- WHAT PHASE D ASKS FOR, AND WHAT THE SCHEMA ALREADY GUARANTEES
 -- ------------------------------------------------------------
@@ -368,4 +368,4 @@ END
 $resource_classification_grants$;
 
 COMMENT ON FUNCTION verify_organization_resource_classification(uuid, text) IS
-  'OPE-204 phase D assertion seam for Variable Sets, Rigs, and Connected Machines. Read-only over every resource table: it proves each row already carries an explicit terminal authority classification and records what it cannot prove through the 0286 ledger. It never rewrites a resource row and never infers user ownership.';
+  'Organization-tenancy phase D assertion seam for Variable Sets, Rigs, and Connected Machines. Read-only over every resource table: it proves each row already carries an explicit terminal authority classification and records what it cannot prove through the 0286 ledger. It never rewrites a resource row and never infers user ownership.';

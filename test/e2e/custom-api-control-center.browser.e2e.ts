@@ -25,6 +25,9 @@ type UiState = {
   connectionsUnavailable: boolean;
   dense: boolean;
   loading: boolean;
+  /** Renders the curated Outlook Mail account as needing reauth (offers Reconnect). */
+  unhealthyAccount?: boolean;
+  mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
   oauthFailuresRemaining: number;
   oauthStarts: Array<{
     definitionId: string;
@@ -219,7 +222,7 @@ describe("custom API control center browser acceptance", () => {
       await loading.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      const refresh = loading.getByRole("button", { name: "Refresh services" });
+      const refresh = loading.getByRole("button", { name: "Refresh", exact: true });
       await expectVisible(refresh);
       expect(await refresh.isDisabled()).toBe(true);
       await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
@@ -228,7 +231,44 @@ describe("custom API control center browser acceptance", () => {
     }
   }, 90_000);
 
-  test("pass 6: guided Outlook Mail setup reviews access and retries one exact account", async () => {
+  test("pass 6: per-account facets configure and pause without exposing provider state", async () => {
+    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
+    const page = await context.newPage();
+    try {
+      const state = readyState();
+      await installApi(page, state);
+      await openCapabilities(page);
+      // Facets are reachable per exact account inside that provider's one row.
+      const sheet = await openOutlookMailSheet(page);
+      const account = sheet.locator('[data-integration-access-item="account-finance"]');
+      await expectText(account, "Outlook Mail — Finance");
+      await account
+        .getByRole("button", { name: "Manage facets for Outlook Mail — Finance" })
+        .click();
+      const facets = account.locator('[data-integration-facets="account-finance"]');
+      await expectText(facets, "Mail inbox");
+      await expectText(facets, "Mail delivery");
+      await expectText(facets, "Account identity");
+
+      const inbox = account.locator('[data-integration-facet="mail-inbox"]');
+      await inbox.getByRole("button", { name: "Configure" }).click();
+      const dialog = page.locator('[data-slot="dialog-content"]').filter({ hasText: "Mail inbox" });
+      await dialog.getByLabel("Folder").fill("INBOX");
+      await dialog.getByLabel("Unread Only").check();
+      await dialog.getByRole("button", { name: "Enable facet" }).click();
+      await expectText(inbox, "Active");
+      expect(JSON.stringify(state.mailInboxBinding)).not.toContain("history_id");
+
+      await inbox.getByRole("button", { name: "Pause" }).click();
+      await expectText(inbox, "Paused");
+      await assertAccessibleAndBounded(page, '[data-integration-sheet="outlook-mail"]');
+      await page.screenshot({ path: `${evidenceDir}pass-6-account-facets.png`, fullPage: true });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("pass 7: adding an account redirects straight to consent and retries one exact account", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
     const state = readyState();
@@ -237,102 +277,61 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      const outlookCard = page.locator("article").filter({
-        has: page.getByRole("heading", { name: "Outlook Mail", exact: true }),
-      });
-      const addAccount = outlookCard.getByRole("button", { name: "Add another account" });
-      await addAccount.click();
-      let dialog = page.getByRole("dialog");
-      await expectVisible(dialog);
-      expect(await dialog.getByLabel("Account label").inputValue()).toBe(
-        "Outlook Mail — Account 2",
-      );
-      expect(
-        await dialog
-          .getByLabel("Account label")
-          .evaluate((element) => element === document.activeElement),
-      ).toBe(true);
-      await expectText(dialog.locator('[aria-current="step"]'), "Account");
-      expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
-      await expectText(dialog, "Only your sessions and work explicitly delegated from you");
-      await expectText(dialog, "Authorized workspace members and workspace automations");
-      await dialog.getByLabel("Account label").press("Tab");
-      expect(
-        await dialog
-          .locator('input[value="personal"]')
-          .evaluate((element) => element === document.activeElement),
-      ).toBe(true);
-      await page.keyboard.press("ArrowRight");
-      expect(await dialog.locator('input[value="workspace"]').isChecked()).toBe(true);
-      await page.keyboard.press("ArrowLeft");
-      expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
-
-      const rawScope = dialog.getByText("Mail.Send", { exact: true });
-      expect(await rawScope.isVisible()).toBe(false);
-      await dialog.getByLabel("Account label").fill("Outlook Mail — Product");
-      await dialog.getByText("Workspace", { exact: true }).click();
-      await dialog.getByLabel("Account label").press("Enter");
-      await expectText(dialog, "What agents can do");
-      await expectText(dialog, "Draft and send messages");
-      expect(await rawScope.isVisible()).toBe(false);
-      await dialog.getByText("Technical details", { exact: true }).click();
-      expect(await rawScope.isVisible()).toBe(true);
-      await dialog.getByRole("button", { name: "Continue" }).click();
-      await expectText(dialog, "Review the connection");
-      await expectText(dialog, "Outlook Mail — Product");
-      await expectText(dialog, "Workspace — shared with authorized workspace members");
-      await dialog.getByRole("button", { name: "Back" }).click();
-      await expectText(dialog, "What agents can do");
-      await page.keyboard.press("Escape");
-      await dialog.waitFor({ state: "hidden" });
-      expect(await addAccount.evaluate((element) => element === document.activeElement)).toBe(true);
-
-      await addAccount.click();
-      dialog = page.getByRole("dialog");
-      expect(await dialog.getByLabel("Account label").inputValue()).toBe(
-        "Outlook Mail — Account 2",
-      );
-      await dialog.getByRole("button", { name: "Continue" }).click();
-      await dialog.getByRole("button", { name: "Continue" }).click();
-      state.oauthFailuresRemaining = 1;
-      await dialog.getByRole("button", { name: "Continue to Microsoft" }).click();
-      await expectText(dialog.getByRole("alert"), "Check your network and try again");
-      expect((await dialog.getByRole("alert").textContent()) ?? "").not.toContain(
-        "provider-oauth-debug-body",
-      );
-      await expectText(
-        page.locator('[data-integration-instance="account-finance"]'),
-        "Outlook Mail — Finance",
-      );
+      // Every curated definition is oauth2-reviewed, so adding an account is a
+      // zero-dialog straight redirect - no local account-naming form.
+      let sheet = await openOutlookMailSheet(page);
+      const addAccount = sheet.getByRole("button", { name: "+ Add account" });
+      await expectVisible(addAccount);
+      await Promise.all([page.waitForURL(`${webBaseUrl}/provider-consent`), addAccount.click()]);
       expect(state.oauthStarts).toHaveLength(1);
+      const added = new URL(state.oauthStarts[0]!.returnPath, webBaseUrl);
+      expect(added.searchParams.get("api_integration_instance")).toMatch(/^account-/);
+      expect(added.searchParams.get("api_integration_instance")).not.toBe("account-finance");
+      expect(added.searchParams.get("api_integration_name")).toBe("Outlook Mail - Account 2");
+      expect(added.searchParams.get("api_integration_expected")).toBeNull();
+      expect(state.oauthStarts[0]).toMatchObject({
+        definitionId: "microsoft-outlook-mail",
+        ownership: "workspace",
+      });
 
-      await assertAccessibleAndBounded(page, '[role="dialog"]');
-      await page.screenshot({
-        path: `${evidenceDir}pass-6-guided-connect-retry.png`,
+      // Reconnect targets the exact existing account, keeping its instance key
+      // and its optimistic version, and a failed start never creates one.
+      const repair = await context.newPage();
+      const repairState = { ...readyState(), unhealthyAccount: true, oauthFailuresRemaining: 1 };
+      await installApi(repair, repairState);
+      await openCapabilities(repair);
+      sheet = await openOutlookMailSheet(repair);
+      const account = sheet.locator('[data-integration-access-item="account-finance"]');
+      await expectText(account, "Needs attention");
+      const reconnect = account.getByRole("button", { name: "Reconnect" });
+      await reconnect.click();
+      await expectVisible(repair.getByText("Couldn't start account connection"));
+      expect(repairState.oauthStarts).toHaveLength(1);
+      expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`);
+      await assertAccessibleAndBounded(repair, '[data-integration-sheet="outlook-mail"]');
+      await repair.screenshot({
+        path: `${evidenceDir}pass-7-add-and-reconnect.png`,
         fullPage: true,
       });
-      await dialog.getByRole("button", { name: "Try again" }).click();
-      await page.waitForURL(`${webBaseUrl}/provider-consent`);
-      expect(state.oauthStarts).toHaveLength(2);
-      const firstReturn = new URL(state.oauthStarts[0]!.returnPath, webBaseUrl);
-      const retriedReturn = new URL(state.oauthStarts[1]!.returnPath, webBaseUrl);
-      expect(firstReturn.searchParams.get("api_integration_instance")).toMatch(/^account-/);
-      expect(retriedReturn.searchParams.get("api_integration_instance")).toBe(
-        firstReturn.searchParams.get("api_integration_instance"),
-      );
-      expect(retriedReturn.searchParams.get("api_integration_name")).toBe(
-        "Outlook Mail — Account 2",
-      );
-      expect(state.oauthStarts[1]).toMatchObject({
+
+      await Promise.all([repair.waitForURL(`${webBaseUrl}/provider-consent`), reconnect.click()]);
+      expect(repairState.oauthStarts).toHaveLength(2);
+      const firstReturn = new URL(repairState.oauthStarts[0]!.returnPath, webBaseUrl);
+      const retriedReturn = new URL(repairState.oauthStarts[1]!.returnPath, webBaseUrl);
+      expect(firstReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
+      expect(retriedReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
+      expect(retriedReturn.searchParams.get("api_integration_name")).toBe("Outlook Mail — Finance");
+      expect(retriedReturn.searchParams.get("api_integration_expected")).toBe("2");
+      expect(repairState.oauthStarts[1]).toMatchObject({
         definitionId: "microsoft-outlook-mail",
-        ownership: "personal",
+        ownership: "workspace",
       });
     } finally {
       await context.close();
     }
   }, 60_000);
 
-  test("pass 7: mobile permission-disabled journey remains usable and bounded", async () => {
+  test("pass 8: mobile permission-disabled journey remains usable and bounded", async () => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       hasTouch: true,
@@ -347,28 +346,33 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const reviewSetup = page.getByRole("button", { name: "Review Outlook Mail setup" });
-      expect(await reviewSetup.isDisabled()).toBe(false);
-      await reviewSetup.click();
-      const dialog = page.getByRole("dialog");
-      await expectText(dialog, "Administrator setup is required");
-      expect(await dialog.locator('input[value="personal"]').isDisabled()).toBe(true);
-      expect(await dialog.locator('input[value="workspace"]').isDisabled()).toBe(true);
-      expect(await dialog.getByRole("button", { name: "Continue" }).isDisabled()).toBe(true);
-      const box = await dialog.boundingBox();
+      const row = page.getByRole("button", { name: "Outlook Mail. Connected", exact: true });
+      await expectVisible(row);
+      // Keyboard journey: opening from the focused row must return focus to it.
+      await row.focus();
+      await row.press("Enter");
+      const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
+      await expectVisible(sheet);
+      // Read-only: the account is listed, but nothing here can mutate it.
+      await expectText(
+        sheet.locator('[data-integration-access-item="account-finance"]'),
+        "Outlook Mail — Finance",
+      );
+      await expectText(sheet, "A workspace administrator manages these accounts.");
+      expect(await sheet.getByRole("button", { name: "+ Add account" }).count()).toBe(0);
+      expect(await sheet.getByRole("button", { name: "Remove" }).count()).toBe(0);
+      const box = await sheet.boundingBox();
       expect(box?.width ?? 0).toBeLessThanOrEqual(390);
       expect(box?.height ?? 0).toBeLessThanOrEqual(844);
-      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await assertAccessibleAndBounded(page, '[data-integration-sheet="outlook-mail"]');
       await page.screenshot({
-        path: `${evidenceDir}pass-7-mobile-permission-forced-colors.png`,
+        path: `${evidenceDir}pass-8-mobile-permission-forced-colors.png`,
         fullPage: true,
       });
 
       await page.keyboard.press("Escape");
-      await dialog.waitFor({ state: "hidden" });
-      expect(await reviewSetup.evaluate((element) => element === document.activeElement)).toBe(
-        true,
-      );
+      await sheet.waitFor({ state: "hidden" });
+      await expectFocused(row);
     } finally {
       await context.close();
     }
@@ -381,6 +385,7 @@ function readyState(): UiState {
     connectionsUnavailable: false,
     dense: false,
     loading: false,
+    mailInboxBinding: null,
     oauthFailuresRemaining: 0,
     oauthStarts: [],
   };
@@ -405,6 +410,16 @@ async function openCapabilities(page: Page): Promise<void> {
     waitUntil: "networkidle",
   });
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
+}
+
+/** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
+async function openOutlookMailSheet(page: Page) {
+  const row = page.getByRole("button", { name: /^Outlook Mail\. / });
+  await expectVisible(row);
+  await row.click();
+  const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
+  await expectVisible(sheet);
+  return sheet;
 }
 
 async function expectCustomInstances(page: Page): Promise<void> {
@@ -478,7 +493,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
-      return json({ integrations: instances(state.dense) });
+      return json({ integrations: instances(state.dense, state.unhealthyAccount === true) });
     }
     if (
       request.method() === "POST" &&
@@ -496,6 +511,79 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({ message: "provider-oauth-debug-body" }, 503);
       }
       return json({ authorizationUrl: `${webBaseUrl}/provider-consent` });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith(
+        "/integrations/api%3Amicrosoft-outlook-mail/instances/account-finance/facets",
+      )
+    ) {
+      return json(mailFacets(state));
+    }
+    if (url.pathname.endsWith("/facets/mail-inbox")) {
+      if (request.method() === "PUT") {
+        const body = request.postDataJSON() as {
+          displayName: string;
+          config: Record<string, unknown>;
+        };
+        state.mailInboxBinding = mailInboxBinding(
+          state.mailInboxBinding?.version ? state.mailInboxBinding.version + 1 : 1,
+          "active",
+          body.config,
+        );
+        return json({
+          capabilityId: "api:microsoft-outlook-mail",
+          instanceKey: "account-finance",
+          facetKey: "mail-inbox",
+          status: "configured",
+          binding: state.mailInboxBinding,
+        });
+      }
+      if (request.method() === "DELETE") {
+        state.mailInboxBinding = state.mailInboxBinding
+          ? {
+              ...state.mailInboxBinding,
+              status: "disabled",
+              version: state.mailInboxBinding.version + 1,
+            }
+          : null;
+        return json({
+          capabilityId: "api:microsoft-outlook-mail",
+          instanceKey: "account-finance",
+          facetKey: "mail-inbox",
+          status: "removed",
+          binding: state.mailInboxBinding,
+          remainingOwners: [],
+        });
+      }
+    }
+    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/pause")) {
+      state.mailInboxBinding = {
+        ...state.mailInboxBinding!,
+        status: "paused",
+        version: state.mailInboxBinding!.version + 1,
+      };
+      return json({
+        capabilityId: "api:microsoft-outlook-mail",
+        instanceKey: "account-finance",
+        facetKey: "mail-inbox",
+        status: "paused",
+        binding: state.mailInboxBinding,
+      });
+    }
+    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/resume")) {
+      state.mailInboxBinding = {
+        ...state.mailInboxBinding!,
+        status: "active",
+        version: state.mailInboxBinding!.version + 1,
+      };
+      return json({
+        capabilityId: "api:microsoft-outlook-mail",
+        instanceKey: "account-finance",
+        facetKey: "mail-inbox",
+        status: "active",
+        binding: state.mailInboxBinding,
+      });
     }
     if (
       request.method() === "POST" &&
@@ -602,7 +690,7 @@ function integrationDefinitions() {
     ...(INTEGRATION_DEFINITION_PRESENTATIONS[id!]
       ? { presentation: INTEGRATION_DEFINITION_PRESENTATIONS[id!] }
       : {}),
-    facets: [],
+    facets: id === "microsoft-outlook-mail" ? mailFacetDefinitions() : [],
   }));
 }
 
@@ -611,9 +699,9 @@ function connections(dense: boolean) {
     connection(financeConnectionId, "Finance credential", null),
     connection(salesConnectionId, "Sales credential", subjectId),
     {
-      ...connection(outlookConnectionId, "Outlook Mail Finance credential", subjectId),
+      ...connection(outlookConnectionId, "Outlook Finance credential", subjectId),
       providerDomain: "graph.microsoft.com",
-      grantedScopes: ["Mail.Read", "Mail.Send"],
+      grantedScopes: ["Mail.ReadWrite", "Mail.Send"],
     },
   ];
   if (dense) {
@@ -653,24 +741,25 @@ function connection(id: string, credentialLabel: string, subject: string | null)
   };
 }
 
-function instances(dense: boolean) {
+function instances(dense: boolean, unhealthyAccount = false) {
   const values = [
     instance("finance", "Linear — Finance", financeConnectionId, "workspace"),
     instance("sales", "Linear — Sales", salesConnectionId, "personal"),
     {
-      ...instance("account-finance", "Outlook Mail — Finance", outlookConnectionId, "personal"),
+      ...instance("account-finance", "Outlook Mail — Finance", outlookConnectionId, "workspace"),
       capabilityId: "api:microsoft-outlook-mail",
       pluginKey: "integration/microsoft-outlook-mail",
       serverId: "api_microsoft_outlook_mail_account_finance",
       name: "Outlook Mail — Finance",
-      description: "Outlook mail, folders, drafts, and delivery.",
+      description: "Messages, folders, attachments, settings, and sending mail.",
       protocol: "openapi",
       definitionId: "microsoft-outlook-mail",
       definitionProvenance: "curated",
       providerDomain: "graph.microsoft.com",
-      baseUrl: "https://graph.microsoft.com/",
+      baseUrl: "https://graph.microsoft.com/v1.0/",
       sourceUrl: "https://graph.microsoft.com/v1.0/$metadata",
-      allowedTools: ["outlook_mail_list_messages", "outlook_mail_send_message"],
+      connected: !unhealthyAccount,
+      allowedTools: ["outlook_mail_messages_list", "outlook_mail_messages_send"],
       revisionId: "openapi:outlook-mail-v1",
       contentSha256: "c".repeat(64),
     },
@@ -688,6 +777,92 @@ function instances(dense: boolean) {
     }
   }
   return values;
+}
+
+function mailFacetDefinitions() {
+  return [
+    {
+      facetKey: "mail-inbox",
+      kind: "inbound_trigger",
+      configSchema: {
+        type: "object",
+        properties: {
+          folder: { type: "string", minLength: 1, maxLength: 256 },
+          unreadOnly: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+      capabilities: {
+        provider: "microsoft-outlook-mail",
+        connectionRequired: true,
+        cursor: "history_id",
+      },
+    },
+    {
+      facetKey: "mail-delivery",
+      kind: "delivery_destination",
+      configSchema: {
+        type: "object",
+        properties: { fromAlias: { type: "string", minLength: 1, maxLength: 512 } },
+        additionalProperties: false,
+      },
+      capabilities: {
+        provider: "microsoft-outlook-mail",
+        connectionRequired: true,
+        delivery: "email",
+      },
+    },
+    {
+      facetKey: "account-identity",
+      kind: "identity_link",
+      configSchema: { type: "object", properties: {}, additionalProperties: false },
+      capabilities: { provider: "microsoft", connectionRequired: true },
+    },
+  ];
+}
+
+function mailFacets(state: UiState) {
+  return {
+    capabilityId: "api:microsoft-outlook-mail",
+    instanceKey: "account-finance",
+    providerDomain: "graph.microsoft.com",
+    connectionId: outlookConnectionId,
+    facets: mailFacetDefinitions().map((definition) => ({
+      definition,
+      binding: definition.facetKey === "mail-inbox" ? state.mailInboxBinding : null,
+    })),
+  };
+}
+
+function mailInboxBinding(
+  version: number,
+  status: "active" | "paused" | "disabled",
+  config: Record<string, unknown>,
+) {
+  return {
+    id: "00000000-0000-4000-8000-000000000622",
+    facetKey: "mail-inbox",
+    kind: "inbound_trigger" as const,
+    bindingKey: "account-finance",
+    displayName: "Outlook Mail — Finance — Mail inbox",
+    connectionId: outlookConnectionId,
+    status,
+    config,
+    version,
+    hasCursor: false,
+    lastSuccessAt: null,
+    lastErrorCode: null,
+    createdAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+    directlyOwned: true,
+    owners: [
+      {
+        kind: "direct" as const,
+        id: "facet:d358a95c79124370ff2e8e3c9d366cd95ff8ddf1f30dfde2c79dffc61d3627af",
+        removable: true,
+      },
+    ],
+  };
 }
 
 function instance(
@@ -793,6 +968,18 @@ async function assertAccessibleAndBounded(page: Page, selector: string): Promise
         document.body.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+}
+
+/** Focus restoration happens on the closing layer's unmount, so poll for it. */
+async function expectFocused(locator: import("playwright").Locator): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let focused = false;
+  while (Date.now() < deadline) {
+    focused = await locator.evaluate((element) => element === document.activeElement);
+    if (focused) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  expect(focused).toBe(true);
 }
 
 async function expectVisible(locator: import("playwright").Locator): Promise<void> {

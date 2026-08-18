@@ -5249,6 +5249,35 @@ export function isClearedRunStateBlob(serialized: string | null | undefined): bo
   }
 }
 
+/**
+ * Expand-era placeholder written when a requires_action pause keeps a bounded
+ * open suffix but the leftover SDK `generatedItems` heap exceeds the 3 MiB
+ * materialization envelope. Resume must not call `RunState.fromString` on it;
+ * prefer `session_pending_tool_calls` interruption rows plus paired history.
+ */
+export const OPEN_SUFFIX_RUN_STATE_MARKER = "$opengeniOpenSuffix" as const;
+
+/** Canonical sentinel serializedRunState when the leftover heap does not fit. */
+export const OPEN_SUFFIX_RUN_STATE_BLOB = JSON.stringify({
+  [OPEN_SUFFIX_RUN_STATE_MARKER]: true,
+});
+
+export function isOpenSuffixRunStateBlob(serialized: string | null | undefined): boolean {
+  if (!serialized) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(serialized) as unknown;
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>)[OPEN_SUFFIX_RUN_STATE_MARKER] === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Trigger conversation compaction now. No body fields today (forward-room). */
 export const CompactSessionContextRequest = z.object({}).strict();
 export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextRequest>;

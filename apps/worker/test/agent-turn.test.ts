@@ -141,6 +141,16 @@ describe("approval RunState materialization boundary", () => {
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
   });
+
+  test("requires_action pause flushes paired history and attaches the open suffix", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    expect(source).toContain("attachOpenSuffixToPendingToolCalls");
+    expect(source).toContain("serializedRunStateForOpenSuffixPause");
+    expect(source).toContain("reconcileConversationTruth({ requireDurable: true })");
+    expect(source).toContain("settleOpenSuffixResumeIfNeeded");
+  });
 });
 
 describe("workspace structured human-input policy", () => {

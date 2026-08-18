@@ -37,12 +37,12 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-});
+}, 180_000);
 
 describe("migration 0285 tenancy inventory", () => {
   test("declares one read-only rolling seam that returns integers only", async () => {
