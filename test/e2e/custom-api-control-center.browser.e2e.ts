@@ -652,7 +652,6 @@ function workspace() {
 
 function integrationDefinitions() {
   const scopes: Record<string, string[]> = {
-    "google-gmail": ["openid", "email", "profile", "https://mail.google.com/"],
     "google-drive": ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
     "microsoft-outlook-mail": [
       "offline_access",
@@ -676,7 +675,6 @@ function integrationDefinitions() {
     ],
   };
   return [
-    ["google-gmail", "Gmail", "google", "gmail.googleapis.com"],
     ["google-drive", "Google Drive", "google", "www.googleapis.com"],
     ["microsoft-outlook-mail", "Outlook Mail", "microsoft", "graph.microsoft.com"],
     ["microsoft-outlook-calendar", "Outlook Calendar", "microsoft", "graph.microsoft.com"],
