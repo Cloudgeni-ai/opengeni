@@ -1,16 +1,15 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { usePacks } from "@opengeni/react";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type {
-  CapabilityPack,
-  PackInstallation,
-  PackInstallationPreview,
-  PackUninstallPreview,
-} from "@/types";
-import { PackInstallationPlan, PacksSection, PackUninstallPlan } from "./packs-section";
+import type { CapabilityPack, PackInstallationPreview, PackUninstallPreview } from "@/types";
+import {
+  PackContents,
+  PackDetailDialog,
+  PackInstallationPlan,
+  PackUninstallPlan,
+} from "./pack-dialogs";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -21,12 +20,18 @@ beforeAll(() => {
 
 afterAll(() => GlobalRegistrator.unregister());
 
-describe("PacksSection", () => {
-  test("reviews additions, configuration, and compute before install", async () => {
+// Radix portals do not mount in this DOM shim, so the dialog frame itself is
+// exercised end to end by the browser acceptance spec. Here we cover the parts
+// that carry the real decisions: the review that opening a Pack row triggers,
+// and the plans and contents that review renders.
+describe("PackDetailDialog", () => {
+  test("reviews the plan as soon as the Pack row opens, with no second button", async () => {
     const onPreviewInstall = mock(async () => installPreview());
     const rendered = await render(
-      <PacksSection
-        packs={packsState(null)}
+      <PackDetailDialog
+        open
+        pack={pack()}
+        installation={null}
         variableSets={[{ id: VARIABLE_SET_ID, name: "Production" }]}
         rigs={[
           {
@@ -37,8 +42,8 @@ describe("PacksSection", () => {
             verified: true,
           },
         ]}
-        busyPackId={null}
-        onRegister={async () => true}
+        busy={false}
+        onOpenChange={() => {}}
         onPreviewInstall={onPreviewInstall}
         onInstall={async () => true}
         onPreviewUninstall={async () => uninstallPreview()}
@@ -47,15 +52,49 @@ describe("PacksSection", () => {
       />,
     );
     try {
-      await click(button(document, "Review install"));
       await flush();
       expect(onPreviewInstall).toHaveBeenCalledTimes(1);
-      await click(button(document, "Contents"));
-      expect(document.body.textContent).toContain("Compute requirement");
-      expect(document.body.textContent).toContain("Configuration requirements");
-      expect(document.body.textContent).toContain("Values come from an encrypted Variable Set");
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("a closed Pack row reviews nothing", async () => {
+    const onPreviewInstall = mock(async () => installPreview());
+    const rendered = await render(
+      <PackDetailDialog
+        open={false}
+        pack={pack()}
+        installation={null}
+        variableSets={[]}
+        rigs={[]}
+        busy={false}
+        onOpenChange={() => {}}
+        onPreviewInstall={onPreviewInstall}
+        onInstall={async () => true}
+        onPreviewUninstall={async () => uninstallPreview()}
+        onUninstall={async () => true}
+        onUnregister={async () => true}
+      />,
+    );
+    try {
+      await flush();
+      expect(onPreviewInstall).toHaveBeenCalledTimes(0);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("shows the reviewed additions, configuration, and compute", async () => {
+    const contents = await render(<PackContents pack={pack()} />);
+    try {
+      expect(contents.container.textContent).toContain("Compute requirement");
+      expect(contents.container.textContent).toContain("Configuration requirements");
+      expect(contents.container.textContent).toContain(
+        "Values come from an encrypted Variable Set",
+      );
+    } finally {
+      await contents.unmount();
     }
 
     const plan = await render(<PackInstallationPlan preview={installPreview()} />);
@@ -71,29 +110,6 @@ describe("PacksSection", () => {
   });
 
   test("explains shared-owner retention before uninstall", async () => {
-    const onPreviewUninstall = mock(async () => uninstallPreview());
-    const rendered = await render(
-      <PacksSection
-        packs={packsState(installation())}
-        variableSets={[]}
-        rigs={[]}
-        busyPackId={null}
-        onRegister={async () => true}
-        onPreviewInstall={async () => installPreview()}
-        onInstall={async () => true}
-        onPreviewUninstall={onPreviewUninstall}
-        onUninstall={async () => true}
-        onUnregister={async () => true}
-      />,
-    );
-    try {
-      await click(button(document, "Uninstall"));
-      await flush();
-      expect(onPreviewUninstall).toHaveBeenCalledTimes(1);
-    } finally {
-      await rendered.unmount();
-    }
-
     const plan = await render(<PackUninstallPlan loading={false} preview={uninstallPreview()} />);
     try {
       expect(plan.container.textContent).toContain("1 shared");
@@ -143,24 +159,6 @@ function pack(): CapabilityPack {
       required: true,
     },
     metadata: {},
-  };
-}
-
-function installation(): PackInstallation {
-  return {
-    id: "33333333-3333-4333-8333-333333333333",
-    accountId: "44444444-4444-4444-8444-444444444444",
-    workspaceId: "55555555-5555-4555-8555-555555555555",
-    packId: pack().id,
-    status: "active",
-    version: 3,
-    manifestSnapshot: pack(),
-    manifestDigest: "d".repeat(64),
-    selectedRigId: RIG_ID,
-    installedBySubjectId: "user:test",
-    metadata: { variableSetId: VARIABLE_SET_ID },
-    enabledAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
   };
 }
 
@@ -234,27 +232,6 @@ function uninstallPreview(): PackUninstallPreview {
   };
 }
 
-function packsState(current: PackInstallation | null): ReturnType<typeof usePacks> {
-  return {
-    packs: [pack()],
-    installations: current ? [current] : [],
-    installationFor: () => current,
-    loading: false,
-    error: null,
-    refresh: async () => {},
-    register: async () => null,
-    enable: async () => null,
-    previewInstallation: async () => null,
-    install: async () => null,
-    previewUninstall: async () => null,
-    uninstall: async () => null,
-    remove: async () => false,
-    mutating: false,
-    mutationError: null,
-    clearMutationError: () => {},
-  };
-}
-
 async function render(element: ReactNode) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -270,21 +247,8 @@ async function render(element: ReactNode) {
   };
 }
 
-function button(container: ParentNode, label: string): HTMLButtonElement {
-  const match = [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
-    candidate.textContent?.includes(label),
-  );
-  if (!match) throw new Error(`Missing button: ${label}`);
-  return match;
-}
-
-async function click(element: HTMLElement): Promise<void> {
-  await act(async () => element.click());
-}
-
 async function flush(): Promise<void> {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }

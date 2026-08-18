@@ -420,6 +420,36 @@ function IntegrationFooterView({ footer }: { footer: IntegrationFooter }) {
           {footer.busy ? <Loader2Icon className="animate-spin" /> : null}
           Set up
         </Button>
+      ) : footer.kind === "actions" ? (
+        <>
+          {footer.primary ? (
+            <Button
+              type="button"
+              className="flex-1"
+              disabled={footer.primary.disabled || footer.busy}
+              title={footer.primary.unavailableReason}
+              aria-describedby={describedBy(footer.disclosureId)}
+              onClick={footer.primary.onClick}
+            >
+              {footer.busy ? <Loader2Icon className="animate-spin" /> : null}
+              {footer.primary.label}
+            </Button>
+          ) : null}
+          {footer.secondary ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className={cn(
+                !footer.primary && "flex-1",
+                footer.secondary.destructive && "text-fg-muted hover:text-status-failed",
+              )}
+              disabled={footer.secondary.disabled || footer.busy}
+              onClick={footer.secondary.onClick}
+            >
+              {footer.secondary.label}
+            </Button>
+          ) : null}
+        </>
       ) : (
         <>
           <Button

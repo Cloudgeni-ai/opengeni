@@ -473,7 +473,10 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
-The **Capabilities** view has exactly two user-facing objects.
+The **Capabilities** view has exactly three top-level sections, in this order:
+**Integrations**, **Connectors**, and **Bundles**. The first two are
+connections - something that holds an identity in another product. The third is
+not: a Bundle is a named collection of tools and instructions.
 
 **Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
 Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
@@ -582,7 +585,16 @@ otherwise store half a credential that only fails later as a 401.
 A **Featured** strip of tiles driven by curated `metadata.curation.featured`
 leads, followed by the searchable long tail: the enabled catalog strip, then a
 **Custom APIs** list of already-installed workspace-defined instances
-(`CustomApiSection`), then Skills/Plugins and Packs, then the Browse grid.
+(`CustomApiSection`), then the Browse grid.
+
+The Connectors search and kind filters are scoped to Connectors. The catalog is
+narrowed to `kind: "mcp"` and `kind: "api"` items once
+(`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
+Featured, Enabled, Browse, and count projections are derived, so no Skill,
+Plugin, or Pack row can appear in any of them and the chip counts describe what
+that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly
+`All`, `MCP servers`, and `APIs`. Skills, Plugins, and Packs have their own
+search in the Bundles section below.
 Tile badges are only `Official` (curated `metadata.curation.official`) and
 `Built by OpenGeni` (first-party bridges such as Fiken); nothing is ever
 labelled reviewed or verified. Every tile shows the same connection-state
@@ -602,7 +614,7 @@ citizens, to avoid touching unrelated `kind: "api"` catalog-builder behavior.
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
-- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Rig/Variable Set selection
+- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Rig/Variable Set selection, and register a Pack manifest of your own
 - add and enable public MCP Registry results
 - add and connect manual MCP integrations through the MCP-only catalog form
 - detect, review, authenticate, and install custom OpenAPI or GraphQL APIs
@@ -611,14 +623,58 @@ Open the **Capabilities** view in the web app to:
 - install Plugin manifests through immutable manifest/component review, bind each credentialed component to one exact active Connection, inspect update diffs, and remove only Plugin-owned components
 - select enabled custom MCPs in the agent composer
 
-Workspace-imported Skills and top-level Plugins render in a dedicated **Skills
-and Plugins** section instead of the generic catalog grid. Imported Skills are
-filtered out of the legacy Enabled/Browse projections so the same installation
-never appears twice. Closing and reopening an in-progress source dialog retains
-its input and error state; Plugin mutation retries retain one stable idempotency
-key, while every changed Connection binding must be re-previewed before the
-final install/update action becomes available. Connection-list load failure is
-shown as unavailable data, not misreported as an empty account inventory.
+**Bundles** are Skills, Plugins, and Packs: a named collection of tools and
+instructions, not a live connection to anything. Install one and everything
+inside it becomes available together. They render in one section
+(`bundles-section.tsx`) with one heading, one bundle-scoped search with a
+count, and one uniform row - the same `IntegrationRow` the Integrations list
+uses, so the whole list scans as one thing. A row is never given the
+quick-connect fast path: installing a Bundle always needs at least a
+confirmation, so the trailing state indicator stays decorative. The bundle
+chip vocabulary is the widened closed set in `integration-view-model.ts`
+(`Installed`, `Not installed`, `Update available`, `Installing`, plus
+`Needs attention`); a Bundle is never labelled `Connected`.
+
+Three provenances coexist and each is named on the row itself, as
+`<Kind> · <Provenance> · <description>`:
+
+- **Curated by OpenGeni** - the reviewed curated Skill library, and the Pack
+  manifests OpenGeni ships (`source: "built_in"` catalog rows).
+- **Registered in this workspace** - a Pack manifest any workspace admin
+  registered through **Add manifest** (`registerPackManifest`; the entry point
+  is a paste-JSON dialog in the section header, `source: "manual"` catalog
+  rows).
+- **Imported from source** - a Skill imported from GitHub/skills.sh, or a
+  Plugin installed from a reviewed manifest URL.
+
+Only the detail differs, and only where it genuinely must. An imported Skill or
+Plugin opens the same four-block `IntegrationSheet` an Integration does, with
+its immutable pinned identity as **Connection** facts and an `actions` footer
+(`Check for update` / `Review update`, and `Remove`); a viewer without
+workspace-administrator authority gets the locked sentence instead of inert
+buttons. A catalog Skill keeps the catalog detail sheet
+(`capability-detail-sheet.tsx`), which already owns its reviewed library
+identity, install/update/remove, and immutable provenance panel. A Pack opens
+`PackDetailDialog` (`pack-dialogs.tsx`), because choosing a Rig and a Variable
+Set, reviewing an exact component plan, and uninstall/unregister do not
+compress into four blocks. Opening a Pack row *is* the review request, so the
+plan resolves immediately rather than behind a second button.
+
+No `kind: "plugin"` catalog item is produced anywhere today, and both catalog
+Skills and Packs are scoped out of the Connectors projections by kind rather
+than by a per-row filter, so the same installation never appears twice and the
+Connectors grid cannot silently start showing a Bundle if the catalog builder
+changes. Closing and reopening an in-progress source dialog retains its input
+and error state; Plugin mutation retries retain one stable idempotency key,
+while every changed Connection binding must be re-previewed before the final
+install/update action becomes available. Connection-list load failure is shown
+as unavailable data, not misreported as an empty account inventory. A footer
+action that opens the import stepper or a removal confirmation closes the sheet
+first: one modal surface at a time.
+
+`/workspaces/:workspaceId/packs` redirects to `capabilities?section=packs`,
+which now scrolls the Bundles section into view instead of selecting a kind
+filter the Connectors grid no longer offers.
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
 

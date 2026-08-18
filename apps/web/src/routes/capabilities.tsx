@@ -1,5 +1,6 @@
 // Capabilities: the workspace integrations marketplace. A single scrollable
-// page with two user-facing objects. Integrations (Slack, GitHub, Google
+// page with exactly three sections: Integrations, Connectors, and Bundles.
+// Integrations (Slack, GitHub, Google
 // Drive, Jira and Confluence, Outlook Mail/Calendar/Contacts, OneDrive) are
 // built and run by OpenGeni and render through one row and one detail sheet
 // each; a provider with several accounts (Outlook, extra Drive accounts)
@@ -10,8 +11,12 @@
 // APIs list, and a logo tile grid over the full catalog (1,000+ items,
 // rendered incrementally). Credentialed MCP servers connect through the
 // connections spine (OAuth redirect or an API-key form) in a right-hand detail
-// sheet, never by hand-editing enable headers. Packs keep their first-class
-// register/enable/disable/unregister surface, restyled flat.
+// sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
+// and Packs: a named collection of tools and instructions rather than a live
+// connection, so they get their own section, their own search, and one uniform
+// row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
+// with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
+// projections.
 import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import {
@@ -28,6 +33,7 @@ import {
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
+import { BundlesSection } from "@/components/capabilities/bundles-section";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
@@ -54,13 +60,10 @@ import {
 } from "@/components/capabilities/featured-connectors";
 import { IntegrationRow } from "@/components/capabilities/integration-row";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
-import { PacksSection } from "@/components/capabilities/packs-section";
 import {
   QuickConnectDialog,
   type QuickConnectRequest,
 } from "@/components/capabilities/quick-connect-dialog";
-import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
-import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
@@ -90,6 +93,7 @@ import {
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
   filterCapabilityCatalogItems,
+  isConnectorCatalogItem,
   isMissingCredentialsError,
   normalizeProviderDomain,
   oauthConnectionRef,
@@ -178,9 +182,10 @@ export function CapabilitiesRoute({
   } = catalogData;
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const [filter, setFilter] = useState<CapabilityFilter>(
-    initialSection === "packs" ? "pack" : "all",
-  );
+  // Connectors-only discovery: the chips offer exactly the kinds that grid can
+  // show. `?section=packs` no longer selects a kind filter - Packs are Bundles
+  // now, so it scrolls that section into view instead.
+  const [filter, setFilter] = useState<CapabilityFilter>("all");
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -195,6 +200,10 @@ export function CapabilitiesRoute({
   // closing it returns focus to that row instead of dropping it on the body.
   const integrationOpenerRef = useRef<HTMLElement | null>(null);
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
+  // `/workspaces/:id/packs` redirects here with `?section=packs`. Packs are
+  // Bundles now, so that deep link scrolls the Bundles section into view
+  // instead of selecting a kind filter the Connectors grid no longer offers.
+  const bundlesRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
@@ -239,19 +248,21 @@ export function CapabilitiesRoute({
   const rigs = useRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
-  const counts = useMemo(() => capabilityCounts(items), [items]);
+  // The Connectors surface owns exactly MCP servers and API connectors. Skills,
+  // Plugins, and Packs are Bundles: they are scoped out here (not merely
+  // filtered by the chips) so no Enabled, Browse, or search result can ever
+  // contain one, and so the chip counts describe what this grid can show.
+  const connectorItems = useMemo(() => items.filter(isConnectorCatalogItem), [items]);
+  const counts = useMemo(() => capabilityCounts(connectorItems), [connectorItems]);
   const catalogView = listViewState({
     loading,
     error: loadError,
-    count: items.length,
+    count: connectorItems.length,
   });
 
   const filtered = useMemo(
-    () =>
-      filterCapabilityCatalogItems(items, filter, query).filter(
-        (item) => item.kind !== "pack" && !isWorkspaceImportedSkill(item),
-      ),
-    [items, filter, query],
+    () => filterCapabilityCatalogItems(connectorItems, filter, query),
+    [connectorItems, filter, query],
   );
   // The Featured strip shows curated connectors when nothing narrows the list;
   // the grid then carries the long tail. A search or a non-MCP filter hides the
@@ -277,9 +288,6 @@ export function CapabilitiesRoute({
     [filtered, featuredIds],
   );
   const visibleBrowse = browseItems.slice(0, visibleCount);
-  const showPacks = filter === "all" || filter === "pack";
-  const showSourcePackages = filter === "all" || filter === "skill" || filter === "plugin";
-  const showCatalog = filter !== "pack";
   // Custom APIs answer the same search as every other connector: a query that
   // matches nothing here must not still list every workspace-defined API.
   const visibleCustomApiInstances = useMemo(
@@ -461,6 +469,12 @@ export function CapabilitiesRoute({
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
+
+  // Honour the `?section=packs` deep link once, on arrival.
+  useEffect(() => {
+    if (initialSection !== "packs") return;
+    bundlesRef.current?.scrollIntoView({ block: "start" });
+  }, [initialSection]);
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A
@@ -1720,22 +1734,19 @@ export function CapabilitiesRoute({
         />
 
         <div className="mt-8 space-y-10">
-          {showCatalog ? (
-            <EnabledCapabilitiesSection
-              items={enabledItems}
-              busyId={busyId}
-              connectionHealth={(item) =>
-                connectionHealth(item, connections ?? [], connectionsLoaded)
-              }
-              logoUrl={logoUrl}
-              canManageSkills={canManageSkills}
-              onOpen={openItem}
-              onDisable={(item) => void removeFromStrip(item)}
-            />
-          ) : null}
+          <EnabledCapabilitiesSection
+            items={enabledItems}
+            busyId={busyId}
+            connectionHealth={(item) =>
+              connectionHealth(item, connections ?? [], connectionsLoaded)
+            }
+            logoUrl={logoUrl}
+            canManageSkills={canManageSkills}
+            onOpen={openItem}
+            onDisable={(item) => void removeFromStrip(item)}
+          />
 
-          {showCatalog &&
-          (filter === "all" || filter === "api") &&
+          {(filter === "all" || filter === "api") &&
           (query.trim().length === 0 || visibleCustomApiInstances.length > 0) ? (
             <CustomApiSection
               instances={visibleCustomApiInstances}
@@ -1749,70 +1760,64 @@ export function CapabilitiesRoute({
             />
           ) : null}
 
-          {showSourcePackages ? (
-            <SourcePackagesSection
-              client={client}
-              workspaceId={workspaceId}
-              connections={connections}
-              canManage={canManageApiIntegrationInstances}
-              filter={filter}
-              query={query}
-              onChanged={async () => {
-                await refresh();
-                onRuntimeChanged();
-              }}
-            />
-          ) : null}
+          <CapabilityBrowseSection
+            filter={filter}
+            query={query}
+            catalogView={catalogView}
+            loadError={loadError}
+            enabledCount={enabledItems.length}
+            browseItems={browseItems}
+            visibleBrowse={visibleBrowse}
+            registryBusy={registryBusy}
+            registrySearched={registrySearched}
+            registryResults={visibleRegistry}
+            logoUrl={logoUrl}
+            health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
+            onRetry={() => void refresh()}
+            onOpen={openItem}
+            onOpenRegistry={(item) => openItem(item, true)}
+            onSearchRegistry={() => void searchRegistry()}
+            onLoadMore={() =>
+              setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
+            }
+            onQuickConnect={capabilityQuickConnectAction}
+          />
+        </div>
 
-          {/* Packs. */}
-          {showPacks ? (
-            <PacksSection
-              packs={packs}
-              variableSets={variableSets.variableSets.map((variableSet) => ({
-                id: variableSet.id,
-                name: variableSet.name,
-              }))}
-              rigs={rigs.rigs.map((rig) => ({
-                id: rig.id,
-                name: rig.name,
-                image: rig.activeVersion?.image ?? null,
-                available: rig.activeVersion !== null,
-                verified: rig.activeVersionHealth?.checkHealth === "passing",
-              }))}
-              busyPackId={packBusyId}
-              onRegister={registerPackManifest}
-              onPreviewInstall={previewPackInstallation}
-              onInstall={installPack}
-              onPreviewUninstall={previewPackUninstall}
-              onUninstall={uninstallPack}
-              onUnregister={unregisterPack}
-            />
-          ) : null}
-
-          {showCatalog ? (
-            <CapabilityBrowseSection
-              filter={filter}
-              query={query}
-              catalogView={catalogView}
-              loadError={loadError}
-              enabledCount={enabledItems.length}
-              browseItems={browseItems}
-              visibleBrowse={visibleBrowse}
-              registryBusy={registryBusy}
-              registrySearched={registrySearched}
-              registryResults={visibleRegistry}
-              logoUrl={logoUrl}
-              health={(item) => connectionHealth(item, connections ?? [], connectionsLoaded)}
-              onRetry={() => void refresh()}
-              onOpen={openItem}
-              onOpenRegistry={(item) => openItem(item, true)}
-              onSearchRegistry={() => void searchRegistry()}
-              onLoadMore={() =>
-                setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
-              }
-              onQuickConnect={capabilityQuickConnectAction}
-            />
-          ) : null}
+        <div ref={bundlesRef}>
+          <BundlesSection
+            client={client}
+            workspaceId={workspaceId}
+            connections={connections}
+            canManage={canManageSkills}
+            items={items}
+            logoUrl={logoUrl}
+            busyCatalogId={busyId}
+            onOpenCatalogItem={openItem}
+            packs={packs}
+            variableSets={variableSets.variableSets.map((variableSet) => ({
+              id: variableSet.id,
+              name: variableSet.name,
+            }))}
+            rigs={rigs.rigs.map((rig) => ({
+              id: rig.id,
+              name: rig.name,
+              image: rig.activeVersion?.image ?? null,
+              available: rig.activeVersion !== null,
+              verified: rig.activeVersionHealth?.checkHealth === "passing",
+            }))}
+            busyPackId={packBusyId}
+            onRegisterPack={registerPackManifest}
+            onPreviewPackInstall={previewPackInstallation}
+            onInstallPack={installPack}
+            onPreviewPackUninstall={previewPackUninstall}
+            onUninstallPack={uninstallPack}
+            onUnregisterPack={unregisterPack}
+            onChanged={async () => {
+              await refresh();
+              onRuntimeChanged();
+            }}
+          />
         </div>
       </div>
 

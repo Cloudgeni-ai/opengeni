@@ -12,8 +12,27 @@ import type { ReactNode } from "react";
 
 export type IntegrationChipTone = "ok" | "warn" | "idle" | "plain";
 
+/**
+ * The closed chip vocabulary. The first five labels describe a live connection
+ * to another product (Integrations, Connectors); the last four describe a
+ * Bundle - a Skill, Plugin, or Pack, which is a named collection of tools and
+ * instructions rather than a connection, so "Connected" would read as a lie
+ * there. Keep this closed: a free-form string turns the chip into per-caller
+ * copy and the row/sheet stop being one shape.
+ */
+export type IntegrationChipLabel =
+  | "Connected"
+  | "Needs attention"
+  | "Not connected"
+  | "Set up by an admin"
+  | "Loading"
+  | "Installed"
+  | "Not installed"
+  | "Update available"
+  | "Installing";
+
 export type IntegrationChip = {
-  label: "Connected" | "Needs attention" | "Not connected" | "Set up by an admin" | "Loading";
+  label: IntegrationChipLabel;
   tone: IntegrationChipTone;
 };
 
@@ -131,8 +150,9 @@ export type IntegrationOption =
 /**
  * Closed footer set. `connected` and `repair` both render Reconnect + Disconnect
  * (Reconnect is primary only for `repair`); `setup` renders one Set up button;
- * `locked` renders the adapter-supplied sentence, defaulting to the
- * admin-managed one.
+ * `actions` renders up to two caller-labelled buttons for a surface whose verbs
+ * are not connect/disconnect; `locked` renders the adapter-supplied sentence,
+ * defaulting to the admin-managed one.
  */
 export type IntegrationFooter =
   | {
@@ -151,6 +171,31 @@ export type IntegrationFooter =
       disabled?: boolean;
       busy?: boolean;
       /** Disclosure the Set up button points at via aria-describedby. */
+      disclosureId?: string;
+    }
+  | {
+      /**
+       * Up to two caller-labelled actions, for a surface whose real verbs are
+       * not connect/disconnect (installing or removing a Bundle). Still a fixed
+       * frame: one primary button, one optional secondary, nothing else.
+       */
+      kind: "actions";
+      primary?: {
+        label: string;
+        onClick: () => void;
+        disabled?: boolean;
+        /** Explains why the action is unavailable, surfaced as the button title. */
+        unavailableReason?: string;
+      };
+      secondary?: {
+        label: string;
+        onClick: () => void;
+        disabled?: boolean;
+        /** Renders in the destructive tone (still confirm before destroying). */
+        destructive?: boolean;
+      };
+      busy?: boolean;
+      /** Disclosure the primary action points at via aria-describedby. */
       disclosureId?: string;
     }
   | { kind: "locked"; message?: string };

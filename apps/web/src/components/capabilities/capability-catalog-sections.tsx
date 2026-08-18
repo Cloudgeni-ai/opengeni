@@ -18,14 +18,12 @@ import type { ListViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
-export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = [
-  "all",
-  "pack",
-  "mcp",
-  "api",
-  "skill",
-  "plugin",
-];
+/**
+ * The kinds the Connectors grid can actually show. Skills, Plugins, and Packs
+ * are Bundles and live in their own section with their own search, so offering
+ * them here would only ever produce an empty grid.
+ */
+export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 
 export function CapabilityDiscoveryControls({
   query,
@@ -47,9 +45,9 @@ export function CapabilityDiscoveryControls({
         <Input
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search integrations, tools, and skills"
+          placeholder="Search connectors"
           className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
-          aria-label="Search capabilities"
+          aria-label="Search connectors"
         />
       </div>
 
