@@ -185,7 +185,12 @@ describe("migration 0282 session-attach materialization attribution", () => {
     // The STRICT session-selection join raises P0002 (not 42501): the
     // transaction rolls back, no materialized fact survives, and the 42501-only
     // denial filter records no false denial evidence for a linkage miss.
-    await expect(attempt).rejects.toBeTruthy();
+    const failure = await attempt.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).not.toBeNull();
+    expect(JSON.stringify(failure)).toContain("P0002");
     const [counts] = await admin<Array<{ materialized: number; denied: number }>>`
       select
         count(*) filter (where action = 'variable_set.materialized')::int as materialized,

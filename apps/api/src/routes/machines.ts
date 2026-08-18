@@ -376,6 +376,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
               accountId: fleetCtx.accountId,
               workspaceId: fleetCtx.workspaceId,
               session,
+              subjectId: fleetCtx.subjectId ?? null,
             },
           );
         },

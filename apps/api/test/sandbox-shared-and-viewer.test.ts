@@ -1253,12 +1253,21 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { accountId, workspaceId } = await freshWorkspace();
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
+    const readinessSubject = `user:fleet-${crypto.randomUUID()}`;
     const hold = await ensureSessionGroupReady(
       { db, settings },
-      { accountId, workspaceId, session: session! },
+      { accountId, workspaceId, session: session!, subjectId: readinessSubject },
     );
 
     expect(hold.lease.liveness).toBe("warm");
+    // 0282: the fleet readiness attach records the driving subject on its
+    // viewer holder, so its materialization/audit lane never masks the human
+    // behind the service sentinel.
+    const [holder] = await admin<Array<{ viewer_subject_id: string | null }>>`
+      select viewer_subject_id from sandbox_lease_holders
+      where workspace_id = ${workspaceId} and kind = 'viewer'
+      order by last_heartbeat_at desc limit 1`;
+    expect(holder?.viewer_subject_id).toBe(readinessSubject);
     const held = await readLease(db, workspaceId, sandboxGroupId);
     expect(held).toMatchObject({
       liveness: "warm",

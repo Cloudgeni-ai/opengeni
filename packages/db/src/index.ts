@@ -17692,9 +17692,13 @@ async function getVariableSetValuesForRunInTransaction(
   return await withRlsContext(db, input, async (scopedDb) => {
     if (input.authority.kind === "session_attach") {
       // 0282: the seam reads the request subject + causal human from the
-      // standard context GUCs and records the materialization audit fact.
+      // standard context GUCs and records the materialization audit fact. A
+      // null subject explicitly clears the GUC so a reused transaction handle
+      // can never attribute this materialization to an earlier subject.
       if (input.authority.subjectId) {
         await setSubjectRlsContext(scopedDb, input.authority.subjectId);
+      } else {
+        await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
       }
       if (input.authority.initiatingHumanSubjectId) {
         await scopedDb.execute(sql`select set_config(

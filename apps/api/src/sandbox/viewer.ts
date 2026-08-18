@@ -470,13 +470,26 @@ export type SessionGroupReadinessHold = {
  * it. */
 export async function ensureSessionGroupReady(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; session: Session },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    /** The authenticated subject driving the fleet attach/swap (0282): recorded
+     *  on the viewer holder and the materialization audit fact. Omitting it
+     *  records the explicit service sentinel, so forward the route subject. */
+    subjectId?: string | null;
+  },
 ): Promise<SessionGroupReadinessHold> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let release: (() => Promise<void>) | undefined;
     try {
-      const attached = await attachViewer(services, input);
+      const attached = await attachViewer(services, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        session: input.session,
+        ...(input.subjectId ? { viewerSubjectId: input.subjectId } : {}),
+      });
       let releasePromise: Promise<void> | undefined;
       release = () =>
         (releasePromise ??= detachViewer(services, {
