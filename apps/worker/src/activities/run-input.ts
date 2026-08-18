@@ -520,14 +520,7 @@ export async function turnInput(
     );
   }
   if (trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse") {
-    return await openSuffixMessageInput(
-      db,
-      runtime,
-      agent,
-      trigger,
-      internalContext,
-      options,
-    );
+    return await openSuffixMessageInput(db, runtime, agent, trigger, internalContext, options);
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }

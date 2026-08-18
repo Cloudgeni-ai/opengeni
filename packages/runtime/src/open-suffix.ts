@@ -7,10 +7,7 @@ import {
   type OpenSuffixMember,
 } from "./history-sanitizer";
 
-export type OpenSuffixInterruptionKind =
-  | "human_input"
-  | "approval"
-  | "interaction_intervention";
+export type OpenSuffixInterruptionKind = "human_input" | "approval" | "interaction_intervention";
 
 export class OpenSuffixUnresumableError extends Error {
   readonly code = "open_suffix_unresumable";
@@ -41,9 +38,7 @@ export function protocolItemsFromGeneratedItems(generatedItems: unknown): Histor
   return items;
 }
 
-export function extractOpenSuffixFromSerializedRunState(
-  serialized: string,
-): OpenSuffixMember[] {
+export function extractOpenSuffixFromSerializedRunState(serialized: string): OpenSuffixMember[] {
   try {
     const parsed = JSON.parse(serialized) as {
       generatedItems?: unknown;

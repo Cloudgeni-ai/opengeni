@@ -1571,13 +1571,17 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
 
     // "function-image" → the attached capability emits computer_* tools EVEN with a
     // ChatCompletions model bound (the sniff alone is never authority).
-    const functionCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-image" });
+    const functionCaps = buildAgentCapabilities(desktopOn, [], {
+      computerToolMode: "function-image",
+    });
     const functionCap = functionCaps.find(
       (c) => (c as { type?: string }).type === "computer-use",
     ) as unknown as ComputerUseCapability;
     const { session: s1 } = makeMockSession();
     functionCap.bind(s1 as never).bindModel("gpt", chatCompletionsModel());
-    expect(functionCap.tools().map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
+    expect(functionCap.tools().map((t) => (t as { name?: string }).name)).toEqual(
+      FUNCTION_TOOL_NAMES,
+    );
 
     // "function-text" is a deprecated fail-closed alias: providers without a proven
     // visual image transport receive no computer capability.
