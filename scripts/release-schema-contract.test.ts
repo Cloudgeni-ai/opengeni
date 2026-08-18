@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0293_retire_legacy_standing_memory_mode.sql")) {
+      if (migrations.has("0295_retire_legacy_standing_memory_mode.sql")) {
         return includesActivation
-          ? "f8e1466c64d7da8ecc249025ca94de42487f751e9516596aba71fe3ea85244c9"
-          : "08ab3d85dd12857e3b15390c78b9eccfa822b9af7433578edf9d77e90865fd30";
+          ? "1e7f6b1fba7ea25feea7b39dabf0be1c0445a6ec791229ce2b24035f96bcde04"
+          : "fd275b054969ef388c8c9479f98daa0885e53d1e1fb127a913722bc4b82bec38";
       }
       if (migrations.has("0291_resource_authority_classification_assertion.sql")) {
         return includesActivation
@@ -1044,7 +1044,7 @@ describe("release schema contract", () => {
         (migrations.has("0287_open_suffix_pending_tool_calls.sql") ? 1 : 0) +
         (migrations.has("0288_attached_browser_reenrollment.sql") ? 1 : 0) +
         (migrations.has("0292_truthful_tenancy_inventory_counters.sql") ? 1 : 0) +
-        (migrations.has("0293_retire_legacy_standing_memory_mode.sql") ? 1 : 0),
+        (migrations.has("0295_retire_legacy_standing_memory_mode.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1079,8 +1079,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0293_retire_legacy_standing_memory_mode.sql")
-        ? "0293_retire_legacy_standing_memory_mode.sql"
+      migrations.has("0295_retire_legacy_standing_memory_mode.sql")
+        ? "0295_retire_legacy_standing_memory_mode.sql"
         : migrations.has("0292_truthful_tenancy_inventory_counters.sql")
           ? "0292_truthful_tenancy_inventory_counters.sql"
           : migrations.has("0291_resource_authority_classification_assertion.sql")
