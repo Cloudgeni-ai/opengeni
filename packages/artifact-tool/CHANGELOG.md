@@ -1,5 +1,17 @@
 # @opengeni/artifact-tool
 
+## 0.3.0
+
+### Minor Changes
+
+- 383c294: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- Updated dependencies [383c294]
+- Updated dependencies [edd2b12]
+  - @opengeni/contracts@1.4.0
+
 ## 0.2.13
 
 ### Patch Changes

@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 1.4.0
+
+### Minor Changes
+
+- 6937eaf: The API-direct session-attach variable-set materialization lane (viewer attach and direct channel operations cold-creating a box) now records the accepted subject and a `variable_set.materialized` audit fact with the live session authority tuple (migration 0282, rolling; unchanged function signature). Attribution flows through the standard request-context GUCs; an old image that sets no subject records the explicit `service:session` sentinel. Denials keep their fail-closed raise-and-rollback semantics.
+- 383c294: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- Updated dependencies [383c294]
+- Updated dependencies [edd2b12]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codemode@0.4.8
+  - @opengeni/config@0.16.8
+
 ## 1.3.0
 
 ### Minor Changes

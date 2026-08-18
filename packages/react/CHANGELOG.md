@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 2.0.0
+
+### Minor Changes
+
+- 383c294: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols.
+
+### Patch Changes
+
+- Updated dependencies [383c294]
+  - @opengeni/artifact-tool@0.3.0
+  - @opengeni/sdk@2.0.0
+
 ## 1.1.1
 
 ### Patch Changes
