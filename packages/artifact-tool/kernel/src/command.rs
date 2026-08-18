@@ -353,7 +353,12 @@ fn apply_formula_commands(
                             })
                         } else {
                             engine
-                                .set_value_if_tracked(key, cell.value().clone())
+                                .set_value_if_tracked(
+                                    key,
+                                    cell.literal_value()
+                                        .expect("non-formula authored cells have a literal")
+                                        .clone(),
+                                )
                                 .map(|receipt| {
                                     engine_changed |=
                                         receipt.is_some_and(|receipt| receipt.content_changed);
@@ -455,7 +460,9 @@ fn final_values_for_keys(
                     let value = if cell.formula_source().is_some() {
                         crate::CellValue::Empty
                     } else {
-                        cell.value().clone()
+                        cell.literal_value()
+                            .expect("non-formula authored cells have a literal")
+                            .clone()
                     };
                     sheet_values.insert(coordinate, value);
                 }
@@ -695,7 +702,8 @@ impl BatchTransaction<'_> {
                         for column in 0..cells.columns() {
                             let index = row as usize * cells.columns() as usize + column as usize;
                             let coord = CellCoord::new(anchor.row + row, anchor.column + column);
-                            let previous = sheet.replace_cell(coord, cells.cells()[index].clone());
+                            let previous =
+                                sheet.replace_cell(coord, cells.cells()[index].materialize());
                             previous_cells.push((coord, previous));
                         }
                     }
@@ -1187,7 +1195,7 @@ mod tests {
                         2,
                         vec![
                             Cell::from_value(number(2.0)),
-                            Cell::formula("=A1*2", number(999.0)).expect("formula"),
+                            Cell::from_formula_projection("=A1*2", number(999.0)).expect("formula"),
                         ],
                     )
                     .expect("cells"),

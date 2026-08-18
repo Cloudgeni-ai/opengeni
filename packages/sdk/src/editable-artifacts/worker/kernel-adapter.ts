@@ -4,15 +4,24 @@ import {
   EDITABLE_ARTIFACT_INTENT_VERSION,
   EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
   SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+  SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
 } from "@opengeni/contracts/editable-artifacts";
-import { MAX_COMMITTED_TRANSACTION_BYTES } from "@opengeni/contracts/editable-artifact-committed-transaction";
+import {
+  SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
+  SPREADSHEET_KERNEL_COMMAND_VERSION,
+  SPREADSHEET_KERNEL_SNAPSHOT_VERSION,
+} from "@opengeni/contracts/editable-artifact-versions";
+import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+  MAX_COMMITTED_TRANSACTION_BYTES,
+} from "@opengeni/contracts/editable-artifact-committed-transaction";
 import type { ArtifactWorkerInitializeInput } from "./wire-codec";
 import type { EditableArtifactModality } from "../types";
 import { ArtifactWorkerProtocolError } from "./rpc-protocol";
 
 export type ArtifactWorkerKernelSession = {
   readonly modality: EditableArtifactModality;
-  /** Replays one exact whole canonical OGACO001 transaction. */
+  /** Replays one exact whole canonical OGACO002 transaction. */
   applyCommitted: (committedTransactionBytes: Uint8Array) => void;
   /** Authors and applies one exact OGATX001 intent over the current frontier. */
   applyPending: (intentBytes: Uint8Array) => void;
@@ -129,6 +138,7 @@ type WasmCapabilities = Readonly<{
   editableArtifactIntentVersion: number;
   kernelSnapshotVersion: number;
   spreadsheetCommandVersion: number;
+  spreadsheetModelSchemaVersion: number;
   maxCellsPerBatch: number;
   maxCommandBytes: number;
   maxCommands: number;
@@ -579,6 +589,7 @@ function decodeCapabilities(bytes: Uint8Array): WasmCapabilities {
     "safeRust",
     "sessionForks",
     "spreadsheetCommandVersion",
+    "spreadsheetModelSchemaVersion",
     "statefulSessions",
     "textLayout",
     "textLayoutFontBundleVersion",
@@ -636,6 +647,10 @@ function decodeCapabilities(bytes: Uint8Array): WasmCapabilities {
     spreadsheetCommandVersion: positiveInteger(
       value.spreadsheetCommandVersion,
       "spreadsheetCommandVersion",
+    ),
+    spreadsheetModelSchemaVersion: positiveInteger(
+      value.spreadsheetModelSchemaVersion,
+      "spreadsheetModelSchemaVersion",
     ),
     maxCellsPerBatch: positiveInteger(value.maxCellsPerBatch, "maxCellsPerBatch"),
     maxCommands: positiveInteger(value.maxCommands, "maxCommands"),
@@ -765,16 +780,17 @@ function decodeCapabilities(bytes: Uint8Array): WasmCapabilities {
     normalized.canonicalStateHash !== "sha256:canonical-snapshot" ||
     normalized.editableArtifactIntentVersion !== EDITABLE_ARTIFACT_INTENT_VERSION ||
     normalized.spreadsheetCommandVersion !== SPREADSHEET_ARTIFACT_COMMAND_VERSION ||
-    normalized.collaborationSnapshotVersion !== 1 ||
-    normalized.commandSchemaVersion !== 1 ||
-    normalized.committedTransactionVersion !== 1 ||
+    normalized.spreadsheetModelSchemaVersion !== SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION ||
+    normalized.collaborationSnapshotVersion !== SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION ||
+    normalized.commandSchemaVersion !== SPREADSHEET_KERNEL_COMMAND_VERSION ||
+    normalized.committedTransactionVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
     normalized.documentCommandVersion !== 1 ||
     normalized.documentQueryResponseVersion !== 1 ||
     normalized.documentQueryVersion !== 1 ||
     normalized.documentReceiptVersion !== 1 ||
     normalized.documentSnapshotVersion !== 1 ||
     normalized.documentStatefulSessions !== normalized.document ||
-    normalized.kernelSnapshotVersion !== 1 ||
+    normalized.kernelSnapshotVersion !== SPREADSHEET_KERNEL_SNAPSHOT_VERSION ||
     normalized.maxCellsPerBatch !== WASM_MAX_CELLS_PER_BATCH ||
     normalized.maxCommandBytes !== WASM_MAX_COMMAND_BYTES ||
     normalized.maxSpreadsheetCommandBytes !== EDITABLE_ARTIFACT_COMMAND_MAX_BYTES ||
@@ -868,7 +884,7 @@ function capabilityProfile(modality: EditableArtifactModality, capabilities: Was
       );
     }
     return {
-      modelSchemaVersion: capabilities.collaborationSnapshotVersion,
+      modelSchemaVersion: capabilities.spreadsheetModelSchemaVersion,
       commandVersion: capabilities.spreadsheetCommandVersion,
       maximumSnapshotBytes: capabilities.maxSnapshotBytes,
       maximumCommandBytes: capabilities.maxSpreadsheetCommandBytes,

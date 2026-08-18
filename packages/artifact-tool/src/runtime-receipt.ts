@@ -19,8 +19,8 @@ const WASM_RUNTIME_FILES = [
 const MAX_CAPABILITIES_BYTES = 1024 * 1024;
 
 export type ArtifactKernelBuildReceipt = Readonly<{
-  schemaVersion: 1;
-  producer: "opengeni-artifact-kernel-smoke-v1";
+  schemaVersion: 2;
+  producer: "opengeni-artifact-kernel-smoke-v2";
   target: ArtifactRuntimeTarget;
   kind: "native" | "wasm";
   buildIdentity: string;
@@ -28,6 +28,7 @@ export type ArtifactKernelBuildReceipt = Readonly<{
     bytes: number;
     sha256: `sha256:${string}`;
   }>;
+  spreadsheetFormulaProjectionCorpusSha256: `sha256:${string}`;
   runtimeFiles: readonly Readonly<{
     path: string;
     bytes: number;
@@ -48,11 +49,12 @@ export function validateArtifactKernelBuildReceipt(
       "kind",
       "buildIdentity",
       "capabilities",
+      "spreadsheetFormulaProjectionCorpusSha256",
       "runtimeFiles",
     ],
     "target build receipt",
   );
-  if (record.schemaVersion !== 1 || record.producer !== "opengeni-artifact-kernel-smoke-v1") {
+  if (record.schemaVersion !== 2 || record.producer !== "opengeni-artifact-kernel-smoke-v2") {
     invalid("target build receipt schema/producer is invalid");
   }
   if (
@@ -77,6 +79,13 @@ export function validateArtifactKernelBuildReceipt(
   if (capabilities.bytes > MAX_CAPABILITIES_BYTES) {
     invalid("target build capabilities exceed their maximum size");
   }
+  const spreadsheetFormulaProjectionCorpusSha256 = record.spreadsheetFormulaProjectionCorpusSha256;
+  if (
+    typeof spreadsheetFormulaProjectionCorpusSha256 !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(spreadsheetFormulaProjectionCorpusSha256)
+  ) {
+    invalid("target build formula projection corpus digest is invalid");
+  }
   if (
     !Array.isArray(record.runtimeFiles) ||
     record.runtimeFiles.length === 0 ||
@@ -97,12 +106,14 @@ export function validateArtifactKernelBuildReceipt(
     invalid("target build receipt runtimeFiles do not match the target package");
   }
   return {
-    schemaVersion: 1,
-    producer: "opengeni-artifact-kernel-smoke-v1",
+    schemaVersion: 2,
+    producer: "opengeni-artifact-kernel-smoke-v2",
     target: descriptor.target,
     kind: descriptor.kind,
     buildIdentity: record.buildIdentity,
     capabilities: { bytes: capabilities.bytes, sha256: capabilities.sha256 },
+    spreadsheetFormulaProjectionCorpusSha256:
+      spreadsheetFormulaProjectionCorpusSha256 as `sha256:${string}`,
     runtimeFiles,
   };
 }

@@ -21,6 +21,12 @@ pub(crate) struct CausalRegister<T> {
 }
 
 impl<T> CausalRegister<T> {
+    pub(crate) fn contains(&self, operation_id: OperationId) -> bool {
+        self.contributions
+            .binary_search_by_key(&operation_id, |candidate| candidate.operation_id)
+            .is_ok()
+    }
+
     pub(crate) fn insert(
         &mut self,
         contribution: RegisterContribution<T>,
@@ -114,6 +120,26 @@ impl<T> CausalRegister<T> {
         }
     }
 
+    pub(crate) fn remove(
+        &mut self,
+        operation_id: OperationId,
+        undone: &BTreeSet<OperationId>,
+    ) -> bool {
+        let Ok(position) = self
+            .contributions
+            .binary_search_by_key(&operation_id, |candidate| candidate.operation_id)
+        else {
+            return false;
+        };
+        self.contributions.remove(position);
+        self.recompute_maximal(undone);
+        true
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.contributions.is_empty()
+    }
+
     pub(crate) fn visible(&self) -> Option<&RegisterContribution<T>> {
         self.maximal
             .iter()
@@ -138,7 +164,7 @@ impl<T> CausalRegister<T> {
     }
 }
 
-fn happens_after<T>(
+pub(crate) fn happens_after<T>(
     candidate_later: &RegisterContribution<T>,
     candidate_earlier: &RegisterContribution<T>,
 ) -> bool {

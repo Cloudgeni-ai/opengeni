@@ -1,8 +1,8 @@
 import { type ArtifactRuntimeTarget } from "../../src/runtime";
 export declare const ARTIFACT_KERNEL_BUILD_RECEIPT = "artifact-kernel-build-receipt.json";
 export type ArtifactKernelBuildReceipt = Readonly<{
-    schemaVersion: 1;
-    producer: "opengeni-artifact-kernel-smoke-v1";
+    schemaVersion: 2;
+    producer: "opengeni-artifact-kernel-smoke-v2";
     target: ArtifactRuntimeTarget;
     kind: "native" | "wasm";
     buildIdentity: string;
@@ -10,6 +10,7 @@ export type ArtifactKernelBuildReceipt = Readonly<{
         bytes: number;
         sha256: `sha256:${string}`;
     }>;
+    spreadsheetFormulaProjectionCorpusSha256: `sha256:${string}`;
     runtimeFiles: readonly Readonly<{
         path: string;
         bytes: number;

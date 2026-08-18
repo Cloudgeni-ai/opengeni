@@ -97,6 +97,18 @@ export async function materializeArtifactKernelPackages(
       "All materialized target receipts must carry one exact build identity",
     );
   }
+  if (
+    new Set(
+      receipts.map(
+        ({ spreadsheetFormulaProjectionCorpusSha256 }) => spreadsheetFormulaProjectionCorpusSha256,
+      ),
+    ).size !== 1
+  ) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_PROJECTION_PARITY",
+      "All materialized target receipts must carry one formula projection corpus digest",
+    );
+  }
   await mkdir(options.outputRoot, { recursive: true });
   const materialized: MaterializedArtifactKernelPackage[] = [];
   for (const [index, target] of orderedTargets.entries()) {

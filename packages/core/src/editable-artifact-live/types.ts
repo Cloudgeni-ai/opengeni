@@ -1,3 +1,4 @@
+import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-live";
 import type {
   EditableArtifactActor,
   EditableArtifactCausalFrontier,
@@ -11,7 +12,7 @@ import type {
   EditableArtifactTransactionId,
 } from "../domain/editable-artifacts/types";
 
-export const EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION = 1;
+export const EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION = EDITABLE_ARTIFACT_LIVE_WIRE_VERSION;
 
 export type EditableArtifactLiveTicket = Readonly<{
   artifactId: EditableArtifactId;
@@ -52,6 +53,7 @@ export type EditableArtifactLiveSnapshot =
         modality: "spreadsheet";
         causalFrontier: EditableArtifactCausalFrontier;
         operationProtocolVersion: number;
+        snapshotVersion: number;
       }>)
   | (EditableArtifactLiveSnapshotCommon &
       Readonly<{
@@ -120,7 +122,7 @@ type EditableArtifactLiveResumeCommon = Readonly<{
 export type EditableArtifactLiveResume =
   | (EditableArtifactLiveResumeCommon &
       Readonly<{
-        modality?: "spreadsheet";
+        modality: "spreadsheet";
         localCausalFrontier: EditableArtifactCausalFrontier;
       }>)
   | (EditableArtifactLiveResumeCommon &
@@ -166,6 +168,8 @@ export type EditableArtifactLiveServerFrame =
         | Readonly<{
             modality: "spreadsheet";
             causalFrontier: EditableArtifactCausalFrontier;
+            operationProtocolVersion: number;
+            snapshotVersion: number;
           }>
         | Readonly<{
             modality: "document" | "presentation";
