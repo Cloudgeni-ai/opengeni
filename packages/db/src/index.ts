@@ -17592,7 +17592,14 @@ export async function getVariableSetValuesForRun(
           executionGeneration: number;
           initiatingHumanSubjectId?: string | null;
         }
-      | { kind: "session_attach"; sessionId: string };
+      | {
+          kind: "session_attach";
+          sessionId: string;
+          /** The authenticated route subject driving the attach (0282); null
+           *  records the explicit legacy sentinel `service:session`. */
+          subjectId: string | null;
+          initiatingHumanSubjectId?: string | null;
+        };
   },
 ): Promise<{
   variableSet: {
@@ -17618,7 +17625,9 @@ export async function getVariableSetValuesForRun(
         action: "variable_set.materialize.denied",
         variableSetId: input.variableSetId,
         subjectId:
-          input.authority.kind === "agent_attempt" ? input.authority.subjectId : "service:session",
+          input.authority.kind === "agent_attempt"
+            ? input.authority.subjectId
+            : (input.authority.subjectId ?? "service:session"),
         ...(input.authority.kind === "agent_attempt"
           ? {
               sessionId: input.authority.sessionId,
@@ -17681,6 +17690,18 @@ async function getVariableSetValuesForRunInTransaction(
   input: Parameters<typeof getVariableSetValuesForRun>[1],
 ): ReturnType<typeof getVariableSetValuesForRun> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    if (input.authority.kind === "session_attach") {
+      // 0282: the seam reads the request subject + causal human from the
+      // standard context GUCs and records the materialization audit fact.
+      if (input.authority.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.authority.subjectId);
+      }
+      if (input.authority.initiatingHumanSubjectId) {
+        await scopedDb.execute(sql`select set_config(
+          'opengeni.initiating_human_subject_id',
+          ${input.authority.initiatingHumanSubjectId}, true)`);
+      }
+    }
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
       await scopedDb.execute(sql`select set_config(
@@ -17832,7 +17853,14 @@ export async function loadVariableSetForRun(
           executionGeneration: number;
           initiatingHumanSubjectId?: string | null;
         }
-      | { kind: "session_attach"; sessionId: string };
+      | {
+          kind: "session_attach";
+          sessionId: string;
+          /** The authenticated route subject driving the attach (0282); null
+           *  records the explicit legacy sentinel `service:session`. */
+          subjectId: string | null;
+          initiatingHumanSubjectId?: string | null;
+        };
   },
 ): Promise<VariableSetForRun | null> {
   if (!input.variableSetId) {
