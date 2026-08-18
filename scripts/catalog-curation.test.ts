@@ -333,8 +333,7 @@ describe("curated fields flow through import normalization", () => {
       presentation: {
         providerName: "Google",
         icon: "mail",
-        introduction:
-          "Let agents work with the Gmail account you choose through Google's official hosted MCP server.",
+        introduction: "Let agents work with the Gmail account you choose.",
       },
     });
     // The three curated scope labels cover exactly the row's scopesHint, so

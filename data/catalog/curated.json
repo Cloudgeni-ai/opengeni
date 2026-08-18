@@ -16,7 +16,7 @@
     {
       "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
       "name": "Gmail",
-      "description": "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      "description": "Search and read Gmail, draft and send mail, and organize messages through OpenGeni's reviewed Gmail bridge.",
       "category": "communication",
       "featured": true,
       "official": true,
@@ -30,6 +30,8 @@
       ],
       "allowedTools": [
         "create_draft",
+        "send_message",
+        "send_draft",
         "get_message",
         "get_thread",
         "label_message",
@@ -42,6 +44,8 @@
       ],
       "requireApproval": [
         "create_draft",
+        "send_message",
+        "send_draft",
         "label_message",
         "label_thread",
         "unlabel_message",
@@ -51,30 +55,30 @@
       "presentation": {
         "providerName": "Google",
         "icon": "mail",
-        "introduction": "Let agents work with the Gmail account you choose through Google's official hosted MCP server.",
+        "introduction": "Let agents work with the Gmail account you choose.",
         "capabilities": [
           {
             "title": "Find and understand mail",
             "description": "Search messages and threads, then use them as context for your work."
           },
           {
-            "title": "Draft replies",
-            "description": "Prepare drafts for your review; sending stays in your hands."
+            "title": "Draft and send messages",
+            "description": "Prepare drafts, or send a new message or an existing draft. Every send needs your approval first."
           },
           {
             "title": "Organize the mailbox",
             "description": "Work with labels, drafts, messages, and threads through the reviewed tools."
           }
         ],
-        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. OpenGeni exposes only the reviewed tools listed for this connector.",
+        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. OpenGeni exposes only the reviewed tools listed for this connector, and every send requires your approval before it goes out.",
         "scopeLabels": {
           "https://www.googleapis.com/auth/gmail.readonly": {
             "label": "Read your mail",
             "description": "Search and read messages and threads in the account you approve."
           },
           "https://www.googleapis.com/auth/gmail.compose": {
-            "label": "Draft messages",
-            "description": "Create and update drafts; nothing is sent without you."
+            "label": "Draft and send messages",
+            "description": "Create drafts and send mail; every send requires your approval first."
           },
           "https://www.googleapis.com/auth/gmail.modify": {
             "label": "Organize your mailbox",
@@ -88,7 +92,7 @@
       "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
       "notes": [
         "scopesHint keeps the consent surface to the union required by the reviewed tools instead of requesting every scope advertised by PRM.",
-        "allowedTools freezes the reviewed Developer Preview surface. Newly introduced remote tools stay unavailable until this contract is reviewed again.",
+        "allowedTools freezes the reviewed tool surface. Every tool call executes through OpenGeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft are OpenGeni additions the Developer Preview server does not offer; both require durable human approval, non-optional and not workspace-configurable.",
         "connectionOwnership is personal_only: a consumer Gmail account is never a workspace credential. Each member authorizes their own mailbox.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]

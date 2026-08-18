@@ -6644,12 +6644,11 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("substitutes the opt-in Gmail REST adapter for the hosted preview MCP", async () => {
+  test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];
     const prepared = await prepareAgentTools(
       testSettings({
-        gmailRestAdapterEnabled: true,
         mcpServers: [
           {
             id: "gmail",

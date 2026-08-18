@@ -508,9 +508,11 @@ The row and the sheet contain no provider-specific branch.
   folder picker, the Jira/Confluence source picker, the reaction conversation
   picker, the Slack decision-publication settings) open from the Access block's
   single edit affordance or an option's action link.
-- Named per-account API integration instances (Gmail, Outlook, OneDrive, and
+- Named per-account API integration instances (Outlook, OneDrive, and
   additional Google Drive accounts) and custom OpenAPI/GraphQL APIs remain in
   the separate **Connected services** control center below the integrations.
+  Gmail is not one of these: it is a Connector, not an API integration
+  definition (see the Gmail section below).
 
 **Connectors** are MCP servers from the catalog. Connection setup defaults to workspace-owned; a personal connection requires the explicit **Connect only for me** choice (official Gmail and Slack's hosted MCP are the personal-only exceptions).
 A **Featured** strip of tiles driven by curated `metadata.curation.featured`
@@ -588,10 +590,12 @@ surface:
 - `https://www.googleapis.com/auth/gmail.compose`
 - `https://www.googleapis.com/auth/gmail.modify`
 
-Those scopes support search/read, draft creation, and the reviewed label and
-unlabel operations. The Google scope is broader than the exposed tools, but the
-reviewed Google MCP surface and REST fallback do not expose a direct-send or
-delete tool. Gmail OAuth is handled by the ordinary encrypted connection broker,
+Those scopes support search/read, draft creation, approval-gated sending
+(`send_message`, `send_draft`), and the reviewed label and unlabel operations.
+The Google scope is broader than the exposed tools, but the reviewed surface
+does not expose a delete tool, and every send requires durable human approval
+first - not a workspace setting. Gmail OAuth is handled by the ordinary
+encrypted connection broker,
 with a narrow Google
 compatibility path: authorization requests ask for offline consent, Google
 authorization/token origins are pinned, and the RFC 8707 `resource` parameter
@@ -609,24 +613,29 @@ asks the agent to quote, summarize, or otherwise add to a session follows that
 session's visibility; connection privacy does not turn a shared session into a
 private one.
 
-The catalog also pins the exact ten tools in Google's reviewed Developer
-Preview surface. A newly added remote tool is unavailable until the catalog
-contract is reviewed and updated. Draft creation and label/unlabel tools require
-the ordinary durable human approval; search, message/thread reads, draft lists,
-and label lists do not.
+Gmail is the single connector path for the provider: the catalog row's
+`gmailmcp.googleapis.com/mcp/v1` resource is the connection and consent
+identity, but every tool call executes against a first-party OpenGeni bridge
+over Gmail's REST API (`packages/runtime/src/gmail-rest-mcp.ts`), never
+against Google's Developer Preview MCP endpoint directly. There is no
+per-deployment toggle: the bridge is unconditional. This is also why Gmail has
+no separate OpenAPI API-integration definition and no REST-adapter fallback
+mode - both existed only while the bridge coexisted with a direct-passthrough
+option; consolidated onto one path, they were removed rather than deprecated.
 
-While hosted MCP enrollment is pending, a deployment can set
-`OPENGENI_GMAIL_REST_ADAPTER_ENABLED=true`. This opt-in substitutes a bounded
-Gmail REST implementation for that exact official MCP endpoint in agent turns
-and the attempt-frozen Codemode projection; it does not create a second
-capability or connection. The
-adapter preserves the reviewed ten-tool allowlist, tool names, output field
-shape, subject-owned delegation, and approval policy. Its credential broker
-binding permits only `https://gmail.googleapis.com/gmail/v1/users/me/...`: it
-cannot call another Google API or address another mailbox. Read-only calls may
-refresh after one 401 and retry once; a mutation is never replayed after an
-ambiguous provider response. Keep the flag off by default and disable it after
-the hosted endpoint works for the enrolled account and project.
+The catalog pins the exact twelve tools in the reviewed surface (the
+Developer Preview's ten plus `send_message`/`send_draft`, which the real
+Developer Preview server does not offer at all). A newly added tool is
+unavailable until the catalog contract is reviewed and updated. Draft
+creation, both send tools, and label/unlabel tools require the ordinary
+durable human approval - mandatory, not a workspace setting; search,
+message/thread reads, draft lists, and label lists do not. The bridge's
+credential broker binding permits only
+`https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
+Google API or address another mailbox. Read-only calls may refresh after one
+401 and retry once; a mutation (including both send tools) is never replayed
+after an ambiguous provider response - it fails closed with an explicit
+"outcome is uncertain" error instead of risking a duplicate send.
 
 Before importing/enabling the capability in a deployment:
 
