@@ -1,0 +1,7 @@
+---
+"@opengeni/db": minor
+---
+
+Add the read-only organization tenancy parity checker (OPE-204 slice 8, phase E). Migration `0293_organization_tenancy_parity.sql` adds a strictly read-only `check_organization_tenancy_parity(uuid, integer, integer)` SECURITY DEFINER seam behind its own transaction-scoped, migration-owner-only capability (the 0254/0285 pattern; deliberately separate from 0285's capability so the inventory seam gains no visibility it was not reviewed for). `@opengeni/db` exports `checkOrganizationTenancyParity`, the pure `composeTenancyParityReport`, and the `TENANCY_PARITY_GATES` / `TENANCY_PARITY_LANES` / `TENANCY_PARITY_UNVERIFIABLE` catalogs; `bun run db:check-tenancy-parity --organization-id <uuid>` emits the machine-readable report and exits non-zero when a gate fails.
+
+Fifteen invariant gates cover organization/membership/workspace consistency, one membership-row-free personal workspace per active membership, stable authority uniqueness, provider-account collision propagation, session ownership provenance, zero partial delegations, and the shadow legacy-vs-proposed scope comparison. The seam never writes, repairs, or widens anything, and no reported mismatch is resolved toward user authority. Compatibility lanes are reported separately from invariants, and properties with no honest measurement (the shape-constrained variable-set/rig/machine "unclassified" counters, default session visibility, and total session ownerlessness) are reported as explicitly unverifiable rather than as counters that could never drain to zero.
