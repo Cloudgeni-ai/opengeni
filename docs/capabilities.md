@@ -590,10 +590,12 @@ surface:
 - `https://www.googleapis.com/auth/gmail.compose`
 - `https://www.googleapis.com/auth/gmail.modify`
 
-Those scopes support search/read, draft creation, and the reviewed label and
-unlabel operations. The Google scope is broader than the exposed tools, but the
-reviewed Google MCP surface and REST fallback do not expose a direct-send or
-delete tool. Gmail OAuth is handled by the ordinary encrypted connection broker,
+Those scopes support search/read, draft creation, approval-gated sending
+(`send_message`, `send_draft`), and the reviewed label and unlabel operations.
+The Google scope is broader than the exposed tools, but the reviewed surface
+does not expose a delete tool, and every send requires durable human approval
+first - not a workspace setting. Gmail OAuth is handled by the ordinary
+encrypted connection broker,
 with a narrow Google
 compatibility path: authorization requests ask for offline consent, Google
 authorization/token origins are pinned, and the RFC 8707 `resource` parameter
