@@ -7520,7 +7520,6 @@ describe("API component integration", () => {
       // Memory V1 writes are retired: selecting them by name does not register
       // them, and the stored opt-out does not bring them back.
       expect(memoryTools).toEqual(["opengeni__memory_search"]);
-
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);

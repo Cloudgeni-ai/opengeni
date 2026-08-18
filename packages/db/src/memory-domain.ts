@@ -430,8 +430,6 @@ This workspace has shared long-lived memory, currently empty. Your context is lo
 export const MEMORY_SEARCH_TOOL_DESCRIPTION =
   "Search this workspace's shared long-lived memory (semantic + keyword). Use it before starting a new non-trivial task when the injected notes or current conversation do not already answer how the workspace does something. Results persist in conversation context: do not repeat the same search as routine setup on every continuation, resume, or interrupted turn. Returns scored records with ids. Indexed workspace documents are a separate store: search those with `knowledge_search`/`knowledge_get` (or `search_documents`) on the Document Search (docs) MCP server, not with this tool.";
 
-
-
 // ---------------------------------------------------------------------------
 // Text normalization + hashing (MUST match migration 0045 backfill exactly)
 // ---------------------------------------------------------------------------

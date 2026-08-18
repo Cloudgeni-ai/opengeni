@@ -37,8 +37,6 @@ describe("workspace Memory V1 prompt mode", () => {
     expect(
       UpdateWorkspaceSettingsRequest.safeParse({ memoryPromptMode: "retrieval_only" }).success,
     ).toBe(true);
-    expect(resolveWorkspaceMemoryPromptMode()).toBe(
-      "retrieval_only",
-    );
+    expect(resolveWorkspaceMemoryPromptMode()).toBe("retrieval_only");
   });
 });

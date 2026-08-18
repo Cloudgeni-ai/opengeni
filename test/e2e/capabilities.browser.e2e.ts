@@ -259,8 +259,8 @@ describe("capabilities browser e2e", () => {
 
         for (const theme of ["light", "dark"] as const) {
           await setTheme(page, theme);
-          await expectVisible(page.getByLabel("Search capabilities"));
-          expect(await page.getByLabel("Search capabilities").count()).toBe(1);
+          await expectVisible(page.getByLabel("Search connectors"));
+          expect(await page.getByLabel("Search connectors").count()).toBe(1);
           await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
           await page.screenshot({
             path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
@@ -324,7 +324,7 @@ describe("capabilities browser e2e", () => {
       expect(initialCount).toBeLessThanOrEqual(48);
 
       const startedAt = performance.now();
-      await page.getByLabel("Search capabilities").fill("Capability 4999");
+      await page.getByLabel("Search connectors").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);

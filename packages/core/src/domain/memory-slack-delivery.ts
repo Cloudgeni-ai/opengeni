@@ -49,7 +49,6 @@ export async function saveWorkspaceMemoryWithSlackPublication(
   });
 }
 
-
 async function publishSavedMemoryMutation(
   db: Database,
   input: SaveWorkspaceMemoryInput,

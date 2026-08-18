@@ -48,6 +48,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentStableVersion: "0.1.16",
     agentBetaVersion: undefined,
     productAccessMode: "local",
+    organizationTenancyCanonicalActivationEnabled: false,
     billingMode: "disabled",
     entitlementsMode: "none",
     usageLimitsMode: "none",

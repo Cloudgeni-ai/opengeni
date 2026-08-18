@@ -79,6 +79,12 @@ config:
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
+  # Canonical organization-tenancy authority activation. Pinned to the
+  # reversible pre-activation posture so an upgrade can never cross the one-way
+  # boundary implicitly. Flip to "true" only after proving the preconditions in
+  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
+  # rollback.
+  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none

@@ -5272,14 +5272,13 @@ export function isClearedRunStateBlob(serialized: string | null | undefined): bo
 }
 
 /**
- * Expand-era placeholder written when a requires_action pause keeps a bounded
- * open suffix but the leftover SDK `generatedItems` heap exceeds the 3 MiB
- * materialization envelope. Resume must not call `RunState.fromString` on it;
- * prefer `session_pending_tool_calls` interruption rows plus paired history.
+ * Sentinel written on a requires_action pause. Resume must not call
+ * `RunState.fromString` on it; the open suffix on `session_pending_tool_calls`
+ * plus paired history is the resume authority.
  */
 export const OPEN_SUFFIX_RUN_STATE_MARKER = "$opengeniOpenSuffix" as const;
 
-/** Canonical sentinel serializedRunState when the leftover heap does not fit. */
+/** Canonical sentinel serializedRunState for a requires_action pause. */
 export const OPEN_SUFFIX_RUN_STATE_BLOB = JSON.stringify({
   [OPEN_SUFFIX_RUN_STATE_MARKER]: true,
 });
