@@ -8026,6 +8026,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rootSessionId: mcpCredentialRootSessionId,
         attemptId: input.attemptId,
         turn,
+        observability,
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();

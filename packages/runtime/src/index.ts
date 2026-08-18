@@ -78,6 +78,7 @@ import {
 } from "./mcp-network";
 import {
   LazyToolModelProvider,
+  createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
@@ -118,7 +119,6 @@ import {
   run,
   Runner,
   Usage,
-  UserError,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index;
@@ -2375,12 +2375,11 @@ export function buildOpenGeniAgent(
  * on the unrelated sandbox structured-tool Boolean.
  *
  * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
- * exact MCP objects may finish materializing after the first request begins;
- * the search executor returns those same objects into Runner's runtime registry.
- * Generic providers receive only
- * stable ordinary tool_search/tool_invoke schemas; every function tool stays in
- * Runner's registry and valid dispatcher calls are rewritten back to the real
- * runtime tool before Runner handles approval and execution.
+ * exact MCP objects may finish materializing after the first request begins.
+ * A remembered authorized name binds through resolveMissingFunctionTool after
+ * that catalog is ready. Generic providers receive only stable ordinary
+ * tool_search/tool_invoke schemas; a valid dispatcher call is renamed to the
+ * real tool and bound by the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -5911,29 +5910,16 @@ export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
-  const restore = async () =>
-    await RunState.fromString(agent, serializedRunState, {
-      clientToolSearchRehydration: "preserve_history",
-    });
-  try {
-    return await restore();
-  } catch (error) {
-    const lazyRuntime = lazyToolRuntimeForAgent(agent);
-    if (
-      !(error instanceof UserError) ||
-      !/^Tool .+ not found$/.test(error.message) ||
-      !lazyRuntime?.hasPendingPreparation()
-    ) {
-      throw error;
-    }
-    // A durable approval may resume in a new worker after its real tool was
-    // disclosed through client tool_search. Rehydration correctly refuses to
-    // bind that pending call until the current authorized catalogue contains
-    // the same routed identity. Join preparation only on this exact miss, then
-    // retry from the untouched serialized state; revoked tools still fail.
+  const lazyRuntime = lazyToolRuntimeForAgent(agent);
+  if (lazyRuntime) {
     await lazyRuntime.ensurePrepared();
-    return await restore();
   }
+  return await RunState.fromString(agent, serializedRunState, {
+    clientToolSearchRehydration: "preserve_history",
+    ...(lazyRuntime
+      ? { resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime) }
+      : {}),
+  });
 }
 
 export async function prepareRunInput(
@@ -6380,9 +6366,7 @@ export async function runAgentStream(
       historyOwnership: "external",
       modelResponseRetention: "last",
       toolExecution: { preApprovalInputGuardrails: true },
-      ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
-        ? { toolNotFoundBehavior: "return_error_to_model" as const }
-        : {}),
+      ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -6521,9 +6505,7 @@ export async function runAgentStream(
     historyOwnership: "external",
     modelResponseRetention: "last",
     toolExecution: { preApprovalInputGuardrails: true },
-    ...(lazyToolRuntimeForAgent(agent)?.transport === "generic_dispatch"
-      ? { toolNotFoundBehavior: "return_error_to_model" as const }
-      : {}),
+    ...lazyToolRunBindings(agent),
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
@@ -6586,6 +6568,18 @@ function appendSandboxFileDownloadFailureNote(
  * Runner inherits the SDK's default config for everything else, identical to the
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
+function lazyToolRunBindings(agent: Agent<any, any>): {
+  toolNotFoundBehavior?: "return_error_to_model";
+  resolveMissingFunctionTool?: ReturnType<typeof createResolveMissingFunctionTool>;
+} {
+  const runtime = lazyToolRuntimeForAgent(agent);
+  if (!runtime) return {};
+  return {
+    toolNotFoundBehavior: "return_error_to_model",
+    resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+  };
+}
+
 function runScopedRunner(settings: Settings, agent: Agent<any, any>): Runner {
   const baseProvider = new MultiProviderModelProvider(settings);
   const lazyRuntime = lazyToolRuntimeForAgent(agent);
