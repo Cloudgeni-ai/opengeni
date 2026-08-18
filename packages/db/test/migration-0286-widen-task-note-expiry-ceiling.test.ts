@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
-const migrationUrl = new URL("../drizzle/0285_widen_task_note_expiry_ceiling.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0286_widen_task_note_expiry_ceiling.sql", import.meta.url);
 
 let shared: SharedTestDatabase | null = null;
 
@@ -14,7 +14,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0285 widen task-note expiry ceiling", () => {
+describe("migration 0286 widen task-note expiry ceiling", () => {
   test("widens the CHECK constraint and both SECURITY DEFINER bounds to 90 days", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);

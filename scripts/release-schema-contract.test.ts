@@ -521,10 +521,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0285_widen_task_note_expiry_ceiling.sql")) {
+      if (migrations.has("0286_widen_task_note_expiry_ceiling.sql")) {
         return includesActivation
-          ? "1bb64633a7bc92b6f8eab998b17162cbc2e03b77bf55b018c8dc765bfda3ca51"
-          : "af9c0ad6b36997c16f8b80022593b4cdfcb06421030cd8932a7ede1bfc5b19bf";
+          ? "fb74cfecb392aee71a2da847b9ffdb730acbe2c81f7834113872f7e711023266"
+          : "82f8ea989e307bd6a2d63db49b60746206d67ae61878bf4f0a912a846cfff625";
       }
       if (migrations.has("0284_truthful_human_confirmed_review_reason.sql")) {
         return includesActivation
@@ -1008,7 +1008,7 @@ describe("release schema contract", () => {
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +
         (migrations.has("0283_editable_spreadsheet_authored_state.sql") ? 1 : 0) +
         (migrations.has("0284_truthful_human_confirmed_review_reason.sql") ? 1 : 0) +
-        (migrations.has("0285_widen_task_note_expiry_ceiling.sql") ? 1 : 0),
+        (migrations.has("0286_widen_task_note_expiry_ceiling.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1043,8 +1043,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0285_widen_task_note_expiry_ceiling.sql")
-        ? "0285_widen_task_note_expiry_ceiling.sql"
+      migrations.has("0286_widen_task_note_expiry_ceiling.sql")
+        ? "0286_widen_task_note_expiry_ceiling.sql"
         : migrations.has("0284_truthful_human_confirmed_review_reason.sql")
           ? "0284_truthful_human_confirmed_review_reason.sql"
           : migrations.has("0283_editable_spreadsheet_authored_state.sql")
