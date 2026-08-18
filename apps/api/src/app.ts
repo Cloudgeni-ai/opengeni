@@ -28,7 +28,6 @@ import {
   type DocumentServices,
 } from "@opengeni/documents";
 import {
-  CodemodeCallBudgetExceededError,
   CodemodeOperationConflictError,
   CodemodeOperationNotExecutableError,
   CodemodePayloadTooLargeError,
@@ -919,9 +918,6 @@ function codemodeHttpError(error: unknown): HTTPException {
   }
   if (error instanceof CodemodeOperationConflictError) {
     return new HTTPException(409, { message: error.message, cause: error });
-  }
-  if (error instanceof CodemodeCallBudgetExceededError) {
-    return new HTTPException(429, { message: error.message, cause: error });
   }
   if (error instanceof CodemodeToolNotInCatalogError) {
     return new HTTPException(404, { message: error.message, cause: error });
