@@ -1,5 +1,6 @@
 -- deployment-mode: rolling
--- Tenancy backfill receipt and unresolved-row ledger (OPE-204 phase D).
+-- Tenancy backfill receipt and unresolved-row ledger (organization-tenancy
+-- backfill phase D).
 --
 -- `docs/organization-tenancy.md` phase D requires that backfill "record
 -- backfill receipts and unresolved rows without widening access". This
