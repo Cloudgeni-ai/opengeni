@@ -26771,7 +26771,7 @@ export const SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT = 32;
 /**
  * The reserved slot a session-visibility transition leaves behind when it strips
  * a now-`user_private` session identity out of another subject's cached page
- * (migration 0294). Replacing rather than removing the slot keeps snapshot
+ * (migration 0295). Replacing rather than removing the slot keeps snapshot
  * cardinality and every in-flight cursor offset byte-stable; `gen_random_uuid()`
  * never emits the nil UUID, so the slot resolves to no session and the hydration
  * below drops it exactly as it already drops a row RLS hid between pages.

@@ -16,17 +16,17 @@ import {
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0294_session_snapshot_and_pin_visibility.sql",
+  "../drizzle/0295_session_snapshot_and_pin_visibility.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0294-session-snapshot-and-pin-visibility");
+  shared = await acquireSharedTestDatabase("migration-0295-session-snapshot-and-pin-visibility");
   if (!shared && requireRealDatabase) {
     throw new Error(
-      "[migration-0294-session-snapshot-and-pin-visibility] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      "[migration-0295-session-snapshot-and-pin-visibility] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
     );
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
@@ -129,7 +129,7 @@ async function makePrivate(fixture: Fixture, sessionId: string, epoch: number): 
   });
 }
 
-describe("migration 0294 session list snapshot and pin visibility", () => {
+describe("migration 0295 session list snapshot and pin visibility", () => {
   test("declares a rolling deployment mode and the bounded stripping contract", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -362,7 +362,7 @@ describe("migration 0294 session list snapshot and pin visibility", () => {
       });
       expect(beforeFix).toEqual({ readable: 0, deleted: 0 });
 
-      // AFTER: restore 0294's owner escape.
+      // AFTER: restore 0295's owner escape.
       await shared.admin.unsafe(`
         drop policy session_visibility_isolation on session_pins;
         create policy session_visibility_isolation on session_pins as restrictive

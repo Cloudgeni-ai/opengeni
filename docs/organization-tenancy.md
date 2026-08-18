@@ -485,11 +485,11 @@ cancellation, and owner-only grants before enabling personal attachment to
 shared sessions.
 
 Cache and pin stripping is delivered by migration
-`0294_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
+`0295_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
 `session_visibility_isolation` by enumerating relations that carry a foreign key
 to `sessions.id`, so it reached 70 relations but could not reach
 `session_list_snapshots.ordinary_session_ids` — a bare `uuid[]` with no foreign
-key. 0294 closes both halves of that gap:
+key. 0295 closes both halves of that gap:
 
 - A cached list page is stripped at the transition, not filtered on the read
   path. An `AFTER UPDATE OF visibility` trigger on `sessions` replaces the
