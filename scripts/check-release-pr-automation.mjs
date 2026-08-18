@@ -29,6 +29,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   ciWorkflowPath: ".github/workflows/ci.yml",
   ciWorkflowFile: "ci.yml",
   sealWorkflowPath: ".github/workflows/seal-release-head.yml",
+  retainControllerWorkflowPath: ".github/workflows/retain-release-controller.yml",
   sourceAdmissionWorkflowPath: ".github/workflows/source-admission.yml",
   releaseHeadTagPrefix: "opengeni-release-head-",
   releaseHeadReleaseNamePrefix: "Retained OpenGeni release head ",
@@ -1215,6 +1216,57 @@ export async function sealReleaseHeadEvidence(options = {}) {
   };
 }
 
+function retainedControllerContext(env, suppliedControllerSha) {
+  const github = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.retainControllerWorkflowPath,
+    "workflow_dispatch",
+  );
+  requiredEnvironment(env, ["GITHUB_REF"]);
+  const controllerSha = assertSha(
+    suppliedControllerSha ?? env.RELEASE_CONTROLLER_SHA,
+    "retained controller SHA",
+  );
+  invariant(
+    env.GITHUB_REF === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
+    "retained controller workflow is not running from the default branch",
+  );
+  invariant(github.sha === controllerSha, "retained controller differs from workflow SHA");
+  return { ...github, controllerSha };
+}
+
+export async function retainCurrentMainControllerEvidence(options = {}) {
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? console;
+  const context = retainedControllerContext(env, options.controllerSha);
+  const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
+  const [repository, main, controller] = await Promise.all([
+    api.get(repositoryPath("")),
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/git/commits/${context.controllerSha}`)),
+  ]);
+  assertRepository(repository);
+  assertMainRef(main, context.controllerSha, "retained controller default branch");
+  assertCommit(controller, context.controllerSha, "retained controller commit");
+
+  const releaseHead = await ensureReleaseHeadRef(api, context.controllerSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.controllerSha);
+  const [terminalMain, terminalRef, terminalRelease] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/git/ref/tags/${releaseHead.name}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHead.name}`)),
+  ]);
+  assertMainRef(terminalMain, context.controllerSha, "terminal retained controller default branch");
+  assertReleaseHeadRef(terminalRef, context.controllerSha);
+  const verifiedRelease = assertReleaseHeadRelease(terminalRelease, context.controllerSha);
+  invariant(
+    JSON.stringify(verifiedRelease) === JSON.stringify(releaseHeadRelease),
+    "retained controller immutable release moved during retention",
+  );
+  logger.log(`Retained current main ${context.controllerSha} as an immutable release controller.`);
+  return { ...context, releaseHead, releaseHeadRelease };
+}
+
 function checkIdentity(kind, context) {
   invariant(
     kind === "source-admission" ||
@@ -2328,6 +2380,17 @@ async function runCommand(env = process.env) {
         release_head_sha: result.headSha,
         release_head_ref: result.releaseHead.ref,
         release_head_merged_source_sha: result.sourceSha,
+      },
+      env,
+    );
+    return;
+  }
+  if (command === "retain-release-controller") {
+    const result = await retainCurrentMainControllerEvidence({ env });
+    writeOutputs(
+      {
+        release_controller_sha: result.controllerSha,
+        release_controller_ref: result.releaseHead.ref,
       },
       env,
     );

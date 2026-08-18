@@ -6,6 +6,7 @@ import {
   beginVersionPrChecks,
   completeVersionPrChecks,
   recoverReleaseHeadEvidence,
+  retainCurrentMainControllerEvidence,
   sealReleaseHeadEvidence,
   validateVersionPrCiAdmission,
   validateVersionPrDispatch,
@@ -16,6 +17,10 @@ const root = join(import.meta.dir, "..");
 const releaseWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath);
 const ciWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath);
 const sealWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath);
+const retainControllerWorkflowPath = join(
+  root,
+  RELEASE_AUTOMATION_CONTRACT.retainControllerWorkflowPath,
+);
 const releaseSourceAdmissionPath = join(root, ".github/workflows/release-source-admission.yml");
 const releasePublicationAdmissionPath = join(
   root,
@@ -855,6 +860,115 @@ describe("release head evidence retention", () => {
       }),
     ).rejects.toThrow("workflow source SHA differs from its event SHA");
     expect(drift.requests).toHaveLength(0);
+  });
+});
+
+function retainControllerEnv(overrides: Record<string, string> = {}) {
+  return {
+    GITHUB_API_URL: RELEASE_AUTOMATION_CONTRACT.apiUrl,
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_REPOSITORY: RELEASE_AUTOMATION_CONTRACT.repository,
+    GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
+    GITHUB_SHA: headSha,
+    GITHUB_TOKEN: "fixture-token",
+    GITHUB_WORKFLOW_REF:
+      `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
+      `${RELEASE_AUTOMATION_CONTRACT.retainControllerWorkflowPath}@refs/heads/main`,
+    GITHUB_WORKFLOW_SHA: headSha,
+    RELEASE_CONTROLLER_SHA: headSha,
+    ...overrides,
+  };
+}
+
+function retainControllerFixture() {
+  const requests: RequestRecord[] = [];
+  let refRetained = false;
+  let releaseRetained = false;
+  const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+  async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    if (method === "POST" && url.pathname === `${prefix}/git/refs`) {
+      refRetained = true;
+      return response({ ref: body?.ref, object: { type: "commit", sha: body?.sha } }, 201);
+    }
+    if (method === "POST" && url.pathname === `${prefix}/releases`) {
+      releaseRetained = true;
+      return response(releaseHeadRelease(headSha), 201);
+    }
+    if (method !== "GET") return response({ message: "unsupported" }, 405);
+    if (url.pathname === prefix) return response(repository());
+    if (url.pathname === `${prefix}/git/ref/heads/main`) return response(mainRef(headSha));
+    if (url.pathname === `${prefix}/git/commits/${headSha}`)
+      return response({
+        sha: headSha,
+        tree: { sha: headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
+    if (
+      url.pathname ===
+      `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`
+    ) {
+      return refRetained
+        ? response({
+            ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+            object: { type: "commit", sha: headSha },
+          })
+        : response({ message: "missing" }, 404);
+    }
+    if (
+      url.pathname ===
+      `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`
+    ) {
+      return releaseRetained
+        ? response(releaseHeadRelease(headSha))
+        : response({ message: "missing" }, 404);
+    }
+    return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
+  }
+  return { fetchImpl, requests };
+}
+
+describe("current-main release controller retention", () => {
+  test("idempotently retains only the exact current workflow SHA", async () => {
+    const fixture = retainControllerFixture();
+    const first = await retainCurrentMainControllerEvidence({
+      env: retainControllerEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    const second = await retainCurrentMainControllerEvidence({
+      env: retainControllerEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(first.controllerSha).toBe(headSha);
+    expect(first.releaseHead.sha).toBe(headSha);
+    expect(second.releaseHeadRelease).toEqual(first.releaseHeadRelease);
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/releases"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("rejects a target that differs from the workflow SHA before provider access", async () => {
+    const fixture = retainControllerFixture();
+    await expect(
+      retainCurrentMainControllerEvidence({
+        env: retainControllerEnv({ RELEASE_CONTROLLER_SHA: baseSha }),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("retained controller differs from workflow SHA");
+    expect(fixture.requests).toHaveLength(0);
   });
 });
 
@@ -3358,12 +3472,14 @@ describe("workflow contracts", () => {
   const releaseText = readFileSync(releaseWorkflowPath, "utf8");
   const ciText = readFileSync(ciWorkflowPath, "utf8");
   const sealText = readFileSync(sealWorkflowPath, "utf8");
+  const retainControllerText = readFileSync(retainControllerWorkflowPath, "utf8");
   const releaseSourceAdmissionText = readFileSync(releaseSourceAdmissionPath, "utf8");
   const releasePublicationAdmissionText = readFileSync(releasePublicationAdmissionPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
   const seal = Bun.YAML.parse(sealText) as any;
+  const retainController = Bun.YAML.parse(retainControllerText) as any;
 
   test("uses only the scoped token for Changesets and grants narrow dispatch rights", () => {
     expect(releaseText).not.toContain("RELEASE_PAT");
@@ -3941,6 +4057,18 @@ describe("workflow contracts", () => {
         "persist-credentials": false,
       }),
     );
+  });
+
+  test("retains only exact current main as post-source workflow authority", () => {
+    expect(retainController.on.workflow_dispatch.inputs).toEqual({
+      controller_sha: expect.objectContaining({ required: true }),
+    });
+    expect(retainController.permissions).toEqual({ contents: "read" });
+    expect(retainController.jobs.retain.permissions).toEqual({ contents: "write" });
+    expect(retainController.jobs.retain.if).toBe("${{ github.ref == 'refs/heads/main' }}");
+    expect(retainControllerText).toContain("retain-release-controller");
+    expect(retainControllerText).not.toContain("pull_request_target");
+    expect(retainControllerText).not.toContain("pull-requests: write");
   });
 
   test("binds explicit source-admission and aggregate reports to the exact head", () => {
