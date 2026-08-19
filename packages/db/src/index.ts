@@ -309,6 +309,7 @@ import {
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
+import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
 import {
   sessionRealtimeIsActiveInTransaction,
   settleExpiredSessionRealtimeInTransaction,
@@ -371,6 +372,8 @@ export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
+export * from "./managed-human-provisioning";
+export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
@@ -1691,87 +1694,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
 
-    const personalWorkspaceExternalSource = "opengeni:organization-membership";
-    const personalWorkspaceExternalId = `${account.id}:${subjectId}`;
-    let [personalWorkspace] = await tx
-      .select()
-      .from(schema.workspaces)
-      .where(
-        and(
-          eq(schema.workspaces.externalSource, personalWorkspaceExternalSource),
-          eq(schema.workspaces.externalId, personalWorkspaceExternalId),
-        ),
-      )
-      .limit(1);
-    if (!personalWorkspace) {
-      [personalWorkspace] = await tx
-        .insert(schema.workspaces)
-        .values({
-          accountId: account.id,
-          name: "Personal workspace",
-          slug: null,
-          externalSource: personalWorkspaceExternalSource,
-          externalId: personalWorkspaceExternalId,
-        })
-        .onConflictDoUpdate({
-          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-          set: { updatedAt: new Date() },
-        })
-        .returning();
-    }
-    if (!personalWorkspace) {
-      throw new Error("Failed to ensure personal workspace");
-    }
-    if (
-      personalWorkspace.accountId !== account.id ||
-      personalWorkspace.externalSource !== personalWorkspaceExternalSource ||
-      personalWorkspace.externalId !== personalWorkspaceExternalId
-    ) {
-      throw new Error("Managed personal workspace identity conflict");
-    }
-
-    await setRlsContext(tx as unknown as Database, {
+    await ensureManagedHumanPersonalWorkspace(tx as unknown as Database, {
       accountId: account.id,
-      workspaceId: personalWorkspace.id,
+      subjectId,
     });
-    const [personalWorkspaceControl] = await tx
-      .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
-      .from(schema.workspaceInferenceControls)
-      .where(eq(schema.workspaceInferenceControls.workspaceId, personalWorkspace.id))
-      .limit(1);
-    if (!personalWorkspaceControl) {
-      await tx
-        .insert(schema.workspaceInferenceControls)
-        .values({
-          workspaceId: personalWorkspace.id,
-          accountId: account.id,
-        })
-        .onConflictDoNothing();
-    }
-    await setRlsContext(tx as unknown as Database, {
-      accountId: account.id,
-      workspaceId: null,
-    });
-
-    const [provisionedMembership] = await rawRows<{
-      organization_membership_id: string;
-      personal_workspace_id: string;
-    }>(
-      tx,
-      sql`
-        select * from ensure_managed_human_personal_workspace(
-          ${account.id},
-          ${subjectId},
-          ${personalWorkspace.id}
-        )
-      `,
-    );
-    if (
-      !provisionedMembership ||
-      provisionedMembership.personal_workspace_id !== personalWorkspace.id
-    ) {
-      throw new Error("Managed organization membership provisioning did not converge");
-    }
 
     // Keep persisted legacy grants first so defaultWorkspaceId and callers that
     // still select the first grant preserve the existing default workspace.

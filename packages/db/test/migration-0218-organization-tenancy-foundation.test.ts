@@ -35,6 +35,12 @@ const currentManagedHumanTenancyLifecycleExpression =
   "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'organization_membership_lifecycle'::text]))";
 const currentSessionVisibilityTenancyLifecycleExpression =
   "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text]))";
+// Migration 0290 adds the read-only `organization_membership_backfill` marker
+// to `organization_memberships`' USING clause ONLY. Its WITH CHECK keeps
+// exactly the three pre-existing write markers, so the backfill enumeration is
+// structurally incapable of writing that table.
+const currentMembershipBackfillTenancyLifecycleReadExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text, 'organization_membership_backfill'::text]))";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -530,6 +536,12 @@ describe("migration 0218 organization tenancy foundation", () => {
           tableName === "organization_user_resource_grants"
             ? currentSessionVisibilityTenancyLifecycleExpression
             : currentManagedHumanTenancyLifecycleExpression;
+        // 0290's read-only marker widens exactly one USING clause; every
+        // WITH CHECK on every tenancy table stays on the write markers.
+        const readExpression =
+          tableName === "organization_memberships"
+            ? currentMembershipBackfillTenancyLifecycleReadExpression
+            : lifecycleExpression;
         return {
           tableName,
           rlsEnabled: true,
@@ -537,7 +549,7 @@ describe("migration 0218 organization tenancy foundation", () => {
           policyCount: 1,
           policyNames: [currentLedgerTenancyLifecyclePolicy],
           policyCommands: ["*"],
-          usingExpressions: [lifecycleExpression],
+          usingExpressions: [readExpression],
           checkExpressions: [lifecycleExpression],
           appSelect: false,
           appInsert: false,
