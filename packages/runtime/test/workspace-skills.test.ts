@@ -102,10 +102,7 @@ description: Prepare a safe release.
     ]);
     expect(skills.map((entry) => entry.name)).toEqual(["deploy", "release"]);
     expect(listed).toEqual([".agents/skills"]);
-    expect(reads).toEqual([
-      ".agents/skills/deploy/SKILL.md",
-      ".agents/skills/release/SKILL.md",
-    ]);
+    expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
   test("fails when the same skill name has different contents", async () => {

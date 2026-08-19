@@ -2844,10 +2844,18 @@ describe("lazy sandbox provisioner single-flight", () => {
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = source.indexOf("resolveWorkspacePackRuntime(db, input.workspaceId)", overlappedReads);
+    const packRead = source.indexOf(
+      "resolveWorkspacePackRuntime(db, input.workspaceId)",
+      overlappedReads,
+    );
     const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", overlappedReads);
-    const policyRead = source.indexOf("getWorkspaceModelPolicy(db, input.workspaceId)", overlappedReads);
-    const imageEnsure = source.indexOf("ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)");
+    const policyRead = source.indexOf(
+      "getWorkspaceModelPolicy(db, input.workspaceId)",
+      overlappedReads,
+    );
+    const imageEnsure = source.indexOf(
+      "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
+    );
     const gitAssert = source.indexOf(
       "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
     );
