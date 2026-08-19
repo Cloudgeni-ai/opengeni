@@ -658,6 +658,88 @@ describe("API Integration provider OAuth", () => {
     expect(connections[0]!.subjectId).toBe(workspace.subjectId);
   }, 60_000);
 
+  test("the personal-owner claim cannot be forged, replayed, or moved to another provider", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "google-refresh-token",
+    });
+
+    // FORGERY: splice the claim into the base64 payload of a legacy state
+    // without re-signing. The claim rides inside the HMAC-signed payload, so
+    // this invalidates the signature rather than granting personal ownership.
+    const legacyState = await legacyProviderOAuthState(workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+    });
+    const [encoded, signature] = legacyState.split(".", 2);
+    const tampered = JSON.parse(Buffer.from(encoded!, "base64url").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    tampered.personalOwnerVerified = true;
+    const forged = `${Buffer.from(JSON.stringify(tampered)).toString("base64url")}.${signature}`;
+    const forgedResult = await callback(
+      fixture,
+      forged,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(forgedResult.headers.get("location")!).searchParams.get("reason")).toBe(
+      "state_invalid",
+    );
+
+    // PROVIDER SWAP: even holding the signing secret, the claim cannot be
+    // carried to a different provider. It is one field inside a payload that
+    // also binds the definition and its fingerprint, so re-signing under
+    // another definitionId fails the fingerprint check.
+    const verified = await legacyProviderOAuthState(workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+      personalOwnerVerified: true,
+    });
+    const verifiedPayload = readSignedState(verified, STATE_SECRET) as Record<string, unknown>;
+    const swapped = createSignedState(STATE_SECRET, {
+      ...verifiedPayload,
+      definitionId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+    });
+    const swappedResult = await callback(
+      fixture,
+      swapped,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(swappedResult.headers.get("location")!).searchParams.get("reason")).toBe(
+      "state_invalid",
+    );
+
+    // The untampered verified state still works, and is single-use: the nonce
+    // table refuses the replay, so a captured personal state cannot be reused.
+    const accepted = await callback(
+      fixture,
+      verified,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
+      "success",
+    );
+    const replayed = await callback(
+      fixture,
+      verified,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(replayed.headers.get("location")!).searchParams.get("reason")).toBe(
+      "state_replayed",
+    );
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toHaveLength(1);
+  }, 60_000);
+
   test("a non-human principal cannot request personal ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

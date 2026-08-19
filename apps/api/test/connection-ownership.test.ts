@@ -94,11 +94,21 @@ describe("personal Connection owner principal", () => {
     ).toBe(false);
   });
 
-  // Enumerates every subject OpenGeni itself mints for a machine principal. A
-  // new machine namespace must be added to RESERVED_MACHINE_SUBJECT_NAMESPACES
-  // or this test fails - that is what keeps the reserved list from going stale,
-  // since an allow-list of human subjects is not available to us (the embedding
-  // contract makes the subject namespace host-owned and opaque).
+  /**
+   * IF THIS TEST FAILS BECAUSE YOU ADDED A NEW MACHINE SUBJECT:
+   * add its namespace to `RESERVED_MACHINE_SUBJECT_NAMESPACES` in
+   * `apps/api/src/connection-ownership.ts`, then add the new subject to the
+   * list below. Do NOT delete the case or relax the assertion.
+   *
+   * Why this test exists: the subject check has to be a reserved-namespace
+   * deny-list rather than a `user:`/`dev` allow-list, because
+   * `docs/embedding.md` makes the subject namespace host-owned and opaque to
+   * OpenGeni. A deny-list can go stale silently, so this test enumerates every
+   * machine subject OpenGeni itself mints and fails when one is unlisted. The
+   * decisive check is still `principalKind === "human_session"`; this is
+   * defence-in-depth against a delegation-secret holder signing a human claim
+   * over an OpenGeni machine subject.
+   */
   test("rejects every machine subject OpenGeni mints", () => {
     const openGeniMintedMachineSubjects = [
       // packages/core/src/access/index.ts — `api_key:${apiKey.id}`
@@ -110,8 +120,12 @@ describe("personal Connection owner principal", () => {
       "worker:first-party-mcp",
     ];
     for (const subjectId of openGeniMintedMachineSubjects) {
-      expect(isPersonalConnectionOwnerSubject(subjectId)).toBe(false);
-      expect(isPersonalConnectionOwnerPrincipal(withGrant({ subjectId }))).toBe(false);
+      const hint =
+        `"${subjectId}" is treated as a human-ownable subject. If OpenGeni now mints this ` +
+        "subject for a machine, add its namespace to RESERVED_MACHINE_SUBJECT_NAMESPACES in " +
+        "apps/api/src/connection-ownership.ts.";
+      expect(isPersonalConnectionOwnerSubject(subjectId), hint).toBe(false);
+      expect(isPersonalConnectionOwnerPrincipal(withGrant({ subjectId })), hint).toBe(false);
     }
   });
 
