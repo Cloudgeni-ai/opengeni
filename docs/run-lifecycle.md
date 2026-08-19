@@ -403,8 +403,11 @@ five-hour reset semantics, and rollout fence are canonical in
 SuperGrok/xAI uses the same provider-tagged durable same-turn wait protocol but
 with its explicit workspace-or-user authority pool. A definitive typed or
 marked 401, 403, or 429 may quarantine only the exact leased credential while
-the attempt is atomically closed and preserved; ambiguous 5xx, partial streams,
-and unrelated errors never walk the pool. See
+the attempt is atomically closed and preserved. HTTP 200 SSE terminals match
+that 429 path only for known overload/rate-limit codes or the observed Grok
+sentence "The model is currently at capacity due to high demand..."; isolated
+"high demand"/"overloaded" wording is not enough. Ambiguous 5xx, partial
+streams, and unrelated errors never walk the pool. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
 When every allocator-enabled Codex credential is unavailable, this recovery
@@ -1451,6 +1454,7 @@ persists only `started`, `headers`, `first_event`, and terminal checkpoints—no
 every streamed event—and the terminal checkpoint carries bounded event-count,
 last-event-type, last-progress-duration, and silence facts. An HTTP 200 SSE
 error/failed/incomplete terminal is not forwarded into the Agents SDK; the
-transport throws the bounded exact provider message and `turn.failed` stores
-that diagnostic. Lifecycle audit stays metadata-only; worker stdout stays
-sanitized.
+transport throws the bounded exact provider message. Rate-limit/capacity
+refusals are marked 429 and enter the durable same-turn waiter; other
+terminals persist that diagnostic on `turn.failed`. Lifecycle audit stays
+metadata-only; worker stdout stays sanitized.

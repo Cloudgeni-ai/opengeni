@@ -56,7 +56,7 @@ machine. Kubernetes is used only as the process, restart, volume, and upgrade
 supervisor. It is not an autoscaling or failover layer in this profile.
 
 The profile renders one API, web, control worker, turn worker, relay, Postgres,
-Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
+Temporal, NATS, and Garage process. It disables HPAs, disruption budgets, and
 topology spreading. Container resource requests and limits are omitted, so a
 busy role may use otherwise-idle CPU and memory on the machine.
 
@@ -113,17 +113,17 @@ one-port NodePort services are the complete private-edge surface:
 | `30081`  | API            | API, SSE, enrollment, and agent distribution |
 | `30222`  | NATS websocket | enrolled-machine command/event transport     |
 | `30443`  | relay          | live terminal/desktop byte streams           |
-| `30900`  | MinIO API      | signed browser file transfer only            |
+| `30900`  | Garage S3 API  | signed browser file transfer only            |
 
-The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
+The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
-websocket, relay, and MinIO API their own private TLS ports. Set
-`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
+websocket, relay, and Garage S3 API their own private TLS ports. Set
+`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
@@ -139,7 +139,8 @@ are not an additional user-facing gateway.
 Create the four Secrets before installation:
 
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
-- `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
+- `opengeni-garage`: `GARAGE_ACCESS_KEY_ID`, `GARAGE_SECRET_ACCESS_KEY`,
+  `GARAGE_RPC_SECRET`, and the `garage.toml` file (the image has no shell);
 - `opengeni-runtime`: the restricted `opengeni_app`
   `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
@@ -161,8 +162,9 @@ kubectl create namespace opengeni --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n opengeni create secret generic opengeni-postgres \
   --from-env-file=.agent/generated/single-node/secrets/postgres.env
 
-kubectl -n opengeni create secret generic opengeni-minio \
-  --from-env-file=.agent/generated/single-node/secrets/minio.env
+kubectl -n opengeni create secret generic opengeni-garage \
+  --from-env-file=.agent/generated/single-node/secrets/garage.env \
+  --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml
 
 kubectl -n opengeni create secret generic opengeni-runtime \
   --from-env-file=.agent/generated/single-node/secrets/runtime.env
@@ -217,7 +219,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Future versions use the same second command with a new official chart/image
-version or digest. Postgres and MinIO PVCs remain attached. Database migrations
+version or digest. Postgres and Garage PVCs remain attached. Database migrations
 are forward-only: if the migration gate fails, the old application stays in
 place; after a migration succeeds, roll the application forward unless the
 older image is explicitly proven compatible with the new schema.
@@ -229,7 +231,7 @@ Failure behavior is intentionally uneven:
 - a turn worker can restart while queued work remains in Temporal/Postgres;
 - NATS stores no authoritative history, but losing it disconnects enrolled
   machines and pauses their command path as well as live fanout;
-- MinIO owns uploaded file bytes;
+- Garage owns uploaded file bytes;
 - Temporal owns durable orchestration state;
 - Postgres owns the durable product record and database migration ledger.
 
@@ -504,12 +506,12 @@ explicit blocking gates. The canonical configuration, retry, observability, and
 acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
 `deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
 
-For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
+For private in-cluster Garage behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
 bun run deployment:conformance -- \
   --base-url http://127.0.0.1:18080 \
-  --object-connect-to opengeni-minio:9000:127.0.0.1:19000
+  --object-connect-to opengeni-garage:3900:127.0.0.1:19000
 ```
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
@@ -633,7 +635,7 @@ Current profiles:
 ## Local Docker Compose
 
 `bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
 integrations catalog, builds the sandbox image, and starts the API, control and
 turn workers, artifact materializer, artifact outbox dispatcher, and web. The
 two artifact roles receive distinct generated least-privilege database logins
@@ -656,7 +658,7 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -1253,7 +1255,7 @@ helm template opengeni deploy/helm/opengeni \
   --set postgres.enabled=true \
   --set temporal.enabled=true \
   --set nats.enabled=true \
-  --set minio.enabled=true \
+  --set garage.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
 
@@ -1280,17 +1282,17 @@ Then run conformance through port-forwards:
 
 ```bash
 kubectl -n opengeni-local port-forward svc/opengeni-local-api 28080:8000
-kubectl -n opengeni-local port-forward svc/opengeni-local-minio 29000:9000
+kubectl -n opengeni-local port-forward svc/opengeni-local-garage 29000:3900
 
 OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- \
   --base-url http://127.0.0.1:28080 \
-  --object-connect-to opengeni-local-minio:9000:127.0.0.1:29000
+  --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
-The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
 

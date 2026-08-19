@@ -381,10 +381,9 @@ function artifactApiEnvironment(
     // must never restore a workstation/container-only internal endpoint here.
     OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: services.objectStorageEndpoint,
     OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT: services.objectStorageSandboxEndpoint,
-    // ubs:ignore -- disposable MinIO fixture credentials only.
-    OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
-    // ubs:ignore -- disposable MinIO fixture credentials only.
-    OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+    OPENGENI_OBJECT_STORAGE_S3_PROVIDER: services.objectStorageS3Provider,
+    OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: services.objectStorageAccessKeyId,
+    OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: services.objectStorageSecretAccessKey,
     OPENGENI_ARTIFACT_RUNTIME_MANIFEST: undefined,
     OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST: runtime.manifestPath,
     OPENGENI_ARTIFACT_TOOL_ENTRY: runtime.skillFacadeEntrypoint,
