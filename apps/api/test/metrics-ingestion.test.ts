@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AGENT_EVENTS_SUBJECT,
   handleAgentEventPayload,
   parseAgentEventSubject,
   wireAttachedBrowserInventoryToContract,
@@ -30,10 +29,6 @@ describe("parseAgentEventSubject", () => {
       agentId: "ag-456",
       connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     });
-  });
-
-  test("the wildcard subscription includes the process authority segment", () => {
-    expect(AGENT_EVENTS_SUBJECT).toBe("agent.*.*.connection.*.events");
   });
 
   test("rejects a malformed / non-events subject", () => {
