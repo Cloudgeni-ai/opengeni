@@ -97,6 +97,8 @@ async function ownedSession(fixture: Fixture, message: string): Promise<string> 
     metadata: {},
     model: "test-model",
     sandboxBackend: "modal",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     createdBy: { kind: "subject", subjectId: fixture.ownerSubjectId },
     createdByContext: {},
   });

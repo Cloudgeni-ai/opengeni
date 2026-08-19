@@ -129,6 +129,8 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       metadata: {},
       model: "test-model",
       sandboxBackend: "modal",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       createdBy: { kind: "subject", subjectId: `user:non-rls-a-${suffix}` },
       createdByContext: {},
     });
