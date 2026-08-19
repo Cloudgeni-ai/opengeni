@@ -79,7 +79,7 @@ const codexRegistry = JSON.stringify([
 ]);
 
 describe("curated AI Gateway catalogue", () => {
-  test("adds the two managed models with exact routes, capabilities, and prices", () => {
+  test("adds the reviewed managed models with exact routes, capabilities, and prices", () => {
     const settings = {
       ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
@@ -95,6 +95,8 @@ describe("curated AI Gateway catalogue", () => {
       (model) => model.id === OPENGENI_GATEWAY_MODELS.deepseek.productId,
     )!;
     const kimi = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.kimi.productId)!;
+    const gemini = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.gemini.productId)!;
+    const glm = models.find((model) => model.id === OPENGENI_GATEWAY_MODELS.glm.productId)!;
     expect(deepseek.upstreamModelId).toBe(OPENGENI_GATEWAY_MODELS.deepseek.upstreamModelId);
     expect(deepseek.label).toBe("DeepSeek V4 Flash 0731");
     expect(deepseek.shortLabel).toBe("V4 Flash");
@@ -124,6 +126,30 @@ describe("curated AI Gateway catalogue", () => {
     expect(kimi.capabilities.inputFileMediaTypes).toEqual(["application/pdf"]);
     expect(kimi.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard"]);
 
+    expect(gemini.upstreamModelId).toBe("google/gemini-3.7-flash");
+    expect(gemini.label).toBe("Gemini 3.7 Flash");
+    expect(gemini.shortLabel).toBe("3.7 Flash");
+    expect(gemini.requestPolicy).toEqual({
+      gateway: { only: ["google", "vertex"], caching: "auto" },
+    });
+    expect(gemini.capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(gemini.capabilities.inputFileMediaTypes).toEqual(["application/pdf"]);
+    expect(gemini.capabilities.promptCaching).toEqual({
+      upstream: "supported",
+      runnable: true,
+      mode: "implicit",
+    });
+    expect(glm.upstreamModelId).toBe("zai/glm-5.3");
+    expect(glm.label).toBe("GLM 5.3");
+    expect(glm.shortLabel).toBe("GLM 5.3");
+    expect(glm.requestPolicy).toEqual({
+      gateway: { only: ["zai"], caching: "auto" },
+    });
+    expect(glm.capabilities.inputModalities).toEqual(["text"]);
+    expect(glm.capabilities.inputFileMediaTypes).toEqual([]);
+    expect(gemini.hostedWebSearch).toBe(false);
+    expect(glm.hostedWebSearch).toBe(false);
+
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
       inputMicrosPerMillionTokens: 140_000,
       cachedInputMicrosPerMillionTokens: 28_000,
@@ -134,6 +160,18 @@ describe("curated AI Gateway catalogue", () => {
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
+      marginBps: 2_500,
+    });
+    expect(configuredModelPricing(settings)[gemini.id]).toEqual({
+      inputMicrosPerMillionTokens: 825_000,
+      cachedInputMicrosPerMillionTokens: 82_500,
+      outputMicrosPerMillionTokens: 4_125_000,
+      marginBps: 2_500,
+    });
+    expect(configuredModelPricing(settings)[glm.id]).toEqual({
+      inputMicrosPerMillionTokens: 1_400_000,
+      cachedInputMicrosPerMillionTokens: 260_000,
+      outputMicrosPerMillionTokens: 4_400_000,
       marginBps: 2_500,
     });
   });
@@ -192,6 +230,36 @@ describe("curated AI Gateway catalogue", () => {
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
     ).toBe(375_000);
+  });
+
+  test("managed debit fallback uses Vertex regional Gemini rates", () => {
+    const settings = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.gemini.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(103_125);
+  });
+
+  test("managed debit fallback applies GLM 5.3 cache-read pricing", () => {
+    const settings = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: "vck_test",
+    };
+    expect(
+      calculateModelUsageCostMicros(settings, OPENGENI_GATEWAY_MODELS.glm.productId, {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        inputTokensDetails: { cached_tokens: 1_000_000 },
+      }),
+    ).toBe(325_000);
   });
 
   test("managed debit converts exact Gateway cost before applying margin", () => {

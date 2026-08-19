@@ -72,6 +72,14 @@ const NON_LLM_PRICES_MODELS = [
     id: "kimi-k3",
     reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
   },
+  {
+    id: "gemini-3.7-flash",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
+  },
+  {
+    id: "glm-5.3",
+    reason: "reviewed Gateway routes; exact-cost billing and conservative fallback are tested",
+  },
 ] as const;
 
 function usdToMicros(usd: number): number {

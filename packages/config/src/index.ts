@@ -1856,6 +1856,8 @@ export const OPENGENI_GATEWAY_MODELS = {
     shortLabel: "V4 Flash",
     providers: ["baseten", "novita", "deepinfra"],
     implicitCaching: true,
+    vision: false,
+    inputFileMediaTypes: [] as const,
   },
   kimi: {
     productId: "kimi-k3",
@@ -1865,6 +1867,30 @@ export const OPENGENI_GATEWAY_MODELS = {
     shortLabel: "Kimi K3",
     providers: ["baseten", "fireworks"],
     implicitCaching: true,
+    vision: true,
+    inputFileMediaTypes: ["application/pdf"] as const,
+  },
+  gemini: {
+    productId: "gemini-3.7-flash",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}gemini-3.7-flash`,
+    upstreamModelId: "google/gemini-3.7-flash",
+    label: "Gemini 3.7 Flash",
+    shortLabel: "3.7 Flash",
+    providers: ["google", "vertex"],
+    implicitCaching: true,
+    vision: true,
+    inputFileMediaTypes: ["application/pdf"] as const,
+  },
+  glm: {
+    productId: "glm-5.3",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}glm-5.3`,
+    upstreamModelId: "zai/glm-5.3",
+    label: "GLM 5.3",
+    shortLabel: "GLM 5.3",
+    providers: ["zai"],
+    implicitCaching: true,
+    vision: false,
+    inputFileMediaTypes: [] as const,
   },
 } as const;
 
@@ -1946,7 +1972,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   // billing uses the exact response Gateway `cost` / `inferenceCost` and applies
   // the same margin. These token rates are used only if that
   // metadata is absent. DeepSeek therefore carries the highest approved route
-  // (Novita); both approved Kimi routes have the same list price.
+  // (Novita); both approved Kimi routes have the same list price; Gemini uses
+  // Vertex regional as the highest approved non-priority route; GLM has one
+  // Z.AI list price.
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
       inputMicrosPerMillionTokens: 140_000,
@@ -1960,6 +1988,25 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
+      marginBps: 2_500,
+    },
+  },
+  // Gemini's approved Google/Vertex intro list is $0.75 / $0.075 / $3.75.
+  // Vertex regional is the highest reviewed non-priority route on that
+  // allowlist, so the metadata-absent fallback uses it.
+  [OPENGENI_GATEWAY_MODELS.gemini.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 825_000,
+      cachedInputMicrosPerMillionTokens: 82_500,
+      outputMicrosPerMillionTokens: 4_125_000,
+      marginBps: 2_500,
+    },
+  },
+  [OPENGENI_GATEWAY_MODELS.glm.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 1_400_000,
+      cachedInputMicrosPerMillionTokens: 260_000,
+      outputMicrosPerMillionTokens: 4_400_000,
       marginBps: 2_500,
     },
   },
@@ -2852,7 +2899,7 @@ function gatewayModelCapabilities(
     promptCaching: input.implicitCaching
       ? { upstream: "supported", runnable: true, mode: "implicit" }
       : { upstream: "unsupported", runnable: false, mode: "none" },
-    // Both Gateway products expose one reviewed route policy and no separately
+    // Gateway products expose one reviewed route policy and no separately
     // billed latency mode.
     latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
   });
@@ -2865,8 +2912,7 @@ function gatewayRegistryProvider(
     | { kind: "vercel-gateway-workspace"; apiKey?: string },
 ): RegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
-  const models = [OPENGENI_GATEWAY_MODELS.deepseek, OPENGENI_GATEWAY_MODELS.kimi].map((model) => {
-    const kimi = model === OPENGENI_GATEWAY_MODELS.kimi;
+  const models = Object.values(OPENGENI_GATEWAY_MODELS).map((model) => {
     return {
       id: workspace ? model.workspaceProductId : model.productId,
       upstreamModelId: model.upstreamModelId,
@@ -2874,8 +2920,8 @@ function gatewayRegistryProvider(
       shortLabel: model.shortLabel,
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
-        vision: kimi,
-        inputFileMediaTypes: kimi ? ["application/pdf"] : [],
+        vision: model.vision,
+        inputFileMediaTypes: [...model.inputFileMediaTypes],
       }),
       contextWindowTokens: 1_000_000,
       effectiveContextWindowTokens: 900_000,

@@ -118,8 +118,8 @@ credential broker.
 
 ## Curated AI Gateway models
 
-`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
-models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
+`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables the reviewed OpenGeni-credit
+models below. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
@@ -127,8 +127,12 @@ endpoint provider.
 | --- | --- | --- | --- |
 | DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
 | Kimi K3 | Baseten → Fireworks | $3 / $0.30 / $15 per 1M on both routes | $3.75 / $0.375 / $18.75 per 1M |
+| Gemini 3.7 Flash | Google → Vertex | Google/Vertex intro $0.75 / $0.075 / $3.75; Vertex regional $0.825 / $0.0825 / $4.125 per 1M | $1.03125 / $0.103125 / $5.15625 per 1M (Vertex regional) |
+| GLM 5.3 | Z.AI | $1.40 / $0.26 / $4.40 per 1M | $1.75 / $0.325 / $5.50 per 1M |
 
-Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
+DeepSeek and Kimi prices are a reviewed 2026-08-03 snapshot; Gemini 3.7 Flash
+and GLM 5.3 are a reviewed 2026-08-19 snapshot from public Gateway endpoint
+metadata. Gemini's intro list expires 2026-12-31 and then roughly doubles.
 Managed turns normally debit the exact Gateway-reported inference cost for the
 provider that actually served the response, plus 25%. The static token rates
 above are only a conservative fallback if that response metadata is absent.
@@ -139,7 +143,9 @@ At the post-serialization fence, OpenGeni pairs only complete call/result batche
 by `call_id`. This preserves all fields and parallel execution; it does not
 change the model or provider route. Grouped, name-annotated, and Chat Completions
 continuations were probed on 2026-08-03; only the paired Responses shape kept
-full tool continuity plus Gateway route/cost metadata.
+full tool continuity plus Gateway route/cost metadata. Gemini 3.7 Flash and
+GLM 5.3 accepted both grouped and paired Responses continuations on 2026-08-19,
+so they keep unmodified history.
 
 Every Gateway request replaces caller routing options with the reviewed provider
 list in both `only` and `order`, sends no model fallback list, and disables OpenAI
@@ -148,14 +154,17 @@ Gateway model slugs fail before network I/O. Keep Gateway account-level rewrite
 rules disabled for the managed key because those rules operate outside the
 request body.
 
-Both models request Gateway automatic caching. Kimi remains catalogued as
-image-capable, so the worker also attaches `view_image` and `computer_*`
-screenshot tools. DeepSeek stays text-only. OpenGeni verifies finalized
+All curated Gateway models request Gateway automatic caching. Kimi and Gemini
+3.7 Flash remain catalogued as image-capable, so the worker also attaches
+`view_image` and `computer_*` screenshot tools. DeepSeek and GLM 5.3 stay
+text-only. OpenGeni verifies finalized
 attachment bytes and checksums, then sends images inline as data URLs through
 the standard Responses input surface; it never gives an endpoint provider an
-object-store URL.
+object-store URL. Gemini's Gateway catalog also tags video, audio, and hosted
+web search; those stay non-runnable until OpenGeni has the matching adapters.
+GLM 5.3's Gateway max output is 12,800 tokens.
 
-DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
+DeepSeek V4 Flash 0731, Kimi K3, Gemini 3.7 Flash, and GLM 5.3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
 exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
@@ -539,7 +548,7 @@ and update `defaultModelPricing` — not as automatic truth to import.
 
 Not covered by the llm-prices canary: Fast/priority multipliers, Fireworks GLM
 defaults, the provider-pinned Gateway snapshots, and the `marginBps` markup.
-Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
+Gateway catalogue tests pin the exact approved-route rates and caching claims;
 offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.
 
