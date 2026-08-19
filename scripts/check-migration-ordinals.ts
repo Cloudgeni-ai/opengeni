@@ -71,8 +71,8 @@ async function main(): Promise<void> {
   if (!loadedPrimary) throw new Error(`cannot read ${MIGRATIONS_DIR} at ${primary}`);
   ledgers.push(loadedPrimary);
   if (primary !== "origin/main") {
-    const main = await loadLedger(root, "origin/main", false);
-    if (main) ledgers.push(main);
+    const originMain = await loadLedger(root, "origin/main", false);
+    if (originMain) ledgers.push(originMain);
   }
   if (primary !== "origin/production") {
     const production = await loadLedger(root, "origin/production", false);

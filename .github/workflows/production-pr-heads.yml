@@ -10,6 +10,7 @@ jobs:
   admit-head:
     name: Admit production PR head
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require main or hotfix/* head
         env:

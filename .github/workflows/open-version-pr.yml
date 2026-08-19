@@ -13,6 +13,7 @@ jobs:
   version:
     name: Open or update Version PR
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out main
         uses: actions/checkout@v6

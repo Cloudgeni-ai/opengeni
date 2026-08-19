@@ -18,6 +18,7 @@ jobs:
   receipt:
     name: Pin canary-sha digests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out the requested SHA
         uses: actions/checkout@v6
