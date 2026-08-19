@@ -104,6 +104,7 @@ import {
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldEstablishSandboxForTurn,
+  shouldPrefetchManagedSandbox,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -2750,6 +2751,23 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).toEqual({ policy: "eager", reason: "signed_file_resources" });
   });
 
+  test("managed-box prefetch is only for on-demand repository turns", () => {
+    const base = {
+      establishPolicy: "on-demand" as const,
+      machinePrimary: false,
+      groupBoxBackend: "modal" as const,
+      hasRepositoryResources: true,
+    };
+
+    expect(shouldPrefetchManagedSandbox(base)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "docker" })).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...base, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+  });
+
   test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
     const steps: string[] = [];
     let resolves = 0;
@@ -2816,6 +2834,90 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
     expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
     expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
+  });
+
+  test("runtime preparation overlaps independent workspace reads after the personal-resource fence", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
+    const overlappedReads = source.indexOf(
+      "Independent workspace reads after the personal-resource fence",
+      authorize,
+    );
+    const packRead = source.indexOf(
+      "resolveWorkspacePackRuntime(db, input.workspaceId)",
+      overlappedReads,
+    );
+    const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", overlappedReads);
+    const policyRead = source.indexOf(
+      "getWorkspaceModelPolicy(db, input.workspaceId)",
+      overlappedReads,
+    );
+    const imageEnsure = source.indexOf(
+      "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
+    );
+    const gitAssert = source.indexOf(
+      "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
+    );
+    expect(authorize).toBeGreaterThan(0);
+    expect(overlappedReads).toBeGreaterThan(authorize);
+    expect(packRead).toBeGreaterThan(overlappedReads);
+    expect(rigRead).toBeGreaterThan(packRead);
+    expect(policyRead).toBeGreaterThan(rigRead);
+    expect(imageEnsure).toBeGreaterThan(policyRead);
+    expect(gitAssert).toBeGreaterThan(imageEnsure);
+    expect(source.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
+  });
+
+  test("lazy git token mint starts before the box establish returns", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+    );
+    const resumeAt = source.indexOf(
+      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      provisionerAt,
+    );
+    const mintStartAt = source.lastIndexOf("startRunGitCredentialsMint();", resumeAt);
+    const mintAwaitAt = source.indexOf("await startRunGitCredentialsMint()", resumeAt);
+    expect(provisionerAt).toBeGreaterThan(-1);
+    expect(resumeAt).toBeGreaterThan(provisionerAt);
+    expect(mintStartAt).toBeGreaterThan(provisionerAt);
+    expect(mintStartAt).toBeLessThan(resumeAt);
+    expect(mintAwaitAt).toBeGreaterThan(resumeAt);
+  });
+
+  test("repository on-demand turns prefetch managed-box create before tools", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const onDemandAt = source.indexOf('} else if (establishPolicy === "on-demand")');
+    const prefetchAt = source.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
+    const toolsAt = source.indexOf('phase: "tools"', prefetchAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      toolsAt,
+    );
+    const joinAt = source.indexOf(
+      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      provisionerAt,
+    );
+    const prefetchMintAt = source.indexOf("startRunGitCredentialsMint();", prefetchAt);
+    const prefetchResumeAt = source.indexOf("resumeManagedGroupBox()", prefetchMintAt);
+
+    expect(onDemandAt).toBeGreaterThan(-1);
+    expect(prefetchAt).toBeGreaterThan(onDemandAt);
+    expect(toolsAt).toBeGreaterThan(prefetchAt);
+    expect(provisionerAt).toBeGreaterThan(toolsAt);
+    expect(joinAt).toBeGreaterThan(provisionerAt);
+    expect(prefetchMintAt).toBeGreaterThan(prefetchAt);
+    expect(prefetchMintAt).toBeLessThan(prefetchResumeAt);
+    expect(prefetchResumeAt).toBeLessThan(toolsAt);
+    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeManagedGroupBox()");
+    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeBoxForTurn(");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

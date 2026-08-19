@@ -2174,6 +2174,31 @@ export function sandboxEstablishPolicyDecision(input: {
 }
 
 /**
+ * Repo-backed workspace skills bind into the first-request prompt-cache prefix
+ * (`WorkspaceSkillsCapability.instructions()` listDirs the live box). Starting
+ * the managed-box establish as soon as its inputs exist lets Modal create overlap
+ * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
+ *
+ * Do not flip those turns to eager: that serializes create BEFORE tools and
+ * increases first-token latency. Chat-only turns without a repository still
+ * never create a box. Portable `/compact` returns before this path. Connected
+ * Machines and `backend: none` have no managed Modal/docker create to overlap.
+ */
+export function shouldPrefetchManagedSandbox(input: {
+  establishPolicy: "eager" | "on-demand";
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+  hasRepositoryResources: boolean;
+}): boolean {
+  if (input.establishPolicy !== "on-demand") return false;
+  if (input.machinePrimary) return false;
+  if (input.groupBoxBackend === "none" || input.groupBoxBackend === "selfhosted") {
+    return false;
+  }
+  return input.hasRepositoryResources;
+}
+
+/**
  * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
  * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
  * or null to leave it in place. STRUCTURAL unestablishability only:
@@ -3587,6 +3612,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       durationSeconds: number;
     }> = [];
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
+    let resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null = null;
+    let prefetchedManagedBox: Promise<ResumedTurnSandbox> | null = null;
+    let prefetchedManagedBoxResult: ResumedTurnSandbox | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
     // Platform setup (beforeAgentStart hooks + file materialization) execs against
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
@@ -3937,6 +3965,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       warmBackend: Settings["sandboxBackend"] | undefined,
     ): void => {
+      if (leaseHeartbeatTimer) return;
       if (!sandboxHolderId || !sandboxGroupId) {
         return;
       }
@@ -5853,46 +5882,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
       });
 
-      // Pack-scoped runtime: enabled packs may declare the sandbox image this
-      // workspace's sessions run in and skills for the sandbox skill index.
-      // Resolved after turn.started so a composition conflict (two enabled
-      // packs declaring images) fails the turn with its plain error instead
-      // of failing the activity opaquely.
-      const [packRuntime, installedSkillRuntime] = await Promise.all([
-        resolveWorkspacePackRuntime(db, input.workspaceId),
-        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
-      ]);
-      // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
-      // at create). Everything rig-derived below (image precedence, env default
-      // sets, setup hook, credential hooks, doctrine, lease/telemetry stamps) is
-      // gated on this being non-null, so a rig-less session takes a zero-cost
-      // branch that is byte-for-byte today's turn. Both ids are frozen together;
-      // a defensive null (e.g. a since-deleted rig FK-nulled the columns) simply
-      // runs the turn rig-less.
-      const rigMaterialization =
-        session.rigId && session.rigVersionId
-          ? await materializeRigVersionForAttempt(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: fileAuthoritySubjectId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              executionGeneration: turn.executionGeneration,
-            })
-          : null;
-      const rigVersion = rigMaterialization?.version ?? null;
-      // Rig display name for the doctrine block + setup events/errors (only on a
-      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
-      // gone). Loaded once here alongside the version.
-      const rigName = rigVersion ? (rigMaterialization?.rigName ?? "rig") : null;
-      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
-      rigId = session.rigId ?? "";
-      rigVersionId = session.rigVersionId ?? "";
-      // Workspace tier of the agent-persona resolution (session > workspace >
-      // deployment default). null means the workspace has no override, so the
-      // runtime falls back to runSettings.agentInstructionsTemplate (the
-      // deployment default, byte-identical to the historical preamble).
       const governanceClaims = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -5901,8 +5890,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot] =
-        await Promise.all([
+      // Independent workspace reads after the personal-resource fence. Pack,
+      // installed skills, frozen rig, governance snapshots, and model policy do
+      // not depend on each other. Company-brain selection still waits on the
+      // snapshots below so its receipt stays exact.
+      const [
+        packRuntime,
+        installedSkillRuntime,
+        rigMaterialization,
+        [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
+        workspaceModelPolicy,
+      ] = await Promise.all([
+        resolveWorkspacePackRuntime(db, input.workspaceId),
+        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
+        session.rigId && session.rigVersionId
+          ? (async () =>
+              await materializeRigVersionForAttempt(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: turn.executionGeneration,
+              }))()
+          : Promise.resolve(null),
+        Promise.all([
           getWorkspace(db, input.workspaceId),
           getOrCreateCompanyProfileSnapshot(db, governanceClaims),
           getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
@@ -5910,7 +5923,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (error instanceof PreferenceRegistryInitiatorError) return null;
             throw error;
           }),
-        ]);
+        ]),
+        getWorkspaceModelPolicy(db, input.workspaceId),
+      ]);
+      const rigVersion = rigMaterialization?.version ?? null;
+      // Rig display name for the doctrine block + setup events/errors (only on a
+      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
+      // gone). Loaded once here alongside the version.
+      const rigName = rigVersion ? (rigMaterialization?.rigName ?? "rig") : null;
+      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
+      rigId = session.rigId ?? "";
+      rigVersionId = session.rigVersionId ?? "";
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
       const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
@@ -6082,7 +6105,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the attribution source even if an injected test runtime returns no
       // concrete resolved model. Fail-loud, never a silent remap.
       {
-        const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
         if (workspaceModelPolicy) {
           const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
             providerId: turnExecutionPolicy.providerId,
@@ -7053,11 +7075,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? runCredentialModelNote(initialRunCredentialMaterial)
         : undefined;
       throwIfTurnOperationCancelled(cancellationSignal);
-      await waitForTurnOperation(
-        ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
-        cancellationSignal,
-        undefined,
-      );
+      await Promise.all([
+        waitForTurnOperation(
+          ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
+          cancellationSignal,
+          undefined,
+        ),
+        activeSandboxBackend !== "selfhosted"
+          ? assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)
+          : Promise.resolve(),
+        assertFileResourcesRemainAuthorized(
+          db,
+          input.accountId,
+          input.workspaceId,
+          fileAuthoritySubjectId,
+          turn.resources,
+        ),
+      ]);
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -7077,16 +7111,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
-      if (activeSandboxBackend !== "selfhosted") {
-        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
-      }
-      await assertFileResourcesRemainAuthorized(
-        db,
-        input.accountId,
-        input.workspaceId,
-        fileAuthoritySubjectId,
-        turn.resources,
-      );
       const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
         await assertGitHubTokenMintSelectionAuthorized(
           db,
@@ -7193,6 +7217,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               expiresAt: sandboxGitTokenExpiresAt ?? {},
             }
           : undefined;
+      // Lazy cloud provision mints the run-scoped git token while Modal create
+      // runs. Chat-only turns never call get(), so this stays unstarted there.
+      let runGitCredentialsMint: Promise<MintedRunGitCredentials | undefined> | undefined;
+      const startRunGitCredentialsMint = (): Promise<MintedRunGitCredentials | undefined> => {
+        if (activeSandboxBackend === "selfhosted") {
+          return Promise.resolve(undefined);
+        }
+        runGitCredentialsMint ??= waitForTurnOperation(
+          mintRunGitCredentials(runSettings, turnResources, {
+            scope: connectionScope,
+            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+            gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
+          }),
+          cancellationSignal,
+          undefined,
+        );
+        return runGitCredentialsMint;
+      };
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
@@ -7732,6 +7775,76 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // but the lease acquire + box establish + setup move behind the routing
             // proxy's first default-pointer op. A chat-only turn never calls it, so
             // no lease row, no provider box, no warm-meter interval.
+            //
+            // A repository still forces that first default-pointer op before HTTP
+            // (workspace-skill catalog in Agent.instructions). Start create now and
+            // join it at get(); do not await here or we serialize Modal before tools.
+            if (sandboxHolderId && sandboxGroupId) {
+              const lazyHolderId = sandboxHolderId;
+              const lazyGroupId = sandboxGroupId;
+              resumeManagedGroupBox = () =>
+                resumeBoxForTurn(
+                  {
+                    db,
+                    settings: runSettings,
+                    logicalFallbackSettings: logicalSandboxSettings,
+                    cancellationSignal: sandboxResumeSignal,
+                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                    onSandboxLost: publishSandboxLost,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sandboxGroupId: lazyGroupId,
+                    sessionId: input.sessionId,
+                    backend: groupBoxBackend,
+                    os: session.sandboxOs,
+                    environment: sandboxEnvironment,
+                    ...(groupBoxImage
+                      ? {
+                          image: groupBoxImage,
+                        }
+                      : {}),
+                    // The lazy acquire must enforce the same frozen rig authority
+                    // as the eager acquire; otherwise a warm box for another rig
+                    // can bypass the shared-state conflict/rotation fence.
+                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                  },
+                  "turn",
+                  lazyHolderId,
+                );
+              if (
+                shouldPrefetchManagedSandbox({
+                  establishPolicy,
+                  machinePrimary,
+                  groupBoxBackend,
+                  hasRepositoryResources: turnResources.some(
+                    (resource) => resource.kind === "repository",
+                  ),
+                })
+              ) {
+                startRunGitCredentialsMint();
+                const started = waitForTurnOperation(
+                  resumeManagedGroupBox(),
+                  sandboxResumeSignal,
+                  releaseLateSandbox,
+                );
+                const joined = started.catch((error) => {
+                  if (isLazySandboxProvisionRetryable(error)) {
+                    prefetchedManagedBox = null;
+                  }
+                  throw error;
+                });
+                prefetchedManagedBox = joined;
+                void joined.then(
+                  (box) => {
+                    if (sandboxResumeSignal.aborted) return;
+                    startLeaseHeartbeat(box, activeSandboxBackend ?? groupBoxBackend);
+                  },
+                  () => undefined,
+                );
+              }
+            }
           } else {
             await publish!(
               [
@@ -8928,8 +9041,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       }
       if (establishPolicy === "on-demand" && sandboxHolderId && sandboxGroupId) {
-        const lazyHolderId = sandboxHolderId;
-        const lazyGroupId = sandboxGroupId;
         const agentDefaultManifest = (agent as { defaultManifest?: unknown }).defaultManifest;
         if (!agentDefaultManifest) {
           throw new Error("Lazy sandbox provisioning requires a SandboxAgent defaultManifest");
@@ -8942,36 +9053,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            const provisioned = await resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                onSandboxLost: publishSandboxLost,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: lazyGroupId,
-                sessionId: input.sessionId,
-                backend: groupBoxBackend,
-                os: session.sandboxOs,
-                environment: sandboxEnvironment,
-                ...(groupBoxImage
-                  ? {
-                      image: groupBoxImage,
-                    }
-                  : {}),
-                // The lazy acquire must enforce the same frozen rig authority
-                // as the eager acquire; otherwise a warm box for another rig
-                // can bypass the shared-state conflict/rotation fence.
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              lazyHolderId,
-            );
+            if (!resumeManagedGroupBox) {
+              throw new Error("Lazy sandbox provisioning requires a managed group-box resume");
+            }
+            startRunGitCredentialsMint();
+            const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox());
             await publishSandboxLifecycleEvents(provisioned);
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
@@ -9062,12 +9148,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const lazyGitCredentials =
                 activeSandboxBackend === "selfhosted"
                   ? undefined
-                  : await mintRunGitCredentials(runSettings, turnResources, {
-                      scope: connectionScope,
-                      ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-                      gitCredentials: connectionCredentials?.gitCredentials,
-                      authorizeGitHubTokenMint,
-                    });
+                  : await startRunGitCredentialsMint();
               const lazyGitTokens = lazyGitCredentials?.gitTokens;
               const lazyCodemodeToken = sandboxCodemodeToken
                 ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
@@ -12729,6 +12810,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnSandboxProvisioner.waitForSettled(30_000),
             finalizerSignal,
           );
+        } else if (prefetchedManagedBox) {
+          // Create finished (or was aborted) before get()/setup. Join so a
+          // successful prefetch cannot leak a holder after this attempt ends.
+          await waitForTurnFinalizerStep(
+            prefetchedManagedBox.then(
+              (box) => {
+                prefetchedManagedBoxResult = box;
+              },
+              () => undefined,
+            ),
+            finalizerSignal,
+          );
         }
         // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
         // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
@@ -12822,7 +12915,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (resolvedSandbox) {
           sandboxReleaseTargets.add(resolvedSandbox);
           resolvedSandbox = null;
+        } else if (prefetchedManagedBoxResult) {
+          sandboxReleaseTargets.add(prefetchedManagedBoxResult);
         }
+        prefetchedManagedBoxResult = null;
         if (attemptWritersDrained) {
           for (const sandboxToRelease of sandboxReleaseTargets) {
             try {
