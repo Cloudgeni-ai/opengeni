@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { MAX_BOUNDED_OBJECT_CHUNK_BYTES, type BoundedObjectReadPort } from "./bounded-object-read";
+import {
+  BoundedObjectReadError,
+  MAX_BOUNDED_OBJECT_CHUNK_BYTES,
+  type BoundedObjectReadPort,
+} from "./bounded-object-read";
+import { retryWhileMissing } from "./retry-while-missing";
 
 export type BoundedObjectWriteErrorCode =
   | "aborted"
@@ -136,12 +141,25 @@ export function createBoundedImmutableObjectWritePort(input: {
         // returned to a caller as a successful publication candidate.
         throwIfAborted(request.signal);
 
-        const reader = await input.readback.open({
-          opaqueReference: promoted.opaqueReference,
-          maxBytes: request.maxBytes,
-          expectedByteSize: byteSize,
-          ...(request.signal ? { signal: request.signal } : {}),
-        });
+        const reader = await retryWhileMissing(
+          async () => {
+            try {
+              return await input.readback.open({
+                opaqueReference: promoted.opaqueReference,
+                maxBytes: request.maxBytes,
+                expectedByteSize: byteSize,
+                ...(request.signal ? { signal: request.signal } : {}),
+              });
+            } catch (error) {
+              if (error instanceof BoundedObjectReadError && error.code === "object_missing") {
+                return null;
+              }
+              throw error;
+            }
+          },
+          request.signal ? { signal: request.signal } : {},
+        );
+        if (!reader) throw new BoundedObjectWriteError("readback_mismatch");
         try {
           if (reader.contentType !== undefined && reader.contentType !== request.contentType) {
             throw new BoundedObjectWriteError("readback_mismatch");

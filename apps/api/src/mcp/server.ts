@@ -132,6 +132,7 @@ import {
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -2830,7 +2831,9 @@ function registerWorkspaceArtifactTools(
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await deps.objectStorage.getObjectBytes(ref.contentKey);
+      const object = await retryWhileMissing(async () =>
+        deps.objectStorage!.getObjectBytes(ref.contentKey),
+      );
       if (!object) throw new Error("Artifact content is unavailable");
       const actualHash = createHash("sha256").update(object.bytes).digest("hex");
       if (actualHash !== ref.version.contentSha256)

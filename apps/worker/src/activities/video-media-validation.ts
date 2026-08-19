@@ -1,5 +1,5 @@
 import type { GeneratedVideoFacts } from "@opengeni/contracts";
-import type { ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import { createHash, randomUUID } from "node:crypto";
 import { open, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -42,7 +42,7 @@ export async function copyVersionedObjectToVerifiedTemp(input: {
     throw new Error("Media staging size is invalid");
   }
   throwIfAborted(input.signal);
-  const head = await input.storage.headObject(input.key);
+  const head = await retryWhileMissing(async () => await input.storage.headObject!(input.key));
   if (
     !head ||
     head.ContentLength !== input.expectedSizeBytes ||
@@ -93,7 +93,7 @@ export async function copyVersionedObjectToVerifiedTemp(input: {
     await rm(directory, { recursive: true, force: true });
     throw new Error("Media staging bytes do not match their sealed digest");
   }
-  const after = await input.storage.headObject(input.key);
+  const after = await retryWhileMissing(async () => await input.storage.headObject!(input.key));
   if (!after || after.VersionToken !== versionToken) {
     await rm(directory, { recursive: true, force: true });
     throw new Error("Media staging object changed after verification");

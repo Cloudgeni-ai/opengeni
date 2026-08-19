@@ -22,6 +22,7 @@ import {
   type RetainedScreenshotMaintenanceActivityOptions,
 } from "../src/activities/retained-screenshot-reaper";
 import {
+  materializeRetainedScreenshotHistory,
   retainComputerScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
@@ -644,6 +645,80 @@ describe("retained screenshot lifecycle fences", () => {
       reservedBytes: 0,
       readyBytes: 0,
     });
+  }, 180_000);
+
+  test("a successful PUT stays ready even when a following HEAD is not visible", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    memory.storage.headFile = async () => {
+      throw new Error("object missing");
+    };
+    const result = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-put-without-head",
+        toolOutputId: "output-put-without-head",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error("retain must succeed");
+    expect(result.originalBytes).toBe(PNG.byteLength);
+    expect(result.sha256).toBe(SCREENSHOT.sha256);
+    expect(await artifactRow(result.artifactId)).toMatchObject({
+      status: "ready",
+    });
+  }, 180_000);
+
+  test("materialize re-resolves a sticky unavailable receipt from a ready artifact", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const result = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-reresolve",
+        toolOutputId: "output-reresolve",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error("retain must succeed");
+
+    const history = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [
+        {
+          type: "function_call_output",
+          callId: "call-reresolve",
+          output: {
+            type: "retained_artifact",
+            artifact: {
+              available: false,
+              artifactId: result.artifactId,
+              reason: "storage_write_failed",
+            },
+          },
+        },
+      ],
+    });
+    const output = history[0]?.output;
+    expect(typeof output).toBe("string");
+    expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {

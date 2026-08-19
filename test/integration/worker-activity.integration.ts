@@ -4232,6 +4232,7 @@ function fakeObjectStorage(body: string): ObjectStorage {
     }),
     fileExists: async () => true,
     getFileBytes: async () => new TextEncoder().encode(body),
+    getObjectBytes: async () => ({ bytes: new TextEncoder().encode(body) }),
   };
 }
 

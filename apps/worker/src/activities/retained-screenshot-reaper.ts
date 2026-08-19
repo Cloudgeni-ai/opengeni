@@ -5,7 +5,7 @@ import {
   promoteRetainedScreenshotMaintenanceCleanup,
   type RetainedScreenshotMaintenanceClaim,
 } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
 
 export const RETAINED_SCREENSHOT_PENDING_GRACE_MS = 15 * 60 * 1_000;
@@ -168,8 +168,11 @@ async function observeClaimObject(
   provider: Required<Pick<RetainedScreenshotMaintenanceActivityOptions, "fileExists" | "headFile">>,
 ): Promise<"matches" | "mismatch" | "missing"> {
   const file = claimFile(storage, claim);
-  if (!(await provider.fileExists(storage, file))) return "missing";
-  const head = await provider.headFile(storage, file);
+  const head = await retryWhileMissing(async () => {
+    if (!(await provider.fileExists(storage, file))) return null;
+    return await provider.headFile(storage, file);
+  });
+  if (!head) return "missing";
   return head.ContentLength === claim.sizeBytes &&
     head.ContentType === claim.mediaType &&
     head.Metadata?.sha256 === claim.sha256

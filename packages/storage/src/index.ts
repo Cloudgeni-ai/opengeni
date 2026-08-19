@@ -28,6 +28,7 @@ import {
 export * from "./bounded-object-read";
 export * from "./bounded-object-write";
 export * from "./object-storage-bounded";
+export * from "./retry-while-missing";
 
 export const MAX_SINGLE_PUT_SIZE_BYTES = 5_000_000_000;
 export const UPLOAD_URL_TTL_SECONDS = 15 * 60;

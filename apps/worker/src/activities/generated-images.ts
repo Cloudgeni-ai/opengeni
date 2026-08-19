@@ -15,7 +15,7 @@ import {
   type GeneratedImageArtifact,
   type GeneratedImageSourceStrategy,
 } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { ScreenshotValidationError, validateRetainableSessionImage } from "./retained-screenshots";
 
@@ -338,7 +338,6 @@ export async function retainGeneratedImage(input: {
   });
 
   if (prepared.artifact.status === "ready") {
-    await verifyReadyGeneratedImage(input.objectStorage, prepared.artifact, image);
     return retainedGeneratedImageFromArtifact(prepared.artifact);
   }
 
@@ -356,11 +355,9 @@ export async function retainGeneratedImage(input: {
           body: image.bytes,
           sha256: image.sha256,
         });
+      } else {
+        await assertGeneratedImageObject(input.objectStorage, prepared.artifact.file, image);
       }
-      assertStoredGeneratedImageHead(
-        await input.objectStorage.headFile(prepared.artifact.file),
-        image,
-      );
       await completeFileUpload(input.db, input.workspaceId, identity.uploadId);
     } else {
       await verifyReadyGeneratedImage(input.objectStorage, prepared.artifact, image);
@@ -764,7 +761,7 @@ export async function verifyReadyGeneratedImageArtifact(
   if (artifact.status !== "ready" || artifact.file.status !== "ready") {
     throw new Error("Generated image artifact is not durably ready");
   }
-  assertStoredGeneratedImageHead(await storage.headFile(artifact.file), {
+  await assertGeneratedImageObject(storage, artifact.file, {
     sizeBytes: artifact.sizeBytes,
     mediaType: artifact.mediaType as GeneratedImageMediaType,
     sha256: artifact.sha256,
@@ -789,8 +786,12 @@ export async function recoverGeneratedImageArtifact(input: {
     return artifact;
   }
   if (artifact.status !== "pending") return null;
-  if (!(await input.storage.fileExists(artifact.file))) return null;
-  assertStoredGeneratedImageHead(await input.storage.headFile(artifact.file), {
+  const recovered = await retryWhileMissing(async () => {
+    if (!(await input.storage.fileExists(artifact.file))) return null;
+    return artifact.file;
+  });
+  if (!recovered) return null;
+  await assertGeneratedImageObject(input.storage, artifact.file, {
     sizeBytes: artifact.sizeBytes,
     mediaType: artifact.mediaType as GeneratedImageMediaType,
     sha256: artifact.sha256,
@@ -812,7 +813,7 @@ async function verifyReadyGeneratedImage(
   artifact: GeneratedImageArtifact,
   expected: ValidatedGeneratedImage,
 ): Promise<void> {
-  assertStoredGeneratedImageHead(await storage.headFile(artifact.file), expected);
+  await assertGeneratedImageObject(storage, artifact.file, expected);
   if (
     artifact.sizeBytes !== expected.sizeBytes ||
     artifact.sha256 !== expected.sha256 ||
@@ -822,6 +823,19 @@ async function verifyReadyGeneratedImage(
   ) {
     throw new Error("ready generated image metadata does not match provider bytes");
   }
+}
+
+async function assertGeneratedImageObject(
+  storage: ObjectStorage,
+  file: GeneratedImageArtifact["file"],
+  expected: Pick<ValidatedGeneratedImage, "sizeBytes" | "mediaType" | "sha256">,
+): Promise<void> {
+  const head = await retryWhileMissing(async () => {
+    if (!(await storage.fileExists(file))) return null;
+    return await storage.headFile(file);
+  });
+  if (!head) throw new Error("generated image object is missing");
+  assertStoredGeneratedImageHead(head, expected);
 }
 
 function assertStoredGeneratedImageHead(

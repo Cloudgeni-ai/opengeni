@@ -120,19 +120,14 @@ export async function downloadGeneratedVideoToVerifiedTemp(input: {
   }
 }
 
-/** Stream verified bytes into an immutable content-addressed object and hash
- * the stored generation back through version-fenced Range reads. */
+/** Stream verified bytes into an immutable content-addressed object. */
 export async function retainVerifiedGeneratedVideo(input: {
   storage: ObjectStorage;
   temp: VerifiedTempFile;
   facts: GeneratedVideoFacts;
   signal?: AbortSignal;
 }): Promise<RetainedGeneratedVideo> {
-  if (
-    !input.storage.putObjectStreamIfAbsent ||
-    !input.storage.headObject ||
-    !input.storage.getObjectRange
-  ) {
+  if (!input.storage.putObjectStreamIfAbsent) {
     throw new Error("Object storage lacks bounded immutable video primitives");
   }
   const objectKey = `video-generation/objects/sha256/${input.temp.sha256}.mp4`;
@@ -143,13 +138,6 @@ export async function retainVerifiedGeneratedVideo(input: {
     chunks,
     byteSize: input.temp.sizeBytes,
     sha256: input.temp.sha256,
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
-  await verifyStoredObject({
-    storage: input.storage,
-    key: objectKey,
-    expectedSizeBytes: input.temp.sizeBytes,
-    expectedSha256: input.temp.sha256,
     ...(input.signal ? { signal: input.signal } : {}),
   });
   return Object.freeze({
@@ -203,49 +191,6 @@ function requireSafeOutputUrl(rawUrl: string): string {
     throw new Error("Video provider output URL is invalid");
   }
   return url.toString();
-}
-
-async function verifyStoredObject(input: {
-  storage: ObjectStorage;
-  key: string;
-  expectedSizeBytes: number;
-  expectedSha256: string;
-  signal?: AbortSignal;
-}): Promise<void> {
-  const head = await input.storage.headObject!(input.key);
-  if (
-    !head ||
-    head.ContentLength !== input.expectedSizeBytes ||
-    head.ContentType !== "video/mp4" ||
-    head.Metadata?.sha256 !== input.expectedSha256 ||
-    !head.VersionToken
-  ) {
-    throw new Error("Retained video object metadata is inconsistent");
-  }
-  const hash = createHash("sha256");
-  let offset = 0;
-  while (offset < input.expectedSizeBytes) {
-    throwIfAborted(input.signal);
-    const endInclusive = Math.min(input.expectedSizeBytes - 1, offset + STORAGE_RANGE_BYTES - 1);
-    const range = await input.storage.getObjectRange!({
-      key: input.key,
-      start: offset,
-      endInclusive,
-      expectedVersionToken: head.VersionToken,
-    });
-    if (
-      !range ||
-      range.versionToken !== head.VersionToken ||
-      range.bytes.byteLength !== endInclusive - offset + 1
-    ) {
-      throw new Error("Retained video object changed during verification");
-    }
-    hash.update(range.bytes);
-    offset += range.bytes.byteLength;
-  }
-  if (hash.digest("hex") !== input.expectedSha256) {
-    throw new Error("Retained video object digest is inconsistent");
-  }
 }
 
 async function* fileChunks(path: string, signal?: AbortSignal): AsyncIterable<Uint8Array> {
