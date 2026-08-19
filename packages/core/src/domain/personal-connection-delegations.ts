@@ -130,6 +130,17 @@ export function personalConnectionDelegationSourceForGrant(
     // personal-workspace access through that exception." Before the pointer
     // existed this was moot - `getWorkspaceGrant` returned null for a personal
     // workspace regardless - so the filter belongs with the pointer.
+    //
+    // Why testing THIS field is sound while inspecting the others is not: a
+    // host signs `subjectId`, `principalKind`, and `serviceInitiator` into the
+    // token itself, so those are host-chosen and a hostile host picks whatever
+    // it likes. `metadata.delegated` is different - it is stamped by
+    // `delegatedAccessContext` in `@opengeni/core` AFTER the token signature is
+    // verified, and is not carried in the payload at all, so a host cannot
+    // clear it. Do not "harden" this by switching to `principalKind`. The
+    // strictly better shape is a positive assertion of how the request
+    // authenticated (a canonical managed-cookie stamp) rather than any
+    // inspection of the grant; that convergence is tracked separately.
     grant.metadata?.delegated === true
   ) {
     return { kind: "none" };

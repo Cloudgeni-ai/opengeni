@@ -214,18 +214,31 @@ subject established once at authentication and immutable thereafter. That is a
 much larger conversation than either variant, and nothing short of it converts
 this oracle into an authorization.
 
-> **Merge note.** A concurrent branch introduces exactly such a scope-derived
-> variant (`subjectHasLiveWorkspaceAuthorityInScope`) and repairs
-> `listSessionsForSubject` / `setSessionPin`. When it lands, converge on one
-> name for the arbitrary-subject oracle rather than leaving two, drop those two
-> seams from the "still on the bare join" list below, and revisit this
-> paragraph. **Whichever change lands second must preserve the subject-GUC
-> restore described under the mechanical traps** - that branch does not carry
-> it, so a naive resolution toward its version silently reopens the leak. Its
-> positive `PersonalWorkspaceOwnerException` flag is a better shape than this
-> path's blocklist and is worth converging on; its doc claim that an in-scope
-> subject "cannot name a third party" needs the same correction this section
-> makes, since the scope is still set by the application role.
+> **Convergence note.** A companion change introduces exactly such a
+> scope-derived variant, `subjectHasLiveWorkspaceAuthorityInScope`, and uses it
+> to repair `listSessionsForSubject` and `setSessionPin`. The two live side by
+> side on purpose: the in-scope variant refuses to set the subject GUC and so
+> cannot express the oracle shape at all, while several callers legitimately
+> ask about a subject that is not the caller and can only use the oracle.
+>
+> The naming is deliberate and worth preserving. The **dangerous** function
+> carries the qualifier (`namedSubjectHasLiveWorkspaceAuthority` - it answers
+> about a *named* subject) and the safer one reads as scoped. Do not "simplify"
+> by giving the oracle the shorter name: at the point of use the name is the
+> most visible warning either function has.
+>
+> **The subject-GUC restore under the mechanical traps below is load-bearing and
+> must survive any refactor of the wrapper.** A wrapper that sets
+> `opengeni.subject_id` and returns without restoring it reopens the leak
+> silently - no failing test, no conflict marker. Anything that rewrites the
+> wrapper must re-prove the restore with the test that pins it.
+>
+> That change's positive `PersonalWorkspaceOwnerException` flag - set only from
+> a canonical managed-cookie assertion rather than by inspecting a grant - is a
+> better shape than this path's delegated blocklist, and converging on it is a
+> tracked follow-up. It is deliberately not done as part of a merge resolution:
+> a conflict resolution is the worst available place to make a security
+> judgement.
 
 The personal-connection authority path uses the oracle at every hop -
 `freezePersonalConnectionDelegations` and the `*ForGrant` connection resolvers
@@ -294,10 +307,10 @@ an authority hole:
   the personal permission set.
 - SQL seams without the personal-workspace disjunct:
   `fork_session_content` (0289) and the xAI subscription authority
-  views/functions in 0234. 0225's `guard_session_authority_write` is the same
-  defect and is repaired separately by migration 0302; do not add it back to
-  this list. (Many other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 -
-  already carry the disjunct.)
+  views/functions in 0234. 0225's `guard_session_authority_write` was the same
+  defect and is already repaired by migration 0302 (described above); do not add
+  it back to this list. (Many other SQL seams - 0253, 0258, 0262, 0264, 0275,
+  0280 - already carry the disjunct.)
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
