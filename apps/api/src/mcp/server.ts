@@ -319,7 +319,7 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
       : typedCode === "CALLER_INTERRUPTED"
         ? ["caller_interrupted", "The calling session was interrupted before delivery."]
         : typedCode === "TARGET_NOT_VERTICAL"
-          ? ["target_not_vertical", "Agents may message only their parent or immediate children."]
+          ? ["target_not_vertical", "The calling agent cannot act on that session."]
           : typedCode === "CONTROL_CHANGED"
             ? ["conflict", "The target session control state changed; refresh and retry."]
             : typedCode === "IDEMPOTENCY_KEY_REUSED"

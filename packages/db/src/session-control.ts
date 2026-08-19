@@ -300,23 +300,8 @@ export async function assertAgentCommandAuthorityInTransaction(
   if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
     throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }
-  const targetsSelf = targetSession.id === callerSession.id;
-  const targetsDirectParent = callerSession.parentSessionId === targetSession.id;
-  const targetsDirectChild = targetSession.parentSessionId === callerSession.id;
-  const verticalTargetAllowed =
-    input.action === "goal"
-      ? targetsSelf
-      : input.action === "message"
-        ? targetsSelf || targetsDirectParent || targetsDirectChild
-        : targetsDirectChild;
-  if (!verticalTargetAllowed) {
-    throw new AgentCommandAuthorityError(
-      "TARGET_NOT_VERTICAL",
-      input.action === "message"
-        ? "An agent may message only its own session, direct parent, or direct child"
-        : "An agent may control only a direct child session",
-    );
-  }
+  // Peer, parent, child, and unrelated-root targets are allowed here. Slack-private
+  // and user_private denies remain in requireSessionAuthorization.
 }
 
 function asSafeRevision(value: number | string | null, label: string): number | null {

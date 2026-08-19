@@ -196,7 +196,10 @@ the authenticated subject or a live exact agent attempt. Agent authority is
 reconstructed from durable attempt ownership and includes the caller session,
 caller root, turn, attempt, execution generation, and frozen initiator; caller
 input cannot nominate those fields. A settled, superseded, interrupted, or
-otherwise stale attempt is rejected before the host is called.
+otherwise stale attempt is rejected before the host is called. Slack-private
+and `user_private` owner checks also run before the host; the host may narrow
+further and cannot grant those sessions. Cross-session agent access keeps
+exact-target projection even when the host returns `relatedSessionAccess: "root"`.
 
 An allowed decision may set `relatedSessionAccess: "root"` when the principal
 may see the target's full tree. The fail-closed default is `"target"`: detail,
