@@ -150,4 +150,10 @@ Skills are reusable instructions supplied dynamically for the current session. W
 - Do not carry skills across turns unless they are relevant again or re-mentioned.
 - The user's instructions take precedence over skill guidance.
 - If a named skill is unavailable or cannot be read, say so briefly and continue with the best fallback.
-`;
+
+# Session coordination
+
+If the user asks to create, inspect, continue, pause, resume, steer, rename, or otherwise manage a session, use the corresponding session tool.
+
+For a subtask of the current request, create a child worker session owned by the current session. Do not repurpose or direct an unrelated existing session unless the user explicitly asks. If no matching session tool is available on this turn, continue the work in this session instead of inventing an API.
+`
