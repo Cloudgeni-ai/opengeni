@@ -396,8 +396,7 @@ function stackEnv(
   apiPort: number,
   scenario: string,
 ): Record<string, string> {
-  // ubs:ignore -- fixed credentials for an isolated disposable MinIO fixture, never a deploy secret.
-  const localObjectStorageCredential = "minioadmin";
+  // ubs:ignore -- fixed credentials for an isolated disposable object-storage fixture, never a deploy secret.
   return {
     OPENGENI_ENVIRONMENT: "test",
     OPENGENI_DATABASE_URL: services.runtimeDatabaseUrl,
@@ -413,8 +412,8 @@ function stackEnv(
     OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",
     OPENGENI_OBJECT_STORAGE_ENDPOINT: services.objectStorageEndpoint!,
     OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT: services.objectStorageSandboxEndpoint!,
-    OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: localObjectStorageCredential,
-    OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: localObjectStorageCredential,
+    OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: services.objectStorageAccessKeyId!,
+    OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: services.objectStorageSecretAccessKey!,
     OPENGENI_TEST_SCENARIO: scenario,
   };
 }

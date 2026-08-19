@@ -69,8 +69,8 @@ spec:
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE
               value: turn
-            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)) | nindent 12 }}
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
