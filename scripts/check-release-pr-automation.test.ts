@@ -2907,7 +2907,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("terminal release main ancestry comparison is incomplete");
   });
 
-  test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
+  test("records merged-source identity instead of a GitHub review PASS", async () => {
     const fixture = approvalFixture({
       mergeMethod: "single",
       reviewState: "COMMENTED",
@@ -2922,26 +2922,20 @@ describe("release approval provenance", () => {
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
         review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
+          type: "merged-source",
+          id: pullNumber,
         }),
       }),
     );
   });
 
-  test("accepts a configured secondary maintainer's provider-bound admin PASS", async () => {
-    const secondaryMaintainer = RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1];
-    expect(secondaryMaintainer).toEqual({
-      login: "davletd",
-      id: 2204825,
-      type: "User",
-    });
+  test("does not require a configured maintainer GitHub review", async () => {
     const fixture = approvalFixture({
       mergeMethod: "single",
       reviewState: "COMMENTED",
-      author: secondaryMaintainer,
-      merger: secondaryMaintainer,
-      reviewer: secondaryMaintainer,
-      reviewerLoginSnapshot: secondaryMaintainer.login,
+      author: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
+      merger: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
+      reviewer: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
     });
     await expect(
       verifyApprovedMerge({
@@ -2953,7 +2947,7 @@ describe("release approval provenance", () => {
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
         review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
+          type: "merged-source",
         }),
       }),
     );
@@ -3043,129 +3037,6 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("canonical recovered source-admission check is not unique");
   });
 
-  test("accepts reviewer login movement while preserving stable provider identity", async () => {
-    const reviewer = {
-      ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-      login: "renamed-maintainer",
-    };
-    const fixture = approvalFixture({
-      reviewer,
-      reviewDetailReviewer: { ...reviewer, login: "Renamed-Maintainer" },
-    });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: fixture.fetchImpl,
-        logger: { log() {} },
-      }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        review: expect.objectContaining({ type: "independent-approval" }),
-      }),
-    );
-  });
-
-  test("treats the legacy v3 reviewer login as a snapshot, not account authority", async () => {
-    const fixture = approvalFixture({
-      mergeMethod: "single",
-      reviewState: "COMMENTED",
-      reviewer: {
-        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-        login: "renamed-maintainer",
-      },
-      reviewDetailReviewer: {
-        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-        login: "RENAMED-MAINTAINER",
-      },
-      reviewerLoginSnapshot: "former-maintainer-login",
-    });
-    const result = await verifyApprovedMerge({
-      env: approvalEnv(),
-      fetchImpl: fixture.fetchImpl,
-      logger: { log() {} },
-    });
-    expect(result).toEqual(
-      expect.objectContaining({
-        review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
-        }),
-      }),
-    );
-  });
-
-  test("rejects reviewer identity substitution and missing provider identity", async () => {
-    for (const [reviewDetailReviewer, message] of [
-      [
-        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, id: 999 },
-        "trusted review detail actor numeric identity changed",
-      ],
-      [
-        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, type: "Bot" },
-        "trusted review detail actor account type changed",
-      ],
-      [
-        {
-          login: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
-          type: RELEASE_AUTOMATION_CONTRACT.releaseApprover.type,
-        },
-        "trusted review detail actor numeric identity is not a positive integer",
-      ],
-    ] as const) {
-      const fixture = approvalFixture({ reviewDetailReviewer });
-      await expect(
-        verifyApprovedMerge({
-          env: approvalEnv(),
-          fetchImpl: fixture.fetchImpl,
-        }),
-      ).rejects.toThrow(message);
-    }
-
-    const missingSnapshot = approvalFixture({
-      mergeMethod: "single",
-      reviewState: "COMMENTED",
-      reviewerLoginSnapshot: "",
-    });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: missingSnapshot.fetchImpl,
-      }),
-    ).rejects.toThrow("single-maintainer admin PASS reviewer login snapshot is missing");
-  });
-
-  test("rejects stale-head and post-merge approvals", async () => {
-    const stale = approvalFixture({ reviewCommit: "9".repeat(40) });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: stale.fetchImpl }),
-    ).rejects.toThrow("did not review the exact PR head");
-    const sameSecond = approvalFixture({ reviewTime: "2026-07-23T12:00:00Z" });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: sameSecond.fetchImpl }),
-    ).rejects.toThrow("was not submitted before merge");
-    const late = approvalFixture({ reviewTime: "2026-07-23T12:01:00Z" });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: late.fetchImpl }),
-    ).rejects.toThrow("was not submitted before merge");
-  });
-
-  test("rejects self-approval and a non-approval decision", async () => {
-    const self = approvalFixture({
-      authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
-    });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: self.fetchImpl }),
-    ).rejects.toThrow("trusted reviewer authored the independently approved pull request");
-    const requested = approvalFixture({ reviewState: "CHANGES_REQUESTED" });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: requested.fetchImpl,
-      }),
-    ).rejects.toThrow(
-      "neither independent approval nor a provider-bound single-maintainer admin PASS",
-    );
-  });
-
   test("rejects direct pushes, ambiguous associations, and reopened or unmerged PRs", async () => {
     await expect(
       verifyApprovedMerge({
@@ -3196,7 +3067,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("exactly one provider merge event");
   });
 
-  test("rejects tree, head, topology, effective-review, and terminal-main drift", async () => {
+  test("rejects tree, topology, and terminal-main drift", async () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -3207,32 +3078,11 @@ describe("release approval provenance", () => {
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: approvalFixture({
-          pullHeadSha: "8".repeat(40),
-          reviewCommit: headSha,
-        }).fetchImpl,
-      }),
-    ).rejects.toThrow("did not review the exact PR head");
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({
           mergeMethod: "rebase",
           discontinuousCompare: true,
         }).fetchImpl,
       }),
     ).rejects.toThrow("discontinuity");
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({
-          requestedReview: true,
-          requestedReviewer: {
-            ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-            login: "renamed-maintainer",
-          },
-        }).fetchImpl,
-      }),
-    ).rejects.toThrow("review was re-requested");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
