@@ -125,7 +125,10 @@ describe("workflow timeout contract", () => {
           for (const m of run.matchAll(/--timeout\s+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
           if (String(step.uses ?? "").includes("playwright-browsers")) usesBoundedInstall = true;
         }
-        if (inner === 0) continue;
+        // A job using the bounded install must be checked even with no declared
+        // inner budget, or a browser lane with a small cap and no test budget is
+        // endorsed despite being guaranteed to cancel mid-install.
+        if (inner === 0 && !usesBoundedInstall) continue;
         // 1 minute covers checkout + toolchain + dependency install.
         const needed = 1 + inner + (usesBoundedInstall ? installBoundMinutes : 0);
         if (cap < needed) {

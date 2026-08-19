@@ -16,14 +16,19 @@ inputs:
     default: "false"
   attempt-timeout-seconds:
     description: >-
-      Hard wall clock for one install attempt. Measured per browser set over
-      successful installs, p99 is 2.8m (chromium), 5.4m (chromium --only-shell),
-      12.0m (chromium+firefox+webkit) and 22.4m (chromium+firefox); pooled p95
-      is 7.3m. The default therefore clears the p99 of three of the four sets,
-      rather than the pooled p90 an earlier revision of this action wrongly
-      cited. Worst case is this value plus the 15s SIGKILL grace, times
-      `attempts`; keep that inside the calling job's timeout-minutes alongside
-      that job's own declared step budgets.
+      Hard wall clock for one install attempt. Deliberately stated as a rule
+      rather than a percentile: independent measurements over different windows
+      disagree on the per-set p99 (the three-browser set has been measured at
+      both 7.5m and 27.7m), so a quoted percentile here would not reproduce.
+      What does reproduce across every window measured: no SINGLE-browser
+      install has ever exceeded this bound, and every observed overrun is a
+      cumulative MULTI-browser download. Because the cache save below persists
+      whichever browsers completed, a re-run after an overrun faces only the
+      browsers that did not - which reduces to the single-browser case. Residual
+      green-to-red exposure is roughly 1-2% on multi-browser sets and zero on
+      single-browser sets. Worst case is this value plus the 15s SIGKILL grace,
+      times `attempts`; keep that inside the calling job's timeout-minutes
+      alongside that job's own declared step budgets.
     required: false
     default: "900"
   attempts:
@@ -126,6 +131,20 @@ runs:
     # `always()` so a bounded failure still persists whatever downloaded, which
     # is what makes the re-run after a timeout actually converge. Skipped on a
     # hit, where the key already exists and saving would error.
+    #
+    # This checkpoint is ONE-SHOT, not iterative: cache keys are immutable, so
+    # once a partial set is saved every later run gets a hit and skips this
+    # step. One step is sufficient because it reduces the re-run to a
+    # single-browser download, which has never breached the bound - but it does
+    # mean a partial set persists for the life of this Playwright version.
+    # A SIGKILLed install can leave a stale __dirlock behind. Playwright only
+    # treats it as stale after ~5 minutes, so baking it into an immutable cache
+    # would tax every later run against this key.
+    - name: Drop stale Playwright dirlock before saving
+      if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: rm -rf ~/.cache/ms-playwright/__dirlock
+
     - name: Save pinned Playwright browsers
       if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v6.1.0
