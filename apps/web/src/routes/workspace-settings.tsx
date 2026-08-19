@@ -380,14 +380,14 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         </section>
 
         <ModelAccessPolicySection
-          key={workspaceId}
+          key={`model-access:${workspaceId}`}
           workspaceId={workspaceId}
           canManage={canDeleteWorkspace}
         />
 
         {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
         <CodexSubscriptionsCard
-          key={workspaceId}
+          key={`codex-subscriptions:${workspaceId}`}
           workspaceId={workspaceId}
           canManage={canDeleteWorkspace}
         />
