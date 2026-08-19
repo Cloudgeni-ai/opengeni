@@ -1,5 +1,17 @@
 # @opengeni/db
 
+## 2.0.1
+
+### Patch Changes
+
+- b230459: Replay an organization membership `accept`/`suspend`/`offboard` transaction a bounded number of times after a PostgreSQL deadlock abort. Replay is exact rather than approximate: the whole lifecycle command runs in one transaction keyed by its caller-supplied operation id plus its CAS revisions, and a deadlock abort rolls back every durable effect, so re-running the identical command either applies it once or observes the newer authoritative state. `updateOrganizationMember()` and `acceptOrganizationInvitation()` are wrapped because they are exactly the lifecycle commands that acquire workspace rows and can therefore be inside a cycle at all. `40001` is still surfaced unchanged as the authoritative stale-revision conflict.
+
+  This is a caller-side safety net, not a lock-order fix: migration `0299_organization_membership_lock_order.sql` removes the organization/workspace lock-order inversion in SQL, and its parallel-load probe reads `pg_stat_database.deadlocks` directly so this replay cannot mask a regression. The `0263` lifecycle test correspondingly no longer assumes a particular deadlock victim - if the concurrent visibility transition is the one aborted it is replayed once, after which the committed offboard makes its `42501` denial deterministic.
+
+- 323db7f: Correct the organization-membership lifecycle lock order. The three lifecycle entry points - `prepare_organization_membership_protocol_settlements`, the wrapped `organization_membership_command_0263`, and the `organization_membership_command` wrapper - locked `managed_accounts FOR UPDATE` and only then took the canonical `workspaces FOR KEY SHARE` prefix. Every ordinary workspace writer is forced into the opposite order (it holds its `workspaces` row and reaches `managed_accounts` through the account foreign-key check of the `sessions`/`session_events`/`session_turns`/`session_goals`/`session_system_updates` row it inserts), so suspending or offboarding a member concurrently with any workspace write in the same organization deadlocked with `40P01`.
+
+  Migration `0299_organization_membership_lock_order.sql` replaces the organization row lock with a transaction-scoped advisory lock keyed on the organization id - which preserves mutual exclusion between concurrent membership commands, is re-grantable across the nested entry points in one command transaction, and lives in a lock space no ordinary writer touches - and downgrades the row lock to `FOR KEY SHARE`, which still blocks DELETE and primary-key UPDATE of the organization while being compatible with every writer's FK check. CAS on `authorization_revision`, operation-receipt idempotency, and every fail-closed authorization check are unchanged; only lock strength and lock class moved. As a side effect the lifecycle no longer stalls every session/event/turn insert in the organization for the duration of a membership command.
+
 ## 2.0.0
 
 ### Major Changes
