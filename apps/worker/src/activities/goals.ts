@@ -5,9 +5,7 @@ import {
 } from "@opengeni/config";
 import {
   evaluateWorkspaceModelPolicy,
-  latencyModeForMetadata,
   mergeToolRefs,
-  reasoningEffortForMetadata,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -69,10 +67,8 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     );
     let continuationModel = latestStartedTurn?.model ?? session.model;
     const continuationReasoningEffort =
-      latestStartedTurn?.reasoningEffort ??
-      reasoningEffortForMetadata(session.metadata, settings.openaiReasoningEffort);
-    const continuationLatencyMode =
-      latestStartedTurn?.latencyMode ?? latencyModeForMetadata(session.metadata, "standard");
+      latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
+    const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
     // Workspace model policy: a continuation inherits the last STARTED turn's
     // model, so a single policy-violating turn would otherwise re-arm itself on
     // every continuation (exactly how one bare-model turn kept a goal loop on

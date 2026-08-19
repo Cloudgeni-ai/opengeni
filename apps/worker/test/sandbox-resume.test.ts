@@ -246,6 +246,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(db, {
@@ -1012,6 +1014,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "local",
     });
 

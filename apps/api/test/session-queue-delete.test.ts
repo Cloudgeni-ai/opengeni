@@ -168,6 +168,8 @@ describe("session queue delete lookup", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);
@@ -255,6 +257,8 @@ describe("session queue delete lookup", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);
@@ -279,6 +283,8 @@ describe("session queue delete lookup", () => {
       resources: [],
       metadata: {},
       model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);

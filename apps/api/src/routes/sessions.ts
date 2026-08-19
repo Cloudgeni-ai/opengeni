@@ -49,6 +49,7 @@ import {
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
@@ -216,6 +217,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  acceptSessionUserMessageWithOutcome,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   deleteHumanQueuePrompt,
@@ -2397,6 +2399,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(result, 202);
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft/submit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
+    let result: Awaited<ReturnType<typeof acceptSessionUserMessageWithOutcome>>;
+    try {
+      result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
+        text: payload.text,
+        annotations: payload.annotations,
+        modelContext: payload.modelContext ?? null,
+        resources: payload.resources,
+        model: payload.model,
+        reasoningEffort: payload.reasoningEffort,
+        latencyMode: payload.latencyMode,
+        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: payload.connectionAuthorities,
+        delivery: payload.delivery,
+        origin: "human",
+        expectedDraftRevision: payload.expectedDraftRevision,
+        clientEventId: payload.clientEventId,
+        ...(payload.controlEtag ? { controlEtag: payload.controlEtag } : {}),
+      });
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+    if (!result.draft) {
+      throw new Error("Accepted composer draft submission did not return its next draft");
+    }
+    return c.json(
+      {
+        accepted: result.accepted,
+        turn: result.turn,
+        draft: result.draft,
+        interruptionCount: result.interruptionCount,
+        replay: result.replay,
+      },
+      202,
+    );
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -3768,6 +3812,9 @@ export function sessionAuthorizationOperationForHttp(
     if (verb === "PUT") return "session.composer.write";
     return null;
   }
+  // Same HTTP gate as POST /events. Delivery `steer` is re-authorized inside
+  // acceptSessionUserMessageWithOutcome after the body is parsed.
+  if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
@@ -4078,6 +4125,20 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         message: `Invalid session create request: ${zodErrorFields(error)} failed schema validation`,
       },
       422,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 409 &&
+    error.cause instanceof NewSessionDraftConflictError
+  ) {
+    return c.json(
+      {
+        code: "NEW_SESSION_DRAFT_CONFLICT",
+        message: error.cause.message,
+        currentRevision: error.cause.currentRevision,
+      },
+      409,
     );
   }
   if (error instanceof HTTPException && error.status === 422) {

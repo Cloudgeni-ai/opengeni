@@ -117,11 +117,11 @@ async function seedRunningSession(
     await tx.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model,
-        sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
         parent_session_id, tool_policy
       ) values (
         ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'event-ordering invariant race',
-        'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
+        'codex/gpt-5.6-sol', 'medium', 'standard', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
         ${options.parentSessionId ?? null},
         jsonb_build_object(
           'mode', 'explicit',
@@ -175,11 +175,11 @@ async function seedIdleChild(
     await tx.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model,
-        sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
         parent_session_id, tool_policy
       ) values (
         ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'event-ordering invariant idle child',
-        'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
+        'codex/gpt-5.6-sol', 'medium', 'standard', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
         ${parentSessionId},
         jsonb_build_object(
           'mode', 'explicit',
@@ -211,10 +211,11 @@ async function seedSandboxGroupMember(
     await tx.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model,
-        sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, status,
+        temporal_workflow_id, tool_policy
       ) values (
         ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'event-ordering invariant group join',
-        'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
+        'codex/gpt-5.6-sol', 'medium', 'standard', 'modal', ${fixture.sandboxGroupId}, 'idle',
         ${`session-${sessionId}`},
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       )

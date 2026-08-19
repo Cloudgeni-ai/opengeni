@@ -600,7 +600,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
       const workspace = await getWorkspace(routeDeps.db, workspaceId);
       const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
@@ -1393,6 +1393,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/queue$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/queue",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft\/submit$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft/submit",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft$/,

@@ -61,6 +61,8 @@ beforeAll(async () => {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   sessionId = session.id;

@@ -519,6 +519,8 @@ async function seedAttempt(
     tools: [],
     metadata: {},
     model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     ...(options.permissions === undefined ? {} : { firstPartyMcpPermissions: options.permissions }),
     ...(options.tools === undefined ? {} : { firstPartyMcpTools: options.tools }),

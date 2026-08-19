@@ -102,6 +102,8 @@ async function freshSession(ids: WorkspaceIds): Promise<string> {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   ids.groupId = session.sandboxGroupId;

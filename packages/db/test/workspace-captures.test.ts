@@ -64,6 +64,8 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const sandboxGroupId = session.sandboxGroupId;

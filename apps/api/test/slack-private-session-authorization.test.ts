@@ -161,6 +161,8 @@ async function fixture() {
     metadata: {},
     createdBy: { kind: "subject", subjectId: owner.subjectId },
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const child = await createSession(client.db, {
@@ -172,6 +174,8 @@ async function fixture() {
     metadata: {},
     createdBy: { kind: "subject", subjectId: owner.subjectId },
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await bindSlackInteractionSession(client.db, {
@@ -201,6 +205,8 @@ describe("private Slack session authorization without an embedding-host port", (
       metadata: {},
       createdBy: { kind: "subject", subjectId: value.owner.subjectId },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     for (const sessionId of [ordinary.id, crypto.randomUUID()]) {

@@ -183,6 +183,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const events = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
@@ -221,6 +223,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const sentinel = new Date("2001-02-03T04:05:06.000Z");
@@ -353,6 +357,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       mcpServers: [
         {
@@ -486,6 +492,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await Promise.all(
@@ -514,6 +522,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
@@ -568,6 +578,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none" as const,
       createIdempotencyKey: key,
     });
@@ -616,6 +628,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createIdempotencyKey: seqKey,
     });
@@ -631,6 +645,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const plainB = await createSession(dbClient.db, {
@@ -640,6 +656,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     expect(plainA.id).not.toBe(plainB.id);
@@ -740,6 +758,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const secondTarget = await createSession(dbClient.db, {
@@ -749,6 +769,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const task = await createScheduledTask(dbClient.db, {
@@ -807,6 +829,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     expect(await getSessionGoal(dbClient.db, grant.workspaceId, session.id)).toBeNull();
@@ -881,6 +905,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const guards = { defaultMaxAutoContinuations: 5 };
@@ -1003,6 +1029,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const guards = { defaultMaxAutoContinuations: null };
@@ -1051,6 +1079,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     // No deployment default: length is governed by explicit lifecycle and
@@ -1136,6 +1166,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         firstPartyMcpPermissions,
       });
@@ -1229,6 +1261,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await createSessionGoal(dbClient.db, {
@@ -1253,6 +1287,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await createSessionGoal(appDbClient.db, {
@@ -1300,6 +1336,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
 
@@ -1315,6 +1353,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       expect(created.workspaceId).toBe(grantA.workspaceId);
@@ -1343,6 +1383,8 @@ describe("DB integration", () => {
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
         }),
       ).rejects.toThrow();
@@ -2332,13 +2374,10 @@ describe("DB integration", () => {
       set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
       where id = ${grant.workspaceId}::uuid
     `);
-    const block = await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId);
-    expect(block).toContain("## Workspace memory");
-    expect(block).toContain("### Preferences");
-    expect(block).toContain("Prefer Terraform for infra.");
-    expect(block).toContain("Staging deploys from main.");
-    // Episodic is excluded from the injected block.
-    expect(block).not.toContain("one-off thing");
+    // The standing block is retired: even a workspace that stored the old
+    // opt-out composes nothing into the prompt. The rows themselves are
+    // untouched and still reachable through search.
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
     // Candidate containment removes the broad block and legacy preference-kind
     // records only from agent retrieval. The canonical row remains available
@@ -2380,8 +2419,7 @@ describe("DB integration", () => {
       set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
       where id = ${empty.workspaceId}::uuid
     `);
-    const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
-    expect(emptyBlock).toContain("currently empty");
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId)).toBeNull();
   });
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {
@@ -2572,6 +2610,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     // A second session that must stay completely untouched — proves the repair
@@ -2583,6 +2623,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     // Legacy corruption: an orphaned function_call_result (no preceding call), a

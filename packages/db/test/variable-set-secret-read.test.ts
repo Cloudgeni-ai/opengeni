@@ -231,6 +231,8 @@ describe("permissioned variable-set plaintext reads", () => {
       tools: [],
       metadata: {},
       model: "secret-read-test",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId,
     });

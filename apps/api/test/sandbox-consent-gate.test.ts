@@ -269,6 +269,8 @@ async function soloSession(): Promise<{
     resources: [],
     metadata: {},
     model: "m",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: BACKEND,
   });
   await seedWarmBox(accountId, workspaceId, session.id, session.sandboxGroupId);
@@ -570,6 +572,8 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
       resources: [],
       metadata: {},
       model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: BACKEND,
     });
     const sandboxGroupId = session.sandboxGroupId;
