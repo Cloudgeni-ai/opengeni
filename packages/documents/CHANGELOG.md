@@ -1,5 +1,22 @@
 # @opengeni/documents
 
+## 0.6.6
+
+### Patch Changes
+
+- f275cc7: Treat a resolved object PUT as the write. Expected-present reads retry not-found. Screenshot history re-resolves from the artifact row instead of a sticky unavailable receipt.
+- Updated dependencies [3e60b2a]
+- Updated dependencies [f275cc7]
+- Updated dependencies [b230459]
+- Updated dependencies [8fa9820]
+- Updated dependencies [323db7f]
+- Updated dependencies [2a70d94]
+- Updated dependencies [18474f1]
+- Updated dependencies [c19fad8]
+- Updated dependencies [093c17f]
+  - @opengeni/db@2.1.0
+  - @opengeni/storage@0.2.102
+
 ## 0.6.5
 
 ### Patch Changes
