@@ -5176,11 +5176,15 @@ describe("objectStorageForSandboxDownloads", () => {
   });
 
   test("active selfhosted keeps the public endpoint even when session home is docker", () => {
-    expect(objectStorageForSandboxDownloads(settings, ambient as never, "selfhosted")).toBe(ambient);
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "selfhosted")).toBe(
+      ambient,
+    );
   });
 
   test("docker rewrites s3-compatible signatures onto the sandbox MinIO host", () => {
-    expect(objectStorageForSandboxDownloads(settings, ambient as never, "docker")).not.toBe(ambient);
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "docker")).not.toBe(
+      ambient,
+    );
   });
 });
 

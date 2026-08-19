@@ -250,6 +250,44 @@ export function readsTable(statement: string, table: string): boolean {
   );
 }
 
+const ROUTINE_START = /\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\b/gi;
+const ROUTINE_AS_DOLLAR = /\bAS\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)/i;
+
+/**
+ * Drop CREATE FUNCTION/PROCEDURE bodies so a DO block that *defines* a
+ * later-running trigger/lifecycle routine is not treated as a migration-time
+ * backfill. `EXECUTE format($ddl$ UPDATE ... $ddl$)` still looks like a write.
+ */
+export function stripRoutineBodies(statement: string): string {
+  let out = "";
+  let index = 0;
+  while (index < statement.length) {
+    ROUTINE_START.lastIndex = index;
+    const match = ROUTINE_START.exec(statement);
+    if (!match || match.index === undefined) {
+      out += statement.slice(index);
+      break;
+    }
+    out += statement.slice(index, match.index);
+    const asTag = ROUTINE_AS_DOLLAR.exec(statement.slice(match.index));
+    if (!asTag || asTag.index === undefined || asTag[1] === undefined) {
+      out += statement.slice(match.index, match.index + match[0].length);
+      index = match.index + match[0].length;
+      continue;
+    }
+    const tag = asTag[1];
+    const bodyStart = match.index + asTag.index + asTag[0].length;
+    const close = statement.indexOf(tag, bodyStart);
+    if (close === -1) {
+      out += statement.slice(match.index);
+      break;
+    }
+    out += `${statement.slice(match.index, bodyStart)} /* routine body omitted */ `;
+    index = close + tag.length;
+  }
+  return out;
+}
+
 const DDL_ONLY =
   /^CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|VIEW|MATERIALIZED|TRIGGER|INDEX|UNIQUE|POLICY|SCHEMA|TYPE|EXTENSION|SEQUENCE|ROLE|TABLE)/i;
 const NON_DML =
@@ -350,6 +388,7 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
         continue;
       if (tenantGuc) continue;
 
+      const executable = isBlock ? stripRoutineBodies(statement) : statement;
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&
@@ -358,10 +397,10 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
           !new RegExp(
             String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
             "i",
-          ).test(statement),
+          ).test(executable),
       );
 
-      const written = opaque.filter((table) => writesTable(statement, table)).sort();
+      const written = opaque.filter((table) => writesTable(executable, table)).sort();
       if (written.length > 0) {
         findings.push({
           file,
@@ -376,8 +415,8 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       // A `DO $$ ... IF EXISTS (SELECT ... FROM <forced table>) ... RAISE
       // EXCEPTION` preflight sees zero rows for the same reason a backfill
       // writes zero rows, so it certifies success instead of guarding.
-      if (!isBlock || !/RAISE\s+EXCEPTION/i.test(statement)) continue;
-      const read = opaque.filter((table) => readsTable(statement, table)).sort();
+      if (!isBlock || !/RAISE\s+EXCEPTION/i.test(executable)) continue;
+      const read = opaque.filter((table) => readsTable(executable, table)).sort();
       if (read.length === 0) continue;
       findings.push({
         file,
