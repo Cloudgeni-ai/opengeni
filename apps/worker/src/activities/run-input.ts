@@ -215,6 +215,7 @@ export async function modelAttachmentContentForFiles(
     if (
       file.status !== "ready" ||
       !descriptor ||
+      descriptor.kind !== "image" ||
       file.sizeBytes > remainingBytes ||
       !/^[a-f0-9]{64}$/.test(checksum)
     ) {
@@ -269,18 +270,6 @@ export async function modelAttachmentContentForFiles(
   );
   return attachments.filter(
     (attachment): attachment is ModelAttachmentContent => attachment !== undefined,
-  );
-}
-
-function modelAcceptsFileMediaType(
-  policy: ModelAttachmentInputPolicy,
-  contentType: string,
-): boolean {
-  const normalized = contentType.toLowerCase().split(";", 1)[0]?.trim() ?? "";
-  return policy.inputFileMediaTypes.some(
-    (accepted) =>
-      accepted === normalized ||
-      (accepted.endsWith("/*") && normalized.startsWith(accepted.slice(0, -1))),
   );
 }
 
@@ -350,11 +339,7 @@ export function createModelHistoryAttachmentProjector(
         .filter((file): file is FileAsset => {
           if (!file || attemptedContentIds.has(file.id)) return false;
           const descriptor = modelAttachmentDescriptor(file.contentType);
-          return Boolean(
-            descriptor &&
-            ((descriptor.kind === "image" && policy.supportsImageInput) ||
-              (descriptor.kind === "file" && modelAcceptsFileMediaType(policy, file.contentType))),
-          );
+          return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
         });
       for (const file of readable) attemptedContentIds.add(file.id);
       const content = await modelAttachmentContentForFiles(readable, readFileBytes);
@@ -374,19 +359,10 @@ export function createModelHistoryAttachmentProjector(
           type: "input_text",
           text: attachmentReceiptText(ref, currentFile),
         };
-        if (!attachment) {
+        if (!attachment || attachment.kind !== "image") {
           return [receipt];
         }
-        return [
-          receipt,
-          attachment.kind === "image"
-            ? { type: "input_image", image: attachment.dataUrl }
-            : {
-                type: "input_file",
-                file: attachment.dataUrl,
-                filename: attachment.filename,
-              },
-        ];
+        return [receipt, { type: "input_image", image: attachment.dataUrl }];
       });
       const clone: Record<string, unknown> = {
         ...original,

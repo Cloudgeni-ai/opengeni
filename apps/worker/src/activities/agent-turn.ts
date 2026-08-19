@@ -460,7 +460,6 @@ import {
 import {
   assertGeneratedImageHistoryRetained,
   collectGeneratedImageReceipts,
-  collectGeneratedImageArtifactReceipts,
   compactGeneratedImageHistory,
   compactGeneratedImageRunState,
   compactGeneratedImageSdkEvent,
@@ -2583,15 +2582,7 @@ export function modelSupportsImageInputForTurn(
   );
 }
 
-const LEGACY_INPUT_FILE_MEDIA_TYPES = [
-  "application/json",
-  "application/pdf",
-  "application/x-yaml",
-  "application/yaml",
-  "text/*",
-] as const;
-
-/** Image and file input are independent catalogue capabilities. */
+/** Image support is catalogue-driven; document bytes are never `input_file`. */
 export function modelAttachmentInputPolicyForTurn(
   resolvedModel: {
     provider: { api: ModelProviderApi };
@@ -2606,10 +2597,7 @@ export function modelAttachmentInputPolicyForTurn(
   const typedTransport = resolvedModel === null || resolvedModel.provider.api === "responses";
   return {
     supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
-    inputFileMediaTypes: typedTransport
-      ? (resolvedModel?.configured.capabilities?.inputFileMediaTypes ??
-        LEGACY_INPUT_FILE_MEDIA_TYPES)
-      : [],
+    inputFileMediaTypes: [],
   };
 }
 
@@ -4220,10 +4208,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // bytes merely for the following request-local projection to remove them.
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
-    const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsCreatedThisTurn = new Map<string, GeneratedImageReceipt>();
     const rememberGeneratedImageCreatedThisTurn = (receipt: GeneratedImageReceipt): void => {
-      generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
       generatedImageReceiptsCreatedThisTurn.set(receipt.artifact.artifactId, receipt);
     };
     const videoGenerationAcceptancesByCallId = new Map<
@@ -4247,12 +4233,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run(). Keep that exact session once the runtime exposes it so an image
     // generated later in the same model/tool loop can be copied immediately.
     let sdkOwnedSandboxSession: CodemodeTokenWriterSession | null = null;
+    // Session-home backend can stay docker while the active pointer is a
+    // Connected Machine. Sign downloads for the backend that will curl.
+    let sandboxFileDownloadBackend: Settings["sandboxBackend"] = modelRunSettings.sandboxBackend;
     const prepareGeneratedImageDownload = async (receipt: GeneratedImageReceipt) => {
       if (!objectStorage) {
         throw new Error("Generated image sandbox materialization requires object storage");
       }
       const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
-      const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+      const downloadStorage = objectStorageForSandboxDownloads(
+        modelRunSettings,
+        objectStorage,
+        sandboxFileDownloadBackend,
+      );
       const signed = await downloadStorage.createGetUrl({
         key: file.objectKey,
       });
@@ -4367,10 +4360,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     };
     const materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
-      if (modelRunSettings.sandboxBackend === "none") return false;
-      // Never allocate a cloud sandbox merely because durable history contains
-      // an image. If this turn later needs one, its ready hook copies every
-      // known receipt before releasing the first operation.
+      if (sandboxFileDownloadBackend === "none") return false;
+      // Never allocate a cloud sandbox merely because an image was retained.
+      // If this turn later needs one, the ready hook copies this-turn receipts
+      // before releasing the first operation.
       if (resolvedSandbox && setupBoxSession) {
         return await materializeGeneratedImageInSandbox(receipt, resolvedSandbox, setupBoxSession);
       }
@@ -4419,7 +4412,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       history: Array<Record<string, unknown>>,
     ): Promise<void> => {
       collectGeneratedImageReceipts(history, generatedImageReceiptsByProviderItemId);
-      collectGeneratedImageArtifactReceipts(history, generatedImageReceiptsByArtifactId);
       for (const output of generatedImagesFromHistory(
         history,
         generatedImageReceiptsByProviderItemId,
@@ -6063,7 +6055,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         items: Array<Record<string, unknown>>,
       ): Promise<Array<Record<string, unknown>>> => {
         collectGeneratedImageReceipts(items, generatedImageReceiptsByProviderItemId);
-        collectGeneratedImageArtifactReceipts(items, generatedImageReceiptsByArtifactId);
         return projectGeneratedImageHistoryForModel(items);
       };
       const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
@@ -6989,6 +6980,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
       startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
+      sandboxFileDownloadBackend = startupMilestoneBackend;
       const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
@@ -7951,7 +7943,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const generatedVideoDownloads: SandboxFileDownload[] = [];
       if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
-        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        const downloadStorage = objectStorageForSandboxDownloads(
+          modelRunSettings,
+          objectStorage,
+          sandboxFileDownloadBackend,
+        );
         for (const file of requiredGeneratedVideoFiles) {
           const signed = await downloadStorage.createGetUrl({
             key: file.objectKey,
@@ -9697,31 +9693,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredVideoFileIds.has(failure.fileId),
       );
       if (failedRequiredVideo) {
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          triggerEventId: triggerEventId!,
-          attemptId: input.attemptId,
-          reason: "generated_video_materialization_failed",
-          detail: {
-            retryable: true,
-            operationIds: requiredGeneratedVideoFiles.map((file) => file.operationId),
-          },
+        // Retention is already durable. A sandbox copy miss must not fail the
+        // turn or replay generation; the File remains retrievable via Files MCP.
+        observability.warn("Generated video sandbox materialization deferred", {
+          errorClass: "SandboxFileDownloadFailure",
+          errorCode: "generated_video_materialization_deferred",
+          origin: "worker",
         });
-        if (recovery.action === "stale") {
-          acknowledgeLostAttemptOwnership();
-          activityStatus = "cancelled";
-          turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
-        }
-        if (recovery.action !== "recovering") {
-          throw new Error("Generated video materialization could not enter recovery");
-        }
-        acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-        activityStatus = "recovering";
-        turnMetricOutcome = "recovering";
-        return claimedResult({ status: "recovering", continueDelayMs: 1_000 });
       }
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
         fileMaterializationFailures,
@@ -9763,25 +9741,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               });
             },
           });
-          const generatedImageMaterializationStartedAt = performance.now();
-          let generatedImageMaterializationOutcome: "completed" | "failed" = "completed";
-          try {
-            for (const receipt of generatedImageReceiptsByArtifactId.values()) {
-              await materializeGeneratedImage(receipt);
-            }
-          } catch (error) {
-            generatedImageMaterializationOutcome = "failed";
-            throw error;
-          } finally {
-            recordTurnStartupPhase(observability, {
-              phase: "history_generated_image_materialization",
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: generatedImageMaterializationOutcome,
-              durationSeconds: (performance.now() - generatedImageMaterializationStartedAt) / 1_000,
-              count: generatedImageReceiptsByArtifactId.size,
-            });
-          }
           runInput = prepared.input;
           providerArtifactCandidates = prepared.providerArtifactCandidates;
           // Slice index = the length of the model-facing (active) history this turn
@@ -10160,7 +10119,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? {
                     onSandboxSessionReady: async (sandboxSession: CodemodeTokenWriterSession) => {
                       sdkOwnedSandboxSession = sandboxSession;
-                      for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                      for (const receipt of generatedImageReceiptsCreatedThisTurn.values()) {
                         await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
                       }
                     },
@@ -13966,7 +13925,11 @@ async function sandboxFileDownloadsForRun(
       `${settings.objectStorageBackend} file resources require configured object storage`,
     );
   }
-  const downloadStorage = objectStorageForSandboxDownloads(settings, objectStorage);
+  const downloadStorage = objectStorageForSandboxDownloads(
+    settings,
+    objectStorage,
+    activeSandboxBackend,
+  );
   const downloads: SandboxFileDownload[] = [];
   for (const resource of fileResources) {
     const file = await requireFileForSubject(db, {
@@ -14018,10 +13981,16 @@ export function requiresSignedFileResourceDownloads(
   );
 }
 
-function objectStorageForSandboxDownloads(
+export function objectStorageForSandboxDownloads(
   settings: Settings,
   objectStorage: ObjectStorage,
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): ObjectStorage {
+  // Connected Machines are not on the Docker compose network. Sign with the
+  // ambient public endpoint; never rewrite to OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT.
+  if (activeSandboxBackend === "selfhosted") {
+    return objectStorage;
+  }
   if (settings.objectStorageBackend !== "s3-compatible" || !settings.objectStorageSandboxEndpoint) {
     return objectStorage;
   }

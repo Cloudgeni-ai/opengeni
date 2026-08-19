@@ -583,8 +583,9 @@ resolved material to the lease before the waiting operation, and starts renewal.
 A model-only turn therefore owns no credential write, renewal, lease, box, or
 exact-generation cleanup work. Signed file resources are eager only on the exact
 turn that attached them; historical attachment ids do not cause sandbox or
-object-storage work. Generated-video files remain eager because their verified
-sandbox paths must exist before model dispatch.
+object-storage work. This-turn generated-video files may still copy onto the
+box before dispatch; a copy miss is deferred like generated images (the
+durable File remains) and does not fail the turn.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A

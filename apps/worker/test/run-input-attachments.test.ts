@@ -37,7 +37,7 @@ const file = (
 });
 
 describe("modelAttachmentContentForFiles", () => {
-  test("reads supported images and documents in finalized attachment order", async () => {
+  test("reads supported images in finalized attachment order and skips documents", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const pdfBytes = new TextEncoder().encode("pdf");
     const image = {
@@ -65,13 +65,6 @@ describe("modelAttachmentContentForFiles", () => {
         filename: "diagram.png",
         contentType: "image/png",
         dataUrl: "data:image/png;base64,aW1hZ2U=",
-      },
-      {
-        kind: "file",
-        fileId: pdf.id,
-        filename: "requirements.pdf",
-        contentType: "application/pdf",
-        dataUrl: "data:application/pdf;base64,cGRm",
       },
     ]);
   });
@@ -121,9 +114,9 @@ describe("modelAttachmentContentForFiles", () => {
     const first = {
       ...file(
         "00000000-0000-4000-8000-000000000030",
-        "text/plain",
+        "image/png",
         MAX_INLINE_MODEL_ATTACHMENT_BYTES,
-        "full.txt",
+        "full.png",
       ),
       sha256: sha256(firstBytes),
     };
@@ -161,12 +154,7 @@ describe("modelAttachmentContentForFiles", () => {
       });
 
       expect(content).toEqual([]);
-      expect(error).toHaveBeenCalledTimes(2);
-      expect(error.mock.calls[1]?.[1]).toEqual({
-        fileId: failed.id,
-        errorType: "Error",
-      });
-      expect(JSON.stringify(error.mock.calls)).not.toContain(failed.objectKey);
+      expect(error).toHaveBeenCalledTimes(1);
     } finally {
       error.mockRestore();
     }
@@ -176,15 +164,15 @@ describe("modelAttachmentContentForFiles", () => {
     const bytes = new TextEncoder().encode("exact content");
     const expectedHash = createHash("sha256").update(bytes).digest("hex");
     const ready = {
-      ...file("00000000-0000-4000-8000-000000000042", "text/plain", bytes.byteLength, "ready.txt"),
+      ...file("00000000-0000-4000-8000-000000000042", "image/png", bytes.byteLength, "ready.png"),
       sha256: expectedHash,
     };
     const wrongHash = {
       ...file(
         "00000000-0000-4000-8000-000000000043",
-        "text/plain",
+        "image/png",
         bytes.byteLength,
-        "wrong-hash.txt",
+        "wrong-hash.png",
       ),
       sha256: "0".repeat(64),
     };
@@ -281,14 +269,14 @@ describe("durable attachment history projection", () => {
     const json = JSON.stringify(first);
 
     expect(json).toContain("data:image/png;base64");
-    expect(json).toContain("data:application/pdf;base64");
+    expect(json).not.toContain("data:application/pdf;base64");
     expect(json).not.toContain("data:text/plain;base64");
+    expect(json).toContain(`fileId=${pdf.id}`);
     expect(json).toContain(`fileId=${notes.id}`);
     expect(json).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
     expect(second).toEqual(first);
     expect(JSON.stringify(historicalAgain)).not.toContain(";base64,");
-    expect(new Set(reads)).toEqual(new Set([image.id, pdf.id]));
-    expect(reads).toHaveLength(2);
+    expect(reads).toEqual([image.id]);
     expect(history[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toHaveLength(3);
   });
 

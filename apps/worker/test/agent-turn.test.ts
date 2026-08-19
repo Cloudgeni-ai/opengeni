@@ -94,6 +94,7 @@ import {
   providerRetryAfterMs,
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
+  objectStorageForSandboxDownloads,
   resolveActiveSandboxBackend,
   runtimeResourcesForTurn,
   runMandatoryHistoryPersistenceStep,
@@ -5044,13 +5045,13 @@ describe("modelAttachmentInputPolicyForTurn", () => {
       },
     }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
 
-  test("keeps image and file capabilities independent on Responses", () => {
+  test("never inlines document bytes as input_file", () => {
     expect(
       modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
-    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: [] });
     expect(
       modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
-    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: [] });
   });
 
   test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
@@ -5058,6 +5059,26 @@ describe("modelAttachmentInputPolicyForTurn", () => {
       supportsImageInput: false,
       inputFileMediaTypes: [],
     });
+  });
+});
+
+describe("objectStorageForSandboxDownloads", () => {
+  const ambient = { kind: "ambient" } as const;
+  const settings = testSettings({
+    sandboxBackend: "docker",
+    objectStorageBackend: "s3-compatible",
+    objectStorageEndpoint: "http://127.0.0.1:9000",
+    objectStorageSandboxEndpoint: "http://minio:9000",
+    objectStorageAccessKeyId: "test",
+    objectStorageSecretAccessKey: "test",
+  });
+
+  test("active selfhosted keeps the public endpoint even when session home is docker", () => {
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "selfhosted")).toBe(ambient);
+  });
+
+  test("docker rewrites s3-compatible signatures onto the sandbox MinIO host", () => {
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "docker")).not.toBe(ambient);
   });
 });
 
