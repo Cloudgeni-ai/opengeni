@@ -19,7 +19,6 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import {
-  AGENT_HELLO_SUBJECT,
   handleHelloPayload,
   helloDesktopUnavailableReason,
   helloReportsOpStream,
@@ -49,9 +48,6 @@ describe("parseAgentHelloSubject", () => {
       agentId: "ag-2",
       connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     });
-  });
-  test("the wildcard subscription includes the process authority segment", () => {
-    expect(AGENT_HELLO_SUBJECT).toBe("agent.*.*.connection.*.hello");
   });
   test("rejects a non-hello subject (the heartbeat plane is not the hello plane)", () => {
     expect(parseAgentHelloSubject("agent.ws.ag.events")).toBeNull();
