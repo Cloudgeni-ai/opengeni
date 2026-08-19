@@ -10,7 +10,9 @@ import {
   XAI_OAUTH_SCOPES,
   XaiSubscriptionReloginRequired,
   xaiAccessTokenExpiry,
+  xaiIdentityFromDeviceTokens,
   type XaiFetch,
+  type XaiOAuthTokens,
 } from "../src";
 
 type Call = { input: string | URL | Request; init?: RequestInit };
@@ -24,6 +26,21 @@ function recorder(handler: (call: Call) => Response): { fetch: XaiFetch; calls: 
       calls.push(call);
       return handler(call);
     },
+  };
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+}
+
+function tokens(input: Partial<XaiOAuthTokens> = {}): XaiOAuthTokens {
+  return {
+    accessToken: input.accessToken ?? jwt({ sub: "access-user" }),
+    refreshToken: input.refreshToken ?? "refresh",
+    idToken: input.idToken ?? null,
+    tokenType: input.tokenType ?? "Bearer",
+    scope: input.scope ?? null,
+    expiresInSeconds: input.expiresInSeconds ?? 3_600,
   };
 }
 
@@ -134,6 +151,53 @@ describe("xAI refresh and identity", () => {
       emailVerified: true,
       name: "Jane",
     });
+  });
+
+  test("derives personal identity from the direct token response", () => {
+    expect(
+      xaiIdentityFromDeviceTokens(
+        tokens({
+          accessToken: jwt({ sub: "access-user" }),
+          idToken: jwt({
+            sub: "user-123",
+            email: "jane@example.com",
+            email_verified: true,
+            name: "Jane",
+          }),
+        }),
+      ),
+    ).toEqual({
+      subject: "user-123",
+      email: "jane@example.com",
+      emailVerified: true,
+      name: "Jane",
+    });
+  });
+
+  test("prefers the selected access-token principal for team or organization accounts", () => {
+    expect(
+      xaiIdentityFromDeviceTokens(
+        tokens({
+          accessToken: jwt({
+            principalType: "Team",
+            principalId: "team-456",
+            sub: "user-123",
+          }),
+          idToken: jwt({ sub: "user-123", given_name: "Jane", family_name: "Doe" }),
+        }),
+      ),
+    ).toEqual({
+      subject: "team-456",
+      email: null,
+      emailVerified: null,
+      name: "Jane Doe",
+    });
+  });
+
+  test("rejects a token response without a stable account identity", () => {
+    expect(() =>
+      xaiIdentityFromDeviceTokens(tokens({ accessToken: "opaque", idToken: null })),
+    ).toThrow("account identity");
   });
 
   test("decodes access-token exp only for refresh scheduling", () => {

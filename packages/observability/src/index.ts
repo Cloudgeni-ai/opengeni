@@ -292,6 +292,7 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
  * caller accidentally publish a raw identifier under that name. */
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
+  ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
@@ -1141,6 +1142,7 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
   const errorCode = attributes.errorCode;
   const status = attributes.status;
   const origin = attributes.origin;
+  const correlationId = attributes.correlationId;
   return {
     errorClass:
       typeof errorClass === "string" && PUBLIC_TELEMETRY_ERROR_CLASSES.has(errorClass)
@@ -1153,6 +1155,10 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
       ? { status }
       : {}),
     ...(typeof origin === "string" && PUBLIC_TELEMETRY_ERROR_ORIGINS.has(origin) ? { origin } : {}),
+    ...(typeof correlationId === "string" &&
+    PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("correlationId")?.test(correlationId)
+      ? { correlationId }
+      : {}),
   };
 }
 

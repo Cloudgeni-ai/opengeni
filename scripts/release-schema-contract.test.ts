@@ -523,18 +523,26 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0298_organization_tenancy_parity.sql")) {
         return includesActivation
-          ? "de58c8bc1456dc880cd817d4ce02771738941252d3ffc2bc710aedbba1773f9d"
-          : "cd1aac84b80c209396083f7c9b816ced6cd82df80038e1f282a073a111244eaf";
+          ? "52e75460701c988f8421bcf89115918f477499c4bce89be5fb6e5184e363557e"
+          : "ba24948d8ba915741f79b61ca05bf0b2ebb319e5c0b6f63505250521f34e6cb3";
       }
       if (migrations.has("0297_session_ownership_classification_and_backfill.sql")) {
         return includesActivation
-          ? "8fbc9ff28283e7f8ae398b1cf7742cd8d07e5ed029a920e33a2b00ba0535ec44"
-          : "6cd311ef6d1c044f24b768f0a9e869942b028af22ea28a07072c314d6af5cb59";
+          ? "f39e0463f4b9998e3d4f4c4cff520b351a9a7d6306c426a6d0869df7997bacdb"
+          : "07df0f730ab85c40901217a218d2e69be4b4d55d53b8c2302268d0ae36e2cd6d";
       }
       if (migrations.has("0290_organization_membership_backfill.sql")) {
         return includesActivation
-          ? "6d65c22d585c09333682b441bc78bceead0539d5fdd4cf636e7bc279d5c39bb8"
-          : "69c6eb7a8c2150d3a69370cfce4364d9706fbab81db1b2ca2bad91bf2ce811e3";
+          ? "7378438b51b04a8ddd2080bfa8ca8a07d05a3bcfd2030e36da1991cd62ca337f"
+          : "85e8b7323cae1fbda10b992350ac87653f0a62a611ee9e64c3dc05a158531e94";
+      }
+      if (
+        migrations.has("0296_force_rls_backfill_noop_repair.sql") &&
+        migrations.has("0299_organization_membership_lock_order.sql")
+      ) {
+        return includesActivation
+          ? "24fb6b4938a573dc516315b6e1d893fa44647f56cdc277157fb0bc07b21dbd30"
+          : "7d5b83e7a150b8c3fae51129c0fd0d727f48428bc207b2ac0202dce6b3203a71";
       }
       if (migrations.has("0299_organization_membership_lock_order.sql")) {
         return includesActivation
@@ -1123,8 +1131,9 @@ describe("release schema contract", () => {
         (migrations.has("0293_confirm_time_rule_rebaseline.sql") ? 1 : 0) +
         (migrations.has("0294_preference_activation_authority.sql") ? 1 : 0) +
         (migrations.has("0295_retire_legacy_standing_memory_mode.sql") ? 1 : 0) +
-        (migrations.has("0290_organization_membership_backfill.sql") ? 1 : 0) +
-        (migrations.has("0297_session_ownership_classification_and_backfill.sql") ? 1 : 0),
+        (migrations.has("0296_force_rls_backfill_noop_repair.sql") ? 1 : 0) +
+        (migrations.has("0297_session_ownership_classification_and_backfill.sql") ? 1 : 0) +
+        (migrations.has("0290_organization_membership_backfill.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [

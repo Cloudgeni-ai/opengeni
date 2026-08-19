@@ -1400,7 +1400,42 @@ describe("migration 0263 organization membership lifecycle", () => {
     if (offboardRace[0]?.status !== "fulfilled") throw offboardRace[0]?.reason;
     member = offboardRace[0].value;
     if (offboardRace[1]?.status === "rejected") {
-      expect(nestedPostgresSqlState(offboardRace[1].reason)).toBe("42501");
+      let visibilityFailureState = nestedPostgresSqlState(offboardRace[1].reason);
+      if (visibilityFailureState === "40P01") {
+        // Any deadlock between the lifecycle command and this ordinary
+        // workspace writer is broken by PostgreSQL aborting ONE of the two -
+        // and it may pick either. The lifecycle side replays itself; this arm
+        // is a plain caller and legitimately surfaces the deadlock abort, so
+        // asserting 42501 on the first result would be a coin flip, not a
+        // contract.
+        //
+        // Replaying it here is deterministic rather than hopeful: the offboard
+        // above is already fulfilled and therefore committed, so the actor's
+        // authority is revoked and this transition must now be denied outright.
+        // Migration 0299 removed the organization/workspace lock-order
+        // inversion in SQL (advisory-lock mutual exclusion plus a downgraded
+        // `managed_accounts FOR KEY SHARE` row lock), so this branch should not
+        // fire; it stays only so an unrelated cycle cannot make the assertion
+        // below victim-dependent again.
+        let replayFulfilled = false;
+        let replayState: string | null = null;
+        try {
+          await transitionSessionVisibility(client.db, {
+            workspaceId: secondWorkspaceId,
+            sessionId: secondSession.id,
+            actorSubjectId: targetSubject,
+            targetVisibility: "workspace_shared",
+            expectedAuthorityEpoch: 2,
+            operationKey: `concurrent-deadlock-replay:${crypto.randomUUID()}`,
+          });
+          replayFulfilled = true;
+        } catch (error) {
+          replayState = nestedPostgresSqlState(error);
+        }
+        expect(replayFulfilled).toBe(false);
+        visibilityFailureState = replayState;
+      }
+      expect(visibilityFailureState).toBe("42501");
     }
     expect(member.status).toBe("revoked");
     expect(member.personalRetentionUntil).not.toBeNull();
