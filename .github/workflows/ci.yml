@@ -1188,6 +1188,52 @@ jobs:
           for node_port in 30080 30081 30222 30443 30900; do
             grep -q "^      nodePort: $node_port$" /tmp/opengeni-single-rendered.yaml
           done
+          if ! grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile did not render Garage" >&2
+            exit 1
+          fi
+          if grep -q 'app.kubernetes.io/component: minio$' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile still rendered MinIO" >&2
+            exit 1
+          fi
+          grep -q 'name: OPENGENI_OBJECT_STORAGE_S3_PROVIDER' /tmp/opengeni-single-rendered.yaml
+          grep -q 'value: "Other"' /tmp/opengeni-single-rendered.yaml
+          helm template opengeni-garage deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=false \
+            >/tmp/opengeni-garage-only-rendered.yaml
+          grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-garage-only-rendered.yaml
+          helm template opengeni-garage-registry deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=false \
+            --set global.imageRegistry=registry.example.com \
+            >/tmp/opengeni-garage-registry-rendered.yaml
+          grep -q 'dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690' /tmp/opengeni-garage-registry-rendered.yaml
+          if grep -q 'registry.example.com/dxflrs/garage' /tmp/opengeni-garage-registry-rendered.yaml; then
+            echo "Garage image must not take global.imageRegistry" >&2
+            exit 1
+          fi
+          helm template opengeni-local-k8s deploy/helm/opengeni \
+            --namespace opengeni-local \
+            -f deploy/helm/opengeni/values.local-kubernetes.example.yaml \
+            >/tmp/opengeni-local-k8s-rendered.yaml
+          grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-local-k8s-rendered.yaml
+          if helm template opengeni-both-fixtures deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=true \
+            >/tmp/opengeni-both-fixtures-rendered.yaml \
+            2>/tmp/opengeni-both-fixtures.err; then
+            echo "helm must fail when garage and minio are both enabled" >&2
+            exit 1
+          fi
+          grep -q 'garage.enabled or minio.enabled, not both' /tmp/opengeni-both-fixtures.err
+          if grep -qE 'app.kubernetes.io/component: (garage|minio)$' /tmp/opengeni-azure-rendered.yaml; then
+            echo "azure-managed profile rendered an in-cluster object-storage fixture" >&2
+            exit 1
+          fi
           for component in api worker-control worker-turns web; do
             if awk -v name="opengeni-preview-$component" '
               $1 == "kind:" && $2 == "PodDisruptionBudget" { pdb = 1; next }

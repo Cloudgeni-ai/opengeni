@@ -99,6 +99,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.garageSecretName" -}}
+{{- if .Values.garage.auth.existingSecret -}}
+{{- .Values.garage.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-garage" (include "opengeni.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.assertExclusiveObjectStorageFixture" -}}
+{{- if and .Values.garage.enabled .Values.minio.enabled -}}
+{{- fail "Enable only one in-cluster object-storage fixture: set garage.enabled or minio.enabled, not both" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "opengeni.postgresHost" -}}
 {{- printf "%s-postgres" (include "opengeni.fullname" .) -}}
 {{- end -}}
@@ -131,6 +145,118 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.garageEndpoint" -}}
+{{- if .Values.garage.publicEndpoint -}}
+{{- .Values.garage.publicEndpoint -}}
+{{- else -}}
+{{- printf "http://%s-garage:%d" (include "opengeni.fullname" .) (.Values.garage.service.apiPort | int) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.garageInternalEndpoint" -}}
+{{- printf "http://%s-garage:%d" (include "opengeni.fullname" .) (.Values.garage.service.apiPort | int) -}}
+{{- end -}}
+
+{{- define "opengeni.garageSandboxEndpoint" -}}
+{{- if .Values.garage.sandboxEndpoint -}}
+{{- .Values.garage.sandboxEndpoint -}}
+{{- else -}}
+{{- include "opengeni.garageEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageInternalEndpoint" -}}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . -}}
+{{- if .Values.garage.enabled -}}
+{{- include "opengeni.garageInternalEndpoint" . -}}
+{{- else if .Values.minio.enabled -}}
+{{- include "opengeni.minioInternalEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStoragePublicEndpoint" -}}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . -}}
+{{- if .Values.garage.enabled -}}
+{{- include "opengeni.garageEndpoint" . -}}
+{{- else if .Values.minio.enabled -}}
+{{- include "opengeni.minioEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageSandboxEndpoint" -}}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . -}}
+{{- if .Values.garage.enabled -}}
+{{- include "opengeni.garageSandboxEndpoint" . -}}
+{{- else if .Values.minio.enabled -}}
+{{- include "opengeni.minioSandboxEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageSecretName" -}}
+{{- if .Values.garage.enabled -}}
+{{- include "opengeni.garageSecretName" . -}}
+{{- else if .Values.minio.enabled -}}
+{{- include "opengeni.minioSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageAccessKeyKey" -}}
+{{- if .Values.garage.enabled -}}
+{{- .Values.garage.auth.accessKeyKey -}}
+{{- else if .Values.minio.enabled -}}
+{{- .Values.minio.auth.accessKeyKey -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageSecretKeyKey" -}}
+{{- if .Values.garage.enabled -}}
+{{- .Values.garage.auth.secretKeyKey -}}
+{{- else if .Values.minio.enabled -}}
+{{- .Values.minio.auth.secretKeyKey -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageBucket" -}}
+{{- if .Values.garage.enabled -}}
+{{- .Values.garage.bucket -}}
+{{- else if .Values.minio.enabled -}}
+{{- .Values.minio.bucket -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.objectStorageS3Provider" -}}
+{{- if .Values.garage.enabled -}}
+Other
+{{- else if .Values.minio.enabled -}}
+Minio
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.garageToml" -}}
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = {{ .Values.garage.auth.rpcSecret | quote }}
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.localhost"
+index = "index.html"
+
+[admin]
+api_bind_addr = "127.0.0.1:3903"
+{{- end -}}
+
 {{- define "opengeni.generatedRuntimeEnv" -}}
 {{- $root := . -}}
 {{- $objectStorageEndpoint := "" -}}
@@ -141,8 +267,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if hasKey . "includeDatabaseUrl" -}}
 {{- $includeDatabaseUrl = .includeDatabaseUrl -}}
 {{- end -}}
+{{- else if $root.Values.garage.enabled -}}
+{{- $objectStorageEndpoint = include "opengeni.objectStoragePublicEndpoint" $root -}}
 {{- else if $root.Values.minio.enabled -}}
-{{- $objectStorageEndpoint = include "opengeni.minioEndpoint" $root -}}
+{{- $objectStorageEndpoint = include "opengeni.objectStoragePublicEndpoint" $root -}}
 {{- end -}}
 {{- if and $includeDatabaseUrl $root.Values.postgres.enabled }}
 {{- if $root.Values.postgres.runtime.existingSecret }}
@@ -165,27 +293,34 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: OPENGENI_TEMPORAL_HOST
   value: {{ printf "%s-temporal:%d" (include "opengeni.fullname" $root) ($root.Values.temporal.service.port | int) | quote }}
 {{- end }}
-{{- if $root.Values.minio.enabled }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" $root }}
+{{- if or $root.Values.garage.enabled $root.Values.minio.enabled }}
 - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
   value: {{ $objectStorageEndpoint | quote }}
 - name: OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
-  value: {{ include "opengeni.minioInternalEndpoint" $root | quote }}
+  value: {{ include "opengeni.objectStorageInternalEndpoint" $root | quote }}
 - name: OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT
-  value: {{ include "opengeni.minioSandboxEndpoint" $root | quote }}
+  value: {{ include "opengeni.objectStorageSandboxEndpoint" $root | quote }}
 - name: OPENGENI_OBJECT_STORAGE_BACKEND
   value: s3-compatible
 - name: OPENGENI_OBJECT_STORAGE_BUCKET
-  value: {{ $root.Values.minio.bucket | quote }}
+  value: {{ include "opengeni.objectStorageBucket" $root | quote }}
+- name: OPENGENI_OBJECT_STORAGE_REGION
+  value: "us-east-1"
+- name: OPENGENI_OBJECT_STORAGE_S3_PROVIDER
+  value: {{ include "opengeni.objectStorageS3Provider" $root | quote }}
+- name: OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE
+  value: "true"
 - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef:
-      name: {{ include "opengeni.minioSecretName" $root }}
-      key: {{ $root.Values.minio.auth.accessKeyKey }}
+      name: {{ include "opengeni.objectStorageSecretName" $root }}
+      key: {{ include "opengeni.objectStorageAccessKeyKey" $root }}
 - name: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ include "opengeni.minioSecretName" $root }}
-      key: {{ $root.Values.minio.auth.secretKeyKey }}
+      name: {{ include "opengeni.objectStorageSecretName" $root }}
+      key: {{ include "opengeni.objectStorageSecretKeyKey" $root }}
 {{- end }}
 {{- end -}}
 

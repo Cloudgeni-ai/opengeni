@@ -1629,14 +1629,14 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
       "optional Cloud SQL PostgreSQL",
     );
   } else if (contract.profile === "single-node-kubernetes") {
-    out.push("persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes");
+    out.push("persistent single-node Postgres/Temporal/NATS/Garage services and local volumes");
   } else if (
     contract.database.mode === "inCluster" ||
     contract.temporal.mode === "inCluster" ||
     contract.nats.mode === "inCluster" ||
     contract.objectStorage.mode === "inCluster"
   ) {
-    out.push("disposable in-cluster Postgres/Temporal/NATS/MinIO fixtures");
+    out.push("disposable in-cluster Postgres/Temporal/NATS/Garage fixtures");
   }
   if (usesOfficialPlatformChart(contract, "nats")) {
     out.push("official NATS Helm release in opengeni-platform namespace");
@@ -1684,7 +1684,7 @@ function deployCommands(
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
       `kubectl -n ${namespace} create secret generic opengeni-postgres --from-env-file=.agent/generated/single-node/secrets/postgres.env --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${namespace} create secret generic opengeni-minio --from-env-file=.agent/generated/single-node/secrets/minio.env --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-garage --from-env-file=.agent/generated/single-node/secrets/garage.env --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-migrations --from-env-file=.agent/generated/single-node/secrets/migrations.env --dry-run=client -o yaml | kubectl apply -f -`,
       `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --set api.enabled=false --set worker.enabled=false --set web.enabled=false --set relay.enabled=false --set migrations.enabled=false --wait --timeout 10m`,
@@ -1950,7 +1950,7 @@ function planNotes(contract: DeploymentContract): string[] {
     notes.push(
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
-      "Create the runtime, migration, Postgres, and MinIO Secrets before the two-phase Helm bootstrap.",
+      "Create the runtime, migration, Postgres, and Garage Secrets before the two-phase Helm bootstrap.",
     );
   }
   return notes;
@@ -1982,8 +1982,8 @@ function profileRequiredSecretKeys(contract: DeploymentContract): string[] {
   }
   return [
     "opengeni-postgres/POSTGRES_PASSWORD",
-    "opengeni-minio/MINIO_ROOT_USER",
-    "opengeni-minio/MINIO_ROOT_PASSWORD",
+    "opengeni-garage/GARAGE_ACCESS_KEY_ID",
+    "opengeni-garage/GARAGE_SECRET_ACCESS_KEY",
     "opengeni-runtime/OPENGENI_DATABASE_URL",
     "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
     "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",

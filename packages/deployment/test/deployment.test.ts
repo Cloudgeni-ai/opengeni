@@ -106,7 +106,7 @@ describe("deployment contract", () => {
     expect(contract.sandbox.backend).toBe("selfhosted");
     expect(plan.helmValuesFile).toBe("deploy/helm/opengeni/values.single-node.example.yaml");
     expect(plan.creates).toContain(
-      "persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes",
+      "persistent single-node Postgres/Temporal/NATS/Garage services and local volumes",
     );
     expect(plan.deployCommands.filter((command) => command.includes("helm upgrade"))).toHaveLength(
       2,

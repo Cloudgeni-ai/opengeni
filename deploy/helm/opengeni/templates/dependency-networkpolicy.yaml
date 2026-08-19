@@ -113,3 +113,43 @@ spec:
         - protocol: TCP
           port: {{ .Values.minio.service.apiPort }}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.garage.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-garage
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: garage
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+            matchExpressions:
+              - key: opengeni.ai/worker-role
+                operator: Exists
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: garage-cors
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: catalog-import
+      ports:
+        - protocol: TCP
+          port: {{ .Values.garage.service.apiPort }}
+{{- end }}

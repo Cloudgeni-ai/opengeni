@@ -123,7 +123,7 @@ config:
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
   OPENGENI_OBJECT_STORAGE_REGION: us-east-1
-  OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Minio
+  OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Other
   OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
   OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true"
   # Selfhosted-primary turns remain eager; keep both later-stage rollout gates
@@ -163,24 +163,27 @@ nats:
     nodePort: 30222
 
 minio:
+  enabled: false
+
+garage:
   enabled: true
   auth:
-    existingSecret: opengeni-minio
-    accessKeyKey: MINIO_ROOT_USER
-    secretKeyKey: MINIO_ROOT_PASSWORD
+    existingSecret: opengeni-garage
+    accessKeyKey: GARAGE_ACCESS_KEY_ID
+    secretKeyKey: GARAGE_SECRET_ACCESS_KEY
   # Set this to the private edge URL browsers use for signed file transfers.
   # Example: https://node.example-tailnet.ts.net:9443
   publicEndpoint: ""
   resources: null
   service:
-    apiPort: 9000
-    consolePort: 9001
+    apiPort: 3900
   edgeService:
     enabled: true
     type: NodePort
     nodePort: 30900
   persistence:
     enabled: true
+    metaSize: 1Gi
     size: 20Gi
 
 selfhosted:

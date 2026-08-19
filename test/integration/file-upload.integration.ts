@@ -21,6 +21,8 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   MemoryEventBus,
   startTestServices,
   testSettings,
@@ -879,8 +881,8 @@ function uploadSettings(databaseUrl: string, endpoint: string) {
     objectStorageEndpoint: endpoint,
     objectStorageSandboxEndpoint: endpoint,
     objectStorageBucket: "opengeni-files",
-    objectStorageAccessKeyId: "minioadmin",
-    objectStorageSecretAccessKey: "minioadmin",
+    objectStorageAccessKeyId: GARAGE_FIXTURE_ACCESS_KEY_ID,
+    objectStorageSecretAccessKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
     objectStorageForcePathStyle: true,
   });
 }
