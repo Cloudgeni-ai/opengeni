@@ -452,6 +452,9 @@ function fullPlan(
       // A migration ordinal that protected main has meanwhile assigned to
       // another file is a real conflict; catch it while the fix is one command.
       "migration-ordinals",
+      // A migration-time backfill over a FORCE-RLS table silently matches zero
+      // rows for the non-superuser owner OpenGeni migrates as.
+      "migration-rls-backfills",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -633,6 +636,9 @@ export function createImpactPlan(
     "generated-fonts",
     "public-hygiene",
   ];
+  if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
+    guards.push("migration-ordinals", "migration-rls-backfills");
+  }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");
 

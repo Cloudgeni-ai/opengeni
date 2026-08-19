@@ -1,15 +1,34 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
-import postgres from "postgres";
-import { migrate } from "../src/migrate";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 const migrationUrl = new URL(
   "../drizzle/0212_browser_state_transfer_hardening.sql",
   import.meta.url,
 );
 
+// The assertions below describe the migrated HEAD schema, so this file clones
+// the shared migrated template instead of replaying the whole migration chain
+// into a pristine database. The chain is ~300 migrations and already costs
+// several seconds unloaded; replaying it once per test FILE under the parallel
+// suite is what pushed this test past its 30s budget on a loaded CI shard.
+// `provisionRoles()` (applied to the template) never enables or forces row
+// security and never grants/revokes these two routines, so every guarantee
+// asserted here is still produced by migration 0212 alone.
 describe("migration 0212 browser state transfer hardening", () => {
+  let shared: SharedTestDatabase | null = null;
+
+  // The shared template is built once per runner; the first suite to reach it
+  // after a new migration lands pays that whole build here, which is far past
+  // bun's 5s default hook budget.
+  beforeAll(async () => {
+    shared = await acquireSharedTestDatabase("migration-0212-state-transfer");
+  }, 180_000);
+
+  afterAll(async () => {
+    await shared?.release();
+  }, 180_000);
+
   test("upgrades retained state and installs reclaimable upload authority", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
@@ -21,55 +40,47 @@ describe("migration 0212 browser state transfer hardening", () => {
     expect(source).toContain("claim_browser_state_upload_cleanup");
     expect(source).toContain("FOR UPDATE SKIP LOCKED");
 
-    const blank = await acquireBlankTestDatabase("migration-0212-state-transfer");
-    if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
-    try {
-      await migrate(blank.databaseUrl);
-      const [uploads] = await sql<
-        Array<{ rlsEnabled: boolean; rlsForced: boolean }>
-      >`select relrowsecurity as "rlsEnabled", relforcerowsecurity as "rlsForced"
-        from pg_class where oid = 'browser_state_uploads'::regclass`;
-      expect(uploads).toEqual({ rlsEnabled: true, rlsForced: true });
+    if (!shared) return;
+    const sql = shared.admin;
+    const [uploads] = await sql<Array<{ rlsEnabled: boolean; rlsForced: boolean }>>`
+      select relrowsecurity as "rlsEnabled", relforcerowsecurity as "rlsForced"
+      from pg_class where oid = 'browser_state_uploads'::regclass`;
+    expect(uploads).toEqual({ rlsEnabled: true, rlsForced: true });
 
-      const columns = await sql<Array<{ name: string; nullable: string }>>`
-        select column_name as name, is_nullable as nullable
-        from information_schema.columns
-        where table_schema = current_schema()
-          and table_name = 'browser_state_artifacts'
-          and column_name in ('delete_claim_id', 'delete_claimed_at', 'encrypted_data_key')
-        order by column_name`;
-      expect([...columns]).toEqual([
-        { name: "delete_claim_id", nullable: "YES" },
-        { name: "delete_claimed_at", nullable: "YES" },
-        { name: "encrypted_data_key", nullable: "YES" },
-      ]);
+    const columns = await sql<Array<{ name: string; nullable: string }>>`
+      select column_name as name, is_nullable as nullable
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'browser_state_artifacts'
+        and column_name in ('delete_claim_id', 'delete_claimed_at', 'encrypted_data_key')
+      order by column_name`;
+    expect([...columns]).toEqual([
+      { name: "delete_claim_id", nullable: "YES" },
+      { name: "delete_claimed_at", nullable: "YES" },
+      { name: "encrypted_data_key", nullable: "YES" },
+    ]);
 
-      const functions = await sql<
-        Array<{ name: string; securityDefiner: boolean; publicExecute: boolean }>
-      >`select p.proname as name, p.prosecdef as "securityDefiner",
-          has_function_privilege('public', p.oid, 'execute') as "publicExecute"
-        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname = 'opengeni_private'
-          and p.proname in (
-            'claim_browser_state_artifact_cleanup',
-            'claim_browser_state_upload_cleanup'
-          ) order by p.proname`;
-      expect([...functions]).toEqual([
-        {
-          name: "claim_browser_state_artifact_cleanup",
-          securityDefiner: true,
-          publicExecute: false,
-        },
-        {
-          name: "claim_browser_state_upload_cleanup",
-          securityDefiner: true,
-          publicExecute: false,
-        },
-      ]);
-    } finally {
-      await sql.end();
-      await blank.release();
-    }
+    const functions = await sql<
+      Array<{ name: string; securityDefiner: boolean; publicExecute: boolean }>
+    >`select p.proname as name, p.prosecdef as "securityDefiner",
+        has_function_privilege('public', p.oid, 'execute') as "publicExecute"
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'opengeni_private'
+        and p.proname in (
+          'claim_browser_state_artifact_cleanup',
+          'claim_browser_state_upload_cleanup'
+        ) order by p.proname`;
+    expect([...functions]).toEqual([
+      {
+        name: "claim_browser_state_artifact_cleanup",
+        securityDefiner: true,
+        publicExecute: false,
+      },
+      {
+        name: "claim_browser_state_upload_cleanup",
+        securityDefiner: true,
+        publicExecute: false,
+      },
+    ]);
   });
 });
