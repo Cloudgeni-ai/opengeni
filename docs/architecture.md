@@ -919,6 +919,12 @@ join the configured API network, and server-side browserd traffic resolves to th
 container DNS identity plus its original port. A public browser must never receive
 that internal address: Docker frame and RFB attachments cross the API's bounded
 bidirectional WebSocket proxy with a short-lived encrypted, origin-bound grant.
+The proxy URL is minted from `OPENGENI_PUBLIC_BASE_URL`, HTTPS `OPENGENI_WEB_BASE_URL`,
+or `X-Forwarded-Proto` / `Host`, never the API process's internal `http://` request
+URL, so an `https://` console always receives `wss://…/v1/interaction/frame-proxy`.
+Existing Docker sandbox leases still drain when `OPENGENI_SANDBOX_OWNERSHIP_ENABLED`
+is off: Computer/Browser attach uses those leases even though turns do not, and the
+reaper must finish rotation or the Desktop tab 409s forever.
 Modal retains its provider-scoped direct tunnel; Connected Machines retain their
 native relay. Attached Chrome freezes `connectionGeneration` as
 `placementInstanceId`. A later inventory announcement with a new generation

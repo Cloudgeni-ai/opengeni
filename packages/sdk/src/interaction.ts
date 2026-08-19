@@ -2527,6 +2527,7 @@ export function browserFrameSocketUrl(
   else if (url.protocol !== "ws:" && url.protocol !== "wss:") {
     throw new Error("browser frame attachment did not contain an HTTP or WebSocket URL");
   }
+  upgradeMixedContentWebSocket(url);
   if (options.format !== undefined) url.searchParams.set("format", options.format);
   setBoundedIntegerQuery(url, "quality", options.quality, 1, 100);
   setBoundedIntegerQuery(url, "maxWidth", options.maxWidth, 1, 4_096);
@@ -2549,6 +2550,7 @@ export function computerFrameSocketUrl(
   else if (url.protocol !== "ws:" && url.protocol !== "wss:") {
     throw new Error("computer frame attachment did not contain an HTTP or WebSocket URL");
   }
+  upgradeMixedContentWebSocket(url);
   if (options.format !== undefined) url.searchParams.set("format", options.format);
   setBoundedIntegerQuery(url, "quality", options.quality, 1, 100);
   setBoundedIntegerQuery(url, "maxWidth", options.maxWidth, 1, 4_096);
@@ -2840,6 +2842,11 @@ function computerRelevance(session: ComputerSession, associationSessionId: strin
     .reduce((best, timestamp) => Math.max(best, timestamp), 0);
   const used = Date.parse(session.lastUsedAt);
   return Math.max(association, Number.isFinite(used) ? used : 0);
+}
+
+function upgradeMixedContentWebSocket(url: URL): void {
+  const protocol = (globalThis as { location?: { protocol?: string } }).location?.protocol;
+  if (protocol === "https:" && url.protocol === "ws:") url.protocol = "wss:";
 }
 
 function setBoundedIntegerQuery(

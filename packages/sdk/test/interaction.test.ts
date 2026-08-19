@@ -1214,6 +1214,35 @@ describe("browser frame wire", () => {
       "browser frame image dimensions do not match metadata",
     );
   });
+
+  test("upgrades an insecure frame socket when the page is HTTPS", () => {
+    const previous = (globalThis as { location?: Location }).location;
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { protocol: "https:" },
+    });
+    try {
+      expect(
+        browserFrameSocketUrl({
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targetId: "target-1",
+          stream: {
+            kind: "direct_websocket",
+            url: "ws://api.example/v1/interaction/frame-proxy",
+            protocols: ["opengeni.browser.v1"],
+          },
+          expiresAt: "2026-08-09T10:02:00.000Z",
+        }),
+      ).toBe("wss://api.example/v1/interaction/frame-proxy");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(globalThis, "location");
+      } else {
+        Object.defineProperty(globalThis, "location", { configurable: true, value: previous });
+      }
+    }
+  });
 });
 
 describe("computer frame wire", () => {
