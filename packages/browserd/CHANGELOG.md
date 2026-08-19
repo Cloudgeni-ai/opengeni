@@ -1,5 +1,85 @@
 # @opengeni/browserd
 
+## 0.1.16
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/interaction@0.4.8
+
+## 0.1.15
+
+### Patch Changes
+
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/interaction@0.4.7
+
+## 0.1.14
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/interaction@0.4.6
+
+## 0.1.13
+
+### Patch Changes
+
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/interaction@0.4.5
+
+## 0.1.12
+
+### Patch Changes
+
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- 79f57b5: Prime an exact frame fence when the first observation of a capturable computer target has not yet been viewed, allowing safe first pointer actions without continuous capture overhead. Browser fills now return `outcome_unknown` when a custom editor silently discards the dispatched value instead of claiming completion.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/interaction@0.4.4
+
 ## 0.1.11
 
 ### Patch Changes

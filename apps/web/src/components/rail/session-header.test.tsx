@@ -26,6 +26,8 @@ const session = {
   titleSource: null,
   parentSessionId: null,
   model: "codex/gpt-5.6-sol",
+  reasoningEffort: "high",
+  latencyMode: "standard",
   metadata: {},
   status: "idle",
   pinned: false,

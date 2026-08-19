@@ -273,7 +273,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   });
 });
 
-test("an idle session stream closes promptly when periodic host authorization is revoked", async () => {
+test("a session stream fails closed before its first frame when host authorization is revoked", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let released = 0;
@@ -299,10 +299,89 @@ test("an idle session stream closes promptly when periodic host authorization is
     },
   );
   const reader = response.body!.getReader();
-  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
   await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
   expect(reauthorizations).toBe(1);
   expect(released).toBe(1);
+});
+
+test("rechecks current authority and suppresses a live event after revocation", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let allowed = true;
+  let publish: ((events: SessionEvent[]) => void) | null = null;
+  const bus = {
+    subscribe: async (
+      _workspaceId: string,
+      _sessionId: string,
+      listener: (events: SessionEvent[]) => void,
+    ) => {
+      publish = listener;
+      return () => {};
+    },
+  } as unknown as EventBus;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    {
+      reauthorize: async () => {
+        if (!allowed) throw new Error("membership revoked");
+      },
+    },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+  allowed = false;
+  publish?.([event(1)]);
+  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+});
+
+test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
+  durableEvents = [];
+  durableControlEvents = [];
+  interactionRevisionState = { revision: 0, updatedAt: null };
+  const bus = {
+    subscribe: async () => () => {},
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const revoked = () => ({
+    reauthorizeAfterMs: 1_000,
+    reauthorize: async () => {
+      throw new Error("workspace membership revoked");
+    },
+  });
+  const signal = () => new AbortController().signal;
+  const responses = await Promise.all([
+    sseSessionStream(fakeDb as never, bus, WORKSPACE_ID, SESSION_ID, 0, signal(), revoked()),
+    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), revoked()),
+    sseWorkspaceInteractionRevisionStream(
+      fakeDb as never,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      signal(),
+      { ...revoked(), pollIntervalMs: 100 },
+    ),
+    sseWorkspaceLiveStream(
+      fakeDb as never,
+      bus,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      0,
+      signal(),
+      { ...revoked(), pollIntervalMs: 100 },
+    ),
+  ]);
+  const readers = responses.map((response) => response.body!.getReader());
+  await Promise.all(
+    readers.map(async (reader) => {
+      await expect(reader.read()).rejects.toBeInstanceOf(Error);
+    }),
+  );
 });
 
 test("workspace-control SSE uses the same one-frame stall bound", async () => {

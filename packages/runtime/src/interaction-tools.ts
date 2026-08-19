@@ -50,7 +50,7 @@ import {
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
 import {
-  firstPartyMcpWorkspaceUrl,
+  firstPartyMcpInternalWorkspaceUrl,
   resolveFirstPartyDelegationSecret,
   type Settings,
 } from "@opengeni/config";
@@ -1309,7 +1309,7 @@ function hasToolPermission(permissions: readonly Permission[], required: Permiss
 }
 
 function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
-  const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+  const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
     throw new Error("First-party MCP URL cannot be projected to the OpenGeni API base URL");

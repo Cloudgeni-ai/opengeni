@@ -4,5 +4,6 @@ export * from "./http";
 export * from "./mcp-manifest";
 export * from "./openapi";
 export * from "./integration-definitions";
+export * from "./integration-presentations";
 export * from "./revision";
 export * from "./types";

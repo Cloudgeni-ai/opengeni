@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +37,7 @@ use opengeni_agent_platform::{
 use opengeni_agent_proto::v1;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -51,6 +55,7 @@ use crate::{
 
 const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+const APPLICATION_LAUNCH_STARTUP_GRACE: Duration = Duration::from_millis(250);
 const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
@@ -139,6 +144,66 @@ struct WindowFrameFence {
     height: u32,
 }
 
+#[derive(Clone)]
+struct LinuxApplicationLauncher {
+    executable: PathBuf,
+}
+
+impl LinuxApplicationLauncher {
+    fn discover() -> Option<Self> {
+        ["/usr/bin/gtk-launch", "/usr/local/bin/gtk-launch"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| is_executable_file(path))
+            .map(|path| Self {
+                executable: path.to_path_buf(),
+            })
+    }
+
+    async fn launch(&self, application_id: &str) -> NativeAdapterResult<()> {
+        validate_linux_application_id(application_id)?;
+        let mut command = Command::new(&self.executable);
+        command
+            .arg(application_id)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().map_err(|error| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::DriverFailed,
+                format!("start Linux application launcher: {error}"),
+                true,
+            )
+        })?;
+        tokio::select! {
+            result = child.wait() => {
+                let status = result.map_err(|error| {
+                    NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("wait for Linux application launcher: {error}"),
+                        true,
+                    )
+                })?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("Linux application launcher exited with {status}"),
+                        false,
+                    ))
+                }
+            }
+            () = tokio::time::sleep(APPLICATION_LAUNCH_STARTUP_GRACE) => {
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Linux semantic adapter over the modern AT-SPI cache and typed interfaces.
 /// All object handles remain private; observations contain only short refs.
 pub(crate) struct AtspiComputerAdapter {
@@ -149,6 +214,7 @@ pub(crate) struct AtspiComputerAdapter {
     latest: RwLock<BTreeMap<String, StoredObservation>>,
     target_locators: RwLock<BTreeMap<String, TargetLocator>>,
     desktop: Option<LinuxDesktop>,
+    application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
     latest_screen_frame: RwLock<Option<String>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
@@ -198,6 +264,7 @@ impl AtspiComputerAdapter {
             latest: RwLock::new(BTreeMap::new()),
             target_locators: RwLock::new(BTreeMap::new()),
             desktop: LinuxDesktop::open_default().ok(),
+            application_launcher: LinuxApplicationLauncher::discover(),
             clipboard: NativeClipboardController::open().ok(),
             latest_screen_frame: RwLock::new(None),
             latest_window_frames: RwLock::new(BTreeMap::new()),
@@ -792,7 +859,10 @@ impl AtspiComputerAdapter {
                 return Some(NativeNodeValue::Text(value.to_string()));
             }
         }
-        if item.ifaces.contains(Interface::EditableText) {
+        // Read-only labels expose AT-SPI Text without EditableText. Their
+        // content is still part of the semantic observation (and often the
+        // only observable result of invoking a control).
+        if item.ifaces.contains(Interface::Text) {
             let proxy = self.text_proxy(&item.object).await.ok()?;
             let count = timed(proxy.character_count()).await.ok()?.clamp(0, 32_768);
             return timed(proxy.get_text(0, count))
@@ -1210,11 +1280,17 @@ impl AtspiComputerAdapter {
                     ));
                 }
             }
-            NativeAction::Semantic { .. }
-            | NativeAction::Focus { .. }
-            | NativeAction::Launch { .. } => {
+            NativeAction::Launch { application_id } => {
+                validate_linux_application_id(application_id)?;
+                if self.application_launcher.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "Linux application launcher is unavailable on this graphical seat",
+                    ));
+                }
+            }
+            NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 return Err(NativeAdapterError::unsupported(
-                    "semantic/focus/launch actions cannot target the X11 screen",
+                    "semantic/focus actions cannot target the X11 screen",
                 ));
             }
         }
@@ -1552,7 +1628,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
         NativeCapabilities {
             semantic_observation: true,
             app_discovery: true,
-            app_launch: false,
+            app_launch: desktop && self.application_launcher.is_some(),
             window_capture: self
                 .desktop
                 .as_ref()
@@ -1746,7 +1822,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
             }
             NativeAction::Launch { .. } => {
                 return Err(NativeAdapterError::unsupported(
-                    "Linux application launch is unavailable in this adapter",
+                    "Linux application launch must target the exact X11 screen",
                 ));
             }
         }
@@ -1769,7 +1845,19 @@ impl ComputerAdapter for AtspiComputerAdapter {
             if screen.id == command.target_id {
                 self.validate_screen(command, &screen).await?;
                 *self.latest_screen_frame.write().await = None;
-                self.dispatch_screen_action(command).await?;
+                if let NativeAction::Launch { application_id } = &command.action {
+                    self.application_launcher
+                        .as_ref()
+                        .ok_or_else(|| {
+                            NativeAdapterError::unsupported(
+                                "Linux application launcher is unavailable on this graphical seat",
+                            )
+                        })?
+                        .launch(application_id)
+                        .await?;
+                } else {
+                    self.dispatch_screen_action(command).await?;
+                }
                 return Ok(Some(self.screen_observation(screen).await));
             }
         }
@@ -2400,6 +2488,27 @@ fn invalid_action(message: impl Into<String>) -> NativeAdapterError {
     NativeAdapterError::definite(NativeAdapterErrorCode::InvalidAction, message, false)
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+fn validate_linux_application_id(application_id: &str) -> NativeAdapterResult<()> {
+    let bytes = application_id.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 255
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+    {
+        return Err(invalid_action(
+            "Linux applicationId must be a desktop-file name using only letters, digits, '.', '_', '+', and '-'",
+        ));
+    }
+    Ok(())
+}
+
 fn null_object() -> NativeAdapterError {
     NativeAdapterError::definite(
         NativeAdapterErrorCode::DriverFailed,
@@ -2479,12 +2588,82 @@ fn ambiguous(context: &str, error: impl std::fmt::Display) -> NativeAdapterError
 
 #[cfg(test)]
 mod live_tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::Command;
 
     use super::*;
+
+    #[test]
+    fn validates_linux_desktop_application_ids_without_shell_metacharacters() {
+        for valid in [
+            "opengeni-browser",
+            "opengeni-browser.desktop",
+            "org.xfce.Terminal+safe_1.desktop",
+        ] {
+            validate_linux_application_id(valid).expect("valid desktop application id");
+        }
+        for invalid in [
+            "",
+            "-help",
+            "../../bin/sh",
+            "browser;touch-owned",
+            "browser desktop",
+            "browser\n.desktop",
+        ] {
+            assert!(validate_linux_application_id(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn executable_probe_requires_a_regular_executable_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let launcher = directory.path().join("gtk-launch");
+        fs::write(&launcher, "#!/bin/sh\n").expect("write fixture");
+        assert!(!is_executable_file(&launcher));
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+        assert!(is_executable_file(&launcher));
+        assert!(!is_executable_file(directory.path()));
+    }
+
+    #[tokio::test]
+    async fn application_launch_returns_after_a_long_running_launcher_starts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let executable = directory.path().join("gtk-launch");
+        fs::write(&executable, "#!/bin/sh\nsleep 2\n").expect("write launcher");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make launcher executable");
+        let launcher = LinuxApplicationLauncher { executable };
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            launcher.launch("opengeni-browser.desktop"),
+        )
+        .await
+        .expect("launch returns after startup grace")
+        .expect("long-running launcher accepted");
+    }
+
+    #[tokio::test]
+    async fn application_launch_reports_immediate_launcher_failure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let executable = directory.path().join("gtk-launch");
+        fs::write(&executable, "#!/bin/sh\nexit 9\n").expect("write launcher");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make launcher executable");
+        let launcher = LinuxApplicationLauncher { executable };
+
+        let error = launcher
+            .launch("opengeni-browser.desktop")
+            .await
+            .expect_err("failed launcher rejected");
+        assert_eq!(error.code, NativeAdapterErrorCode::DriverFailed);
+        assert!(error.message.contains("exit status: 9"));
+    }
 
     fn native_window(process_id: Option<u32>, title: &str, bounds: NativeRect) -> NativeTarget {
         NativeTarget {

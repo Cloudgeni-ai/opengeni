@@ -6,7 +6,7 @@ import {
   decodeEditableArtifactCausalFrontier,
   encodeEditableArtifactCausalFrontier,
 } from "../src/editable-artifact-causal-frontier";
-import fixture from "./fixtures/editable-artifact-spreadsheet-v1.json";
+import fixture from "./fixtures/editable-artifact-spreadsheet-current.json";
 
 const hex = (value: string): Uint8Array => Uint8Array.fromHex(value);
 

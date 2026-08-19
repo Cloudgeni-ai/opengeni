@@ -11,11 +11,13 @@ import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
+import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
 export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./connector-attachments";
 export * from "./memory-slack-delivery";
 export * from "./image-generation";
 export * from "./video-generation";
@@ -24,6 +26,7 @@ export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
 export * from "./interaction";
+export * from "./sandbox-file-artifacts";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -757,6 +760,7 @@ export const Permission = z.enum([
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -814,8 +818,12 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   // tools resolve an already-installed workspace principal. Credentials stay
   // inside the broker and remain subject to each tool's own authorization.
   "connections:read",
+  "variable-sets:list",
+  "variable-sets:write",
+  "variable-sets:attach",
   "variable-sets:use",
-  "variable-sets:manage",
+  "secrets:list",
+  "secrets:write",
   "rigs:use",
   "github:use",
   "artifacts:read",
@@ -845,6 +853,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_notes_list",
   "task_note_save",
   "task_note_archive",
+  "task_note_replace",
+  "knowledge_propose",
+  "knowledge_correct",
+  "task_note_promote_knowledge",
+  "task_note_promote_instruction_policy",
+  "task_note_promote_preference",
+  "instruction_policy_propose",
+  "preference_propose",
+  "remember",
+  "remember_confirm",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -922,6 +940,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_tasks_delete",
   "scheduled_task_runs_list",
   "slack_bot_list_channels",
+  "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
   "slack_bot_list_users",
@@ -948,6 +967,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
   "editable_artifact_import",
@@ -998,8 +1018,15 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
+// Names kept so previously written data still parses - immutable scheduled-task
+// execution snapshots recorded the tool set that was default at the time, and
+// they are strictly re-parsed on replay. Retiring a tool must not strand an
+// accepted occurrence. These are never registered, never default, and never
+// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  "memory_save",
+  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1032,6 +1059,10 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
+    // Memory V1 writes are retired entirely; `remember` and task-note
+    // promotion own durable agent writes.
+    name !== "memory_save" &&
+    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -1087,6 +1118,73 @@ export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
 export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
 
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+
+export const UserResourceAuthorityScope = z.literal("user");
+export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const UserResourceAuthorityGrant = z.object({
+  grantId: z.string().uuid(),
+  targetWorkspaceId: z.string().uuid(),
+  targetSessionId: z.string().uuid().nullable(),
+  action: z.string().min(1).max(64),
+  mode: UserResourceLifecycleGrantMode,
+  context: SessionTenancyVisibility,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "consumed", "revoked", "expired"]),
+  expiresAt: z.string().datetime().nullable(),
+});
+export const UserResourceAuthoritySummary = z.object({
+  authorityId: z.string().uuid(),
+  resourceKind: z.string().min(1).max(64),
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "retained", "revoked"]),
+  grants: z.array(UserResourceAuthorityGrant),
+});
+export const ListUserResourceAuthoritiesQuery = z.object({
+  scope: UserResourceAuthorityScope,
+});
+export const ListUserResourceAuthoritiesResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  authorities: z.array(UserResourceAuthoritySummary),
+});
+export const IssueUserResourceGrantRequest = z
+  .object({
+    scope: UserResourceAuthorityScope,
+    action: z.string().min(1).max(64),
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    sessionId: z.string().uuid().nullable().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+  })
+  .superRefine((value, context) => {
+    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceSharedAcknowledged"],
+        message: "workspace_shared requires durable shared-output acknowledgement",
+      });
+    }
+    if (value.mode === "always" && value.sessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "always is unbound",
+      });
+    }
+    if (value.mode !== "always" && !value.sessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "once/session require a target session",
+      });
+    }
+  });
+export const UserResourceGrantMutationResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  grant: UserResourceAuthorityGrant,
+});
+export const RevokeUserResourceGrantQuery = z.object({
+  scope: UserResourceAuthorityScope,
+});
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
@@ -1748,12 +1846,30 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+// Memory V1's standing prompt block is retired, but the enum deliberately still
+// ACCEPTS `legacy_standing`. `.passthrough()` only preserves unknown keys - it
+// does not rescue a known key holding a value the enum rejects - so collapsing
+// this to one value would fail the whole settings parse for any workspace that
+// opted in. Every resolver here is "parse the bag, fall back on failure", so
+// that single rejection would silently revert memoryEnabled,
+// agentHumanInputEnabled, codexCompactionDefault, voiceInput and Slack summon
+// to their defaults. The value is accepted and then ignored: see
+// resolveWorkspaceMemoryPromptMode.
 export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
 export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
 
+/**
+ * What an already-accepted turn recorded. Snapshots and receipts are immutable,
+ * so turns accepted before the standing block was retired still read back
+ * `legacy_standing`. That is a fact about history, not a mode anyone can pick -
+ * keep the two apart so retiring the setting never rewrites the record.
+ */
+export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off and the
-// reversible Memory V1 containment rollout defaults to legacy standing context;
+// Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
@@ -1788,10 +1904,15 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
-/** Reversible Memory V1 prompt rollout. Absent preserves legacy composition. */
-export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? (parsed.data.memoryPromptMode ?? "legacy_standing") : "legacy_standing";
+/**
+ * Memory V1 prompt mode. Always `retrieval_only`: the standing pinned/recency
+ * block is retired, so an absent, unrecognized, or stored-`legacy_standing`
+ * setting all resolve the same way. Kept as a function so the call sites and
+ * the frozen SQL snapshot keep agreeing without each one having to learn that
+ * the choice is gone.
+ */
+export function resolveWorkspaceMemoryPromptMode(): "retrieval_only" {
+  return "retrieval_only";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
@@ -2382,6 +2503,17 @@ export const StreamTokenPayload = z.object({
   // Short TTL (120s default); rotation is event-driven under the epoch fence,
   // not on a keepalive clock.
   exp: z.number().int().positive(),
+  // The authenticated subject the token was minted for (0281). Optional for
+  // rolling compatibility: old verifiers strip it, old mints omit it.
+  subjectId: z.string().min(1).max(512).optional(),
+  // The session authority epoch observed at mint (0281). The relay tracks the
+  // highest value presented per LIVE channel and rejects tokens below that
+  // floor. The floor is defense-in-depth, not the revocation authority: it
+  // lives only as long as the channel does (both sides detached, the
+  // half-open reaper, or a relay restart reset it), so a stale in-TTL token
+  // can still attach to a fresh channel. Real revocation is the mint refusing
+  // to issue new tokens plus the 120 s TTL bounding the old ones.
+  authorityEpoch: z.number().int().positive().optional(),
 });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 
@@ -3206,9 +3338,25 @@ export type GitCredentials = {
 export type SandboxSecretsRequest = {
   accountId: string;
   workspaceId: string;
-  // The variable set the run's session declares (null = unattached;
-  // the provider, like the self-mint path, returns null values for it).
+  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
+  // session's selected resource identity, and any personal-resource grant
+  // immediately before returning plaintext.
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  // Organization/workspace Variable Sets may be materialized by a pure
+  // service turn (for example, the scheduler). Personal Variable Sets still
+  // require this causal human and an exact personal-resource grant.
+  initiator: TurnInitiator;
+  initiatingHumanSubjectId: string | null;
   variableSetId: string;
+  /**
+   * Exact accepted scheduled-occurrence generation. Present only for scheduled
+   * attempts; ordinary live turns omit it, so hosts that predate this field keep
+   * working unchanged for those.
+   */
+  expectedGeneration?: number | null;
 };
 
 export type SandboxSecrets = {
@@ -3216,8 +3364,19 @@ export type SandboxSecrets = {
   // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
   // produces (plaintext name→value).
   values: Record<string, string>;
-  // workspace-scope cross-check echo: the workspace the provider scoped these secrets to.
+  // Exact scope/resource echoes are mandatory so a host routing bug cannot
+  // inject a sibling tenant, resource, or stale attempt's plaintext.
+  accountId: string;
   workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  variableSetId: string;
+  /** Must echo the request's `expectedGeneration` when one was supplied. */
+  expectedGeneration?: number | null;
+  scope: VariableSetScope;
+  generation: number;
   // Optional variableSet metadata; when omitted the activity uses the
   // variableSetId as both id and name (the local decrypt carries the row's
   // id/name/description, but only `id` is load-bearing downstream).
@@ -3381,10 +3540,41 @@ export const McpPersonalConnectionDelegation = z
   .object({
     serverId: z.string().min(1).max(256),
     connectionId: z.string().uuid(),
+    /**
+     * Immutable physical workspace that owns an activated common-user
+     * connection. It is server-resolved from the selected authority and lets
+     * provider adapters load only that exact row when the accepted turn runs
+     * in another workspace of the same organization.
+     */
+    originWorkspaceId: z.string().uuid().optional(),
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
+    /**
+     * Explicit common-authority grant selected by the owning human. Omission is
+     * retained only for legacy_user connections that cannot yet participate in
+     * the organization-user authority lifecycle.
+     */
+    userDelegation: UserResourceDelegation.optional(),
+    /**
+     * Google Drive publication only: the exact output destination frozen when
+     * this delegation was accepted, so a later connection-settings change can
+     * never redirect an already-accepted turn's publication. Structurally
+     * mirrors GoogleDriveOutputDestination (defined in ./google-drive, which
+     * imports this module - hence the inline shape). Absent on pre-freeze
+     * turns, which keep the bounded legacy live-resolution behavior.
+     */
+    outputDestination: z
+      .object({
+        folderId: z.string().min(1).max(256),
+        folderName: z.string().min(1).max(1024),
+        driveId: z.string().min(1).max(256).nullable(),
+        location: z.enum(["my_drive", "shared_drive"]),
+        selectedAt: z.string().datetime({ offset: true }),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -3417,6 +3607,36 @@ export const McpPersonalConnectionSummary = McpPersonalConnectionDelegation.pick
 });
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
+/**
+ * Public, credential-free selection of one exact personal connection grant for
+ * one selected MCP/first-party server. The owner is always derived server-side.
+ */
+export const McpConnectionAuthoritySelection = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    connectionId: z.string().uuid(),
+    userDelegation: UserResourceDelegation,
+  })
+  .strict();
+export type McpConnectionAuthoritySelection = z.infer<typeof McpConnectionAuthoritySelection>;
+
+export const McpConnectionAuthoritySelections = z
+  .array(McpConnectionAuthoritySelection)
+  .max(128)
+  .superRefine((selections, context) => {
+    const seen = new Set<string>();
+    for (const [index, selection] of selections.entries()) {
+      if (seen.has(selection.serverId)) {
+        context.addIssue({
+          code: "custom",
+          message: "connection authority selections must be unique by serverId",
+          path: [index, "serverId"],
+        });
+      }
+      seen.add(selection.serverId);
+    }
+  });
+
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -3447,6 +3667,10 @@ export type McpCredentialsRequest = {
   toolName?: string;
   connectionRef: McpServerConnectionRef;
   forceRefresh: boolean;
+  /** Canonical credential-free authority frozen on the accepted turn. */
+  connectionUseAuthority?: unknown;
+  /** Stable idempotency key for this one physical provider request. */
+  connectionUseRequestId?: string;
 };
 
 export type McpCredentialAuthNeededReason =
@@ -3811,6 +4035,8 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
  * reconstruct the same typed attachment input after a model switch or retry.
  */
 export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
+/** Private marker for the compact attachment-reference carrier created by compaction. */
+export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this OpenGeni
@@ -4078,6 +4304,9 @@ export const Document = z.object({
   authorityKind: DocumentAuthorityKind,
   authorityWorkspaceId: z.string().uuid().nullable(),
   authoritySubjectId: z.string().nullable(),
+  // Opaque handle used by the owning human to issue explicit personal-scope
+  // grants. Organization/workspace and legacy anchored personal rows are null.
+  authorityId: z.string().uuid().nullable().optional(),
   visibility: DocumentVisibility,
   createdBy: z.string().nullable(),
   agentAccess: z.boolean(),
@@ -4375,9 +4604,15 @@ export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearch
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
+  // Session-scoped startup choice. `true` prepares this server's authorized
+  // schemas before the first model request; absent/false keeps it behind
+  // progressive discovery. This never grants a server or tool permission.
+  eager: z.boolean().optional(),
   // Non-fatal-on-connect marker for MCP server refs that can degrade
   // gracefully. On new input, absent/false is STRICT: the id must be configured
-  // and an unavailable registered server fails the turn. Persisted refs are
+  // and an unavailable registered server fails closed when its preparation is
+  // demanded. Only the independent eager marker makes that a startup failure.
+  // Persisted refs are
   // intersected with the current registry at each turn boundary, so a server
   // disconnected after admission is retained in policy/audit truth but skipped
   // until it is registered again. `optional:true` additionally makes runtime
@@ -4574,10 +4809,14 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // strict occurrence upgrades the merged ref so an unavailable server fails
     // the turn. This preserves the fail-loud default when defaults, packs, and
     // per-turn tool selections are combined.
-    if (prior.optional === true && tool.optional !== true) {
-      const { optional: _dropped, ...strict } = prior;
-      byKey.set(key, strict);
-    }
+    const optional = prior.optional === true && tool.optional === true ? true : undefined;
+    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    byKey.set(key, {
+      kind: "mcp",
+      id: prior.id,
+      ...(optional ? { optional } : {}),
+      ...(eager ? { eager } : {}),
+    });
   }
   return order.map((key) => byKey.get(key)!);
 }
@@ -4731,6 +4970,9 @@ export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
 export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES = 512;
+export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS = 16;
 
 export function sessionGoalUtf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -4744,6 +4986,43 @@ function boundedSessionGoalString(maxBytes: number, field: string) {
       message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
     });
 }
+
+function compareUtf8(left: string, right: string): number {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+export function normalizeSessionGoalRootConstraints(values: readonly string[]): string[] {
+  // PostgreSQL btrim(text) removes U+0020 at both ends. Keep the public
+  // projector byte-equivalent with the storage trigger instead of using
+  // JavaScript trim(), whose Unicode whitespace set is broader.
+  return [...new Set(values.map((value) => value.replace(/^ +| +$/g, "")))].sort(compareUtf8);
+}
+
+export const SessionGoalRootConstraintsWrite = z
+  .array(boundedSessionGoalString(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES, "goal root constraint"))
+  .transform(normalizeSessionGoalRootConstraints)
+  .pipe(
+    z
+      .array(z.string().min(1))
+      .max(SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS)
+      .refine(
+        (values) =>
+          values.reduce((total, value) => total + sessionGoalUtf8Bytes(value), 0) <=
+          SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
+        {
+          message: `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes`,
+        },
+      ),
+  );
+export type SessionGoalRootConstraintsWrite = z.infer<typeof SessionGoalRootConstraintsWrite>;
 
 const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
 const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
@@ -4763,6 +5042,7 @@ export const SessionGoalSnapshot = z.discriminatedUnion("state", [
     objectiveRevision: z.number().int().positive(),
     text: SessionGoalTextWrite,
     successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+    rootConstraints: SessionGoalRootConstraintsWrite.default([]),
     mutationPolicy: SessionGoalMutationPolicy,
     capturedAt: z.string(),
   }),
@@ -4781,21 +5061,56 @@ export const SessionGoalRevision = z.object({
   resultObjectiveRevision: z.number().int().positive().nullable(),
   text: z.string().min(1),
   successCriteria: z.string().nullable(),
+  rootConstraints: z.array(z.string().min(1)).default([]),
   mutationPolicy: SessionGoalMutationPolicy,
   rationale: z.string().min(1),
   actor: z.enum(["agent", "api", "scheduled_task"]),
   actorTurnId: z.string().uuid().nullable(),
   actorAttemptId: z.string().uuid().nullable(),
   proposalId: z.string().uuid().nullable(),
+  rollbackOfRevisionId: z.string().uuid().nullable(),
   createdAt: z.string(),
 });
 export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
+
+export const SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT = 50;
+export const SESSION_GOAL_REVISION_LIST_MAX_LIMIT = 100;
+
+export const ListSessionGoalRevisionsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SESSION_GOAL_REVISION_LIST_MAX_LIMIT)
+    .default(SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT),
+  before: z.string().uuid().optional(),
+});
+export type ListSessionGoalRevisionsQuery = z.infer<typeof ListSessionGoalRevisionsQuery>;
+
+export const ListSessionGoalRevisionsResponse = z.object({
+  revisions: z.array(SessionGoalRevision),
+  hasMore: z.boolean(),
+  nextCursor: z.string().uuid().nullable(),
+});
+export type ListSessionGoalRevisionsResponse = z.infer<typeof ListSessionGoalRevisionsResponse>;
 
 export const ApplySessionGoalRevisionRequest = z.object({
   expectedObjectiveRevision: z.number().int().positive(),
   rationale: SessionGoalRationaleWrite.optional(),
 });
 export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+
+export const RejectSessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite,
+});
+export type RejectSessionGoalRevisionRequest = z.infer<typeof RejectSessionGoalRevisionRequest>;
+
+export const RollbackSessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite,
+});
+export type RollbackSessionGoalRevisionRequest = z.infer<typeof RollbackSessionGoalRevisionRequest>;
 
 export const SessionGoalPausedReason = z.enum([
   "agent",
@@ -4850,6 +5165,7 @@ export const SessionGoal = z.object({
   status: SessionGoalStatus,
   text: z.string(),
   successCriteria: z.string().nullable(),
+  rootConstraints: z.array(z.string().min(1)).default([]),
   evidence: z.string().nullable(),
   rationale: z.string().nullable(),
   pausedReason: z.string().nullable(),
@@ -4872,6 +5188,7 @@ export type SessionGoal = z.infer<typeof SessionGoal>;
 export const GoalSpec = z.object({
   text: SessionGoalTextWrite,
   successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
+  rootConstraints: SessionGoalRootConstraintsWrite.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
   mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
@@ -4885,6 +5202,7 @@ export const UpdateSessionGoalRequest = z.union([
   z.object({
     text: SessionGoalTextWrite,
     successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    rootConstraints: SessionGoalRootConstraintsWrite.optional(),
     mutationPolicy: SessionGoalMutationPolicy.optional(),
     rationale: SessionGoalRationaleWrite,
     expectedObjectiveRevision: z.number().int().positive(),
@@ -4980,6 +5298,34 @@ export function isClearedRunStateBlob(serialized: string | null | undefined): bo
       typeof parsed === "object" &&
       parsed !== null &&
       (parsed as Record<string, unknown>)[CLEARED_RUN_STATE_MARKER] === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sentinel written on a requires_action pause. Resume must not call
+ * `RunState.fromString` on it; the open suffix on `session_pending_tool_calls`
+ * plus paired history is the resume authority.
+ */
+export const OPEN_SUFFIX_RUN_STATE_MARKER = "$opengeniOpenSuffix" as const;
+
+/** Canonical sentinel serializedRunState for a requires_action pause. */
+export const OPEN_SUFFIX_RUN_STATE_BLOB = JSON.stringify({
+  [OPEN_SUFFIX_RUN_STATE_MARKER]: true,
+});
+
+export function isOpenSuffixRunStateBlob(serialized: string | null | undefined): boolean {
+  if (!serialized) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(serialized) as unknown;
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>)[OPEN_SUFFIX_RUN_STATE_MARKER] === true
     );
   } catch {
     return false;
@@ -5267,7 +5613,12 @@ export type WorkspaceRealtimeModelCatalogResponse = z.infer<
 export const SessionRealtimeState = z.enum(["active", "ended"]);
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
 
-export const SessionRealtimeEndReason = z.enum(["user_stop", "browser_unload", "lease_expired"]);
+export const SessionRealtimeEndReason = z.enum([
+  "user_stop",
+  "browser_unload",
+  "lease_expired",
+  "authority_revoked",
+]);
 export type SessionRealtimeEndReason = z.infer<typeof SessionRealtimeEndReason>;
 
 export const SessionRealtimeMode = z.object({
@@ -5674,23 +6025,54 @@ export function renderTimelineAnnotationsForModel(
 }
 
 export const MODEL_CONTEXT_LABEL = "[Application context attached to this user message]" as const;
+export const SESSION_GOAL_CONTEXT_LABEL =
+  "[Session goal frozen when this turn was accepted]" as const;
+
+/**
+ * Render the exact goal authority frozen with one accepted logical turn. Goal
+ * state belongs at the chronological input boundary, not in the mutable
+ * Agent.instructions prefix.
+ */
+export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string | undefined {
+  if (!snapshot || snapshot.state === "none") return undefined;
+  const rootConstraints = snapshot.rootConstraints.length
+    ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
+    : "";
+  if (snapshot.state === "completed") {
+    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+  }
+  const policy =
+    snapshot.mutationPolicy === "review_changes"
+      ? "Semantic changes are proposals until a user applies them."
+      : snapshot.mutationPolicy === "preserve_intent"
+        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
+        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
+  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
+}
 
 /**
  * Build one canonical user-role message body. `modelContext` is ordinary
- * message content: it is model-visible in the same chronological position as
- * the visible text, but presentation layers may omit it. It is not a secret or
- * an instruction-authority boundary.
+ * message content, while `goalSnapshot` is the exact goal authority frozen at
+ * turn acceptance. Both remain in the visible message's chronological
+ * position, and presentation layers may omit their leading parts.
  */
 export function renderUserMessageContentForModel(
   text: string,
   annotations: readonly TimelineAnnotation[],
   modelContext?: string | null,
+  goalSnapshot?: SessionGoalSnapshot,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
-  if (!context) return visibleContent;
+  const goalContext = renderSessionGoalContext(goalSnapshot);
+  if (!context && !goalContext) return visibleContent;
   return [
-    { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${context}` },
+    ...(goalContext
+      ? [{ type: "input_text" as const, text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` }]
+      : []),
+    ...(context
+      ? [{ type: "input_text" as const, text: `${MODEL_CONTEXT_LABEL}\n${context}` }]
+      : []),
     { type: "input_text", text: visibleContent },
   ];
 }
@@ -5715,7 +6097,7 @@ export const SessionTurn = z
     toolsProvided: z.boolean().optional(),
     model: z.string().min(1),
     reasoningEffort: ReasoningEffort,
-    latencyMode: LatencyMode.default("standard"),
+    latencyMode: LatencyMode,
     sandboxBackend: SandboxBackend,
     // Per-turn OS override. NULL = inherit the session's sandboxOs.
     sandboxOs: SandboxOs.nullable(),
@@ -5816,7 +6198,7 @@ export const ComposerDraft = z.object({
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   sourceTurnId: z.string().uuid().nullable(),
   sourceTurnVersion: z.number().int().positive().nullable(),
   updatedAt: z.string().nullable(),
@@ -5863,6 +6245,29 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 /**
+ * Submit one exact established-session draft. Content is repeated only as an
+ * integrity fence for outcome-unknown idempotent replay; the matching durable
+ * draft revision remains authoritative and is atomically rotated on acceptance.
+ */
+export const SubmitComposerDraftRequest = ComposerDraft.pick({
+  text: true,
+  annotations: true,
+  resources: true,
+  model: true,
+  reasoningEffort: true,
+  latencyMode: true,
+}).extend({
+  expectedDraftRevision: z.number().int().positive(),
+  clientEventId: SessionOperationKey,
+  delivery: z.enum(["send", "steer"]),
+  controlEtag: z.string().min(1).optional(),
+  modelContext: z.string().trim().min(1).max(32768).optional(),
+  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+});
+export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
+
+/**
  * Create-only options saved with an actor's private pre-session draft. This is
  * deliberately narrower than CreateSessionRequest: idempotency/event keys and
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
@@ -5889,7 +6294,7 @@ export const NewSessionDraft = z.object({
   toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   options: NewSessionDraftOptions,
   updatedAt: z.string().nullable(),
 });
@@ -6290,11 +6695,16 @@ export function renderSessionSystemUpdateBatch(
 
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+  goalSnapshot?: SessionGoalSnapshot,
 ): { type: "message"; role: "system"; content: string } {
+  const goalContext = renderSessionGoalContext(goalSnapshot);
   return {
     type: "message",
     role: "system",
-    content: renderSessionSystemUpdateBatch(updates),
+    content: [
+      ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
+      renderSessionSystemUpdateBatch(updates),
+    ].join("\n\n"),
   };
 }
 
@@ -6344,10 +6754,16 @@ export const VariableSetSecret = z.object({
 });
 export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
+export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
+export type VariableSetScope = z.infer<typeof VariableSetScope>;
+
 export const VariableSet = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  scope: VariableSetScope,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "revoked"]),
   name: z.string(),
   description: z.string().nullable(),
   variables: z.array(VariableSetVariableMetadata),
@@ -6361,6 +6777,8 @@ export const WorkspaceEnvironment = VariableSet;
 export type WorkspaceEnvironment = VariableSet;
 
 export const CreateVariableSetRequest = z.object({
+  // Omitted remains the legacy workspace-owned creation path.
+  scope: VariableSetScope.default("workspace"),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   variables: z
@@ -6559,6 +6977,9 @@ export const Rig = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  scope: ResourceAuthorityScope,
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "revoked"]),
   name: z.string(),
   description: z.string().nullable(),
   createdBy: z.string().nullable(),
@@ -6617,6 +7038,8 @@ export const RigChange = z.object({
 export type RigChange = z.infer<typeof RigChange>;
 
 export const CreateRigRequest = z.object({
+  // Omitted remains the compatibility workspace-owned creation path.
+  scope: ResourceAuthorityScope.default("workspace"),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   // Initial (version 1) content, inline.
@@ -6826,24 +7249,306 @@ export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("t
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const ScheduledTaskAgentConfig = /* @__PURE__ */ z.object({
-  prompt: z.string().min(1),
-  resources: z.array(ResourceRef).default([]),
-  tools: z.array(ToolRef).default([]),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
-  // The worker copies this non-secret pointer into session metadata; the
-  // first-party Slack tools never fall back to a personal hosted-MCP grant.
-  slackBotConnectionId: z.string().uuid().optional(),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  goal: GoalSpec.optional(),
-  // Durable task override. Scheduled dispatch is trusted to preserve this
-  // snapshot even if the workspace/deployment policy narrows later.
-  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-});
+export const IncidentTelemetryExecutionClass = z.literal("incident_telemetry");
+export type IncidentTelemetryExecutionClass = z.infer<typeof IncidentTelemetryExecutionClass>;
+
+const IncidentTelemetryIdentifier = z.string().trim().min(1).max(200);
+const IncidentTelemetryMetricName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_:][A-Za-z0-9_:]*$/);
+const IncidentTelemetryLabelName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+
+export const IncidentTelemetrySeriesMetadata = z
+  .object({
+    metric: IncidentTelemetryMetricName,
+    labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
+  })
+  .strict();
+export type IncidentTelemetrySeriesMetadata = z.infer<typeof IncidentTelemetrySeriesMetadata>;
+
+export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("mcp"),
+      serverId: SessionMcpServerId,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("first_party"),
+      tool: FirstPartyMcpToolName,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("variable_set"),
+      variableSetName: z.string().trim().min(1).max(120),
+      variableNames: z.array(VariableSetVariableName).min(1).max(100),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("rig_credential_hook"),
+      credentialHookId: IncidentTelemetryIdentifier,
+    })
+    .strict(),
+]);
+export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
+
+export const IncidentTelemetryPreflight = z
+  .object({
+    // These are exact selected resource refs, not discovery hints. The core
+    // validator requires every entry to already be present in agentConfig.
+    requiredResources: z.array(ResourceRef).max(100).default([]),
+    requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
+    requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+    requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
+    requiredRig: z
+      .object({
+        name: z.string().trim().min(1).max(120),
+        credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    // Names only. The dispatch preflight never reads or decrypts values.
+    requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
+    requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
+    dataSource: z
+      .object({
+        kind: z.literal("prometheus"),
+        // Exposition endpoints such as /metrics are deliberately excluded.
+        queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
+        workspaceLabel: IncidentTelemetryLabelName,
+        // Exact non-workspace labels whose values come from the validated
+        // structured alert occurrence and bound every telemetry query.
+        alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
+        route: IncidentTelemetryDataRoute,
+        requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
+        availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
+      if (label === value.dataSource.workspaceLabel) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "alertSelectorLabels", index],
+          message: "alert selector labels must be non-workspace labels",
+        });
+      }
+    }
+    for (const [index, series] of value.dataSource.requiredSeries.entries()) {
+      if (!series.labels.includes(value.dataSource.workspaceLabel)) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "requiredSeries", index, "labels"],
+          message: "required incident series must include the workspace label",
+        });
+      }
+      for (const label of value.dataSource.alertSelectorLabels) {
+        if (!series.labels.includes(label)) {
+          context.addIssue({
+            code: "custom",
+            path: ["dataSource", "requiredSeries", index, "labels"],
+            message: "required incident series must include every alert selector label",
+          });
+        }
+      }
+    }
+  });
+export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
+
+/**
+ * Canonical UTF-8 ingress limits for newly written scheduled execution truth.
+ * They bound create/update requests and freshly accepted occurrence snapshots;
+ * already-stored tasks are read back through the unbounded storage shape so a
+ * legacy row can never become unreadable or undispatchable by a later cap.
+ */
+export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
+export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 64 * 1024;
+export const SCHEDULED_TASK_METADATA_MAX_BYTES = 32 * 1024;
+export const SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES = 128 * 1024;
+export const SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES = 512 * 1024;
+/**
+ * A scheduled occurrence is delivered as one durable internal update whose
+ * payload (`scheduled_occurrence` text + resources + tools + ids) must fit the
+ * canonical internal-update bound. Bounding it here at ingress means every
+ * stored task that passed validation can also be delivered.
+ */
+export const SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES = 64 * 1024;
+/**
+ * Ingress reserves headroom below that bound for what the worker adds to the
+ * delivered payload (the first-party `opengeni` MCP tool ref and real ids), so
+ * a request that passes validation can always be delivered.
+ */
+export const SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES = 1024;
+export const SCHEDULED_TASK_PRODUCER_KEY_MAX_BYTES = 512;
+export const SCHEDULED_TASK_RESOURCE_MAX_COUNT = 100;
+export const SCHEDULED_TASK_TOOL_MAX_COUNT = 128;
+
+const scheduledTaskUtf8Encoder = new TextEncoder();
+
+function scheduledTaskUtf8Bytes(value: string): number {
+  return scheduledTaskUtf8Encoder.encode(value).byteLength;
+}
+
+function scheduledTaskJsonUtf8Bytes(value: unknown): number {
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? Number.POSITIVE_INFINITY : scheduledTaskUtf8Bytes(encoded);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * UTF-8 size of the exact `scheduled_occurrence` internal-update payload the
+ * worker delivers for one occurrence of this agent config (ids use fixed-width
+ * placeholder UUIDs). Shared by ingress validation and worker admission.
+ */
+export function scheduledOccurrencePayloadUtf8Bytes(agentConfig: {
+  prompt: string;
+  resources?: readonly unknown[] | undefined;
+  tools?: readonly unknown[] | undefined;
+}): number {
+  const placeholder = "00000000-0000-4000-8000-000000000000";
+  return scheduledTaskJsonUtf8Bytes({
+    type: "scheduled_occurrence",
+    text: agentConfig.prompt,
+    scheduledTaskId: placeholder,
+    scheduledTaskRunId: placeholder,
+    ...(agentConfig.resources?.length ? { resources: agentConfig.resources } : {}),
+    ...(agentConfig.tools?.length ? { tools: agentConfig.tools } : {}),
+  });
+}
+
+function scheduledTaskBoundedJsonObject(maxBytes: number, label: string) {
+  return z.record(z.string(), z.unknown()).superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > maxBytes) {
+      context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+    }
+  });
+}
+
+function scheduledTaskBoundedString(maxBytes: number, label: string) {
+  return z
+    .string()
+    .min(1)
+    .superRefine((value, context) => {
+      if (scheduledTaskUtf8Bytes(value) > maxBytes) {
+        context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+      }
+    });
+}
+
+/** Ingress-bounded task name for create/update requests. */
+export const ScheduledTaskNameInput = /* @__PURE__ */ scheduledTaskBoundedString(
+  SCHEDULED_TASK_NAME_MAX_BYTES,
+  "scheduled task name",
+);
+/** Ingress-bounded task metadata for create/update requests. */
+export const ScheduledTaskMetadataInput = /* @__PURE__ */ scheduledTaskBoundedJsonObject(
+  SCHEDULED_TASK_METADATA_MAX_BYTES,
+  "scheduled task metadata",
+);
+
+function scheduledTaskAgentConfigShape(bounded: boolean) {
+  return {
+    prompt: bounded
+      ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
+      : z.string().min(1),
+    resources: bounded
+      ? z.array(ResourceRef).max(SCHEDULED_TASK_RESOURCE_MAX_COUNT).default([])
+      : z.array(ResourceRef).default([]),
+    tools: bounded
+      ? z
+          .array(ToolRef)
+          .max(SCHEDULED_TASK_TOOL_MAX_COUNT - 1)
+          .default([])
+      : z.array(ToolRef).default([]),
+    metadata: bounded
+      ? ScheduledTaskMetadataInput.default({})
+      : z.record(z.string(), z.unknown()).default({}),
+    // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+    // The worker copies this non-secret pointer into session metadata; the
+    // first-party Slack tools never fall back to a personal hosted-MCP grant.
+    slackBotConnectionId: z.string().uuid().optional(),
+    model: bounded
+      ? scheduledTaskBoundedString(512, "scheduled task model").optional()
+      : z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    sandboxBackend: SandboxBackend.optional(),
+    goal: GoalSpec.optional(),
+    // Incident telemetry is the only special execution class. Omission keeps
+    // every existing task on the byte-compatible ordinary dispatch path.
+    executionClass: IncidentTelemetryExecutionClass.optional(),
+    incidentTelemetryPreflight: IncidentTelemetryPreflight.optional(),
+    // Durable task override. Scheduled dispatch is trusted to preserve this
+    // snapshot even if the workspace/deployment policy narrows later.
+    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+  };
+}
+
+function refineScheduledTaskAgentConfig(
+  value: { executionClass?: unknown; incidentTelemetryPreflight?: unknown },
+  context: z.RefinementCtx,
+): void {
+  if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
+    context.addIssue({
+      code: "custom",
+      path: ["incidentTelemetryPreflight"],
+      message: "incident telemetry tasks require incidentTelemetryPreflight",
+    });
+  }
+  if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
+    context.addIssue({
+      code: "custom",
+      path: ["executionClass"],
+      message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
+    });
+  }
+}
+
+/** Storage/projection shape. Deliberately unbounded so stored rows always parse. */
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
+  .object(scheduledTaskAgentConfigShape(false))
+  .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
+
+/** Ingress-bounded agent config for create/update requests. */
+export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
+  .object(scheduledTaskAgentConfigShape(true))
+  .superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+    if (
+      scheduledOccurrencePayloadUtf8Bytes(value) >
+      SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled task prompt, resources, and tools exceed the ${SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES} UTF-8 byte occurrence payload`,
+      });
+    }
+    refineScheduledTaskAgentConfig(value, context);
+  });
+export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
@@ -6863,6 +7568,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+  authorityRevision: z.number().int().positive().default(1),
+  executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
   reusableSessionId: z.string().uuid().nullable(),
   targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
@@ -6877,6 +7584,139 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   updatedAt: z.string(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+/**
+ * Complete credential-free execution truth accepted for one scheduled agent
+ * occurrence. Retries consume this immutable snapshot instead of a mutable
+ * scheduled-task head.
+ */
+export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    task: ScheduledTask,
+    resolvedModel: z.string().min(1),
+    resolvedReasoningEffort: ReasoningEffort,
+    resolvedLatencyMode: LatencyMode,
+    resolvedSandboxBackend: SandboxBackend,
+    resolvedSandboxOs: SandboxOs,
+    resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+    resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
+    resolvedFirstPartyMcpPermissions: z.array(Permission),
+    resolvedVariableSet: z
+      .object({ id: z.string().uuid(), generation: z.number().int().positive() })
+      .strict()
+      .nullable(),
+    resolvedRig: z
+      .object({
+        id: z.string().uuid(),
+        versionId: z.string().uuid(),
+        defaultVariableSets: z
+          .array(
+            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+          )
+          .max(25),
+      })
+      .strict()
+      .nullable(),
+    resolvedSlackBotConnection: z
+      .object({
+        id: z.string().uuid(),
+        version: z.number().int().positive(),
+        verifiedInstallVersion: z.number().int().positive(),
+        metadata: z
+          .object({
+            credentialRole: z.literal("opengeni_slack_bot"),
+            credentialLabel: z.literal("OpenGeni Slack bot"),
+            slackTeamId: z.string().min(1).max(64),
+            slackTeamName: z.string().min(1).max(256),
+            botUserId: z.string().min(1).max(64),
+            botId: z.string().min(1).max(64),
+            botDisplayName: z.literal("OpenGeni"),
+            verifiedAt: z.string().datetime({ offset: true }),
+          })
+          .passthrough(),
+      })
+      .strict()
+      .nullable(),
+    /**
+     * The effective policy that an existing or already-materialized reusable
+     * session will execute. Generated sessions carry null because their
+     * accepted task policy is used to create the session itself.
+     */
+    targetSessionExecution: z
+      .object({
+        sessionId: z.string().uuid(),
+        visibility: z.enum(["user_private", "workspace_shared"]),
+        authorityEpoch: z.number().int().positive(),
+        model: z.string().min(1),
+        reasoningEffort: ReasoningEffort,
+        latencyMode: LatencyMode,
+        tools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        sandboxBackend: SandboxBackend,
+        sandboxOs: SandboxOs,
+        firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        firstPartyMcpPermissions: z.array(Permission).nullable(),
+        toolPolicy: SessionToolPolicy,
+        mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        effectiveMcpServerIds: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        toolPolicyVersion: z.number().int().nonnegative(),
+        variableSetId: z.string().uuid().nullable(),
+        variableSetGeneration: z.number().int().positive().nullable(),
+        rigId: z.string().uuid().nullable(),
+        rigVersionId: z.string().uuid().nullable(),
+        rigDefaultVariableSets: z
+          .array(
+            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+          )
+          .max(25),
+        maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+      })
+      .strict()
+      .nullable(),
+    generatedSessionBinding: z
+      .object({
+        createIdempotencyKey: z.string().min(1).max(512),
+        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+        nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+        codexCompactionMode: CodexCompactionMode,
+      })
+      .strict()
+      .nullable(),
+    personalConnectionDelegations: McpPersonalConnectionDelegations,
+    personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
+    /** One accepted human principal for every resource-bearing scheduled run. */
+    causalHumanSubjectId: z.string().min(1).nullable().default(null),
+    /** Exact revision-bound human membership proof; never inferred at execution. */
+    causalHumanAuthority: z
+      .object({
+        subjectId: z.string().min(1),
+        organizationMembershipId: z.string().uuid(),
+        membershipAuthorizationRevision: z.number().int().positive(),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
+    xaiAuthoritySubjectId: z.string().min(1).nullable(),
+    connectionAuthoritySubjectId: z.string().min(1).nullable(),
+    triggerInitiator: TurnInitiator,
+    agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
+    incidentPreflightRequired: z.boolean(),
+    alertOccurrenceLabels: z.record(z.string(), z.string()).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+export type ScheduledTaskRunAcceptedExecution = z.infer<typeof ScheduledTaskRunAcceptedExecution>;
 
 export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
   externalObjectId: KnowledgeSourceSyncSubject,
@@ -6928,6 +7768,12 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   taskId: z.string().uuid(),
+  taskAuthorityRevision: z.number().int().positive().nullable().default(null),
+  taskExecutionDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .nullable()
+    .default(null),
   status: ScheduledTaskRunStatus,
   triggerType: ScheduledTaskTriggerType,
   scheduledAt: z.string().nullable(),
@@ -6945,7 +7791,7 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: z.string().min(1),
+  name: ScheduledTaskNameInput,
   schedule: ScheduledTaskScheduleSpec,
   action: z
     .object({ kind: z.literal("agent_turn") })
@@ -6954,13 +7800,14 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
-  agentConfig: ScheduledTaskAgentConfig,
+  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+  agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
   // The rig each run binds to (M3); its active version is resolved per fire.
   rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
+  metadata: ScheduledTaskMetadataInput.default({}),
 }).superRefine((value, context) => {
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
@@ -7008,6 +7855,7 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     variableSetId: null,
     environmentId: null,
     rigId: null,
+    connectionAuthorities: [],
   }));
 
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
@@ -7018,13 +7866,14 @@ export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskReque
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias({
-    name: z.string().min(1).optional(),
+    name: ScheduledTaskNameInput.optional(),
     schedule: ScheduledTaskScheduleSpec.optional(),
     runMode: ScheduledTaskRunMode.optional(),
     overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
-    agentConfig: ScheduledTaskAgentConfig.optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
     variableSetId: z.string().uuid().nullable().optional(),
     environmentId: z.string().uuid().nullable().optional(),
@@ -7745,6 +8594,8 @@ export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
+  /** Opaque owner-only handle used to manage this personal connection's grants. */
+  authorityId: z.string().uuid().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   subjectId: z.string().nullable(),
@@ -8380,6 +9231,43 @@ export const IntegrationFacetDefinitionSummary = z
   .strict();
 export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
+/**
+ * Presentation-only consent copy for an integration or connector. Never grants
+ * a scope, selects a connection, or replaces server-side authorization; the UI
+ * falls back to generic copy for any omitted field.
+ */
+export const IntegrationPresentation = z
+  .object({
+    providerName: z.string().min(1).max(120).optional(),
+    icon: z.enum(["calendar", "cloud", "contacts", "files", "mail"]).optional(),
+    introduction: z.string().min(1).max(500).optional(),
+    capabilities: z
+      .array(
+        z
+          .object({
+            title: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .max(8)
+      .optional(),
+    permissionSummary: z.string().min(1).max(500).optional(),
+    scopeLabels: z
+      .record(
+        z.string().min(1).max(1024),
+        z
+          .object({
+            label: z.string().min(1).max(160),
+            description: z.string().min(1).max(500),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict();
+export type IntegrationPresentation = z.infer<typeof IntegrationPresentation>;
+
 export const IntegrationDefinitionSummary = z
   .object({
     id: z.string().min(1).max(128),
@@ -8398,6 +9286,7 @@ export const IntegrationDefinitionSummary = z
         scopes: z.array(z.string().min(1).max(1024)).max(256),
       })
       .strict(),
+    presentation: IntegrationPresentation.optional(),
     facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();
@@ -8988,6 +9877,8 @@ export const Session = z.object({
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
   model: z.string(),
+  reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode,
   sandboxBackend: SandboxBackend,
   // The OS the session's box runs. Defaults to 'linux' (today's only OS).
   sandboxOs: SandboxOs,
@@ -9225,6 +10116,12 @@ export const SessionEventType = z.enum([
   "turn.superseded",
   "turn.recovery.requested",
   "turn.capacity_waiting",
+  // Compact, attempt-fenced user-visible worker preparation checkpoints. The
+  // payload phase is a closed enum and terminal events carry durationMs; no
+  // session-specific value is ever promoted into Prometheus labels.
+  "turn.startup.phase.started",
+  "turn.startup.phase.completed",
+  "turn.startup.phase.failed",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",
@@ -11364,6 +12261,8 @@ export const SessionControlResponse = z.object({
 });
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
+export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
+
 export const CreateSessionRequest = withVariableSetIdAlias(
   {
     /**
@@ -11387,10 +12286,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // agentInstructions rides, composed AFTER the workspace persona so it refines
     // it for this one session — how a host delivers per-agent-type prompts without
     // leaking them into the user-visible timeline (it is NEVER emitted as an
-    // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
-    // matches the codebase's largest free-form string convention (workspace
-    // variable set variable values). Absent ⇒ byte-identical to today.
-    instructions: z.string().trim().min(1).max(32768).optional(),
+    // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
+    // shared durable session-instruction contract. Absent ⇒ byte-identical to
+    // today.
+    instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     // Immutable prompt-policy role binding for matching one activated role
     // policy. This never derives from or grants a human workspace membership
     // role. Existing callers may continue to use normalized metadata.role as a
@@ -11473,9 +12372,14 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // permission. Credential headers are write-only: create responses and events
     // expose only SessionMcpServerMetadata.
     mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+    /** Explicit personal-connection grants for the initial accepted turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
-    // inside a session → "shared" with the creator's box, top-level → "new").
+    // inside a session → "shared" with the creator's box, top-level → "new"),
+    // except a named targetSandboxId is always an own-box create ("new") because
+    // a machine target is a different compute home. Explicit "shared"/{groupId}
+    // plus a machine target is a 422.
     //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
     //                from the worker-signed sessionId claim, never caller-supplied);
     //                top-level "shared" is a 422.
@@ -11515,6 +12419,14 @@ export const CreateSessionRequest = withVariableSetIdAlias(
       code: z.ZodIssueCode.custom,
       path: ["modelContext"],
       message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
+    });
+  }
+  if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["connectionAuthorities"],
+      message:
+        "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
     });
   }
 });
@@ -11715,6 +12627,8 @@ export const SessionUserMessagePayload = z
     // Header-value rotation only. URL/name/tool settings are immutable after
     // session create; persisted events expose metadata, never header values.
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    /** Explicit personal-connection grants for this exact logical turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
   })
   .strict()
   .superRefine(requireMessageTextOrAnnotations);
@@ -11760,6 +12674,8 @@ export const SteerSessionMessageRequest = z
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    /** Explicit personal-connection grants for this exact steered turn. */
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
   })
   .strict()
   .superRefine(requireMessageTextOrAnnotations);
@@ -11770,6 +12686,15 @@ export const SteerSessionMessageResponse = z.object({
   turn: SessionTurn,
 });
 export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
+
+export const SubmitComposerDraftResponse = z.object({
+  accepted: SessionEvent,
+  turn: SessionTurn,
+  draft: ComposerDraft,
+  interruptionCount: z.number().int().nonnegative(),
+  replay: z.boolean(),
+});
+export type SubmitComposerDraftResponse = z.infer<typeof SubmitComposerDraftResponse>;
 
 export const SessionBusMessage = z.object({
   workspaceId: z.string().uuid(),
@@ -12125,6 +13050,9 @@ export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStart
 export const DeviceEnrollmentApproveRequest = z.object({
   userCode: z.string().min(1).max(64),
   allowScreenControl: z.boolean().default(false),
+  // Human-approved machines are private by default. Workspace/organization
+  // publication is an explicit consent choice at this same loud boundary.
+  scope: ResourceAuthorityScope.default("user"),
 });
 export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
 
@@ -12197,6 +13125,8 @@ export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollRe
 // GET /enrollments — a workspace's machines (the Machines dashboard surface).
 export const EnrollmentSummary = z.object({
   id: z.string().uuid(),
+  scope: ResourceAuthorityScope,
+  generation: z.number().int().positive(),
   pubkey: z.string(),
   exposure: z.literal("whole-machine"),
   hasDisplay: z.boolean(),
@@ -12418,6 +13348,8 @@ export const MachineRuntimeCapabilities = z.object({
   desktop: z.boolean(),
   opStream: z.boolean(),
   browserBridge: z.boolean(),
+  operationResourcePolicy: z.boolean(),
+  operationCpuQuota: z.boolean(),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -12472,6 +13404,56 @@ export const UpdateMachineAgentResponse = z.object({
 });
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
 
+const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
+const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
+
+function operationPolicyShape(
+  value: {
+    memoryMaxBytes: number | null;
+    memoryHighBytes: number | null;
+    cpuMaxMillicores?: number | null | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    value.memoryMaxBytes !== null &&
+    value.memoryHighBytes !== null &&
+    value.memoryHighBytes > value.memoryMaxBytes
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["memoryHighBytes"],
+      message: "memoryHighBytes cannot exceed memoryMaxBytes",
+    });
+  }
+}
+
+/** Optional per-connection command resource policy. CPU is a period-independent
+ * millicore ratio; runners choose a documented representable cgroup period. Null
+ * values are unrestricted; revision is the optimistic concurrency fence. */
+export const MachineOperationPolicy = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores,
+    revision: z.number().int().nonnegative(),
+    updatedAt: z.string().nullable(),
+  })
+  .superRefine(operationPolicyShape);
+export type MachineOperationPolicy = z.infer<typeof MachineOperationPolicy>;
+
+export const UpdateMachineOperationPolicyRequest = z
+  .object({
+    memoryMaxBytes: OperationMemoryBytes,
+    memoryHighBytes: OperationMemoryBytes,
+    cpuMaxMillicores: OperationCpuMillicores.optional(),
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .superRefine(operationPolicyShape);
+export type UpdateMachineOperationPolicyRequest = z.infer<
+  typeof UpdateMachineOperationPolicyRequest
+>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12483,6 +13465,8 @@ export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentRespon
 export const MachineView = z.object({
   sandboxId: z.string(),
   enrollmentId: z.string().nullable(),
+  scope: ResourceAuthorityScope.default("workspace"),
+  generation: z.number().int().positive().default(1),
   name: z.string(),
   kind: MachineKind,
   state: MachineState,
@@ -12505,6 +13489,8 @@ export const MachineView = z.object({
   // Exact connected-agent build/capabilities and current update operation. Null
   // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
   runtime: MachineRuntime.nullable().default(null),
+  // Per-enrollment desired policy. Null for managed/session sandboxes.
+  operationPolicy: MachineOperationPolicy.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;
@@ -12988,7 +13974,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -13162,10 +14148,17 @@ export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
+export * from "./company-brain";
 export * from "./workspace-learning-policy";
+export * from "./workspace-learning-administration";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./company-brain-governed-writes";
+export * from "./governed-learning-evaluator";
+export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";
+export * from "./organization-membership-lifecycle";
+export * from "./remember";

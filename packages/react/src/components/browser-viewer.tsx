@@ -97,6 +97,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
     | undefined;
   /** Navigate to the exact linked ComputerSession; never a lookalike desktop. */
   onOpenComputer?: ((computerSessionId: string) => void) | undefined;
+  /** Restore and report the BrowserSession selected in this task's dock. */
+  initialBrowserSessionId?: string | null | undefined;
+  onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   /** Host-owned install/setup surface for attaching an existing Chrome profile.
    * The machine bridge remains discoverable even when this URL is omitted. */
   browserExtensionSetupUrl?: string | undefined;
@@ -141,6 +144,8 @@ export function BrowserViewer({
   renderEmpty,
   createLinkedComputer,
   onOpenComputer,
+  initialBrowserSessionId,
+  onBrowserSessionIdChange,
   browserExtensionSetupUrl,
   ...override
 }: BrowserViewerProps) {
@@ -161,11 +166,49 @@ export function BrowserViewer({
     () => registry.sessions.filter((session) => isLiveBrowser(session)),
     [registry.sessions],
   );
+  const attachedGenerationLoss = useMemo(
+    () => attachedChromeGenerationLoss(registry.sessions),
+    [registry.sessions],
+  );
+  const endedGenerationLossRef = useRef(new Set<string>());
+  const endStaleBrowser = registry.end;
+  useEffect(() => {
+    if (!enabled) return;
+    for (const session of registry.sessions) {
+      if (
+        session.lifecycle !== "lost" ||
+        session.failureCode !== "controller_transition_expired" ||
+        session.placement.kind !== "attached_device"
+      ) {
+        continue;
+      }
+      if (endedGenerationLossRef.current.has(session.id)) continue;
+      endedGenerationLossRef.current.add(session.id);
+      void endStaleBrowser(session.id).catch(() => {
+        endedGenerationLossRef.current.delete(session.id);
+      });
+    }
+  }, [enabled, endStaleBrowser, registry.sessions]);
+  const replacementChromeDevice = useMemo(() => {
+    if (!attachedGenerationLoss) return null;
+    return (
+      attached.devices.find((candidate) => candidate.id === attachedGenerationLoss.deviceId) ?? null
+    );
+  }, [attached.devices, attachedGenerationLoss]);
   const relevant = useMemo(
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
   );
-  const [selection, setSelection] = useState<BrowserSelection>(null);
+  const [selection, setSelection] = useState<BrowserSelection>(() =>
+    initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
+  );
+  const selectBrowserSession = useCallback(
+    (next: BrowserSelection) => {
+      setSelection(next);
+      onBrowserSessionIdChange?.(next?.sessionId ?? null);
+    },
+    [onBrowserSessionIdChange],
+  );
   const interventions = useInteractionInterventions({
     ...override,
     enabled,
@@ -200,11 +243,14 @@ export function BrowserViewer({
   useEffect(() => {
     if (previousSessionIdRef.current !== sessionId) {
       previousSessionIdRef.current = sessionId;
-      setSelection(null);
+      setSelection(
+        initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
+      );
     }
-  }, [sessionId]);
+  }, [initialBrowserSessionId, sessionId]);
 
   useEffect(() => {
+    if (!enabled || registry.loading) return;
     const selectedStillLive = liveSessions.some((session) => session.id === selection?.sessionId);
     // A manually selected workspace browser stays selected, but an unrelated
     // browser must never become the implicit browser for this agent. That made
@@ -212,15 +258,15 @@ export function BrowserViewer({
     if (selection?.pinned && selectedStillLive) return;
     const preferred = relevant[0] ?? null;
     if (!preferred) {
-      if (selection) setSelection(null);
+      if (selection) selectBrowserSession(null);
       return;
     }
     if (!selectedStillLive || !selection?.pinned) {
       if (selection?.sessionId !== preferred.id || selection.pinned) {
-        setSelection({ sessionId: preferred.id, pinned: false });
+        selectBrowserSession({ sessionId: preferred.id, pinned: false });
       }
     }
-  }, [liveSessions, relevant, selection]);
+  }, [enabled, liveSessions, registry.loading, relevant, selectBrowserSession, selection]);
 
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
@@ -509,7 +555,7 @@ export function BrowserViewer({
         if (createLinkedComputer) {
           try {
             linkedComputer = await createLinkedComputer(
-              `${browserName} computer`,
+              `${browserName} desktop`,
               device ? { kind: "attached_device", deviceId: device.id } : undefined,
             );
           } catch {
@@ -551,11 +597,11 @@ export function BrowserViewer({
               }
             : {}),
         });
-        setSelection({ sessionId: response.session.id, pinned: true });
+        selectBrowserSession({ sessionId: response.session.id, pinned: true });
         if (computerViewUnavailable) {
           onNotify?.({
             kind: "info",
-            message: "Browser opened. Computer view is unavailable on this placement.",
+            message: "Browser opened. Desktop view is unavailable on this placement.",
           });
         }
       })()
@@ -568,6 +614,7 @@ export function BrowserViewer({
       creating,
       notifyError,
       onNotify,
+      selectBrowserSession,
       profiles.identities,
       sessionId,
     ],
@@ -691,9 +738,15 @@ export function BrowserViewer({
           <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
             <Globe2Icon className="size-4.5" />
           </span>
-          <p className="mt-3 text-og-menu font-medium text-og-fg">No browser open</p>
+          <p className="mt-3 text-og-menu font-medium text-og-fg">
+            {attachedGenerationLoss
+              ? "Chrome reconnected—open a fresh browser/desktop."
+              : "No browser open"}
+          </p>
           <p className="mt-1 text-og-control leading-5 text-og-muted">
-            A browser appears here when this agent—or another agent in the workspace—opens one.
+            {attachedGenerationLoss
+              ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+              : "A browser appears here when this agent—or another agent in the workspace—opens one."}
           </p>
           <BrowserLaunchMenu
             attachedBridges={onlineAttachedBridges}
@@ -733,10 +786,12 @@ export function BrowserViewer({
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
         interventionCounts={interventionCounts}
-        onSelect={(browserSessionId) => setSelection({ sessionId: browserSessionId, pinned: true })}
+        onSelect={(browserSessionId) =>
+          selectBrowserSession({ sessionId: browserSessionId, pinned: true })
+        }
         onFollow={() => {
           const preferred = relevant[0];
-          if (preferred) setSelection({ sessionId: preferred.id, pinned: false });
+          if (preferred) selectBrowserSession({ sessionId: preferred.id, pinned: false });
         }}
         onCreate={createBrowser}
         onSaveProfile={saveProfileVersion}
@@ -830,7 +885,26 @@ export function BrowserViewer({
               return receipt;
             }}
             onReadClipboard={browser.readClipboard}
-            onReconnect={frames.reconnect}
+            onReconnect={
+              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+                ? () => {
+                    if (replacementChromeDevice) {
+                      createBrowser({ kind: "attached", device: replacementChromeDevice });
+                    }
+                  }
+                : frames.reconnect
+            }
+            reconnectLabel={
+              (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
+              replacementChromeDevice
+                ? "Open a fresh Connected Chrome"
+                : undefined
+            }
+            reconnectMessage={
+              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
+                ? "Chrome reconnected—open a fresh browser/desktop."
+                : undefined
+            }
             onError={(cause) => notifyError(cause, "Browser input failed.")}
           />
           <BrowserStatusBar
@@ -1749,6 +1823,8 @@ function BrowserViewport(props: {
   onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
   onReconnect: () => void;
+  reconnectLabel?: string | undefined;
+  reconnectMessage?: string | undefined;
   onError: (cause: unknown) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2119,6 +2195,8 @@ function BrowserViewport(props: {
           error={props.connectionError}
           onAction={(action) => enqueue(action, null)}
           onReconnect={props.onReconnect}
+          reconnectLabel={props.reconnectLabel}
+          reconnectMessage={props.reconnectMessage}
         />
       ) : null}
       {props.mutating ? (
@@ -2137,8 +2215,12 @@ function SemanticBrowserFallback(props: {
   error: Error | null;
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
+  reconnectLabel?: string | undefined;
+  reconnectMessage?: string | undefined;
 }) {
   const controlFailure = interactionControlFailureFromError(props.error);
+  const generationLoss =
+    Boolean(props.reconnectMessage) || isAttachedChromeGenerationLossError(props.error);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
   );
@@ -2155,16 +2237,18 @@ function SemanticBrowserFallback(props: {
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
-            {props.error
-              ? "Live view disconnected"
-              : props.supportsLiveFrames
-                ? browserConnectionLabel(props.connectionState)
-                : "Semantic browser"}
+            {generationLoss
+              ? "Chrome reconnected—open a fresh browser/desktop."
+              : props.error
+                ? "Live view disconnected"
+                : props.supportsLiveFrames
+                  ? browserConnectionLabel(props.connectionState)
+                  : "Semantic browser"}
           </p>
         </div>
-        {props.error ? (
+        {props.error || props.reconnectMessage ? (
           <p className="mt-2 text-og-control leading-5 text-og-muted">
-            {controlFailure?.message ?? props.error.message}
+            {props.reconnectMessage ?? controlFailure?.message ?? props.error?.message}
           </p>
         ) : null}
         {interactive.length > 0 ? (
@@ -2193,13 +2277,14 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error && props.supportsLiveFrames ? (
+        {props.error && props.supportsLiveFrames && (!generationLoss || props.reconnectLabel) ? (
           <button
             type="button"
             onClick={props.onReconnect}
             className="mt-3 text-og-control font-medium text-og-accent hover:underline"
           >
-            {controlFailure?.retryable === false ? "Try again" : "Reconnect"}
+            {props.reconnectLabel ??
+              (controlFailure?.retryable === false ? "Try again" : "Reconnect")}
           </button>
         ) : null}
       </div>
@@ -2247,10 +2332,10 @@ function BrowserStatusBar(props: {
           type="button"
           onClick={props.onOpenComputer}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg"
-          aria-label="Open this browser window in Computer"
+          aria-label="Open this browser window in Desktop"
         >
           <MonitorIcon className="size-3" />
-          Computer
+          Desktop
         </button>
       ) : null}
       <button
@@ -2831,6 +2916,23 @@ function sameOptionalBrowserFrame(left: BrowserFrame | null, right: BrowserFrame
 
 function isLiveBrowser(session: BrowserSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
+}
+
+function attachedChromeGenerationLoss(
+  sessions: readonly BrowserSession[],
+): { deviceId: string } | null {
+  const lost = sessions.find(
+    (session) =>
+      session.lifecycle === "lost" &&
+      session.failureCode === "controller_transition_expired" &&
+      session.placement.kind === "attached_device",
+  );
+  return lost?.placement.kind === "attached_device" ? { deviceId: lost.placement.deviceId } : null;
+}
+
+function isAttachedChromeGenerationLossError(error: Error | null): boolean {
+  if (!error) return false;
+  return /placement instance changed|controller authority changed/i.test(error.message);
 }
 
 function countInterventions(

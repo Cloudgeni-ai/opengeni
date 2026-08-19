@@ -116,6 +116,37 @@ describe("OpenGeniClient", () => {
     await expect(request).rejects.toHaveProperty("name", "AbortError");
   });
 
+  test("updateMachineOperationPolicy patches the exact revision-fenced contract", async () => {
+    const enrollmentId = "11111111-1111-4111-8111-111111111111";
+    const response = {
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: null,
+      cpuMaxMillicores: 1_500,
+      revision: 3,
+      updatedAt: "2026-08-14T10:00:00.000Z",
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+
+    expect(
+      await client.updateMachineOperationPolicy(WORKSPACE_ID, enrollmentId, {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
+        expectedRevision: 2,
+      }),
+    ).toEqual(response);
+    expect(requests[0]).toMatchObject({
+      method: "PATCH",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/machines/${enrollmentId}/operation-policy`,
+      body: JSON.stringify({
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 1_500,
+        expectedRevision: 2,
+      }),
+    });
+  });
+
   test("removeEnrollment posts the workspace-scoped idempotent removal contract", async () => {
     const enrollmentId = "11111111-1111-4111-8111-111111111111";
     const response: RemoveEnrollmentResponse = {
@@ -186,6 +217,7 @@ describe("OpenGeniClient", () => {
       toolsProvided: false,
       model: "gpt-5.4",
       reasoningEffort: "medium",
+      latencyMode: "standard",
       options: { sandboxBackend: "none" },
       updatedAt: "2026-07-20T01:02:03.000Z",
     };
@@ -201,6 +233,7 @@ describe("OpenGeniClient", () => {
         toolsProvided: false,
         model: draft.model,
         reasoningEffort: "medium",
+        latencyMode: "standard",
         options: { sandboxBackend: "none" },
       }),
     ).toEqual(draft as never);
@@ -217,7 +250,63 @@ describe("OpenGeniClient", () => {
       toolsProvided: false,
       model: "gpt-5.4",
       reasoningEffort: "medium",
+      latencyMode: "standard",
       options: { sandboxBackend: "none" },
+    });
+  });
+
+  test("submits one exact revision-fenced established-session draft", async () => {
+    const response = {
+      accepted: makeEvent(9),
+      turn: { id: "turn-9" },
+      draft: {
+        revision: 8,
+        text: "",
+        annotations: [],
+        resources: [],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        latencyMode: "priority",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: "2026-08-18T12:00:00.000Z",
+      },
+      interruptionCount: 0,
+      replay: false,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+
+    expect(
+      await client.submitComposerDraft(WORKSPACE_ID, SESSION_ID, {
+        expectedDraftRevision: 7,
+        clientEventId: "submit-draft-7",
+        delivery: "send",
+        text: "freeze exactly this",
+        annotations: [],
+        resources: [],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        latencyMode: "priority",
+        connectionAuthorities: [],
+      }),
+    ).toEqual(response as never);
+
+    expect(requests).toHaveLength(1);
+    expect([requests[0]!.method, requests[0]!.url]).toEqual([
+      "POST",
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/composer-draft/submit`,
+    ]);
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      expectedDraftRevision: 7,
+      clientEventId: "submit-draft-7",
+      delivery: "send",
+      text: "freeze exactly this",
+      annotations: [],
+      resources: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      connectionAuthorities: [],
     });
   });
 
@@ -863,6 +952,7 @@ describe("OpenGeniClient", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard",
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: null,
@@ -873,6 +963,7 @@ describe("OpenGeniClient", () => {
       resources: [],
       model: draft.model,
       reasoningEffort: draft.reasoningEffort,
+      latencyMode: draft.latencyMode,
     };
     const operations = [
       {

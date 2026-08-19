@@ -6,7 +6,7 @@ import {
   xaiSubscriptionFetch,
 } from "@opengeni/xai-subscription";
 
-import type { RuntimeMetricsHooks } from "./metrics";
+import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
@@ -14,11 +14,24 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
+import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
   runtimeMetricsHooks = hooks ?? null;
+}
+
+export function recordRuntimeMcpToolCallMetric(
+  outcome: McpToolCallOutcome,
+  startedAt: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
+  try {
+    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
+  } catch {
+    // Metrics emission must never affect an MCP call or rewrite its result.
+  }
 }
 
 /**
@@ -149,11 +162,14 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   return client;
 }
 
-function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
+export function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
+    // The attempt-local observer durably checkpoints provider dispatch before
+    // this process can place request bytes on the network.
+    await recordModelTransportStarted();
     const started = performance.now();
     try {
       const response = await inner(input, init);

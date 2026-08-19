@@ -1,4 +1,5 @@
 import {
+  getScheduledVariableSetExpectedGenerationForAttempt,
   advanceWorkspaceGeneration,
   verifyWorkspaceMutationSettlement,
   applySessionTurnSettlement,
@@ -6,8 +7,7 @@ import {
   claimSessionWorkForAttempt,
   applyCreditDebitUpToBalance,
   getBillingBalance,
-  getRigName,
-  getRigVersion,
+  materializeRigVersionForAttempt,
   getSandbox,
   getFilesForSubject,
   readActiveSandbox,
@@ -53,7 +53,7 @@ import {
   recordCodexAccountUsageWithWakeTargets,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
-  resolveWorkspaceMemoryBlock,
+  resolveCompanyBrainContextSelection,
   setCodexCredentialExhaustedWithWakeTargets,
   withSessionCodexCapacityMutation,
   countConsecutiveReactiveRotations,
@@ -62,6 +62,7 @@ import {
   recordModelCallFact,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
+  attachOpenSuffixToPendingToolCalls,
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
   isSessionCompactionRequested,
@@ -93,6 +94,7 @@ import {
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getLiveEnrollmentConnection,
+  assertPersonalMachineForAttempt,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
   getOrCreateCompanyProfileSnapshot,
@@ -103,6 +105,7 @@ import {
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
   withCodexAppsRequestAuthorization,
+  resolveSessionAttemptPersonalResources,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -110,6 +113,7 @@ import {
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
   type ApiIntegrationRuntime,
+  type CanonicalTurnStartupMilestoneReceipt,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -123,14 +127,14 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
-  compactMcpResultCustomDataRunState,
+  extractOpenSuffixFromRunState,
+  assertOpenSuffixResumable,
+  interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
-  appendPersistentSessionSettings,
-  appendSessionGoal,
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
@@ -158,6 +162,8 @@ import {
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   runOwnedSandboxSetup,
+  markModelPreparationFirstSandboxOperation,
+  recordModelPreparationMeasurement,
   RoutingMutationOutcomeUnknownError,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
@@ -192,6 +198,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  type ConnectorAttachmentMaterializationRequest,
   createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   renewSandboxProviderExpiration,
@@ -205,6 +212,7 @@ import {
 } from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
+import { materializeConnectorAttachmentsInChannel } from "./connector-attachments";
 import {
   allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -239,6 +247,7 @@ import {
   settingsWithWorkspaceGatewayCredential,
   withXaiSubscriptionProvider,
 } from "./capabilities";
+import { validateIncidentTelemetrySystemUpdateAuthority } from "./incident-telemetry-authority";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
@@ -299,7 +308,10 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
+  loadRigDefaultVariableSetEnvironment,
+  mergeRigDefaultVariableSetEnvironment,
   rigProviderImageContentHash,
+  resolveRigProviderImageForRun,
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
@@ -347,13 +359,11 @@ import {
 } from "./run-credentials";
 import { withFirstPartyTools } from "./goals";
 import {
-  mergeRigDefaultVariableSetEnvironment,
   rigProviderImageSourceImage,
   resolveWorkspacePackRuntime,
   resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
-  settingsWithRigProviderImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import {
@@ -417,6 +427,7 @@ import {
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
+  recordTurnStartupMilestone,
   recordTurnWorkerPreparationTotal,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
@@ -439,11 +450,9 @@ import {
 } from "./recording";
 import {
   collectRetainedScreenshotReceipts,
-  collectRetainedScreenshotRunStateReceipts,
   compactRetainedScreenshotHistory,
   compactRetainedScreenshotRunState,
   materializeRetainedScreenshotHistory,
-  materializeRetainedScreenshotRunState,
   sdkEventContainsInlineImage,
   retainComputerScreenshot,
   toolOutputContainsInlineImage,
@@ -454,8 +463,6 @@ import {
 import {
   assertGeneratedImageHistoryRetained,
   collectGeneratedImageReceipts,
-  collectGeneratedImageArtifactReceipts,
-  collectGeneratedImageRunStateArtifactReceipts,
   compactGeneratedImageHistory,
   compactGeneratedImageRunState,
   compactGeneratedImageSdkEvent,
@@ -463,7 +470,6 @@ import {
   generatedImagesFromHistory,
   isCompletedGeneratedImageSdkEvent,
   projectGeneratedImageHistoryForModel,
-  projectGeneratedImageRunStateForModel,
   retainGeneratedImage,
   type GeneratedImageReceipt,
   type GeneratedImageOutput,
@@ -472,9 +478,14 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
+import { interruptionCallIdsFromPause, settleOpenSuffixResumeIfNeeded } from "./open-suffix-resume";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
-import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
+import {
+  ChannelAPartialMutationError,
+  SandboxChannelAService,
+  type ChannelASession,
+} from "@opengeni/runtime/sandbox";
+import { createObjectStorage, retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
   sandboxRunAs,
@@ -482,10 +493,10 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
-  resolveWorkspaceMemoryPromptMode,
   resourceMountPath,
   VideoGenerationRejectedResult,
   type LatencyMode,
@@ -820,6 +831,16 @@ export function filterUnmaterializedSandboxFileDownloads(
   return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
+export function runtimeResourcesForTurn(
+  sessionResources: readonly ResourceRef[],
+  currentTurnResources: readonly ResourceRef[],
+): ResourceRef[] {
+  return mergeResourceRefs(
+    sessionResources.filter((resource) => resource.kind !== "file"),
+    [...currentTurnResources],
+  );
+}
+
 export function sandboxFileMaterializationOutcome(
   failures: readonly SandboxFileDownloadFailure[],
 ): "completed" | "failed" {
@@ -921,6 +942,22 @@ export function shouldRunTurnEndWorkspacePersistence(input: {
   cancellationRequested: boolean;
 }): boolean {
   return input.activityStatus !== "cancelled" && !input.cancellationRequested;
+}
+
+/**
+ * Periodic workspace snapshots protect work performed during a long-running
+ * turn. Before the first provider request reaches the wire there is no
+ * mid-turn agent work to protect; snapshotting platform setup at that point can
+ * instead make the request wait behind the snapshot's workspace-write fence.
+ */
+export function shouldStartPeriodicWorkspaceSnapshot(input: {
+  firstProviderRequestStarted: boolean;
+  snapshotInFlight: boolean;
+  turnEndCaptureInProgress: boolean;
+}): boolean {
+  return (
+    input.firstProviderRequestStarted && !input.snapshotInFlight && !input.turnEndCaptureInProgress
+  );
 }
 
 /**
@@ -1469,7 +1506,11 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
+) => Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+}>;
 
 export type ModelResponseEventState = {
   responseCount: number;
@@ -2107,16 +2148,13 @@ export function sandboxEstablishPolicyDecision(input: {
   lazyEnabled: boolean;
   machinePrimary: boolean;
   sandboxBackend: Settings["sandboxBackend"];
-  hasInitialRunCredentialMaterial: boolean;
+  hasRunCredentialResolver: boolean;
   generatedVideoFileCount: number;
   hasSignedFileResources: boolean;
 }): { policy: "eager" | "on-demand"; reason: TurnSandboxEstablishReason } {
   if (!input.lazyEnabled) return { policy: "eager", reason: "lazy_disabled" };
   if (input.machinePrimary) return { policy: "eager", reason: "machine_primary" };
   if (input.sandboxBackend === "none") return { policy: "eager", reason: "backend_none" };
-  if (input.hasInitialRunCredentialMaterial) {
-    return { policy: "eager", reason: "initial_run_credentials" };
-  }
   if (input.generatedVideoFileCount > 0) {
     return { policy: "eager", reason: "generated_video_files" };
   }
@@ -2127,7 +2165,40 @@ export function sandboxEstablishPolicyDecision(input: {
   if (input.hasSignedFileResources) {
     return { policy: "eager", reason: "signed_file_resources" };
   }
+  // Merely having a host run-credential resolver is not proof that this turn
+  // will use the sandbox. Resolve its attempt-bound material before model input
+  // so auth-needed context remains deterministic, but defer every sandbox
+  // write, lease, renewal, and cleanup action to the first-operation
+  // provisioner. The eager file paths above remain unchanged.
+  if (input.hasRunCredentialResolver) {
+    return { policy: "on-demand", reason: "initial_run_credentials_deferred" };
+  }
   return { policy: "on-demand", reason: "eligible" };
+}
+
+/**
+ * Repo-backed workspace skills bind into the first-request prompt-cache prefix
+ * (`WorkspaceSkillsCapability.instructions()` listDirs the live box). Starting
+ * the managed-box establish as soon as its inputs exist lets Modal create overlap
+ * tools/history/agent; `get()` still owns clone/setup after `buildAgent`.
+ *
+ * Do not flip those turns to eager: that serializes create BEFORE tools and
+ * increases first-token latency. Chat-only turns without a repository still
+ * never create a box. Portable `/compact` returns before this path. Connected
+ * Machines and `backend: none` have no managed Modal/docker create to overlap.
+ */
+export function shouldPrefetchManagedSandbox(input: {
+  establishPolicy: "eager" | "on-demand";
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+  hasRepositoryResources: boolean;
+}): boolean {
+  if (input.establishPolicy !== "on-demand") return false;
+  if (input.machinePrimary) return false;
+  if (input.groupBoxBackend === "none" || input.groupBoxBackend === "selfhosted") {
+    return false;
+  }
+  return input.hasRepositoryResources;
 }
 
 /**
@@ -2373,24 +2444,14 @@ export function shouldStartOnTurnRecording(params: {
 /**
  * Decide the EXPLICIT computer-use tool transport for THIS turn.
  *
- * The runtime's SDK-mirrored capability would otherwise pick hosted-vs-function
- * tools by string-sniffing the bound model instance's constructor name for
- * "ChatCompletions" (supportsStructuredToolOutputTransport). That is fragile: a
- * wrapped / proxied / minified model instance defeats the sniff and a
- * chat-completions provider would silently get the HOSTED `computer_use_preview`
- * tool it 400s on every turn. So the mode is decided HERE — the worker's model
- * resolution is the ONE place a provider's true wire identity is authoritative —
- * and threaded to the runtime as an explicit flag (buildAgent → computerToolMode):
- *   • codex-subscription → "function-image": the ChatGPT/Codex backend rejects
- *     hosted tool types but SEES structured `input_image` tool results.
- *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "disabled": it cannot
- *     receive a screenshot through a proven visual transport, so computer use fails
- *     closed instead of serializing the image as text.
- *   • Vercel Gateway providers → "disabled": their curated models support ordinary
- *     function tools and vision input, not OpenAI's hosted computer tool.
- *   • everything else — built-in Azure/OpenAI responses, registry "responses"
- *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
- *     null) — → "hosted": real Responses hosted-tool support.
+ * Computer-use is ordinary `computer_*` function tools bound to the live
+ * desktop. The worker picks the mode from the resolved provider so the runtime
+ * never string-sniffs the model instance:
+ *   • catalogue `inputModalities` must include `image`, or computer-use is off
+ *   • Responses wires (Azure/OpenAI, Gateway, Codex, legacy client) →
+ *     "function-image": screenshot results are structured `{type:'image'}`
+ *   • Chat Completions → "disabled": tool results on that wire are text, so a
+ *     screenshot would become a base64 string rather than an image the model sees
  *
  * Pure + exported so the mapping is unit-testable without a live turn.
  */
@@ -2401,7 +2462,7 @@ export function computerToolModeForTurn(
   } | null,
 ): ComputerToolMode {
   if (!resolvedModel) {
-    return "hosted"; // legacy built-in Responses client — real hosted support
+    return "function-image";
   }
   if (!modelSupportsImageInputForTurn(resolvedModel)) {
     return "disabled";
@@ -2409,16 +2470,10 @@ export function computerToolModeForTurn(
   if (resolvedModel.provider.kind === "codex-subscription") {
     return "function-image";
   }
-  if (
-    resolvedModel.provider.kind === "vercel-gateway-managed" ||
-    resolvedModel.provider.kind === "vercel-gateway-workspace"
-  ) {
-    return "disabled";
-  }
   if (resolvedModel.provider.api === "chat") {
     return "disabled";
   }
-  return "hosted";
+  return "function-image";
 }
 
 /** Gateway models do not advertise OpenAI's hosted apply_patch/view_image tool types. */
@@ -2462,6 +2517,23 @@ export function lazyToolTransportForTurn(
     return "openai_native";
   }
   return "generic_dispatch";
+}
+
+/** Only brand-new lazy-capable turns may overlap non-eager tool preparation. */
+export function shouldDeferNonEagerToolPreparation(args: {
+  lazyToolTransport: LazyToolTransport | null;
+  progressiveDisclosureEnabled: boolean;
+  artifactRuntimeAvailable: boolean;
+  triggerKind: "next" | "approval";
+  triggerType: string;
+}): boolean {
+  return Boolean(
+    args.lazyToolTransport &&
+    args.progressiveDisclosureEnabled &&
+    !args.artifactRuntimeAvailable &&
+    args.triggerKind === "next" &&
+    (args.triggerType === "user.message" || args.triggerType === "system.update.delivered"),
+  );
 }
 
 /**
@@ -2538,15 +2610,7 @@ export function modelSupportsImageInputForTurn(
   );
 }
 
-const LEGACY_INPUT_FILE_MEDIA_TYPES = [
-  "application/json",
-  "application/pdf",
-  "application/x-yaml",
-  "application/yaml",
-  "text/*",
-] as const;
-
-/** Image and file input are independent catalogue capabilities. */
+/** Image support is catalogue-driven; document bytes are never `input_file`. */
 export function modelAttachmentInputPolicyForTurn(
   resolvedModel: {
     provider: { api: ModelProviderApi };
@@ -2561,10 +2625,7 @@ export function modelAttachmentInputPolicyForTurn(
   const typedTransport = resolvedModel === null || resolvedModel.provider.api === "responses";
   return {
     supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
-    inputFileMediaTypes: typedTransport
-      ? (resolvedModel?.configured.capabilities?.inputFileMediaTypes ??
-        LEGACY_INPUT_FILE_MEDIA_TYPES)
-      : [],
+    inputFileMediaTypes: [],
   };
 }
 
@@ -2954,7 +3015,7 @@ export function createTurnSandboxProvisioner<T>(
     onAttemptSettled?: (attempt: TurnSandboxProvisionAttempt<T>) => Promise<void> | void;
     beforeCompleted?: (
       result: T,
-      settlement: Pick<TurnSandboxProvisionSettlement, "provisionId" | "internalAttempts">,
+      settlement: TurnSandboxProvisionSettlement,
     ) => Promise<void> | void;
     onCompleted?: (result: T, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
     onFailed?: (error: unknown, settlement: TurnSandboxProvisionSettlement) => Promise<void> | void;
@@ -3030,6 +3091,7 @@ export function createTurnSandboxProvisioner<T>(
             await options.beforeCompleted?.(result, {
               provisionId,
               internalAttempts,
+              durationMs: performance.now() - startedAt,
             });
             throwIfTurnOperationCancelled(options.signal);
             await options.onCompleted?.(result, {
@@ -3546,7 +3608,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // aggregates it together with every machine reached after a mid-turn swap.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
+    let firstModelPreparationNestedSandboxMs = 0;
+    const firstModelPreparationNestedSandboxPhases: Array<{
+      phase: "admission" | "provider" | "settlement" | "snapshot_wait";
+      outcome: "completed" | "failed";
+      durationSeconds: number;
+    }> = [];
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
+    let resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null = null;
+    let prefetchedManagedBox: Promise<ResumedTurnSandbox> | null = null;
+    let prefetchedManagedBoxResult: ResumedTurnSandbox | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
     // Platform setup (beforeAgentStart hooks + file materialization) execs against
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
@@ -3598,14 +3669,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       operation: string,
       mutation: () => Promise<T>,
+      observePhase?: (measurement: {
+        phase: "admission" | "provider" | "settlement" | "snapshot_wait";
+        outcome: "completed" | "failed";
+        durationSeconds: number;
+      }) => void,
     ): Promise<T> => {
+      const observeMutationPhase = (
+        phase: "admission" | "provider" | "settlement" | "snapshot_wait",
+        outcome: "completed" | "failed",
+        durationMs: number,
+      ): void => {
+        try {
+          observePhase?.({
+            phase,
+            outcome,
+            durationSeconds: Math.max(0, durationMs) / 1_000,
+          });
+        } catch {
+          // Diagnostics must never alter workspace mutation authority.
+        }
+      };
       // Connected machines are the user's own persistence and never dirty the
       // cloud home archive. Every persistable raw-session write batch is fenced
       // against the exact current lease/provider before the provider sees it.
-      if (sandbox.established.backendId === "selfhosted") return await mutation();
+      if (sandbox.established.backendId === "selfhosted") {
+        const providerStartedAt = performance.now();
+        let providerOutcome: "completed" | "failed" = "failed";
+        try {
+          const result = await mutation();
+          providerOutcome = "completed";
+          return result;
+        } catch (error) {
+          if (error instanceof ChannelAPartialMutationError) {
+            throw new RoutingMutationOutcomeUnknownError(
+              operation,
+              `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+              { cause: error },
+            );
+          }
+          throw error;
+        } finally {
+          observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+        }
+      }
       if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
         throw new Error("Workspace mutation attempted before exact turn sandbox admission");
       }
+      let admissionCaptureWaitMs = 0;
       const identity = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -3620,33 +3731,81 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         operation,
         captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
         ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
+        ...(observePhase
+          ? {
+              onCaptureWait: (observation: {
+                durationMs: number;
+                outcome: "completed" | "failed";
+              }) => {
+                admissionCaptureWaitMs += Math.max(0, observation.durationMs);
+                observeMutationPhase("snapshot_wait", observation.outcome, observation.durationMs);
+              },
+            }
+          : {}),
       };
-      const admission = await advanceWorkspaceGeneration(db, identity);
-      let result: T;
+      const admissionStartedAt = performance.now();
+      let admissionOutcome: "completed" | "failed" = "failed";
+      let admission: Awaited<ReturnType<typeof advanceWorkspaceGeneration>>;
       try {
-        result = await mutation();
-      } catch (providerError) {
+        admission = await advanceWorkspaceGeneration(db, identity);
+        admissionOutcome = "completed";
+      } finally {
+        observeMutationPhase(
+          "admission",
+          admissionOutcome,
+          Math.max(0, performance.now() - admissionStartedAt - admissionCaptureWaitMs),
+        );
+      }
+      const settleMutation = async (outcome: "resolved" | "rejected"): Promise<void> => {
+        const settlementStartedAt = performance.now();
+        let settlementOutcome: "completed" | "failed" = "failed";
         try {
           await verifyWorkspaceMutationSettlement(db, {
             ...identity,
             admission,
-            outcome: "rejected",
+            outcome,
           });
+          settlementOutcome = "completed";
+        } finally {
+          observeMutationPhase(
+            "settlement",
+            settlementOutcome,
+            performance.now() - settlementStartedAt,
+          );
+        }
+      };
+      let result: T;
+      const providerStartedAt = performance.now();
+      let providerOutcome: "completed" | "failed" = "failed";
+      try {
+        result = await mutation();
+        providerOutcome = "completed";
+      } catch (providerError) {
+        observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+        const partialMutation = providerError instanceof ChannelAPartialMutationError;
+        try {
+          await settleMutation(partialMutation ? "resolved" : "rejected");
         } catch (settlementError) {
           throw new RoutingMutationOutcomeUnknownError(
             operation,
-            `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+            partialMutation
+              ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+              : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
             { cause: settlementError },
+          );
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: providerError },
           );
         }
         throw providerError;
       }
+      observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
       try {
-        await verifyWorkspaceMutationSettlement(db, {
-          ...identity,
-          admission,
-          outcome: "resolved",
-        });
+        await settleMutation("resolved");
       } catch (settlementError) {
         throw new RoutingMutationOutcomeUnknownError(
           operation,
@@ -3689,6 +3848,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
+    // The heartbeat snapshot is mid-session durability, not first-request
+    // preparation. Keep it off the startup critical path until a provider
+    // request has actually reached its transport boundary.
+    let firstProviderRequestStarted = false;
     // Turn-end capture needs the lease heartbeat to keep its holder alive, but
     // must prevent that same timer from starting another periodic snapshot
     // while it reads. This gate separates those two responsibilities.
@@ -3734,6 +3897,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    let toolPreparationReady: Promise<void> | null = null;
+    let toolPreparationClosing = false;
     let codemodeDispatcher: CodemodeAttemptDispatcher | null = null;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
@@ -3814,6 +3979,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       warmBackend: Settings["sandboxBackend"] | undefined,
     ): void => {
+      if (leaseHeartbeatTimer) return;
       if (!sandboxHolderId || !sandboxGroupId) {
         return;
       }
@@ -3997,7 +4163,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
         const snapshotTurnId = turnId;
-        if (snapshotSession && snapshotTurnId && !snapshotInFlight && !turnEndCaptureInProgress) {
+        if (
+          snapshotSession &&
+          snapshotTurnId &&
+          shouldStartPeriodicWorkspaceSnapshot({
+            firstProviderRequestStarted,
+            snapshotInFlight: Boolean(snapshotInFlight),
+            turnEndCaptureInProgress,
+          })
+        ) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
@@ -4126,7 +4300,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // bytes merely for the following request-local projection to remove them.
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
-    const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
+    const generatedImageReceiptsCreatedThisTurn = new Map<string, GeneratedImageReceipt>();
+    const rememberGeneratedImageCreatedThisTurn = (receipt: GeneratedImageReceipt): void => {
+      generatedImageReceiptsCreatedThisTurn.set(receipt.artifact.artifactId, receipt);
+    };
     const videoGenerationAcceptancesByCallId = new Map<
       string,
       { operationId: string; requestDigest: string }
@@ -4148,12 +4325,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run(). Keep that exact session once the runtime exposes it so an image
     // generated later in the same model/tool loop can be copied immediately.
     let sdkOwnedSandboxSession: CodemodeTokenWriterSession | null = null;
+    // Session-home backend can stay docker while the active pointer is a
+    // Connected Machine. Sign downloads for the backend that will curl.
+    let sandboxFileDownloadBackend: Settings["sandboxBackend"] = modelRunSettings.sandboxBackend;
     const prepareGeneratedImageDownload = async (receipt: GeneratedImageReceipt) => {
       if (!objectStorage) {
         throw new Error("Generated image sandbox materialization requires object storage");
       }
       const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
-      const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+      const downloadStorage = objectStorageForSandboxDownloads(
+        modelRunSettings,
+        objectStorage,
+        sandboxFileDownloadBackend,
+      );
       const signed = await downloadStorage.createGetUrl({
         key: file.objectKey,
       });
@@ -4195,7 +4379,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const warnGeneratedImageMaterializationDeferred = (error: unknown): void => {
       // Generation and permanent retention are already durable. Never turn a
       // transient sandbox copy failure into a replay of paid provider work;
-      // an unmaterialized resource is retried on the next real sandbox.
+      // the receipt remains explicitly retrievable through workspace Files.
       observability.warn("Generated image sandbox materialization deferred", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "generated_image_materialization_deferred",
@@ -4209,18 +4393,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     ): Promise<boolean> => {
       try {
         const { file, download } = await prepareGeneratedImageDownload(receipt);
-        const cacheable = sandbox.established.backendId !== "selfhosted";
         if (generatedImageMaterializationCache?.instanceId !== sandbox.established.instanceId) {
-          const fileIds =
-            cacheable && sandboxGroupId
-              ? await getMaterializedSandboxFileResources(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sandboxGroupId,
-                  expectedEpoch: sandbox.leaseEpoch,
-                  instanceId: sandbox.established.instanceId,
-                })
-              : new Set<string>();
+          const fileIds = sandboxGroupId
+            ? await getMaterializedSandboxFileResources(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId,
+                expectedEpoch: sandbox.leaseEpoch,
+                instanceId: sandbox.established.instanceId,
+              })
+            : new Set<string>();
           generatedImageMaterializationCache = {
             instanceId: sandbox.established.instanceId,
             fileIds,
@@ -4237,7 +4419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ),
         );
         generatedImageMaterializationCache.fileIds.add(file.id);
-        if (cacheable && sandboxGroupId) {
+        if (sandboxGroupId) {
           await markSandboxFileResourcesMaterialized(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -4270,10 +4452,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
     };
     const materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
-      if (modelRunSettings.sandboxBackend === "none") return false;
-      // Never allocate a cloud sandbox merely because durable history contains
-      // an image. If this turn later needs one, its ready hook copies every
-      // known receipt before releasing the first operation.
+      if (sandboxFileDownloadBackend === "none") return false;
+      // Never allocate a cloud sandbox merely because an image was retained.
+      // If this turn later needs one, the ready hook copies this-turn receipts
+      // before releasing the first operation.
       if (resolvedSandbox && setupBoxSession) {
         return await materializeGeneratedImageInSandbox(receipt, resolvedSandbox, setupBoxSession);
       }
@@ -4314,10 +4496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         output,
       });
       generatedImageReceiptsByProviderItemId.set(output.providerItemId, retained.receipt);
-      generatedImageReceiptsByArtifactId.set(
-        retained.receipt.artifact.artifactId,
-        retained.receipt,
-      );
+      rememberGeneratedImageCreatedThisTurn(retained.receipt);
       await materializeGeneratedImage(retained.receipt);
       return retained.receipt;
     };
@@ -4325,7 +4504,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       history: Array<Record<string, unknown>>,
     ): Promise<void> => {
       collectGeneratedImageReceipts(history, generatedImageReceiptsByProviderItemId);
-      collectGeneratedImageArtifactReceipts(history, generatedImageReceiptsByArtifactId);
       for (const output of generatedImagesFromHistory(
         history,
         generatedImageReceiptsByProviderItemId,
@@ -4345,8 +4523,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
         generatedImageReceiptsByProviderItemId,
       );
-    const compactApprovalRunState = (serialized: string): string =>
-      compactMcpResultCustomDataRunState(compactMediaRunState(serialized));
     // Explicit image-producing tools cross the durable session-media boundary.
     // Incidental frames returned by click/scroll actions remain unretained; an
     // intentional computer_screenshot or view_image result must never be lost
@@ -4416,22 +4592,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sessionId: input.sessionId,
         history,
       });
-    };
-    const materializeScreenshotRunState = async (serialized: string) => {
-      collectRetainedScreenshotRunStateReceipts(serialized, retainedScreenshotReceiptsByCallId);
-      collectGeneratedImageRunStateArtifactReceipts(serialized, generatedImageReceiptsByArtifactId);
-      const withScreenshots = modelCanReceiveRetainedSessionImages
-        ? await materializeRetainedScreenshotRunState({
-            db,
-            objectStorage,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            serialized,
-          })
-        : serialized;
-      return projectGeneratedImageRunStateForModel(
-        compactGeneratedImageRunState(withScreenshots, generatedImageReceiptsByProviderItemId),
-      );
     };
     let providerArtifactCandidates: Awaited<
       ReturnType<typeof turnInput>
@@ -4544,8 +4704,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let latestCodexUsage: CodexUsageHeaderSnapshot | null = null;
     let lastCodexRequestOpaqueArtifacts: readonly string[] = [];
     // Hoisted for same-turn recovery: an approval-decision rerun must
-    // re-enter through the approval resume path (its frozen mid-flight state
-    // only exists in the RunState blob), never through a swapped trigger.
+    // re-enter through the suffix/history resume path, never through a swapped trigger.
     let triggerType: string | null = null;
     try {
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
@@ -4555,6 +4714,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         dispatchId,
         trigger: input.trigger,
+        validatePendingSystemUpdateAuthority: async (tx, update) =>
+          await validateIncidentTelemetrySystemUpdateAuthority({
+            db: tx,
+            settings,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            update,
+          }),
       });
       if (claim.action === "unclaimed") {
         activityStatus = "unclaimed";
@@ -4728,6 +4895,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
       const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
+      let startupMilestoneBackend: Settings["sandboxBackend"] = turn.sandboxBackend;
+      const recordCanonicalStartupMilestones = (
+        receipts: CanonicalTurnStartupMilestoneReceipt[],
+      ): void => {
+        for (const receipt of receipts) {
+          recordTurnStartupMilestone(observability, {
+            milestone: receipt.milestone,
+            provider: turnExecutionPolicy.providerId,
+            backend: startupMilestoneBackend,
+            outcome: receipt.outcome,
+            durationSeconds: receipt.durationMs / 1_000,
+          });
+        }
+      };
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -4762,6 +4943,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
         }
+        recordCanonicalStartupMilestones(appended.canonicalStartupMilestones);
         if (inputs.length > 0) {
           turnLifecycleMetricsFor(observability).progress(turnId!);
         }
@@ -4858,6 +5040,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "cancelled";
           return false;
         }
+        recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
         turnLifecycleMetricsFor(observability).progress(turnId!);
         if (recordingForSettlement && preparedRecording) {
           if (result.recordingMutationApplied) {
@@ -5480,13 +5663,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           if (effectiveCodexCredentialId) {
             const priorAccountId = sessionCodex?.lastCredentialId ?? null;
-            await recordSessionActiveCodexCredential(
-              db,
-              input.workspaceId,
-              input.sessionId,
-              effectiveCodexCredentialId,
-            );
             if (priorAccountId !== effectiveCodexCredentialId) {
+              await recordSessionActiveCodexCredential(
+                db,
+                input.workspaceId,
+                input.sessionId,
+                effectiveCodexCredentialId,
+              );
               const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
               await publish([
                 {
@@ -5752,40 +5935,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const runtimePreparationStartedAt = performance.now();
 
-      // Pack-scoped runtime: enabled packs may declare the sandbox image this
-      // workspace's sessions run in and skills for the sandbox skill index.
-      // Resolved after turn.started so a composition conflict (two enabled
-      // packs declaring images) fails the turn with its plain error instead
-      // of failing the activity opaquely.
-      const [packRuntime, installedSkillRuntime] = await Promise.all([
-        resolveWorkspacePackRuntime(db, input.workspaceId),
-        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
-      ]);
-      // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
-      // at create). Everything rig-derived below (image precedence, env default
-      // sets, setup hook, credential hooks, doctrine, lease/telemetry stamps) is
-      // gated on this being non-null, so a rig-less session takes a zero-cost
-      // branch that is byte-for-byte today's turn. Both ids are frozen together;
-      // a defensive null (e.g. a since-deleted rig FK-nulled the columns) simply
-      // runs the turn rig-less.
-      const rigVersion =
-        session.rigId && session.rigVersionId
-          ? await getRigVersion(db, input.workspaceId, session.rigId, session.rigVersionId)
-          : null;
-      // Rig display name for the doctrine block + setup events/errors (only on a
-      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
-      // gone). Loaded once here alongside the version.
-      const rigName =
-        rigVersion && session.rigId
-          ? ((await getRigName(db, input.workspaceId, session.rigId)) ?? "rig")
-          : null;
-      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
-      rigId = session.rigId ?? "";
-      rigVersionId = session.rigVersionId ?? "";
-      // Workspace tier of the agent-persona resolution (session > workspace >
-      // deployment default). null means the workspace has no override, so the
-      // runtime falls back to runSettings.agentInstructionsTemplate (the
-      // deployment default, byte-identical to the historical preamble).
+      // Personal Rig/Variable Set authority is revalidated immediately before
+      // any direct resource read. The database function is a zero-row no-op for
+      // sessions with no personal resources, preserving the legacy workspace path.
+      await resolveSessionAttemptPersonalResources(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        attemptId: input.attemptId,
+      });
+
       const governanceClaims = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -5794,8 +5953,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot] =
-        await Promise.all([
+      // Independent workspace reads after the personal-resource fence. Pack,
+      // installed skills, frozen rig, governance snapshots, and model policy do
+      // not depend on each other. Company-brain selection still waits on the
+      // snapshots below so its receipt stays exact.
+      const [
+        packRuntime,
+        installedSkillRuntime,
+        rigMaterialization,
+        [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
+        workspaceModelPolicy,
+      ] = await Promise.all([
+        resolveWorkspacePackRuntime(db, input.workspaceId),
+        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
+        session.rigId && session.rigVersionId
+          ? (async () =>
+              await materializeRigVersionForAttempt(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: turn.executionGeneration,
+              }))()
+          : Promise.resolve(null),
+        Promise.all([
           getWorkspace(db, input.workspaceId),
           getOrCreateCompanyProfileSnapshot(db, governanceClaims),
           getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
@@ -5803,14 +5986,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (error instanceof PreferenceRegistryInitiatorError) return null;
             throw error;
           }),
-        ]);
+        ]),
+        getWorkspaceModelPolicy(db, input.workspaceId),
+      ]);
+      const rigVersion = rigMaterialization?.version ?? null;
+      // Rig display name for the doctrine block + setup events/errors (only on a
+      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
+      // gone). Loaded once here alongside the version.
+      const rigName = rigVersion ? (rigMaterialization?.rigName ?? "rig") : null;
+      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
+      rigId = session.rigId ?? "";
+      rigVersionId = session.rigVersionId ?? "";
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
-      const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
-      const memoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace.settings);
+      const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
+      const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
+      const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-      const companyProfileIncluded =
-        memoryPromptMode === "legacy_standing" || session.nestedAgentDepth === 0;
+      const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
       const workspaceGovernance = renderWorkspaceGovernanceContext(
         {
           companyProfile: companyProfileSnapshot,
@@ -5823,13 +6016,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
-      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const workspaceMemory = contextSelection.workspaceMemory;
       const buildCompanyBrainContributionReceiptFor = (
         skillActivations: Parameters<
           typeof buildCompanyBrainContributionReceipt
         >[0]["skillActivations"],
       ) =>
         buildCompanyBrainContributionReceipt({
+          contextSelectionReceiptId: contextSelection.receipt.id,
           attemptId: input.attemptId,
           turnId: turn.id,
           nestedAgentDepth: session.nestedAgentDepth,
@@ -5863,11 +6057,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ),
         rigVersion?.image ?? null,
       );
-      const providerImageSettings = await settingsWithRigProviderImage(
+      const providerImageSelection = await resolveRigProviderImageForRun(
         logicalSandboxSettings,
         rigVersion,
         turn.sandboxBackend,
       );
+      const providerImageSettings = providerImageSelection.settings;
+      const verifiedRigProviderImageId =
+        providerImageSelection.reason === "selected"
+          ? (providerImageSelection.imageId ?? undefined)
+          : undefined;
       const baseRunSettings = {
         // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
         // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
@@ -5919,32 +6118,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const supportsImageInput = modelInputPolicy.supportsImageInput;
       modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
-        db,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: fileAuthoritySubjectId,
-        },
         modelInputPolicy,
         objectStorage
           ? async (file) => {
-              await requireFileForSubject(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-                fileId: file.id,
-              });
-              return await objectStorage.getFileBytes(file);
+              const object = await retryWhileMissing(async () =>
+                objectStorage.getObjectBytes(file.objectKey),
+              );
+              if (!object) throw new Error("attachment object is missing");
+              return object.bytes;
             }
           : undefined,
       );
-      const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
-        projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
+      const modelHistoryProjector = async (
+        items: Array<Record<string, unknown>>,
+        projectionOptions?: Parameters<typeof attachmentProjector>[1],
+      ) =>
+        projectModelInputForCapabilities(
+          await attachmentProjector(items, projectionOptions),
+          modelInputPolicy,
+        );
       const generatedImageHistoryProjector = async (
         items: Array<Record<string, unknown>>,
       ): Promise<Array<Record<string, unknown>>> => {
         collectGeneratedImageReceipts(items, generatedImageReceiptsByProviderItemId);
-        collectGeneratedImageArtifactReceipts(items, generatedImageReceiptsByArtifactId);
         return projectGeneratedImageHistoryForModel(items);
       };
       const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
@@ -5972,7 +6168,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the attribution source even if an injected test runtime returns no
       // concrete resolved model. Fail-loud, never a silent remap.
       {
-        const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
         if (workspaceModelPolicy) {
           const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
             providerId: turnExecutionPolicy.providerId,
@@ -6098,6 +6293,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   lastCodexRequestOpaqueArtifacts = fingerprints;
                 },
                 onModelRequestDiagnostic: (event) => {
+                  if (event.phase === "started") firstProviderRequestStarted = true;
                   if (
                     event.phase === "started" &&
                     firstModelRequestPreparationStartedAt !== null &&
@@ -6152,6 +6348,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   let auditOutcome: "completed" | "failed" = "completed";
                   try {
                     await publish([
+                      ...(shouldRecordStartedAudit && firstModelRequestPreparationStartedAt !== null
+                        ? [
+                            {
+                              type: "turn.startup.phase.completed" as const,
+                              payload: {
+                                phase: "model_preparation",
+                                durationMs: Math.max(
+                                  0,
+                                  Math.round(
+                                    performance.now() - firstModelRequestPreparationStartedAt,
+                                  ),
+                                ),
+                              },
+                            },
+                          ]
+                        : []),
                       {
                         type: "agent.model.request",
                         payload: {
@@ -6207,6 +6419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           onModelRequestDiagnostic: (event) => {
             const requestKey = `${event.requestId}:${event.transportAttempt}`;
             if (event.phase === "started") {
+              firstProviderRequestStarted = true;
               modelRequestLifecycleMetricsFor(observability).start(
                 requestKey,
                 "supergrok-subscription",
@@ -6276,6 +6489,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let auditOutcome: "completed" | "failed" = "completed";
             try {
               await publish([
+                ...(shouldRecordStartedAudit && firstModelRequestPreparationStartedAt !== null
+                  ? [
+                      {
+                        type: "turn.startup.phase.completed" as const,
+                        payload: {
+                          phase: "model_preparation",
+                          durationMs: Math.max(
+                            0,
+                            Math.round(performance.now() - firstModelRequestPreparationStartedAt),
+                          ),
+                        },
+                      },
+                    ]
+                  : []),
                 {
                   type: "agent.model.request",
                   payload: {
@@ -6474,30 +6701,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const remoteV2CompactionNeedsAgentPrefix =
         Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
       if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
-        const persistentSessionSettings = {
-          titleIsSet: Boolean(session.title?.trim()),
-        };
         const compactionInstructions = appendWorkspaceMemory(
-          appendPersistentSessionSettings(
-            appendSessionGoal(
-              appendSessionInstructions(
-                appendWorkspaceGovernance(
-                  composeAgentInstructions(
-                    structuredWorkspacePolicyActive
-                      ? modelRunSettings.agentInstructionsTemplate
-                      : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
-                    undefined,
-                    rigVersion && rigName
-                      ? { name: rigName, version: rigVersion.version }
-                      : undefined,
-                  ),
-                  workspaceGovernance ?? undefined,
-                ),
-                session.instructions ?? undefined,
+          appendSessionInstructions(
+            appendWorkspaceGovernance(
+              composeAgentInstructions(
+                structuredWorkspacePolicyActive
+                  ? modelRunSettings.agentInstructionsTemplate
+                  : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
+                undefined,
+                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
               ),
-              turn.goalSnapshot,
+              workspaceGovernance ?? undefined,
             ),
-            persistentSessionSettings,
+            session.instructions ?? undefined,
           ),
           workspaceMemory ?? undefined,
         );
@@ -6624,6 +6840,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
 
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
+      // Repositories remain durable workspace inputs. File attachments do not:
+      // only files attached to this exact turn enter the sandbox manifest and
+      // eager materialization path. Historical file ids remain in canonical
+      // history/session metadata and are recoverable through the Files MCP.
+      const runtimeResources = runtimeResourcesForTurn(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
       // whose stored tools predate this). The server registration is then
@@ -6633,11 +6854,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // sessions follow the current configured MCP set,
       // while explicit, inherited-fixed, and legacy sessions remain narrowed
       // to their stored materialized allow-list.
+      const scheduledEffectiveMcpServerIds = (() => {
+        const value =
+          turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
+            ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
+            : null;
+        return Array.isArray(value) && value.every((id) => typeof id === "string")
+          ? [...new Set(value)].sort()
+          : null;
+      })();
+      const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
       const resolvedToolPolicy = resolveSessionToolPolicy({
         toolPolicy: session.toolPolicy,
-        sessionTools: session.tools,
-        availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
-        defaultMcpServerIds: defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+        sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
+        availableMcpServerIds: scheduledEffectiveMcpServerIds
+          ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
+          : [...currentMcpServerIds],
+        defaultMcpServerIds:
+          scheduledEffectiveMcpServerIds ??
+          defaultSessionMcpServerIds(capabilitySettings.mcpServers),
       });
       const mcpAvailabilityNote = unavailableMcpOperationalContext({
         droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
@@ -6645,49 +6880,99 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const effectivePolicyTools = resolvedToolPolicy.toolRefs;
       const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-      // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
-      // `sandboxSecrets` provider when bound; unset → today's local decrypt.
+      // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
+      // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
+      // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
+      // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
+      // additionally require the causal human frozen into the admitted turn.
       const connectionScope = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       };
-      const workspaceVariableSet = await waitForTurnOperation(
-        loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          session.variableSetId,
-          connectionCredentials?.sandboxSecrets,
-        ),
-        cancellationSignal,
-        undefined,
-      );
-      variableSetId = workspaceVariableSet?.id ?? "";
-      // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
-      // variable sets and layer them BELOW the session's own set — the session's
-      // values WIN on any key collision. Loaded through the SAME host-secrets
-      // provider path as the session set (embedded-topology parity). Precedence
-      // WITHIN the rig defaults is listed order (a later set overrides an earlier
-      // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
-      // VERSION is frozen per session, so the SET of default variable sets is
-      // fixed for the session's life — the merged manifest env is therefore stable
-      // across the session's turns (the same guarantee the session's own variable
-      // set already relies on), keeping validateNoEnvironmentDelta empty.
+      const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
+      let workspaceVariableSet: Awaited<
+        ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
+      > = null;
       const rigDefaultEnvironmentValues: Record<string, string> = {};
-      for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await waitForTurnOperation(
-          loadWorkspaceEnvironmentForRunWithCredentials(
-            db,
-            runSettings,
-            connectionScope,
-            rigDefaultVariableSetId,
-            connectionCredentials?.sandboxSecrets,
-          ),
+      if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0) {
+        const variableSetAuthority = {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: turn.executionGeneration,
+          initiator: turn.initiator,
+          initiatingHumanSubjectId: fileAuthoritySubjectId,
+        };
+        // A scheduled attempt may materialize only the exact generation frozen
+        // on its accepted occurrence; ordinary turns resolve to null.
+        const expectedVariableSetGeneration = async (
+          candidateVariableSetId: string,
+        ): Promise<number | null> =>
+          await getScheduledVariableSetExpectedGenerationForAttempt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
+            initiatingHumanSubjectId: fileAuthoritySubjectId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+            variableSetId: candidateVariableSetId,
+          });
+        workspaceVariableSet = await waitForTurnOperation(
+          (async () =>
+            loadWorkspaceEnvironmentForRunWithCredentials(
+              db,
+              runSettings,
+              connectionScope,
+              session.variableSetId,
+              variableSetAuthority,
+              connectionCredentials?.sandboxSecrets,
+              session.variableSetId && connectionCredentials?.sandboxSecrets
+                ? { expectedGeneration: await expectedVariableSetGeneration(session.variableSetId) }
+                : {},
+            ))(),
           cancellationSignal,
           undefined,
         );
-        Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
+        // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
+        // variable sets and layer them BELOW the session's own set — the session's
+        // values WIN on any key collision. Loaded through the SAME host-secrets
+        // provider path as the session set (embedded-topology parity). Precedence
+        // WITHIN the rig defaults is listed order (a later set overrides an earlier
+        // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
+        // VERSION is frozen per session, so the SET of default variable sets is
+        // fixed for the session's life — the merged manifest env is therefore stable
+        // across the session's turns (the same guarantee the session's own variable
+        // set already relies on), keeping validateNoEnvironmentDelta empty.
+        Object.assign(
+          rigDefaultEnvironmentValues,
+          await loadRigDefaultVariableSetEnvironment(
+            rigDefaultVariableSetIds,
+            async (rigDefaultVariableSetId) =>
+              await waitForTurnOperation(
+                (async () =>
+                  loadWorkspaceEnvironmentForRunWithCredentials(
+                    db,
+                    runSettings,
+                    connectionScope,
+                    rigDefaultVariableSetId,
+                    variableSetAuthority,
+                    connectionCredentials?.sandboxSecrets,
+                    connectionCredentials?.sandboxSecrets
+                      ? {
+                          expectedGeneration:
+                            await expectedVariableSetGeneration(rigDefaultVariableSetId),
+                        }
+                      : {},
+                  ))(),
+                cancellationSignal,
+                undefined,
+              ),
+          ),
+        );
       }
+      variableSetId = workspaceVariableSet?.id ?? "";
       // Session set wins collisions with the rig defaults (explicit precedence).
       const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
         rigDefaultEnvironmentValues,
@@ -6727,7 +7012,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
           },
           activeSandboxPointer,
-          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          (sandboxId) =>
+            getSandbox(
+              db,
+              fileAuthoritySubjectId
+                ? {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    subjectId: fileAuthoritySubjectId,
+                  }
+                : input.workspaceId,
+              sandboxId,
+            ),
           publish
             ? async (events) => {
                 await publish!(events);
@@ -6768,6 +7064,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings.sandboxBackend === "selfhosted" && !machinePrimary
           ? settings.sandboxBackend
           : runSettings.sandboxBackend;
+      startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
+      sandboxFileDownloadBackend = startupMilestoneBackend;
+      const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
       const sandboxCreationBackend: Settings["sandboxBackend"] =
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
@@ -6796,6 +7095,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               cancellationSignal,
               undefined,
             );
+      const establishDecision = sandboxEstablishPolicyDecision({
+        lazyEnabled: lazyProvisionEnabled(settings),
+        machinePrimary,
+        sandboxBackend: runSettings.sandboxBackend,
+        hasRunCredentialResolver: runCredentialResolver !== null,
+        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
+        hasSignedFileResources:
+          requiresSignedFileResourceDownloads(
+            runSettings,
+            activeSandboxBackend ?? groupBoxBackend,
+          ) && turn.resources.some((resource) => resource.kind === "file"),
+      });
+      const establishPolicy = establishDecision.policy;
+      recordTurnSandboxEstablishPolicy(observability, {
+        policy: establishDecision.policy,
+        reason: establishDecision.reason,
+        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
+      });
+      // Resolve once before model preparation so partial/auth-needed host state
+      // is available as bounded model context and reconnect UI even when an
+      // on-demand turn never provisions a box. Resolution alone performs no
+      // sandbox write or renewal; both paths reuse this exact material and the
+      // lazy path materializes it only inside its first-operation single-flight.
       const initialRunCredentialMaterial = runCredentialResolver
         ? await waitForTurnOperation(
             runCredentialResolver.resolve({
@@ -6816,32 +7138,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? runCredentialModelNote(initialRunCredentialMaterial)
         : undefined;
       throwIfTurnOperationCancelled(cancellationSignal);
-      await waitForTurnOperation(
-        ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
-        cancellationSignal,
-        undefined,
-      );
-      const establishDecision = sandboxEstablishPolicyDecision({
-        lazyEnabled: lazyProvisionEnabled(settings),
-        machinePrimary,
-        sandboxBackend: runSettings.sandboxBackend,
-        // Resolved run credentials must be written to one exact leased sandbox
-        // before agent execution. A warm active pointer can bypass the lazy
-        // provisioner entirely, which previously skipped materialization.
-        hasInitialRunCredentialMaterial: initialRunCredentialMaterial !== null,
-        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
-        hasSignedFileResources:
-          requiresSignedFileResourceDownloads(
-            runSettings,
-            activeSandboxBackend ?? groupBoxBackend,
-          ) && turnResources.some((resource) => resource.kind === "file"),
-      });
-      const establishPolicy = establishDecision.policy;
-      recordTurnSandboxEstablishPolicy(observability, {
-        policy: establishDecision.policy,
-        reason: establishDecision.reason,
-        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-      });
+      await Promise.all([
+        waitForTurnOperation(
+          ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
+          cancellationSignal,
+          undefined,
+        ),
+        activeSandboxBackend !== "selfhosted"
+          ? assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)
+          : Promise.resolve(),
+        assertFileResourcesRemainAuthorized(
+          db,
+          input.accountId,
+          input.workspaceId,
+          fileAuthoritySubjectId,
+          turn.resources,
+        ),
+      ]);
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -6861,16 +7174,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
-      if (activeSandboxBackend !== "selfhosted") {
-        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
-      }
-      await assertFileResourcesRemainAuthorized(
-        db,
-        input.accountId,
-        input.workspaceId,
-        fileAuthoritySubjectId,
-        turnResources,
-      );
       const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
         await assertGitHubTokenMintSelectionAuthorized(
           db,
@@ -6977,6 +7280,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               expiresAt: sandboxGitTokenExpiresAt ?? {},
             }
           : undefined;
+      // Lazy cloud provision mints the run-scoped git token while Modal create
+      // runs. Chat-only turns never call get(), so this stays unstarted there.
+      let runGitCredentialsMint: Promise<MintedRunGitCredentials | undefined> | undefined;
+      const startRunGitCredentialsMint = (): Promise<MintedRunGitCredentials | undefined> => {
+        if (activeSandboxBackend === "selfhosted") {
+          return Promise.resolve(undefined);
+        }
+        runGitCredentialsMint ??= waitForTurnOperation(
+          mintRunGitCredentials(runSettings, turnResources, {
+            scope: connectionScope,
+            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+            gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
+          }),
+          cancellationSignal,
+          undefined,
+        );
+        return runGitCredentialsMint;
+      };
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
@@ -7178,6 +7500,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
+        initialMaterial: NormalizedRunCredentialMaterial | null,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!runCredentialResolver) return;
@@ -7195,7 +7518,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return targetSandbox;
         };
 
-        if (!initialRunCredentialMaterial) {
+        if (!initialMaterial) {
           await runWorkspaceMutationForSandbox(
             requireTargetSandbox(),
             "runCredentialClear",
@@ -7263,14 +7586,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         };
 
-        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
         const seed =
           initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
             ? await runCredentialResolver.resolve({
                 purpose: "provision",
                 forceRefresh: true,
               })
-            : initialRunCredentialMaterial;
+            : initialMaterial;
         await write(seed, true);
         if (runCredentialRenewalClosed) return;
         const controller = startRunCredentialRenewalLoop({
@@ -7356,6 +7679,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // backend back to the deployment default cloud backend so swap-away / flag-off
           // degrade to a genuine cloud box exactly like today (home=modal did).
           if (machinePrimary) {
+            if (activeSandboxRecord!.scope === "user") {
+              if (!fileAuthoritySubjectId) {
+                throw new Error("personal machine use requires an initiating human subject");
+              }
+              const authorized = await assertPersonalMachineForAttempt(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration: turn.executionGeneration,
+                enrollmentId: activeSandboxRecord!.enrollmentId!,
+              });
+              if (!authorized) {
+                throw new Error("personal Connected Machine use was not admitted for this turn");
+              }
+            }
             // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
             // establish OR lease the managed home box. The active-sandbox pointer is
             // the machine route's own epoch fence; the managed-home lease separately
@@ -7367,7 +7708,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // one indexed lookup, and the flag off keeps this path byte-identical.
             const machineEnrollment = await getLiveEnrollmentConnection(
               db,
-              input.workspaceId,
+              activeSandboxRecord!.workspaceId,
               activeSandboxRecord!.enrollmentId!,
             );
             const machineOpStream =
@@ -7383,6 +7724,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
               {
                 workspaceId: input.workspaceId,
+                controlWorkspaceId: activeSandboxRecord!.workspaceId,
                 agentId: activeSandboxRecord!.enrollmentId!,
                 // An offline machine must not fail turn admission. Bind an
                 // intentionally unserved token so the model receives the normal
@@ -7390,6 +7732,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // claimed process instance.
                 connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
                 opStream: machineOpStream,
+                operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
+                  memoryMaxBytes: null,
+                  memoryHighBytes: null,
+                  cpuMaxMillicores: null,
+                  revision: 0,
+                  updatedAt: null,
+                },
+                operationResourcePolicySupported:
+                  machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
+                operationCpuQuotaSupported:
+                  machineEnrollment?.agentCapabilities.operationCpuQuota === true,
+                ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
+                  ? {
+                      personalMachineAttempt: {
+                        accountId: input.accountId,
+                        subjectId: fileAuthoritySubjectId,
+                        sessionId: input.sessionId,
+                        turnId: turn.id,
+                        attemptId: input.attemptId,
+                        executionGeneration,
+                      },
+                    }
+                  : {}),
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
                 ...(transientCodemodeEnvironment
@@ -7423,6 +7788,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 {
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
+                  resourceAccountId: input.accountId,
+                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+                  ...(fileAuthoritySubjectId
+                    ? {
+                        personalMachineAttempt: {
+                          accountId: input.accountId,
+                          subjectId: fileAuthoritySubjectId,
+                          turnId: turn.id,
+                          attemptId: input.attemptId,
+                          executionGeneration,
+                        },
+                      }
+                    : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -7460,59 +7838,169 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // but the lease acquire + box establish + setup move behind the routing
             // proxy's first default-pointer op. A chat-only turn never calls it, so
             // no lease row, no provider box, no warm-meter interval.
+            //
+            // A repository still forces that first default-pointer op before HTTP
+            // (workspace-skill catalog in Agent.instructions). Start create now and
+            // join it at get(); do not await here or we serialize Modal before tools.
+            if (sandboxHolderId && sandboxGroupId) {
+              const lazyHolderId = sandboxHolderId;
+              const lazyGroupId = sandboxGroupId;
+              resumeManagedGroupBox = () =>
+                resumeBoxForTurn(
+                  {
+                    db,
+                    settings: runSettings,
+                    logicalFallbackSettings: logicalSandboxSettings,
+                    cancellationSignal: sandboxResumeSignal,
+                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                    onSandboxLost: publishSandboxLost,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sandboxGroupId: lazyGroupId,
+                    sessionId: input.sessionId,
+                    backend: groupBoxBackend,
+                    os: session.sandboxOs,
+                    environment: sandboxEnvironment,
+                    ...(groupBoxImage
+                      ? {
+                          image: groupBoxImage,
+                        }
+                      : {}),
+                    // The lazy acquire must enforce the same frozen rig authority
+                    // as the eager acquire; otherwise a warm box for another rig
+                    // can bypass the shared-state conflict/rotation fence.
+                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                  },
+                  "turn",
+                  lazyHolderId,
+                );
+              if (
+                shouldPrefetchManagedSandbox({
+                  establishPolicy,
+                  machinePrimary,
+                  groupBoxBackend,
+                  hasRepositoryResources: turnResources.some(
+                    (resource) => resource.kind === "repository",
+                  ),
+                })
+              ) {
+                startRunGitCredentialsMint();
+                const started = waitForTurnOperation(
+                  resumeManagedGroupBox(),
+                  sandboxResumeSignal,
+                  releaseLateSandbox,
+                );
+                const joined = started.catch((error) => {
+                  if (isLazySandboxProvisionRetryable(error)) {
+                    prefetchedManagedBox = null;
+                  }
+                  throw error;
+                });
+                prefetchedManagedBox = joined;
+                void joined.then(
+                  (box) => {
+                    if (sandboxResumeSignal.aborted) return;
+                    startLeaseHeartbeat(box, activeSandboxBackend ?? groupBoxBackend);
+                  },
+                  () => undefined,
+                );
+              }
+            }
           } else {
-            resolvedSandbox = await waitForTurnOperation(
-              resumeBoxForTurn(
+            await publish!(
+              [
                 {
-                  db,
-                  settings: runSettings,
-                  logicalFallbackSettings: logicalSandboxSettings,
-                  cancellationSignal: sandboxResumeSignal,
-                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                  onSandboxLost: publishSandboxLost,
+                  type: "sandbox.operation.started",
+                  payload: { name: "sandbox.provision" },
                 },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sandboxGroupId: session.sandboxGroupId,
-                  sessionId: input.sessionId,
-                  // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-                  // is not machine-primary resumes a real cloud group box (the
-                  // deployment default), never a "selfhosted" box (which would throw
-                  // for lack of a bound agentId).
-                  backend: groupBoxBackend,
-                  os: session.sandboxOs,
-                  environment: sandboxEnvironment,
-                  // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
-                  // this run resolves. The lease stamps it + conflicts on a live shared box
-                  // running a DIFFERENT image (solo → durable rotation; N-holders →
-                  // SandboxImageConflictError surfaced as an actionable turn error). Prefer
-                  // the explicit Modal image ref, else the docker image. The selfhosted branch
-                  // (establishSelfhostedTurnSession) NEVER passes
-                  // an image — B3 lives only on this Modal else-branch.
-                  ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                    ? {
-                        image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                      }
-                    : {}),
-                  // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-                  // conflicts on a live shared box set up under a different rig (solo
-                  // durable rotation / N-holders SandboxRigConflictError). Omitted for a
-                  // rig-less turn -> never stamped or enforced (shares exactly as today).
-                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-                },
-                "turn",
-                managedOwnership!.holderId,
-              ),
-              sandboxResumeSignal,
-              releaseLateSandbox,
+              ],
+              true,
             );
+            try {
+              resolvedSandbox = await waitForTurnOperation(
+                resumeBoxForTurn(
+                  {
+                    db,
+                    settings: runSettings,
+                    logicalFallbackSettings: logicalSandboxSettings,
+                    cancellationSignal: sandboxResumeSignal,
+                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                    onSandboxLost: publishSandboxLost,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sandboxGroupId: session.sandboxGroupId,
+                    sessionId: input.sessionId,
+                    // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                    // is not machine-primary resumes a real cloud group box (the
+                    // deployment default), never a "selfhosted" box (which would throw
+                    // for lack of a bound agentId).
+                    backend: groupBoxBackend,
+                    os: session.sandboxOs,
+                    environment: sandboxEnvironment,
+                    // IMAGE IS SHARED STATE (B3): the container image
+                    // this run resolves. The lease stamps it + conflicts on a live shared box
+                    // running a DIFFERENT image (solo → durable rotation; N-holders →
+                    // SandboxImageConflictError surfaced as an actionable turn error). Select
+                    // the image for the actual group-box backend; a configured Modal image must
+                    // never override a Docker run. The selfhosted branch
+                    // (establishSelfhostedTurnSession) NEVER passes
+                    // an image — B3 lives only on this managed-box branch.
+                    ...(groupBoxImage
+                      ? {
+                          image: groupBoxImage,
+                        }
+                      : {}),
+                    // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                    // conflicts on a live shared box set up under a different rig (solo
+                    // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                    // rig-less turn -> never stamped or enforced (shares exactly as today).
+                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                  },
+                  "turn",
+                  managedOwnership!.holderId,
+                ),
+                sandboxResumeSignal,
+                releaseLateSandbox,
+              );
+            } catch (error) {
+              await publish!(
+                [
+                  {
+                    type: "sandbox.operation.failed",
+                    payload: {
+                      name: "sandbox.provision",
+                      error: error instanceof Error ? error.message : String(error),
+                    },
+                  },
+                ],
+                true,
+              );
+              throw error;
+            }
             setupBoxSession = resolvedSandbox.established.session;
             // Durable box-lifecycle events (sandbox-file-persistence observability):
             // record every box transition in session_events so the NEXT box loss is
             // attributable from the DB alone — worker logs rotate within hours, which
             // left both 2026-07-06 incidents without a durable trace. Best-effort.
             await publishSandboxLifecycleEvents(resolvedSandbox);
+            await publish!(
+              [
+                {
+                  type: "sandbox.operation.completed",
+                  payload: {
+                    name: "sandbox.provision",
+                    ...(resolvedSandbox.established.origin
+                      ? { origin: resolvedSandbox.established.origin }
+                      : {}),
+                  },
+                },
+              ],
+              true,
+            );
             // M7 hot-swap: when the selfhosted feature is on, wrap the established
             // group box in the STABLE routing proxy before it is injected NON-OWNED
             // into the run. The SDK binds to this ONE object once and calls its
@@ -7542,6 +8030,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 {
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
+                  resourceAccountId: input.accountId,
+                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+                  ...(fileAuthoritySubjectId
+                    ? {
+                        personalMachineAttempt: {
+                          accountId: input.accountId,
+                          subjectId: fileAuthoritySubjectId,
+                          turnId: turn.id,
+                          attemptId: input.attemptId,
+                          executionGeneration,
+                        },
+                      }
+                    : {}),
                   environment: sandboxEnvironment,
                   ...(transientCodemodeEnvironment
                     ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -7593,7 +8094,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               input.accountId,
               input.workspaceId,
               fileAuthoritySubjectId,
-              turnResources,
+              turn.resources,
               activeSandboxBackend ?? groupBoxBackend,
             ),
             cancellationSignal,
@@ -7609,7 +8110,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             backend: activeSandboxBackend ?? groupBoxBackend,
             outcome: fileResolutionOutcome,
             durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
-            count: turnResources.length,
+            count: turn.resources.length,
           });
         }
       })();
@@ -7618,7 +8119,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const generatedVideoDownloads: SandboxFileDownload[] = [];
       if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
-        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        const downloadStorage = objectStorageForSandboxDownloads(
+          modelRunSettings,
+          objectStorage,
+          sandboxFileDownloadBackend,
+        );
         for (const file of requiredGeneratedVideoFiles) {
           const signed = await downloadStorage.createGetUrl({
             key: file.objectKey,
@@ -7661,6 +8166,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rootSessionId: mcpCredentialRootSessionId,
         attemptId: input.attemptId,
         turn,
+        observability,
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
@@ -7825,8 +8331,63 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
         count: turnTools.length,
       });
+      await publish!([
+        {
+          type: "turn.startup.phase.started",
+          payload: { phase: "tools" },
+        },
+      ]);
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
+      const progressiveDisclosureEnabled =
+        lazyToolTransport === "codex_native"
+          ? runSettings.codexToolSearchEnabled
+          : runSettings.lazyToolSearchEnabled;
+      const deferNonEagerToolPreparation = shouldDeferNonEagerToolPreparation({
+        lazyToolTransport,
+        progressiveDisclosureEnabled,
+        artifactRuntimeAvailable: sandboxArtifactRuntime.available,
+        triggerKind: input.trigger.kind,
+        triggerType,
+      });
+      const materializeConnectorAttachments = async (
+        request: ConnectorAttachmentMaterializationRequest,
+      ) => {
+        throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
+        let sandbox = resolvedSandbox;
+        if (!sandbox && turnSandboxProvisioner) {
+          sandbox = await turnSandboxProvisioner.get();
+        }
+        const sessionForImport = (lazyOwnedSandbox?.session ??
+          sandbox?.established.session ??
+          sdkOwnedSandboxSession) as ChannelASession | null;
+        if (!sessionForImport) {
+          throw new Error("Connector attachment sandbox is unavailable");
+        }
+        const runAs = sandboxRunAs(runSettings);
+        const channel = new SandboxChannelAService({
+          session: sessionForImport,
+          workspaceRoot: "/workspace",
+          leaseEpoch: sandbox?.leaseEpoch ?? 0,
+          emit: async (events) => {
+            await publish?.(events, true);
+          },
+          ...(runAs ? { runAs } : {}),
+        });
+        return await materializeConnectorAttachmentsInChannel(channel, request, {
+          runMutation: async (mutation) => {
+            if (sandbox && !routingOn) {
+              return await runWorkspaceMutationForSandbox(
+                sandbox,
+                "connectorAttachmentMaterialization",
+                mutation,
+              );
+            }
+            return await mutation();
+          },
+        });
+      };
       try {
         preparedTools = await waitForTurnOperation(
           runtime.prepareTools(runSettings, turnTools, {
@@ -7845,7 +8406,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(codexAppsAuth ? { codexAppsAuth } : {}),
             resolveCredential,
             onAuthNeeded: publishToolAuthNeeded,
+            materializeConnectorAttachments,
             localMcpServers,
+            ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
                 phase: `tool_${measurement.phase}`,
@@ -7896,21 +8459,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         toolPreparationOutcome = "failed";
         throw error;
       } finally {
+        const toolPreparationDurationMs = performance.now() - toolPreparationStartedAt;
         recordTurnStartupPhase(observability, {
           phase: "tool_preparation",
           provider: turnExecutionPolicy.providerId,
           backend: activeSandboxBackend ?? groupBoxBackend,
           outcome: toolPreparationOutcome,
-          durationSeconds: (performance.now() - toolPreparationStartedAt) / 1_000,
+          durationSeconds: toolPreparationDurationMs / 1_000,
           count: turnTools.length,
         });
+        await publish!([
+          {
+            type:
+              toolPreparationOutcome === "completed"
+                ? "turn.startup.phase.completed"
+                : "turn.startup.phase.failed",
+            payload: {
+              phase: "tools",
+              durationMs: Math.max(0, Math.round(toolPreparationDurationMs)),
+            },
+          },
+        ]);
       }
       const postToolPreparationStartedAt = performance.now();
-      if (turnId && preparedTools.attemptToolEnvironment) {
+      const activatePreparedToolEnvironment = (
+        tools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>>,
+      ): void => {
+        if (
+          toolPreparationClosing ||
+          !turnId ||
+          !tools.attemptToolEnvironment ||
+          codemodeDispatcher
+        ) {
+          return;
+        }
         codemodeDispatcher = new CodemodeAttemptDispatcher(
           db,
           bus,
-          preparedTools.attemptToolEnvironment,
+          tools.attemptToolEnvironment,
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -7922,6 +8508,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           cancellationSignal,
         );
         codemodeDispatcher.start();
+      };
+      if (preparedTools.ready) {
+        toolPreparationReady = preparedTools.ready.then((tools) => {
+          activatePreparedToolEnvironment(tools);
+        });
+      } else {
+        activatePreparedToolEnvironment(preparedTools);
       }
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
@@ -8035,7 +8628,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   codexContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
-                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                rememberGeneratedImageCreatedThisTurn(receipt);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8069,7 +8662,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   xaiContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
-                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                rememberGeneratedImageCreatedThisTurn(receipt);
                 await materializeGeneratedImage(receipt);
                 return receipt;
               },
@@ -8104,7 +8697,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 toolCallId,
                 ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
               });
-              generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+              rememberGeneratedImageCreatedThisTurn(receipt);
               await materializeGeneratedImage(receipt);
               return receipt;
             },
@@ -8332,16 +8925,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const agentConstructionStartedAt = performance.now();
         let agentConstructionOutcome: "completed" | "failed" = "completed";
         try {
-          return runtime.buildAgent(modelRunSettings, turnResources, {
+          return runtime.buildAgent(modelRunSettings, runtimeResources, {
             reasoningEffort: turn.reasoningEffort,
             latencyMode: turnExecutionPolicy.latencyMode,
             ...(serviceTier ? { serviceTier } : {}),
             ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
             humanInputEnabled: agentHumanInputEnabled,
             genesisTitleHint: isGenesisTurn,
-            persistentSessionSettings: {
-              titleIsSet: Boolean(session.title?.trim()),
-            },
             sandboxEnvironment,
             ...(preparedTools.attemptToolCatalog
               ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
@@ -8404,6 +8994,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...imageGenerationOption,
             ...videoGenerationOption,
             lazyToolTransport,
+            ...(toolPreparationReady ? { toolPreparationReady } : {}),
             supportsImageInput,
             inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
             ...(resolvedModel
@@ -8420,17 +9011,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   // typed input_image content. Chat wires have no proven typed image
                   // result transport and therefore receive no view_image tool.
                   structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
-                  // EXPLICIT computer-use tool transport, derived from the resolved provider's
-                  // authoritative wire identity (codex → function-image, chat → disabled,
-                  // responses → hosted) so the runtime never string-sniffs the model instance's
-                  // constructor name. See {@link computerToolModeForTurn}.
+                  // EXPLICIT computer-use tool transport. See {@link computerToolModeForTurn}.
                   computerToolMode: computerToolModeForTurn(resolvedModel),
                   ...(promptCacheKey ? { promptCacheKey } : {}),
                 }
               : // LEGACY global-client fallback (resolveTurnModel returned null → the model
                 // is not in the registry, served by the built-in OpenAI/Azure Responses
-                // client). That backend has real hosted support, so pin computerToolMode to
-                // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
+                // client). Pin computerToolMode to function-image EXPLICITLY rather than
+                // leaving the runtime to sniff the instance.
                 {
                   computerToolMode: computerToolModeForTurn(null),
                   promptCacheKey: input.sessionId,
@@ -8457,7 +9045,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
             ...(workspaceGovernance ? { workspaceGovernance } : {}),
             ...(workspaceMemory ? { workspaceMemory } : {}),
-            goalSnapshot: turn.goalSnapshot,
             // Per-session persona tier (session > workspace > deployment default).
             // Composed system-level AFTER the workspace persona so it refines it for
             // this one session; absent ⇒ byte-identical to today's composition.
@@ -8485,6 +9072,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             ),
                             definition: rigVersion,
                           }),
+                          ...(verifiedRigProviderImageId
+                            ? { verifiedProviderImageId: verifiedRigProviderImageId }
+                            : {}),
                         },
                       }
                     : {}),
@@ -8514,8 +9104,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       }
       if (establishPolicy === "on-demand" && sandboxHolderId && sandboxGroupId) {
-        const lazyHolderId = sandboxHolderId;
-        const lazyGroupId = sandboxGroupId;
         const agentDefaultManifest = (agent as { defaultManifest?: unknown }).defaultManifest;
         if (!agentDefaultManifest) {
           throw new Error("Lazy sandbox provisioning requires a SandboxAgent defaultManifest");
@@ -8523,109 +9111,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const lazyClient = {
           backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
         } as EstablishedSandboxSession["client"];
+        let lazySandboxEstablishmentSettled = false;
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
             throwIfTurnCancelled();
-            const lazyGitCredentials =
-              activeSandboxBackend === "selfhosted"
-                ? undefined
-                : await mintRunGitCredentials(runSettings, turnResources, {
-                    scope: connectionScope,
-                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-                    gitCredentials: connectionCredentials?.gitCredentials,
-                    authorizeGitHubTokenMint,
-                  });
-            const lazyGitTokens = lazyGitCredentials?.gitTokens;
-            const lazyCodemodeToken = sandboxCodemodeToken
-              ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-              : undefined;
-            const provisioned = await resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                onSandboxLost: publishSandboxLost,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: lazyGroupId,
-                sessionId: input.sessionId,
-                backend: groupBoxBackend,
-                os: session.sandboxOs,
-                environment: sandboxEnvironment,
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                  ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                    }
-                  : {}),
-                // The lazy acquire must enforce the same frozen rig authority
-                // as the eager acquire; otherwise a warm box for another rig
-                // can bypass the shared-state conflict/rotation fence.
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              lazyHolderId,
-            );
+            if (!resumeManagedGroupBox) {
+              throw new Error("Lazy sandbox provisioning requires a managed group-box resume");
+            }
+            startRunGitCredentialsMint();
+            const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox());
             await publishSandboxLifecycleEvents(provisioned);
-            await attachRunCredentialRenewal(
-              provisioned.established.session as RunCredentialCommandSession,
-              provisioned,
-            );
-            const provisionedSetupSession = initialRunCredentialMaterial
-              ? withRunCredentialsSession(
-                  provisioned.established.session as object,
-                  input.sessionId,
-                )
-              : provisioned.established.session;
-            await runWorkspaceMutationForSandbox(
-              provisioned,
-              "lazyOwnedSandboxSetup",
-              async () =>
-                await runOwnedSandboxSetup(
-                  agent,
-                  provisioned.established.session as never,
-                  provisionedSetupSession as never,
-                  {
-                    settings: runSettings,
-                    environment: sandboxEnvironment,
-                    onRuntimeEvent: async (event) => {
-                      await publish?.([{ type: event.type, payload: event.payload }], true);
-                    },
-                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                    ...(lazyGitCredentials?.bindings
-                      ? {
-                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                        }
-                      : {}),
-                    ...(lazyCodemodeToken
-                      ? {
-                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                        }
-                      : {}),
-                    ...(toolCancellationFenceRef.current
-                      ? {
-                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            toolCancellationFenceRef.current,
-                          ),
-                        }
-                      : {}),
-                  },
-                ),
-            );
-            await attachCodemodeTokenRenewal(
-              provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
-              provisioned,
-            );
-            await attachGitCredentialRenewal(
-              provisioned.established.session as GitCredentialTokenWriterSession,
-              lazyGitCredentials,
-              provisioned,
-            );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
             // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
@@ -8669,25 +9165,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 durationSeconds: durationMs / 1_000,
               });
             },
-            beforeCompleted: async (provisioned) => {
+            beforeCompleted: async (provisioned, settlement) => {
               throwIfTurnOperationCancelled(sandboxResumeSignal);
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
-              // `get()` does not release the first routed sandbox operation
-              // until this hook returns. Materialize durable generated images
-              // here so that operation can use their advertised paths without
-              // racing a best-effort background copy.
-              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
-                await materializeGeneratedImageInSandbox(
-                  receipt,
-                  provisioned,
-                  provisioned.established.session,
-                );
-              }
-              throwIfTurnOperationCancelled(sandboxResumeSignal);
-            },
-            onCompleted: async (provisioned, settlement) => {
+              // This durable completion and its logical metric close at actual box
+              // establishment. Credential, rig, repository, and file preparation below
+              // must never be attributed to "Starting sandbox" or provision latency.
               await publish?.(
                 [
                   {
@@ -8721,8 +9206,92 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 internalAttempts: settlement.internalAttempts,
                 durationSeconds: settlement.durationMs / 1_000,
               });
+              lazySandboxEstablishmentSettled = true;
+
+              const lazyGitCredentials =
+                activeSandboxBackend === "selfhosted"
+                  ? undefined
+                  : await startRunGitCredentialsMint();
+              const lazyGitTokens = lazyGitCredentials?.gitTokens;
+              const lazyCodemodeToken = sandboxCodemodeToken
+                ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
+                : undefined;
+              await attachRunCredentialRenewal(
+                provisioned.established.session as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
+                provisioned,
+              );
+              const provisionedSetupSession = initialRunCredentialMaterial
+                ? withRunCredentialsSession(
+                    provisioned.established.session as object,
+                    input.sessionId,
+                  )
+                : provisioned.established.session;
+              await runWorkspaceMutationForSandbox(
+                provisioned,
+                "lazyOwnedSandboxSetup",
+                async () =>
+                  await runOwnedSandboxSetup(
+                    agent,
+                    provisioned.established.session as never,
+                    provisionedSetupSession as never,
+                    {
+                      settings: runSettings,
+                      environment: sandboxEnvironment,
+                      onRuntimeEvent: async (event) => {
+                        await publish?.([{ type: event.type, payload: event.payload }], true);
+                      },
+                      ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                      ...(lazyGitCredentials?.bindings
+                        ? {
+                            gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                          }
+                        : {}),
+                      ...(lazyCodemodeToken
+                        ? {
+                            codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                          }
+                        : {}),
+                      ...(toolCancellationFenceRef.current
+                        ? {
+                            commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                              toolCancellationFenceRef.current,
+                            ),
+                          }
+                        : {}),
+                    },
+                  ),
+                (measurement) => {
+                  if (firstModelRequestPreparationRecorded) return;
+                  firstModelPreparationNestedSandboxMs += measurement.durationSeconds * 1_000;
+                  firstModelPreparationNestedSandboxPhases.push(measurement);
+                },
+              );
+              await attachCodemodeTokenRenewal(
+                provisioned.established.session as CodemodeTokenWriterSession,
+                lazyCodemodeToken?.expiresAt,
+                provisioned,
+              );
+              await attachGitCredentialRenewal(
+                provisioned.established.session as GitCredentialTokenWriterSession,
+                lazyGitCredentials,
+                provisioned,
+              );
+              // `get()` does not release the first routed sandbox operation
+              // until this hook returns. Only images created during this exact
+              // turn can require deferred delivery here; historical images stay
+              // as durable receipts and are restored explicitly when requested.
+              for (const receipt of generatedImageReceiptsCreatedThisTurn.values()) {
+                await materializeGeneratedImageInSandbox(
+                  receipt,
+                  provisioned,
+                  provisioned.established.session,
+                );
+              }
+              throwIfTurnOperationCancelled(sandboxResumeSignal);
             },
             onFailed: async (error, settlement) => {
+              if (lazySandboxEstablishmentSettled) return;
               const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
               await publish?.(
                 [
@@ -8773,6 +9342,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
+            resourceAccountId: input.accountId,
+            ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
+            ...(fileAuthoritySubjectId
+              ? {
+                  personalMachineAttempt: {
+                    accountId: input.accountId,
+                    subjectId: fileAuthoritySubjectId,
+                    turnId: turn.id,
+                    attemptId: input.attemptId,
+                    executionGeneration,
+                  },
+                }
+              : {}),
             environment: sandboxEnvironment,
             ...(transientCodemodeEnvironment
               ? { transientExecEnvironment: transientCodemodeEnvironment }
@@ -8794,6 +9376,84 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sandboxGroupId: session.sandboxGroupId,
               backend: groupBoxBackend,
             },
+            onFirstOperation: (measurement) => {
+              if (firstModelRequestPreparationRecorded) return;
+              markModelPreparationFirstSandboxOperation(measurement.durationMs / 1_000);
+
+              for (const nested of firstModelPreparationNestedSandboxPhases) {
+                if (nested.phase === "snapshot_wait") continue;
+                recordModelPreparationMeasurement({
+                  phase:
+                    nested.phase === "admission"
+                      ? "sandbox_workspace_mutation_admission"
+                      : nested.phase === "provider"
+                        ? "sandbox_workspace_mutation_provider"
+                        : "sandbox_workspace_mutation_settlement",
+                  outcome: nested.outcome,
+                  durationSeconds: nested.durationSeconds,
+                });
+              }
+
+              const resolution = measurement.phases.resolution;
+              if (resolution) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_first_routed_resolution_other",
+                  outcome: resolution.outcome,
+                  durationSeconds:
+                    Math.max(0, resolution.durationMs - firstModelPreparationNestedSandboxMs) /
+                    1_000,
+                });
+              }
+
+              const routedPhaseNames = [
+                ["mutationAdmission", "sandbox_first_routed_mutation_admission"],
+                ["providerOperation", "sandbox_first_routed_provider_operation"],
+                ["mutationSettlement", "sandbox_first_routed_mutation_settlement"],
+              ] as const;
+              for (const [phaseName, metricPhase] of routedPhaseNames) {
+                const phase = measurement.phases[phaseName];
+                if (!phase) continue;
+                recordModelPreparationMeasurement({
+                  phase: metricPhase,
+                  outcome: phase.outcome,
+                  durationSeconds: phase.durationMs / 1_000,
+                });
+              }
+
+              const nestedSnapshotPhases = firstModelPreparationNestedSandboxPhases.filter(
+                (phase) => phase.phase === "snapshot_wait",
+              );
+              const routedSnapshot = measurement.phases.snapshotWait;
+              const snapshotWaitMs =
+                nestedSnapshotPhases.reduce(
+                  (total, phase) => total + phase.durationSeconds * 1_000,
+                  0,
+                ) + (routedSnapshot?.durationMs ?? 0);
+              if (snapshotWaitMs > 0) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_snapshot_wait",
+                  outcome:
+                    routedSnapshot?.outcome === "failed" ||
+                    nestedSnapshotPhases.some((phase) => phase.outcome === "failed")
+                      ? "failed"
+                      : "completed",
+                  durationSeconds: snapshotWaitMs / 1_000,
+                });
+              }
+
+              const routedMeasuredMs = Object.values(measurement.phases).reduce(
+                (total, phase) => total + (phase?.durationMs ?? 0),
+                0,
+              );
+              const routedOtherMs = Math.max(0, measurement.durationMs - routedMeasuredMs);
+              if (routedOtherMs > 0) {
+                recordModelPreparationMeasurement({
+                  phase: "sandbox_first_routed_other",
+                  outcome: measurement.outcome,
+                  durationSeconds: routedOtherMs / 1_000,
+                });
+              }
+            },
           },
         );
       }
@@ -8812,6 +9472,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.info("model context contribution receipt", {
             attemptId: companyBrainContributionReceipt.attemptId,
             turnId: companyBrainContributionReceipt.turnId,
+            contextSelectionReceiptId: companyBrainContributionReceipt.contextSelectionReceiptId,
             sessionRole: companyBrainContributionReceipt.sessionRole,
             memoryPromptMode: companyBrainContributionReceipt.memoryPromptMode,
             instructionPolicySnapshotId:
@@ -9084,30 +9745,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (resolvedSandbox && setupBoxSession && fileResourceDownloads.length > 0) {
         const fileMaterializationStartedAt = performance.now();
         let fileMaterializationOutcome: "completed" | "failed" = "completed";
-        const cacheMaterialization = resolvedSandbox.established.backendId !== "selfhosted";
-        let fileMaterializationCache: "hit" | "miss" | "disabled" = cacheMaterialization
-          ? "miss"
-          : "disabled";
+        let fileMaterializationCache: "hit" | "miss" = "miss";
         try {
           const boxInstanceId = resolvedSandbox.established.instanceId;
-          // Managed boxes are immutable platform state, so their durable lease can
-          // memoize successful downloads. A connected machine is user-owned: files
-          // can be changed or removed between turns, so verify/materialize every
-          // attached file each turn instead of trusting the managed-box cache.
-          const alreadyMaterialized = cacheMaterialization
-            ? await getMaterializedSandboxFileResources(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                expectedEpoch: resolvedSandbox.leaseEpoch,
-                instanceId: boxInstanceId,
-              })
-            : new Set<string>();
+          // A successful transfer is durable for this exact filesystem instance.
+          // Do not turn later model startup into an integrity scan. If an owner or
+          // agent removes the file, it can be restored explicitly through the
+          // existing Files MCP using the durable file id carried in model history.
+          const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: resolvedSandbox.leaseEpoch,
+            instanceId: boxInstanceId,
+          });
           const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
             fileResourceDownloads,
             alreadyMaterialized,
           );
-          if (cacheMaterialization && downloadsToMaterialize.length === 0) {
+          if (downloadsToMaterialize.length === 0) {
             fileMaterializationCache = "hit";
           }
           const runAs = sandboxRunAs(runSettings);
@@ -9140,7 +9796,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const succeededFileIds = downloadsToMaterialize
               .map((download) => download.fileId)
               .filter((fileId) => !failedFileIds.has(fileId));
-            if (cacheMaterialization && succeededFileIds.length > 0) {
+            if (succeededFileIds.length > 0) {
               await markSandboxFileResourcesMaterialized(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
@@ -9181,31 +9837,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredVideoFileIds.has(failure.fileId),
       );
       if (failedRequiredVideo) {
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          triggerEventId: triggerEventId!,
-          attemptId: input.attemptId,
-          reason: "generated_video_materialization_failed",
-          detail: {
-            retryable: true,
-            operationIds: requiredGeneratedVideoFiles.map((file) => file.operationId),
-          },
+        // Retention is already durable. A sandbox copy miss must not fail the
+        // turn or replay generation; the File remains retrievable via Files MCP.
+        observability.warn("Generated video sandbox materialization deferred", {
+          errorClass: "SandboxFileDownloadFailure",
+          errorCode: "generated_video_materialization_deferred",
+          origin: "worker",
         });
-        if (recovery.action === "stale") {
-          acknowledgeLostAttemptOwnership();
-          activityStatus = "cancelled";
-          turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
-        }
-        if (recovery.action !== "recovering") {
-          throw new Error("Generated video materialization could not enter recovery");
-        }
-        acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-        activityStatus = "recovering";
-        turnMetricOutcome = "recovering";
-        return claimedResult({ status: "recovering", continueDelayMs: 1_000 });
       }
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
         fileMaterializationFailures,
@@ -9236,7 +9874,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerApi,
             projectCanonicalHistory: generatedImageHistoryProjector,
             materializeModelHistory: materializeScreenshotHistory,
-            materializeSerializedRunState: materializeScreenshotRunState,
             projectModelHistory: modelHistoryProjector,
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {
@@ -9248,25 +9885,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               });
             },
           });
-          const generatedImageMaterializationStartedAt = performance.now();
-          let generatedImageMaterializationOutcome: "completed" | "failed" = "completed";
-          try {
-            for (const receipt of generatedImageReceiptsByArtifactId.values()) {
-              await materializeGeneratedImage(receipt);
-            }
-          } catch (error) {
-            generatedImageMaterializationOutcome = "failed";
-            throw error;
-          } finally {
-            recordTurnStartupPhase(observability, {
-              phase: "history_generated_image_materialization",
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: generatedImageMaterializationOutcome,
-              durationSeconds: (performance.now() - generatedImageMaterializationStartedAt) / 1_000,
-              count: generatedImageReceiptsByArtifactId.size,
-            });
-          }
           runInput = prepared.input;
           providerArtifactCandidates = prepared.providerArtifactCandidates;
           // Slice index = the length of the model-facing (active) history this turn
@@ -9398,6 +10016,71 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
+        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
+        const providerPublishesNativeRequestEvents =
+          resolvedModel?.provider.kind === "codex-subscription" ||
+          resolvedModel?.provider.kind === "xai-subscription";
+        let fallbackProviderRequestStartedAt: number | null = null;
+        const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+          if (
+            providerPublishesNativeRequestEvents ||
+            firstModelRequestPreparationRecorded ||
+            firstModelRequestPreparationStartedAt === null
+          ) {
+            return;
+          }
+          firstProviderRequestStarted = true;
+          firstModelRequestPreparationRecorded = true;
+          const preparationDurationMs = Math.max(
+            0,
+            performance.now() - firstModelRequestPreparationStartedAt,
+          );
+          recordTurnStartupPhase(observability, {
+            phase: "model_request_preparation",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            outcome: "completed",
+            durationSeconds: preparationDurationMs / 1_000,
+            count: turnTools.length,
+          });
+          const auditStartedAt = performance.now();
+          let auditOutcome: "completed" | "failed" = "completed";
+          try {
+            await publish!([
+              {
+                type: "turn.startup.phase.completed",
+                payload: {
+                  phase: "model_preparation",
+                  durationMs: Math.round(preparationDurationMs),
+                },
+              },
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "started",
+                  provider: streamProvider,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration,
+                },
+              },
+            ]);
+            fallbackProviderRequestStartedAt = performance.now();
+          } catch (error) {
+            auditOutcome = "failed";
+            throw error;
+          } finally {
+            recordTurnStartupPhase(observability, {
+              phase: "model_request_audit",
+              provider: turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              outcome: auditOutcome,
+              durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+              count: turnTools.length,
+            });
+          }
+        };
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
           // Eager owned sessions must settle the exact platform-setup provider
@@ -9417,6 +10100,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // decorate setup commands so they source the active generation.
               await attachRunCredentialRenewal(
                 eagerSetupSession as RunCredentialCommandSession,
+                initialRunCredentialMaterial,
                 resolvedSandbox,
               );
               const eagerCredentialSetupSession = initialRunCredentialMaterial
@@ -9477,6 +10161,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
           recordCompanyBrainContributionReceiptOnce();
+          if (!firstModelRequestPreparationRecorded) {
+            await publish!([
+              {
+                type: "turn.startup.phase.started",
+                payload: { phase: "model_preparation" },
+              },
+            ]);
+            firstModelRequestPreparationStartedAt = performance.now();
+            firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
+          }
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
@@ -9556,7 +10250,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                             const pinnedCredentialSession = setupBoxSession
                               ? (setupBoxSession as RunCredentialCommandSession)
                               : credentialSession;
-                            await attachRunCredentialRenewal(pinnedCredentialSession);
+                            await attachRunCredentialRenewal(
+                              pinnedCredentialSession,
+                              initialRunCredentialMaterial,
+                            );
                           },
                         }
                       : {}),
@@ -9566,7 +10263,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? {
                     onSandboxSessionReady: async (sandboxSession: CodemodeTokenWriterSession) => {
                       sdkOwnedSandboxSession = sandboxSession;
-                      for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                      for (const receipt of generatedImageReceiptsCreatedThisTurn.values()) {
                         await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
                       }
                     },
@@ -9585,6 +10282,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ...(measurement.count === undefined ? {} : { count: measurement.count }),
                 });
               },
+              ...(!providerPublishesNativeRequestEvents
+                ? {
+                    onModelTransportStarted: recordFallbackProviderDispatchAtWire,
+                  }
+                : {}),
               ...(toolCancellationFenceRef.current
                 ? {
                     turnToolCancellationFence: toolCancellationFenceRef.current,
@@ -9614,7 +10316,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Bounded provider label for the streaming SLIs — the resolved registry
         // provider id (or the built-in OpenAI/Azure provider), never a raw
         // user-supplied model string.
-        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
         const streamTiming = new StreamTimingMetrics(observability, {
           provider: streamProvider,
         });
@@ -9642,10 +10343,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             count: turnTools.length,
           });
         };
-        if (!firstModelRequestPreparationRecorded) {
-          firstModelRequestPreparationStartedAt = performance.now();
-          firstModelRequestCheckpointAt = firstModelRequestPreparationStartedAt;
-        }
+        const settleFallbackProviderFirstByte = async (): Promise<void> => {
+          if (fallbackProviderRequestStartedAt === null) return;
+          const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
+          fallbackProviderRequestStartedAt = null;
+          await publish!([
+            {
+              type: "agent.model.request",
+              payload: {
+                phase: "first_byte",
+                provider: streamProvider,
+                durationMs: Math.round(durationMs),
+                turnId: activeTurnId,
+                attemptId: input.attemptId,
+                dispatchId,
+                executionGeneration,
+              },
+            },
+          ]);
+        };
         const iterator = stream.toStream()[Symbol.asyncIterator]();
         let streamDone = false;
         try {
@@ -9656,6 +10372,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            await settleFallbackProviderFirstByte();
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
             let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
@@ -9983,6 +10700,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
           }
+        } catch (error) {
+          if (fallbackProviderRequestStartedAt !== null) {
+            const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
+            fallbackProviderRequestStartedAt = null;
+            await publish!([
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "failed",
+                  provider: streamProvider,
+                  durationMs: Math.round(durationMs),
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration,
+                },
+              },
+            ]);
+          }
+          if (
+            !firstModelRequestPreparationRecorded &&
+            firstModelRequestPreparationStartedAt !== null
+          ) {
+            firstModelRequestPreparationRecorded = true;
+            const durationMs = Math.max(
+              0,
+              performance.now() - firstModelRequestPreparationStartedAt,
+            );
+            recordTurnStartupPhase(observability, {
+              phase: "model_request_preparation",
+              provider: turnExecutionPolicy.providerId,
+              backend: activeSandboxBackend ?? groupBoxBackend,
+              outcome: "failed",
+              durationSeconds: durationMs / 1_000,
+              count: turnTools.length,
+            });
+            await publish!([
+              {
+                type: "turn.startup.phase.failed",
+                payload: {
+                  phase: "model_preparation",
+                  durationMs: Math.round(durationMs),
+                },
+              },
+            ]);
+          }
+          throw error;
         } finally {
           if (!streamDone) {
             // ReadableStream cancellation synchronously trips the Agents SDK's
@@ -10091,7 +10855,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
         if (stream.interruptions.length > 0) {
-          await reconcileConversationTruth();
+          await reconcileConversationTruth({ requireDurable: true });
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
@@ -10168,6 +10932,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...approvals,
             ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
           ];
+          const suffixMembers = extractOpenSuffixFromRunState(stream.state);
+          const interruptionCallIds = interruptionCallIdsFromPause({
+            humanInputRequests,
+            interactionInterventionRequests,
+            pendingApprovals,
+          });
+          assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
+          const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
+          const attached = await attachOpenSuffixToPendingToolCalls(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            executionGeneration,
+            attemptId: input.attemptId,
+            members: interruptionCallIds.map((callId) => {
+              const member = suffixByCallId.get(callId)!;
+              return {
+                callId,
+                interruptionKind: interruptionKindForCallItem(
+                  member.callItem as Record<string, unknown>,
+                ),
+                reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+              };
+            }),
+          });
+          if (!attached.accepted) {
+            return claimedResult({ status: "cancelled" });
+          }
           if (
             !(await settle!({
               events: [
@@ -10189,7 +10982,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: compactApprovalRunState(stream.state.toString()),
+                serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
                 pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
@@ -10249,6 +11042,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return claimedResult({ status: "idle" });
       };
+
+      const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
+        db,
+        agent,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        trigger,
+        humanInputResume,
+        modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+        settle: settle!,
+        publish,
+      });
+      if (openSuffixResume.action === "cancelled") {
+        return claimedResult({ status: "cancelled" });
+      }
+      if (openSuffixResume.action === "requires_action") {
+        activityStatus = "requires_action";
+        return claimedResult({ status: "requires_action" });
+      }
 
       await prepareRunAttemptInput();
       let retriedAfterCompaction = false;
@@ -12029,6 +12845,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(finalizerSignal ? { signal: finalizerSignal } : {}),
           });
         }
+        toolPreparationClosing = true;
+        if (toolPreparationReady) {
+          await waitForTurnFinalizerStep(
+            toolPreparationReady.catch(() => undefined),
+            finalizerSignal,
+          );
+        }
         if (codemodeDispatcher) {
           await waitForTurnFinalizerStep(
             codemodeDispatcher.close().catch(() => undefined),
@@ -12048,6 +12871,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (turnSandboxProvisioner?.hasStarted()) {
           await waitForTurnFinalizerStep(
             turnSandboxProvisioner.waitForSettled(30_000),
+            finalizerSignal,
+          );
+        } else if (prefetchedManagedBox) {
+          // Create finished (or was aborted) before get()/setup. Join so a
+          // successful prefetch cannot leak a holder after this attempt ends.
+          await waitForTurnFinalizerStep(
+            prefetchedManagedBox.then(
+              (box) => {
+                prefetchedManagedBoxResult = box;
+              },
+              () => undefined,
+            ),
             finalizerSignal,
           );
         }
@@ -12143,7 +12978,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (resolvedSandbox) {
           sandboxReleaseTargets.add(resolvedSandbox);
           resolvedSandbox = null;
+        } else if (prefetchedManagedBoxResult) {
+          sandboxReleaseTargets.add(prefetchedManagedBoxResult);
         }
+        prefetchedManagedBoxResult = null;
         if (attemptWritersDrained) {
           for (const sandboxToRelease of sandboxReleaseTargets) {
             try {
@@ -13246,7 +14084,11 @@ async function sandboxFileDownloadsForRun(
       `${settings.objectStorageBackend} file resources require configured object storage`,
     );
   }
-  const downloadStorage = objectStorageForSandboxDownloads(settings, objectStorage);
+  const downloadStorage = objectStorageForSandboxDownloads(
+    settings,
+    objectStorage,
+    activeSandboxBackend,
+  );
   const downloads: SandboxFileDownload[] = [];
   for (const resource of fileResources) {
     const file = await requireFileForSubject(db, {
@@ -13298,10 +14140,16 @@ export function requiresSignedFileResourceDownloads(
   );
 }
 
-function objectStorageForSandboxDownloads(
+export function objectStorageForSandboxDownloads(
   settings: Settings,
   objectStorage: ObjectStorage,
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): ObjectStorage {
+  // Connected Machines are not on the Docker compose network. Sign with the
+  // ambient public endpoint; never rewrite to OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT.
+  if (activeSandboxBackend === "selfhosted") {
+    return objectStorage;
+  }
   if (settings.objectStorageBackend !== "s3-compatible" || !settings.objectStorageSandboxEndpoint) {
     return objectStorage;
   }

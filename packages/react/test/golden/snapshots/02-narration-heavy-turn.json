@@ -9,6 +9,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000204-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:03.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T11:00:03.000Z",
+      "completedAt": "2026-01-02T11:00:04.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "reasoning",
       "id": "00000000-0000-4000-8000-000000000205",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
@@ -134,19 +146,32 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000002",
       "outcome": "complete",
-      "startedAt": "2026-01-02T11:00:05.000Z",
+      "startedAt": "2026-01-02T11:00:03.000Z",
       "endedAt": "2026-01-02T11:00:19.000Z",
       "groupCount": 5,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000205",
-          "itemCount": 1,
+          "id": "activity-00000000-0000-4000-8000-000000000204-queue",
+          "itemCount": 2,
           "itemKinds": {
-            "reasoning": 1
+            "reasoning": 1,
+            "startup-phase": 1
           },
           "outcome": "complete",
           "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000204-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "occurredAt": "2026-01-02T11:00:03.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T11:00:03.000Z",
+              "completedAt": "2026-01-02T11:00:04.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            },
             {
               "kind": "reasoning",
               "id": "00000000-0000-4000-8000-000000000205",
@@ -289,6 +314,7 @@
     "itemKinds": {
       "agent-message": 3,
       "reasoning": 2,
+      "startup-phase": 1,
       "tool-call": 3,
       "turn-end": 1,
       "user-message": 1
@@ -300,6 +326,7 @@
     },
     "activityItemKinds": {
       "reasoning": 2,
+      "startup-phase": 1,
       "tool-call": 3
     },
     "turnOutcomes": {

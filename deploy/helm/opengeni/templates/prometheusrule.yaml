@@ -1,11 +1,19 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
+{{- $turnStartupQueueP95Seconds := int (default 5 ((.Values.observability).prometheusRule).turnStartupQueueP95Seconds) }}
+{{- $turnStartupProviderDispatchP95Seconds := int (default 60 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
+{{- $turnStartupFirstByteP95Seconds := int (default 120 ((.Values.observability).prometheusRule).turnStartupFirstByteP95Seconds) }}
+{{- $turnStartupFirstByteAvailabilityRatio := float64 ((.Values.observability).prometheusRule).turnStartupFirstByteAvailabilityRatio }}
+{{- $turnStartupMinSamples := int (default 5 ((.Values.observability).prometheusRule).turnStartupMinSamples) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
+{{- end }}
+{{- if or (le $turnStartupQueueP95Seconds 0) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
+{{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive and first-byte availability ratio must be in (0, 1]" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -153,6 +161,69 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
+        - alert: OpenGeniTurnStartupQueueP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m]))
+            ) > {{ $turnStartupQueueP95Seconds }}
+            and on()
+            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni turn queue p95 exceeds {{ $turnStartupQueueP95Seconds }} seconds
+            description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+        - alert: OpenGeniTurnStartupProviderDispatchP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+            ) > {{ $turnStartupProviderDispatchP95Seconds }}
+            and on()
+            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni queue-to-provider-dispatch p95 exceeds {{ $turnStartupProviderDispatchP95Seconds }} seconds
+            description: The cumulative platform path is slow. Use the Turn Startup phase breakdown to distinguish sandbox, rig, file/repository, tool, history, and request-preparation latency.
+        - alert: OpenGeniTurnStartupFirstByteP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+            ) > {{ $turnStartupFirstByteP95Seconds }}
+            and on()
+            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni queue-to-first-byte p95 exceeds {{ $turnStartupFirstByteP95Seconds }} seconds
+            description: End-to-end first response latency is above target. Compare the cumulative provider-dispatch milestone with provider first-byte duration to separate platform delay from provider think time.
+        - alert: OpenGeniTurnStartupFirstByteAvailabilityLow
+          expr: |
+            (
+              (
+                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+                or on(provider)
+                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
+              )
+              /
+              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
+            ) < {{ $turnStartupFirstByteAvailabilityRatio }}
+            and on(provider)
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
+            and on(provider)
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni first-byte availability is below {{ $turnStartupFirstByteAvailabilityRatio }} for {{ "{{ $labels.provider }}" }}
+            description: Canonical durable logical turns terminated failed after provider dispatch without producing a first byte in any attempt. Successful first-byte latency remains a separate SLO; inspect provider transport diagnostics rather than treating missing bytes as fast latency samples.
         - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
           expr: |
             sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0

@@ -7,7 +7,11 @@ import {
 } from "@opengeni/storage";
 import type { EditableArtifactSnapshotVerifierPort } from "./ports";
 import { decodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
-import { EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES } from "@opengeni/contracts/editable-artifacts";
+import {
+  EDITABLE_ARTIFACT_CODEC_REGISTRY,
+  EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
+} from "@opengeni/contracts/editable-artifacts";
+import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "@opengeni/contracts/editable-artifact-committed-transaction";
 import {
   causalFrontiersEqual,
   editableArtifactCausalFrontier,
@@ -520,6 +524,7 @@ function validateKernelResult(
       >
     | undefined,
 ): void {
+  const currentCodec = EDITABLE_ARTIFACT_CODEC_REGISTRY[snapshot.modality];
   if (
     result.canonicalReencodeVerified !== true ||
     result.modality !== snapshot.modality ||
@@ -542,8 +547,8 @@ function validateKernelResult(
     throw new EditableArtifactSnapshotVerificationError("state_hash_mismatch");
   }
   if (
-    result.modelSchemaVersion !== snapshot.modelSchemaVersion ||
-    result.kernelVersion !== snapshot.kernelVersion
+    snapshot.modelSchemaVersion !== currentCodec.modelSchemaVersion ||
+    result.modelSchemaVersion !== snapshot.modelSchemaVersion
   ) {
     throw new EditableArtifactSnapshotVerificationError("version_mismatch");
   }
@@ -559,6 +564,8 @@ function validateKernelResult(
       throw new EditableArtifactSnapshotVerificationError("frontier_mismatch");
     }
     if (
+      snapshot.operationProtocolVersion !== COMMITTED_TRANSACTION_PROTOCOL_VERSION ||
+      snapshot.crdtStateVersion !== currentCodec.snapshotVersion ||
       result.operationProtocolVersion !== snapshot.operationProtocolVersion ||
       result.crdtStateVersion !== snapshot.crdtStateVersion
     ) {

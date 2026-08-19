@@ -1,3 +1,16 @@
+export const MCP_TOOL_CALL_OUTCOMES = [
+  "success",
+  "provider_declared_error",
+  "auth_needed",
+  "outcome_uncertain",
+  "timeout",
+  "cancelled",
+  "thrown_transport_error",
+  "thrown_protocol_error",
+] as const;
+
+export type McpToolCallOutcome = (typeof MCP_TOOL_CALL_OUTCOMES)[number];
+
 export type RuntimeMetricsHooks = {
   onModelCall?: (input: {
     provider: string;
@@ -19,6 +32,11 @@ export type RuntimeMetricsHooks = {
     operation: "create" | "renew";
   }) => void;
   onSandboxTtlRenewal?: (input: { backend: string; outcome: "completed" | "failed" }) => void;
+  /**
+   * One physical MCP tools/call invocation. The closed outcome enum deliberately
+   * excludes server, tool, tenant, request, and error-content labels.
+   */
+  onMcpToolCall?: (input: { outcome: McpToolCallOutcome; durationSeconds: number }) => void;
   /**
    * One completed Connected Machine (selfhosted) control op — the out-of-band
    * telemetry twin of the in-band fault rendering. `code` is the typed wire-code

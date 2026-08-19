@@ -9,7 +9,7 @@ import {
   usePreferenceRegistryInventory,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { AttemptGovernanceInventory } from "./workspace-state";
+import { AttemptGovernanceInventory, reviewSummaryForWorkspace } from "./workspace-state";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -34,6 +34,21 @@ function response(workspaceId: string): WorkspaceStateResponse {
 }
 
 describe("Workspace State loader", () => {
+  test("does not reuse a resolved review summary across workspace authority", () => {
+    type Review = { status: "loading" | "ready"; pendingCount: number };
+    const ready: Review = { status: "ready", pendingCount: 0 };
+    const loading: Review = { status: "loading", pendingCount: 0 };
+    const review = {
+      workspaceId: "00000000-0000-4000-8000-000000000051",
+      summary: ready,
+    };
+
+    expect(reviewSummaryForWorkspace(review.workspaceId, review, loading)).toBe(ready);
+    expect(reviewSummaryForWorkspace("00000000-0000-4000-8000-000000000052", review, loading)).toBe(
+      loading,
+    );
+  });
+
   test("fences a late response after switching workspaces", async () => {
     const workspaceA = "00000000-0000-4000-8000-000000000001";
     const workspaceB = "00000000-0000-4000-8000-000000000002";

@@ -10,15 +10,14 @@ page exists so you pick the right one in one read.
 | **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Built in; selected through the `docs` server ref | Caller's bearer | An agent should search the workspace's documents store |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Default-on download-materialization surface selected through the `files` server ref; an explicit API policy may omit it | Caller's bearer with `files:read` | An agent needs a short-lived download URL for a ready file, including an original file identified by document search |
-| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up | A third-party tool (e.g. Slack's hosted MCP) should be available to *all* sessions and schedules in a workspace |
+| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and Slack's hosted MCP are personal-only and never workspace-owned | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
 
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
-- `memory_save` — save one durable, future-useful workspace memory through the deterministic write gate.
-- `memory_correct` — archive or supersede an incorrect/outdated workspace memory by id.
+- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
 
 These tools are session-scoped: they register only when the delegated bearer carries
 a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
@@ -80,6 +79,49 @@ same frozen catalog. Codemode does not proxy or reconstruct them: execution
 returns to the same prepared MCP instance, so the per-request designated-owner
 check and connector-wire compatibility layer remain authoritative and no static
 or weaker credential copy reaches sandbox code.
+
+### Accepted connection-use authority
+
+Organization-user connections are selected explicitly; a session creator,
+current browser user, service actor, or worker identity is never a substitute.
+For activated configured MCP connections, the accepted human/API turn stores a
+server-built, credential-free snapshot of the exact connection, causal human,
+organization membership authorization revision, common resource authority,
+grant, target session visibility/epoch, and accepted logical work. Each
+physical provider request—including a safe read retry after 401—must authorize
+that persisted snapshot for the exact current attempt before resolving any
+credential. A `once` grant is consumed atomically when the logical turn is
+accepted and is bound to that turn by its durable receipt; every physical call
+and recovery attempt only validates the matching receipt, while another turn
+cannot be accepted with it. Audit facts contain identifiers, generations, outcome,
+and a denial reason only—never credentials, headers, arguments, content, or
+provider responses.
+
+Migration 0264 is a drained maintenance cutover because an old worker can omit
+these attempt/use facts. The migration enforces the drain with live app-role
+session checks around exclusive writer locks and rejects all executable
+pre-activation common-user work instead of backfilling it from mutable state.
+Its first bounded activation covers configured remote
+MCP, API-hosted OpenAPI/GraphQL, Gmail REST, and Google Drive publication
+requests; the publication adapter reauthorizes
+independently before destination verification, idempotency search, and upload,
+and never replays an outcome-uncertain upload. Host credential callbacks are
+limited here to host MCP credential callbacks: they are invoked only after local
+authorization and receive credential-free attribution. Git, sandbox, and run
+credential ports are separate authorities and are not covered by migration 0264.
+Activated Atlassian is omitted from direct turns, and scheduled tasks reject
+activated MCP, Google Drive, and Atlassian selections, until their dedicated
+acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack,
+social, and scheduled knowledge-source surfaces remain explicit successors;
+workspace and `legacy_user` connections remain on their bounded compatibility
+path rather than being silently upgraded.
+
+An activated personal connection freezes its physical origin separately from
+the target workspace. Exact common authority permits same-organization use and
+the lifecycle-derived owner-only personal workspace even though that personal
+workspace intentionally has no membership row. Workspace administrators,
+other subjects, and cross-organization callers receive no corresponding
+portable authority.
 
 ### Codex Apps designation parity verdict
 

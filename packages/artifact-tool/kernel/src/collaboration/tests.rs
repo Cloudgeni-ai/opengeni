@@ -1,5 +1,6 @@
 use super::*;
-use crate::{CellBlock, CellRange, Number};
+use crate::{Cell, CellBlock, CellRange, Number};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 fn replica(value: u64) -> ReplicaId {
@@ -393,6 +394,56 @@ fn concurrent_same_cell_writes_converge_without_clock_time() {
 }
 
 #[test]
+fn concurrent_case_insensitive_sheet_name_collisions_converge() {
+    let upper = transaction(
+        1,
+        1,
+        1,
+        &[],
+        vec![operation(
+            1,
+            CollaborationCommand::CreateSheet {
+                sheet_id: sheet_id(10),
+                name: "Data".into(),
+                after: None,
+            },
+        )],
+    );
+    let lower = transaction(
+        2,
+        2,
+        1,
+        &[],
+        vec![operation(
+            2,
+            CollaborationCommand::CreateSheet {
+                sheet_id: sheet_id(11),
+                name: "data".into(),
+                after: None,
+            },
+        )],
+    );
+    let mut first = CollaborativeWorkbook::new(77).expect("first");
+    first.apply_transaction(upper.clone()).expect("upper");
+    first.apply_transaction(lower.clone()).expect("lower");
+    let mut second = CollaborativeWorkbook::new(77).expect("second");
+    second.apply_transaction(lower).expect("lower");
+    second.apply_transaction(upper).expect("upper");
+
+    let normalized: BTreeSet<_> = first
+        .workbook()
+        .sheets()
+        .map(|sheet| sheet.name().to_lowercase())
+        .collect();
+    assert_eq!(normalized.len(), 2);
+    assert_eq!(first, second);
+    assert_eq!(
+        encode_collaboration_snapshot(&first).expect("first snapshot"),
+        encode_collaboration_snapshot(&second).expect("second snapshot")
+    );
+}
+
+#[test]
 fn range_clear_and_delayed_concurrent_write_converge_sparsely() {
     let create = create_sheet_transaction();
     let clear = transaction(
@@ -492,6 +543,273 @@ fn selective_undo_of_rename_reveals_the_previous_name() {
         workbook.workbook().sheet(sheet_id(10)).unwrap().name(),
         "Data"
     );
+}
+
+#[test]
+fn formula_qualifiers_follow_causal_rename_undo_and_snapshot_restore() {
+    let mut workbook = CollaborativeWorkbook::new(77).expect("workbook");
+    workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("create data");
+    workbook
+        .apply_transaction(transaction(
+            2,
+            1,
+            2,
+            &[(1, 1)],
+            vec![operation(
+                2,
+                CollaborationCommand::CreateSheet {
+                    sheet_id: sheet_id(11),
+                    name: "Calc".into(),
+                    after: Some(generation(sheet_id(10), 1)),
+                },
+            )],
+        ))
+        .expect("create calc");
+    workbook
+        .apply_transaction(transaction(
+            3,
+            1,
+            3,
+            &[(1, 2)],
+            vec![
+                operation(
+                    3,
+                    CollaborationCommand::SetCells {
+                        sheet: generation(sheet_id(10), 1),
+                        anchor: CellCoord::new(0, 0),
+                        cells: CellBlock::new(1, 1, vec![Cell::from_value(finite(2.0))])
+                            .expect("input"),
+                    },
+                ),
+                operation(
+                    4,
+                    CollaborationCommand::SetCells {
+                        sheet: generation(sheet_id(11), 2),
+                        anchor: CellCoord::new(0, 0),
+                        cells: CellBlock::new(
+                            1,
+                            1,
+                            vec![Cell::formula("=Data!A1*3").expect("formula")],
+                        )
+                        .expect("formula cell"),
+                    },
+                ),
+            ],
+        ))
+        .expect("seed formula");
+
+    let formula = |state: &CollaborativeWorkbook| {
+        state
+            .workbook()
+            .sheet(sheet_id(11))
+            .and_then(|sheet| sheet.cell(CellCoord::new(0, 0)))
+            .expect("formula cell")
+            .clone()
+    };
+    assert_eq!(formula(&workbook).formula_source(), Some("=Data!A1*3"));
+    assert_eq!(formula(&workbook).value(), &finite(6.0));
+    let before_rename = encode_collaboration_snapshot(&workbook).expect("before rename");
+
+    workbook
+        .apply_transaction(transaction(
+            4,
+            1,
+            4,
+            &[(1, 3)],
+            vec![operation(
+                5,
+                CollaborationCommand::RenameSheet {
+                    sheet: generation(sheet_id(10), 1),
+                    name: "Inputs".into(),
+                },
+            )],
+        ))
+        .expect("rename data");
+    assert_eq!(formula(&workbook).formula_source(), Some("='Inputs'!A1*3"));
+    assert_eq!(formula(&workbook).value(), &finite(6.0));
+    let renamed = encode_collaboration_snapshot(&workbook).expect("renamed snapshot");
+    assert_ne!(renamed, before_rename);
+    let restored = decode_collaboration_snapshot(&renamed).expect("restore renamed");
+    assert_eq!(formula(&restored).formula_source(), Some("='Inputs'!A1*3"));
+    assert_eq!(formula(&restored).value(), &finite(6.0));
+
+    workbook
+        .apply_transaction(transaction(
+            5,
+            1,
+            5,
+            &[(1, 4)],
+            vec![operation(
+                6,
+                CollaborationCommand::Undo {
+                    target: OperationId::from_stable_id(StableId::from_parts(91, 5)),
+                },
+            )],
+        ))
+        .expect("undo rename");
+    assert_eq!(formula(&workbook).formula_source(), Some("=Data!A1*3"));
+    assert_eq!(formula(&workbook).value(), &finite(6.0));
+}
+
+#[test]
+fn rejected_formula_expanding_rename_leaves_collaboration_state_unchanged() {
+    let mut workbook = CollaborativeWorkbook::new(77).expect("workbook");
+    workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("create data");
+    let source = format!("=Data!A2+\"{}\"", "x".repeat(8_170));
+    assert!(source.len() <= 8 * 1_024);
+    workbook
+        .apply_transaction(transaction(
+            2,
+            1,
+            2,
+            &[(1, 1)],
+            vec![operation(
+                2,
+                CollaborationCommand::SetCells {
+                    sheet: generation(sheet_id(10), 1),
+                    anchor: CellCoord::new(0, 0),
+                    cells: CellBlock::new(1, 1, vec![Cell::formula(source).expect("formula")])
+                        .expect("formula cell"),
+                },
+            )],
+        ))
+        .expect("seed near-limit formula");
+    let before = encode_collaboration_snapshot(&workbook).expect("before rejected rename");
+
+    let result = workbook.apply_transaction(transaction(
+        3,
+        1,
+        3,
+        &[(1, 2)],
+        vec![operation(
+            3,
+            CollaborationCommand::RenameSheet {
+                sheet: generation(sheet_id(10), 1),
+                name: "n".repeat(MAX_SHEET_NAME_BYTES),
+            },
+        )],
+    ));
+    assert!(result.is_err());
+    assert_eq!(
+        encode_collaboration_snapshot(&workbook).expect("after rejected rename"),
+        before
+    );
+}
+
+#[test]
+fn rejected_formula_expanding_rename_undo_leaves_collaboration_state_unchanged() {
+    let mut workbook = CollaborativeWorkbook::new(77).expect("workbook");
+    workbook
+        .apply_transaction(transaction(
+            1,
+            1,
+            1,
+            &[],
+            vec![operation(
+                1,
+                CollaborationCommand::CreateSheet {
+                    sheet_id: sheet_id(10),
+                    name: "n".repeat(MAX_SHEET_NAME_BYTES),
+                    after: None,
+                },
+            )],
+        ))
+        .expect("create long-named sheet");
+    workbook
+        .apply_transaction(transaction(
+            2,
+            1,
+            2,
+            &[(1, 1)],
+            vec![operation(
+                2,
+                CollaborationCommand::RenameSheet {
+                    sheet: generation(sheet_id(10), 1),
+                    name: "Data".into(),
+                },
+            )],
+        ))
+        .expect("shorten sheet name");
+    let source = format!("=Data!A2+\"{}\"", "x".repeat(8_170));
+    workbook
+        .apply_transaction(transaction(
+            3,
+            1,
+            3,
+            &[(1, 2)],
+            vec![operation(
+                3,
+                CollaborationCommand::SetCells {
+                    sheet: generation(sheet_id(10), 1),
+                    anchor: CellCoord::new(0, 0),
+                    cells: CellBlock::new(1, 1, vec![Cell::formula(source).expect("formula")])
+                        .expect("formula cell"),
+                },
+            )],
+        ))
+        .expect("seed near-limit formula");
+    let before = encode_collaboration_snapshot(&workbook).expect("before rejected undo");
+
+    let result = workbook.apply_transaction(transaction(
+        4,
+        1,
+        4,
+        &[(1, 3)],
+        vec![operation(
+            4,
+            CollaborationCommand::Undo {
+                target: OperationId::from_stable_id(StableId::from_parts(91, 2)),
+            },
+        )],
+    ));
+    assert!(result.is_err());
+    assert_eq!(
+        encode_collaboration_snapshot(&workbook).expect("after rejected undo"),
+        before
+    );
+}
+
+#[test]
+fn rejected_formula_projection_releases_transaction_and_operation_ids() {
+    let mut workbook = CollaborativeWorkbook::new(77).expect("workbook");
+    workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("create data");
+    let before = encode_collaboration_snapshot(&workbook).expect("before rejected formula");
+    let invalid_source = format!("={}1{}", "(".repeat(300), ")".repeat(300));
+    let invalid = transaction(
+        2,
+        1,
+        2,
+        &[(1, 1)],
+        vec![operation(
+            2,
+            CollaborationCommand::SetCells {
+                sheet: generation(sheet_id(10), 1),
+                anchor: CellCoord::new(0, 0),
+                cells: CellBlock::new(
+                    1,
+                    1,
+                    vec![Cell::formula(invalid_source).expect("authored formula")],
+                )
+                .expect("formula cell"),
+            },
+        )],
+    );
+    assert!(workbook.apply_transaction(invalid).is_err());
+    assert_eq!(
+        encode_collaboration_snapshot(&workbook).expect("after rejected formula"),
+        before
+    );
+
+    workbook
+        .apply_transaction(set_cell_transaction(2, 2, 1, 2, &[(1, 1)], "reused"))
+        .expect("released identities are reusable");
+    assert_eq!(cell_text(&workbook), Some("reused"));
 }
 
 #[test]
@@ -975,7 +1293,7 @@ fn formulas_recalculate_through_collaboration_undo_and_snapshot_restore() {
                         2,
                         vec![
                             Cell::from_value(finite(2.0)),
-                            Cell::formula("=A1*3", finite(999.0)).expect("formula"),
+                            Cell::from_formula_projection("=A1*3", finite(999.0)).expect("formula"),
                         ],
                     )
                     .expect("cells"),
@@ -1034,4 +1352,111 @@ fn formulas_recalculate_through_collaboration_undo_and_snapshot_restore() {
     .expect("restore collaboration");
     assert_eq!(formula_value(&restored), Some(finite(6.0)));
     assert_eq!(restored, workbook);
+}
+
+#[test]
+fn retained_formula_admission_and_bytes_ignore_projection_values() {
+    let formula_transaction = |projected_value| {
+        transaction(
+            2,
+            1,
+            2,
+            &[(1, 1)],
+            vec![operation(
+                2,
+                CollaborationCommand::SetCells {
+                    sheet: generation(sheet_id(10), 1),
+                    anchor: CellCoord::new(0, 0),
+                    cells: CellBlock::new(
+                        1,
+                        1,
+                        vec![Cell::from_formula_projection("=1+1", projected_value)
+                            .expect("formula projection")],
+                    )
+                    .expect("cells"),
+                },
+            )],
+        )
+    };
+    let small = formula_transaction(finite(2.0));
+    let large = formula_transaction(CellValue::Text("projection-only".repeat(4_096)));
+    assert_eq!(small, large);
+    assert_eq!(
+        snapshot::retained_transaction_wire_bytes(&small).expect("small wire size"),
+        snapshot::retained_transaction_wire_bytes(&large).expect("large wire size")
+    );
+
+    let mut small_workbook = CollaborativeWorkbook::new(77).expect("small workbook");
+    let mut large_workbook = CollaborativeWorkbook::new(77).expect("large workbook");
+    small_workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("small create");
+    large_workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("large create");
+    small_workbook
+        .apply_transaction(small)
+        .expect("small projection transaction");
+    large_workbook
+        .apply_transaction(large)
+        .expect("large projection transaction");
+    assert_eq!(
+        small_workbook.retained_history_bytes(),
+        large_workbook.retained_history_bytes()
+    );
+    assert_eq!(
+        encode_collaboration_snapshot(&small_workbook).expect("small snapshot"),
+        encode_collaboration_snapshot(&large_workbook).expect("large snapshot")
+    );
+}
+
+#[test]
+fn collaboration_snapshot_and_state_hash_ignore_formula_projections() {
+    let mut workbook = CollaborativeWorkbook::new(77).expect("workbook");
+    workbook
+        .apply_transaction(create_sheet_transaction())
+        .expect("create");
+    workbook
+        .apply_transaction(transaction(
+            2,
+            1,
+            2,
+            &[(1, 1)],
+            vec![operation(
+                2,
+                CollaborationCommand::SetCells {
+                    sheet: generation(sheet_id(10), 1),
+                    anchor: CellCoord::new(0, 0),
+                    cells: CellBlock::new(1, 1, vec![Cell::formula("=1+1").expect("formula")])
+                        .expect("cells"),
+                },
+            )],
+        ))
+        .expect("formula transaction");
+
+    let authored_bytes = encode_collaboration_snapshot(&workbook).expect("authored snapshot");
+    let authored_hash = Sha256::digest(&authored_bytes);
+    workbook
+        .workbook
+        .sheets
+        .get_mut(&sheet_id(10))
+        .expect("sheet")
+        .set_cell(
+            CellCoord::new(0, 0),
+            Cell::from_formula_projection("=1+1", finite(999.0)).expect("projection"),
+        );
+
+    let perturbed_bytes =
+        encode_collaboration_snapshot(&workbook).expect("projection-perturbed snapshot");
+    assert_eq!(perturbed_bytes, authored_bytes);
+    assert_eq!(Sha256::digest(&perturbed_bytes), authored_hash);
+    let restored = decode_collaboration_snapshot(&authored_bytes).expect("restore");
+    assert_eq!(
+        restored
+            .workbook()
+            .sheet(sheet_id(10))
+            .and_then(|sheet| sheet.cell(CellCoord::new(0, 0)))
+            .map(Cell::value),
+        Some(&finite(2.0))
+    );
 }

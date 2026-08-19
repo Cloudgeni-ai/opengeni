@@ -9,6 +9,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000303-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+      "occurredAt": "2026-01-02T12:00:02.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T12:00:02.000Z",
+      "completedAt": "2026-01-02T12:00:03.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "tool-call",
       "id": "00000000-0000-4000-8000-000000000304",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
@@ -40,20 +52,24 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000308-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
+      "occurredAt": "2026-01-02T12:00:07.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T12:00:07.000Z",
+      "completedAt": "2026-01-02T12:00:08.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "turn-end",
       "id": "00000000-0000-4000-8000-000000000309-turn-end",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
       "occurredAt": "2026-01-02T12:00:09.000Z",
       "outcome": "failed",
       "failureText": "provider context window exceeded"
-    },
-    {
-      "kind": "notice",
-      "id": "00000000-0000-4000-8000-000000000309",
-      "occurredAt": "2026-01-02T12:00:09.000Z",
-      "tone": "failed",
-      "text": "provider context window exceeded",
-      "details": null
     }
   ],
   "groups": [
@@ -73,19 +89,32 @@
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000003",
       "outcome": "failed",
       "failureText": "model provider unavailable",
-      "startedAt": "2026-01-02T12:00:04.000Z",
+      "startedAt": "2026-01-02T12:00:02.000Z",
       "endedAt": "2026-01-02T12:00:05.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000304",
-          "itemCount": 1,
+          "id": "activity-00000000-0000-4000-8000-000000000303-queue",
+          "itemCount": 2,
           "itemKinds": {
+            "startup-phase": 1,
             "tool-call": 1
           },
           "outcome": "cancelled",
           "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000303-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+              "occurredAt": "2026-01-02T12:00:02.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T12:00:02.000Z",
+              "completedAt": "2026-01-02T12:00:03.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            },
             {
               "kind": "tool-call",
               "id": "00000000-0000-4000-8000-000000000304",
@@ -117,34 +146,58 @@
       }
     },
     {
-      "kind": "item",
-      "item": {
-        "kind": "notice",
-        "id": "00000000-0000-4000-8000-000000000309",
-        "occurredAt": "2026-01-02T12:00:09.000Z",
-        "tone": "failed",
-        "text": "provider context window exceeded",
-        "details": null
-      }
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000004",
+      "outcome": "failed",
+      "failureText": "provider context window exceeded",
+      "startedAt": "2026-01-02T12:00:07.000Z",
+      "endedAt": "2026-01-02T12:00:09.000Z",
+      "groupCount": 1,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000308-queue",
+          "itemCount": 1,
+          "itemKinds": {
+            "startup-phase": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000308-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
+              "occurredAt": "2026-01-02T12:00:07.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T12:00:07.000Z",
+              "completedAt": "2026-01-02T12:00:08.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            }
+          ]
+        }
+      ]
     }
   ],
   "facets": {
     "itemKinds": {
-      "notice": 1,
+      "startup-phase": 2,
       "tool-call": 1,
       "turn-end": 2,
       "user-message": 2
     },
     "groupKinds": {
-      "activity": 1,
-      "item": 3,
-      "turn": 1
+      "activity": 2,
+      "item": 2,
+      "turn": 2
     },
     "activityItemKinds": {
+      "startup-phase": 2,
       "tool-call": 1
     },
     "turnOutcomes": {
-      "failed": 1
+      "failed": 2
     }
   }
 }

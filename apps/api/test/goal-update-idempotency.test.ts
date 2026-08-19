@@ -88,6 +88,8 @@ describe("goal_update idempotency", () => {
       tools: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(client.db, {
@@ -146,7 +148,9 @@ describe("goal_update idempotency", () => {
     );
     const first = await callMcpTool<GoalUpdateResult>(firstMcp, "goal_update", {
       text: "Committed despite transient fanout failure",
-      progressNote: "first attempt persisted",
+      changeKind: "refinement",
+      rationale: "preserve intent while clarifying the durable outcome",
+      expectedObjectiveRevision: 1,
       idempotencyKey: firstKey,
     });
     expect(first).toMatchObject({
@@ -183,7 +187,9 @@ describe("goal_update idempotency", () => {
     );
     const replay = await callMcpTool<GoalUpdateResult>(replacementMcp, "goal_update", {
       text: "Committed despite transient fanout failure",
-      progressNote: "first attempt persisted",
+      changeKind: "refinement",
+      rationale: "preserve intent while clarifying the durable outcome",
+      expectedObjectiveRevision: 1,
       idempotencyKey: firstKey,
     });
     expect(replay).toEqual({ ...first, replay: true });
@@ -191,7 +197,9 @@ describe("goal_update idempotency", () => {
     const secondKey = crypto.randomUUID();
     const newer = await callMcpTool<GoalUpdateResult>(replacementMcp, "goal_update", {
       text: "Newer replacement-attempt goal truth",
-      progressNote: "replacement attempt advanced the goal",
+      changeKind: "refinement",
+      rationale: "newer recovered-attempt evidence clarifies the useful objective",
+      expectedObjectiveRevision: 2,
       idempotencyKey: secondKey,
     });
     expect(newer).toMatchObject({
@@ -203,7 +211,9 @@ describe("goal_update idempotency", () => {
 
     const oldReplay = await callMcpTool<GoalUpdateResult>(replacementMcp, "goal_update", {
       text: "Committed despite transient fanout failure",
-      progressNote: "first attempt persisted",
+      changeKind: "refinement",
+      rationale: "preserve intent while clarifying the durable outcome",
+      expectedObjectiveRevision: 1,
       idempotencyKey: firstKey,
     });
     expect(oldReplay).toEqual({ ...first, replay: true });
@@ -214,6 +224,9 @@ describe("goal_update idempotency", () => {
     await expect(
       callMcpTool(replacementMcp, "goal_update", {
         text: "Conflicting reuse must not apply",
+        changeKind: "replacement",
+        rationale: "exercise conflicting idempotency reuse",
+        expectedObjectiveRevision: 3,
         idempotencyKey: firstKey,
       }),
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });

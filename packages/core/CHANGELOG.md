@@ -1,5 +1,275 @@
 # @opengeni/core
 
+## 1.5.0
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+
+### Patch Changes
+
+- a7df809: Harden the four `remember` instruction-policy edges.
+
+  A moved policy head is now one typed, actionable `RememberError` (`baseline_stale`) on both the propose and confirm sides instead of an untyped error or a raw SQLSTATE 40001. The activation baseline no longer contributes to operation identity, so an ordinary turn-recovery replay of the same `operationId` stays idempotent across a head change; staleness is still enforced by the compare-and-set and by the activation function. A governed write that fails now archives the evidence task note it created instead of stranding it.
+
+  A confirmation stranded by a head that moved after the human already answered now rebaselines onto the current head and completes, instead of hard-failing and forcing the human to answer again. Proposal uniqueness moves from one-per-source to one-per-source-per-baseline to admit that successor; the successor reuses the same knowledge proposal, so the human's confirmation stays bound to exactly the content they approved.
+
+  Two consequences worth stating plainly:
+
+  - Activating a rule replaces the whole active policy document, so confirming a second rule discards a first rule that a human also approved, without asking again. That is the existing whole-document-replacement design of this lane rather than something the rebaseline introduces - previously the stale baseline forced a round trip that would have clobbered anyway - and the audit trail stays exact, with the activation event naming the revision it replaced and `undo` restoring it. The rebaseline removes the round trip, which makes the behaviour easier to reach.
+  - Excluding the baseline from operation identity changes both the proposal request fingerprint and the governed-write input hash (which derives the service actor subject id). A `remember` operation that durably wrote rows under the previous release and is replayed under this one computes a different identity and fails as an operation-reuse conflict. This is bounded to operations in flight across the deploy and self-heals with a fresh operation id; no dual-identity compatibility path was added.
+
+- 6d22ab5: Widen the task-note expiry ceiling from 30 to 90 days. Task notes are pure agent-to-agent coordination within one root session tree; resuming a paused root session/task tree after a longer gap previously lost all coordination notes silently. `TASK_NOTE_MAX_LIFETIME_DAYS` is now the single source of truth, referenced by the application-layer bound checks and `remember`'s evidence note instead of a hardcoded literal. Fully backward compatible: every existing row and every caller supplying 1-30 days keeps working unchanged.
+- Updated dependencies [5dc88ef]
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [f4afa19]
+- Updated dependencies [d581eef]
+- Updated dependencies [994a743]
+- Updated dependencies [a7df809]
+- Updated dependencies [51123b4]
+- Updated dependencies [8583779]
+- Updated dependencies [a99ef33]
+- Updated dependencies [79ee99b]
+- Updated dependencies [368ee6c]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [747222a]
+- Updated dependencies [7bc1cd1]
+- Updated dependencies [6d22ab5]
+  - @opengeni/db@2.0.0
+  - @opengeni/contracts@2.0.0
+  - @opengeni/runtime@1.1.2
+  - @opengeni/config@0.17.0
+  - @opengeni/observability@0.8.0
+  - @opengeni/documents@0.6.5
+  - @opengeni/events@0.3.119
+  - @opengeni/storage@0.2.101
+
+## 1.4.1
+
+### Patch Changes
+
+- Updated dependencies [a03b86f]
+  - @opengeni/db@1.5.0
+  - @opengeni/documents@0.6.4
+  - @opengeni/events@0.3.118
+
+## 1.4.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols. Preserve React compatibility with artifact-tool 0.1 and 0.2 while adding the 0.3 line.
+
+### Patch Changes
+
+- Updated dependencies [0a6c577]
+- Updated dependencies [f804057]
+- Updated dependencies [6937eaf]
+- Updated dependencies [e6c2fee]
+- Updated dependencies [b05130a]
+- Updated dependencies [418b531]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/db@1.4.0
+  - @opengeni/storage@0.2.100
+  - @opengeni/contracts@1.4.0
+  - @opengeni/documents@0.6.3
+  - @opengeni/runtime@1.1.1
+  - @opengeni/events@0.3.117
+  - @opengeni/observability@0.7.11
+
+## 1.3.0
+
+### Minor Changes
+
+- 4c2d958: Google Drive publication freezes its exact output destination on the accepted delegation, so a later connection-settings change fails an already-accepted turn's publication closed instead of silently redirecting it. Every publication sits behind exactly one durable execute-once connector fence (the attempt connector-action wrapper for model callers, the tool's own registration for Codemode callers): a failure before the first mutating provider request settles not_executed with a retry-safe message, while a failure after it settles uncertain and surfaces the unknown outcome.
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/config@0.16.7
+  - @opengeni/documents@0.6.2
+  - @opengeni/events@0.3.116
+  - @opengeni/observability@0.7.10
+  - @opengeni/storage@0.2.99
+
+## 1.2.1
+
+### Patch Changes
+
+- Updated dependencies [a65505d]
+  - @opengeni/db@1.2.0
+  - @opengeni/documents@0.6.1
+  - @opengeni/events@0.3.115
+
+## 1.2.0
+
+### Minor Changes
+
+- ca75ed9: Add the governed-learning activation controller with exact authority revalidation, destination-native workspace activation, immutable content-free receipts, and supersession-safe append-only undo.
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- db758f3: Publish governed-learning activations and undos to the configured workspace Slack channel through the existing durable publication outbox. The dead durable-learning adapter (`publishDurableLearningOutcomeToSlack`) is replaced by `publishGovernedLearningEventToSlack`, which projects only content-free receipt facts, uses `governed-learning:<event>:<receiptId>` idempotency, and fails closed for Slack-derived evidence.
+- e9aabaa: Wire the governed-learning evaluator and activation controller into the Company Brain learning-policy router. Ways-of-working proposals now record a content-free decision receipt after they commit; under `automatic`, an eligible preference decision is activated through the destination lifecycle (instruction policy keeps a human activation boundary). The route receipt gains `learning`, `learningFailure`, and activation receipt/destination facts; `activation.activated` is no longer always `false`.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 22c0c21: Add the managed-human organization invitation, role, suspension, offboarding,
+  and retention lifecycle with revision-fenced APIs and SDK methods. Self
+  invitation history is exposed only through bounded keyset pages, and acceptance
+  resolves one exact subject-bound invitation. Already-open session,
+  workspace-control, live, and interaction streams periodically recheck current
+  membership authority and close after revocation. A bounded operator command
+  commits expired offboarded personal database deletion together with a closed,
+  exact-key cleanup-obligation set before deleting external objects. Provider
+  failures retry only unfinished obligations, retained references abort before
+  external bytes are touched, File bucket identity stays frozen across retries,
+  and immutable lifecycle evidence survives cleanup.
+- 4eb7abd: `remember` with `lane: knowledge` now returns `confirmation_required` bound to the Knowledge claim, and `remember_confirm` (`claimId`) approves the claim through the Knowledge review lifecycle after the exact initiating human answered the bound canonical question with `save` (rolling migration 0274, `confirm_remember_knowledge_claim`, immutable `remember_knowledge_confirmation_receipts`). `remember_confirm` accepts either `proposalId` + `decisionReceiptId` (preference / instruction policy) or `claimId` (knowledge); the confirm receipt carries `claimId` and a `knowledge` activation summary with `undo: knowledge_review`.
+- 89d4ab3: Add the explicit user-directed `remember` / `remember_confirm` agent tools. Content becomes exact task-note evidence promoted through the learning-policy router; a preference activates immediately under `automatic`, Knowledge stays proposal-only, and everything else returns a bound `request_human_input` payload whose `save` answer authorizes activation through the new rolling migration 0272 `activate_human_confirmed_learning_decision` capability (`authority_kind = human_confirmed`, human-input request id recorded on the receipt).
+- 30ba620: Make every accepted scheduled agent occurrence an immutable, credential-free
+  execution snapshot bound to one run, session, scheduled update, logical turn,
+  and attempt chain. Agent tasks accept explicit `connectionAuthorities`
+  (omitted preserves, `[]` clears, an array replaces), execution-affecting edits
+  require the same causal human, `once` grants are consumed exactly once per
+  run, cold reusable sessions converge on one revision-bound materialization
+  receipt, and task deletion becomes a one-way paused tombstone with durable
+  connector cleanup. Create/update requests are byte-bounded at ingress while
+  stored rows stay readable. Migration `0275` is a maintenance cutover.
+- f72563d: Slack now has exactly two authorities: the personal hosted Slack MCP grant and the OpenGeni workspace bot. The workspace-owned hosted Slack MCP connection is removed: OAuth start, reconnect, the callback fence, and capability enablement reject an explicit non-personal ownership for `https://mcp.slack.com/mcp`, an omitted ownership on that resource defaults to personal, and `listEnabledMcpCapabilityServers` no longer runs a workspace-scoped Slack MCP installation enabled by an earlier release. The bot manifest and canonical bot allowlist gain the bot-token Real-time Search scopes `search:read.public`, `search:read.files`, and `search:read.users` as requested-but-not-required extras; apply them to the Slack app before deploying, since the install URL requests every requested scope. The bot search tool itself is a separate change.
+- c297fc0: Add deterministic governed-learning evaluation over exact accepted policy and evidence authority, with immutable content-free decision receipts and no activation capability.
+- cac85bc: Every persistable /workspace writer admission and retained process now freezes its exact authority tuple (causal initiator, initiating human, organization-membership grant identity with observed revision, and session tenancy epoch/visibility/owner). Direct and process actors are fenced like turns: a revoked or suspended grant, or an unattributed pre-0277 tenancy half, fails a new mutation closed before any workspace generation is consumed, and the running provider process is never terminated or re-owned.
+
+### Patch Changes
+
+- 987742d: Skip the redundant in-box rig marker probe when a live Modal session reports
+  the exact immutable image that already passed the rig's content, source,
+  provider-binding, and independent cold-boot verification. Missing or mismatched
+  image identity retains the existing fail-closed marker and setup path.
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- 5cd7b46: `remember` with `lane: instruction_policy` now binds the draft to the target's current activation baseline (active head revision and CAS version, including a deactivated-to-null boundary) instead of assuming an empty workspace, so a user-directed rule can be proposed and confirmed in a workspace that already has an active policy.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [987742d]
+- Updated dependencies [987742d]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [6a8954f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [5cd7b46]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [304462e]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+- Updated dependencies [ea52ff2]
+- Updated dependencies [cac85bc]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/storage@0.2.98
+  - @opengeni/events@0.3.114
+  - @opengeni/observability@0.7.9
+
+## 1.1.0
+
+### Minor Changes
+
+- eeb7cb6: Add immutable personal/workspace connection authority contracts and immediate
+  pre-use revalidation helpers.
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- 04b1a1f: Add exact-attempt, workspace-local governed Knowledge proposal/correction
+  routing and inactive instruction-policy and preference proposal adapters while
+  preserving human activation authority and immutable Knowledge provenance.
+- Updated dependencies [a551666]
+- Updated dependencies [31231dc]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [e98daf6]
+- Updated dependencies [b2af2df]
+- Updated dependencies [e9e1016]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [79f57b5]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/db@1.0.2
+  - @opengeni/observability@0.7.8
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/documents@0.5.42
+  - @opengeni/storage@0.2.97
+
 ## 1.0.1
 
 ### Patch Changes

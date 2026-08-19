@@ -197,6 +197,8 @@ async function seedAttempt(
     tools: [],
     metadata: {},
     model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const executionGeneration = 3;
@@ -212,20 +214,25 @@ async function seedAttempt(
       ${initiator.subjectId}, '{"accepted":true}'::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
-  await shared.admin`
-    INSERT INTO session_turn_attempts (
-      id, account_id, workspace_id, session_id, turn_id, execution_generation,
-      state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-      verified_control_revision, mcp_approval_policies
-    ) VALUES (
-      ${attemptId}, ${grant.accountId}, ${grant.workspaceId}, ${session.id}, ${turn!.id},
-      ${executionGeneration}, 'running', 'preference-wf', ${`run-${attemptId}`},
-      ${`activity-${attemptId}`}, 0, '{}'::jsonb
-    )`;
-  await shared.admin`
-    UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
-  await shared.admin`
-    UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+  await shared.admin.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    await tx`
+      UPDATE sessions SET active_turn_id = ${turn!.id}, status = 'running'
+      WHERE id = ${session.id}`;
+    await tx`
+      UPDATE session_turns SET active_attempt_id = ${attemptId}
+      WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${grant.accountId}, ${grant.workspaceId}, ${session.id}, ${turn!.id},
+        ${executionGeneration}, 'running', 'preference-wf', ${`run-${attemptId}`},
+        ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
   return {
     sessionId: session.id,
     turnId: turn!.id,
@@ -238,10 +245,16 @@ async function replaceAttempt(attempt: Attempt): Promise<Attempt> {
   const replacementId = crypto.randomUUID();
   const executionGeneration = attempt.executionGeneration + 1;
   await shared.admin.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
     await tx`
       UPDATE session_turn_attempts
       SET state = 'closed', outcome = 'superseded', closed_at = now(), updated_at = now()
       WHERE id = ${attempt.attemptId}`;
+    await tx`
+      UPDATE session_turns
+      SET execution_generation = ${executionGeneration},
+        active_attempt_id = ${replacementId}, updated_at = now()
+      WHERE id = ${attempt.turnId}`;
     await tx`
       INSERT INTO session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id, execution_generation,
@@ -254,11 +267,6 @@ async function replaceAttempt(attempt: Attempt): Promise<Attempt> {
         ${`replacement-run-${replacementId}`}, ${`replacement-activity-${replacementId}`},
         verified_control_revision, mcp_approval_policies
       FROM session_turn_attempts WHERE id = ${attempt.attemptId}`;
-    await tx`
-      UPDATE session_turns
-      SET execution_generation = ${executionGeneration},
-        active_attempt_id = ${replacementId}, updated_at = now()
-      WHERE id = ${attempt.turnId}`;
   });
   return { ...attempt, attemptId: replacementId, executionGeneration };
 }

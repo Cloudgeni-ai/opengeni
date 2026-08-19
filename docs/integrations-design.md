@@ -153,7 +153,37 @@ The callback route must NOT call `requireAccessGrant` — a browser redirect car
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
-Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt.
+Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt. The override is data twice over: Linear's curated catalog row carries `oauthProfile.clientSource: "dcr"`, and the OAuth client keeps the issuer on its prefer-DCR list for deployments with a stale catalog (§5.2.2).
+
+### 5.2.2 Provider OAuth quirks as data (profiles)
+
+Providers that need a pre-registered client with pinned metadata, personal-only
+ownership, an exact resource URL, a fixed scope set, or non-standard authorize
+parameters are expressed as an `OAuthProviderProfile`
+(`apps/api/src/integrations/oauth-profiles.ts`), never as a provider branch in
+the flow. `oauth-client.ts` resolves exactly one profile per start and reads
+every quirk from it: start-time payload fences (caller-client rejection,
+provider identity, exact MCP URL, required deployment client), allowed
+ownership plus its default, exact-URL reconnect binding and connection
+selection, post-discovery authorization-server origin pins, `resource`
+parameter suppression, extra authorize parameters, and an exact scope override.
+
+Profiles come from two layers with a fixed resolution order — built-in, then
+catalog, then default:
+
+- **Built-in profiles** (hosted Slack MCP, official Gmail) live in code as data
+  because their fences are security invariants that must not depend on catalog
+  import state. Reserved authorization servers (Google's) and the DCR
+  compatibility issuer list are adjacent data tables. Deployment-managed client
+  credentials (Slack's `OPENGENI_SLACK_CLIENT_ID`/`SECRET`) resolve through a
+  keyed table that only built-in profiles can reference.
+- **Catalog profiles** ride a global catalog row as `metadata.oauthProfile`
+  (curated overlay `oauthProfile` -> importer -> `capability_catalog_items`),
+  zod-validated at use time. A catalog profile applies only when no built-in
+  matched and can only narrow the default flow: its schema cannot express
+  deployment-client keys or reserved-server membership, so catalog data can
+  never loosen a built-in fence or borrow Slack's credentials. This is how a
+  new pinned-client provider is added with no API change.
 
 ### 5.3 Our client identity (CIMD)
 
@@ -222,8 +252,9 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 
 ## 10. Discovery & catalog (I4)
 
-- Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`. Never live-consume the registry at request time; snapshots are versioned with import provenance.
+- Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`, (3) the committed **curated overlay** `data/catalog/curated.json`, keyed by exact MCP URL, which wins over the snapshot field-by-field and carries reviewed first-party contracts, branding, category, and the checkable `featured` / `official` flags. Never live-consume the registry at request time; snapshots are versioned with import provenance. See `docs/capabilities.md` § Curated overlay.
 - Catalog rows extend `capability_catalog_items` with surface type, MCP URL, transports, credential facts, tier, provenance.
+- **Consent copy is data, not frontend code.** A curated row may carry a `presentation` object (provider name, icon, introduction, capabilities, permission summary, scope labels) that flows overlay -> importer -> `metadata.presentation` and renders in the connector sheet's connect step through `capabilityPresentation()` / `presentationPermissions()` (`apps/web/src/components/capabilities/integration-experience.ts`); API integration definitions serve the same shape from `INTEGRATION_DEFINITION_PRESENTATIONS` (`@opengeni/capabilities`) on the definitions endpoint, and it is available to any future definition surface - the one-row-per-provider integration sheet does not render it today, so that definition-side copy currently has no web consumer. Presentation is cosmetic only — it never grants a scope or replaces server-side authorization, a malformed object degrades to the generic copy, and an uncurated connector renders exactly the pre-existing fallback. The provider-neutral `COMMON_SCOPE_LABELS` stay in the web bundle.
 - Phase I4 imports use `scripts/import-integrations-catalog.ts` against a reviewed snapshot or precomputed `importRows` file. Imported rows are global `source: "registry"` capability rows keyed by `(provider_domain, mcp_url)`, linked to `import_batches`, and stale-marked on removal rather than deleted. Logo URLs are fetched at import time and stored as self-hosted object-storage assets (`logo_asset_path`); third-party logo URLs are not served from the catalog.
 - **Agent registry tools (implemented):** `capability_catalog_search` lets a session query the trusted merged catalog for capabilities it lacks, and `capability_authorization_request` emits a concrete, attempt-fenced `tool.auth_needed` recommendation with mandatory human domain confirmation. The agent can never silently add a server. The web resolves live catalog state again before acting: supported OAuth MCPs return to and enable from the originating session, while API-key/variable/admin-review cases use the protected Capabilities setup sheet. GitHub remains on its existing owner-authority spine until I6; its adapter mints fresh browser-only `github:manage` state at click time and never widens the worker grant.
 

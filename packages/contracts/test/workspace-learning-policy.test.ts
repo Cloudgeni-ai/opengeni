@@ -6,6 +6,11 @@ import {
   workspaceLearningPolicyRouterContext,
   type WorkspaceLearningPolicySnapshot,
 } from "../src/workspace-learning-policy";
+import {
+  CreateWorkspaceLearningPolicyRevisionRequest,
+  UndoGovernedLearningActivationHttpRequest,
+  WorkspaceLearningPolicyHistoryQuery,
+} from "../src/workspace-learning-administration";
 
 const HASH = "a".repeat(64);
 
@@ -29,6 +34,25 @@ function snapshot(overrides: WorkspaceLearningPolicySnapshot["sourceOverrides"] 
 }
 
 describe("workspace learning-policy contracts", () => {
+  test("bounds public history and keeps path-owned undo identity out of the body", () => {
+    expect(WorkspaceLearningPolicyHistoryQuery.parse({ limit: "100" })).toEqual({ limit: 100 });
+    expect(WorkspaceLearningPolicyHistoryQuery.safeParse({ limit: "101" }).success).toBe(false);
+    expect(UndoGovernedLearningActivationHttpRequest.parse({})).toEqual({});
+    expect(
+      UndoGovernedLearningActivationHttpRequest.safeParse({
+        activationReceiptId: crypto.randomUUID(),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts sparse request-only inherit overrides", () => {
+    expect(
+      CreateWorkspaceLearningPolicyRevisionRequest.parse({
+        workspaceMode: "suggest",
+        sourceOverrides: [{ kind: "task-note", id: "note:1", mode: "inherit" }],
+      }),
+    ).toMatchObject({ workspaceMode: "suggest", supersedesRevisionId: null });
+  });
   test("canonicalizes sparse overrides and never persists inherit", () => {
     expect(
       canonicalizeWorkspaceLearningSourceOverrides([

@@ -179,6 +179,103 @@ fn core_function_set_matches_reference_semantics() {
 }
 
 #[test]
+fn deterministic_math_profile_covers_incident_and_numeric_boundaries() {
+    let sheet = sheet_id(63);
+    let mut engine = FormulaEngine::new();
+    engine.register_sheet(sheet, "Math").expect("sheet");
+    let formulas = [
+        "=1/(1+0.1)^4",
+        "=POWER(1.1,-4)",
+        "=POWER(2,-1024)",
+        "=POWER(2,-3)",
+        "=POWER(2,-0)",
+        "=POWER(2,0)",
+        "=POWER(2,1)",
+        "=POWER(2,2)",
+        "=POWER(2,3)",
+        "=POWER(2,4)",
+        "=POWER(1,9007199254740991)",
+        "=POWER(2,0.5)",
+        "=POWER(4,-0.5)",
+        "=POWER(-2,3)",
+        "=POWER(-2,0.5)",
+        "=POWER(-0,3)",
+        "=POWER(0,3)",
+        "=POWER(0,-1)",
+        "=POWER(5E-324,1)",
+        "=POWER(1E308,2)",
+        "=ROUND(2.55,1)",
+        "=ROUNDUP(-1.21,1)",
+        "=ROUNDDOWN(-1.29,1)",
+        "=ROUND(1.2345,309)",
+        "=ROUND(1.2345,-324)",
+        "=SQRT(9)",
+        "=SQRT(-1)",
+        "=SQRT(5E-324)",
+        "=-0",
+        "=POWER(-0,-3)",
+        "=1/0",
+    ];
+    for (row, formula) in formulas.into_iter().enumerate() {
+        engine
+            .set_formula(key(sheet, row as u32, 0), formula)
+            .expect("formula");
+    }
+    engine.recalculate().expect("recalculate");
+
+    for (row, bits) in [
+        (0, 0x3fe5_db3f_08b0_ab7d),
+        (1, 0x3fe5_db3f_08b0_ab7d),
+        (2, 0x0004_0000_0000_0000),
+        (18, 0x0000_0000_0000_0001),
+        (28, 0x0000_0000_0000_0000),
+    ] {
+        assert_eq!(
+            number_at(&engine, key(sheet, row, 0)).to_bits(),
+            bits,
+            "formula row {row} bits"
+        );
+    }
+    for (row, expected) in [
+        (3, 0.125),
+        (4, 1.0),
+        (5, 1.0),
+        (6, 2.0),
+        (7, 4.0),
+        (8, 8.0),
+        (9, 16.0),
+        (10, 1.0),
+        (11, 2.0_f64.sqrt()),
+        (12, 0.5),
+        (13, -8.0),
+        (15, 0.0),
+        (16, 0.0),
+        (20, 2.6),
+        (21, -1.3),
+        (22, -1.2),
+        (25, 3.0),
+        (27, 5e-324_f64.sqrt()),
+    ] {
+        assert_eq!(
+            number_at(&engine, key(sheet, row, 0)),
+            expected,
+            "row {row}"
+        );
+    }
+    for row in [14, 17, 19, 23, 24, 26, 29] {
+        assert_eq!(
+            engine.value(key(sheet, row, 0)),
+            Some(&CellValue::Error(FormulaError::Number)),
+            "formula row {row} error"
+        );
+    }
+    assert_eq!(
+        engine.value(key(sheet, 30, 0)),
+        Some(&CellValue::Error(FormulaError::DivideByZero))
+    );
+}
+
+#[test]
 fn evaluator_preserves_lazy_branches_provenance_and_error_semantics() {
     let sheet = sheet_id(61);
     let mut engine = FormulaEngine::new();
@@ -475,7 +572,7 @@ fn shared_fuel_keeps_failed_recalculation_atomic() {
 }
 
 #[test]
-fn aggregate_cached_value_budget_stops_text_fanout_atomically() {
+fn aggregate_projected_value_budget_stops_text_fanout_atomically() {
     let sheet = sheet_id(72);
     let limits = FormulaLimits {
         max_engine_value_bytes: 128,
@@ -502,7 +599,7 @@ fn aggregate_cached_value_budget_stops_text_fanout_atomically() {
     assert_eq!(engine.value(key(sheet, 0, 1)), Some(&CellValue::Empty));
     assert_eq!(engine.value(key(sheet, 0, 2)), Some(&CellValue::Empty));
     assert_eq!(engine.stats().dirty_formula_cells, 2);
-    assert_eq!(engine.allocation_facts().cached_value_utf8_bytes, 64);
+    assert_eq!(engine.allocation_facts().projected_value_utf8_bytes, 64);
 }
 
 #[test]
@@ -616,7 +713,7 @@ fn unique_formula_churn_compacts_arenas_to_live_state() {
     assert_eq!(stats.interned_ast_nodes, 0);
     assert_eq!(stats.compiled_ranges, 0);
     assert_eq!(stats.interned_strings, 0);
-    assert_eq!(facts.cached_value_utf8_bytes, 0);
+    assert_eq!(facts.projected_value_utf8_bytes, 0);
 }
 
 #[test]
@@ -705,7 +802,7 @@ fn trace_is_stable_and_bounded() {
 }
 
 #[test]
-fn workbook_commands_and_snapshot_rebuild_derive_cached_values_from_source() {
+fn workbook_commands_and_snapshot_rebuild_derive_projected_values_from_source() {
     let sheet = sheet_id(12);
     let mut workbook = Workbook::new(42).expect("workbook");
     workbook
@@ -722,7 +819,7 @@ fn workbook_commands_and_snapshot_rebuild_derive_cached_values_from_source() {
                     2,
                     vec![
                         Cell::from_value(number(1.0)),
-                        Cell::formula("=A1*2", number(2.0)).expect("formula"),
+                        Cell::from_formula_projection("=A1*2", number(2.0)).expect("formula"),
                     ],
                 )
                 .expect("cells"),
@@ -789,7 +886,7 @@ fn million_dense_non_formula_cells_do_not_enter_the_formula_graph() {
         assert_eq!(allocation.node_index_capacity, 0);
         assert_eq!(allocation.hydration_queue_slots, 0);
         assert_eq!(allocation.hydration_queue_capacity, 0);
-        assert_eq!(allocation.cached_value_utf8_bytes, 0);
+        assert_eq!(allocation.projected_value_utf8_bytes, 0);
     }
 }
 
@@ -809,7 +906,10 @@ fn hydrated_empty_precedents_are_not_rescanned_by_unrelated_edits() {
                 cells: CellBlock::new(
                     1,
                     1,
-                    vec![Cell::formula("=COUNT(A1:A10000)", CellValue::Empty).expect("formula")],
+                    vec![
+                        Cell::from_formula_projection("=COUNT(A1:A10000)", CellValue::Empty)
+                            .expect("formula"),
+                    ],
                 )
                 .expect("formula block"),
             },
@@ -842,7 +942,7 @@ fn hydrated_empty_precedents_are_not_rescanned_by_unrelated_edits() {
 }
 
 #[test]
-fn command_and_snapshot_boundaries_ignore_forged_formula_caches() {
+fn command_and_snapshot_boundaries_ignore_forged_formula_projections() {
     let sheet = sheet_id(120);
     let mut workbook = Workbook::new(42).expect("workbook");
     workbook
@@ -857,7 +957,7 @@ fn command_and_snapshot_boundaries_ignore_forged_formula_caches() {
                 cells: CellBlock::new(
                     1,
                     1,
-                    vec![Cell::formula("=1+1", number(999.0)).expect("formula")],
+                    vec![Cell::from_formula_projection("=1+1", number(999.0)).expect("formula")],
                 )
                 .expect("cell"),
             },
@@ -870,16 +970,18 @@ fn command_and_snapshot_boundaries_ignore_forged_formula_caches() {
             .map(Cell::value),
         Some(&number(2.0))
     );
+    let authored_bytes = encode_snapshot(&workbook).expect("encode authored state");
 
-    // Simulate an untrusted v1 snapshot producer by bypassing the command
-    // boundary inside this crate. Decode must still derive the cache from the
-    // authored source before exposing the workbook.
+    // Bypass the authored command boundary inside this crate to perturb only
+    // the calculated projection. Canonical bytes must ignore it, and decode
+    // must rebuild the value from the authored source.
     workbook.sheets.get_mut(&sheet).expect("sheet").set_cell(
         CellCoord::new(0, 0),
-        Cell::formula("=1+1", number(777.0)).expect("forged cache"),
+        Cell::from_formula_projection("=1+1", number(777.0)).expect("forged projection"),
     );
-    let restored = decode_snapshot(&encode_snapshot(&workbook).expect("encode forged"))
-        .expect("decode and normalize");
+    let perturbed_bytes = encode_snapshot(&workbook).expect("encode perturbed projection");
+    assert_eq!(perturbed_bytes, authored_bytes);
+    let restored = decode_snapshot(&perturbed_bytes).expect("decode and rebuild projection");
     assert_eq!(
         restored
             .sheet(sheet)
@@ -921,7 +1023,7 @@ fn rejected_formula_recalculation_leaves_workbook_and_engine_atomic() {
         cells: CellBlock::new(
             1,
             1,
-            vec![Cell::formula("=A1&B1", CellValue::Empty).expect("formula")],
+            vec![Cell::from_formula_projection("=A1&B1", CellValue::Empty).expect("formula")],
         )
         .expect("cell"),
     }]));
@@ -944,7 +1046,10 @@ fn rejected_formula_recalculation_leaves_workbook_and_engine_atomic() {
             cells: CellBlock::new(
                 1,
                 1,
-                vec![Cell::formula("=LEFT(A1,2)", CellValue::Empty).expect("formula")],
+                vec![
+                    Cell::from_formula_projection("=LEFT(A1,2)", CellValue::Empty)
+                        .expect("formula"),
+                ],
             )
             .expect("cell"),
         }]))
@@ -975,8 +1080,8 @@ fn snapshot_rebuild_forward_reference_remains_incrementally_reachable() {
                     2,
                     1,
                     vec![
-                        Cell::formula("=A2", number(1.0)).expect("dependent"),
-                        Cell::formula("=1", number(1.0)).expect("precedent"),
+                        Cell::from_formula_projection("=A2", number(1.0)).expect("dependent"),
+                        Cell::from_formula_projection("=1", number(1.0)).expect("precedent"),
                     ],
                 )
                 .expect("formulas"),
@@ -1019,7 +1124,7 @@ fn renamed_sheet_sources_survive_snapshot_graph_rebuild() {
                 cells: CellBlock::new(
                     1,
                     1,
-                    vec![Cell::formula("=Old!A1", number(4.0)).expect("formula")],
+                    vec![Cell::from_formula_projection("=Old!A1", number(4.0)).expect("formula")],
                 )
                 .expect("output"),
             },
@@ -1101,7 +1206,8 @@ fn deleted_sheet_reference_cannot_resurrect_by_name_after_snapshot() {
                 cells: CellBlock::new(
                     1,
                     1,
-                    vec![Cell::formula("=Inputs!A1", number(999.0)).expect("formula")],
+                    vec![Cell::from_formula_projection("=Inputs!A1", number(999.0))
+                        .expect("formula")],
                 )
                 .expect("output"),
             },
@@ -1158,7 +1264,10 @@ fn unicode_case_insensitive_sheet_rename_rewrites_formula_source() {
                 cells: CellBlock::new(
                     1,
                     1,
-                    vec![Cell::formula("='ångström'!A1", CellValue::Empty).expect("formula")],
+                    vec![
+                        Cell::from_formula_projection("='ångström'!A1", CellValue::Empty)
+                            .expect("formula"),
+                    ],
                 )
                 .expect("output"),
             },

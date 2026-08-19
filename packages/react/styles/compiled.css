@@ -2801,6 +2801,9 @@
 :where(.og-root).decoration-og-border-strong,:where(.og-root) .decoration-og-border-strong {
     text-decoration-color: var(--og-color-border-strong);
   }
+:where(.og-root).decoration-dotted,:where(.og-root) .decoration-dotted {
+    text-decoration-style: dotted;
+  }
 :where(.og-root).underline-offset-2,:where(.og-root) .underline-offset-2 {
     text-underline-offset: 2px;
   }
@@ -3985,6 +3988,14 @@
       }
     }
   }
+:where(.og-root).focus-visible\:ring-og-accent\/50,:where(.og-root) .focus-visible\:ring-og-accent\/50 {
+    &:focus-visible {
+      --tw-ring-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 50%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-visible\:ring-og-status-failed\/50,:where(.og-root) .focus-visible\:ring-og-status-failed\/50 {
     &:focus-visible {
       --tw-ring-color: var(--og-color-status-failed);
@@ -4059,6 +4070,11 @@
 :where(.og-root).disabled\:cursor-not-allowed,:where(.og-root) .disabled\:cursor-not-allowed {
     &:disabled {
       cursor: not-allowed;
+    }
+  }
+:where(.og-root).disabled\:cursor-wait,:where(.og-root) .disabled\:cursor-wait {
+    &:disabled {
+      cursor: wait;
     }
   }
 :where(.og-root).disabled\:bg-og-surface-3,:where(.og-root) .disabled\:bg-og-surface-3 {
@@ -4412,6 +4428,11 @@
 :where(.og-root).sm\:col-span-1,:where(.og-root) .sm\:col-span-1 {
     @media (width >= 40rem) {
       grid-column: span 1 / span 1;
+    }
+  }
+:where(.og-root).sm\:col-span-2,:where(.og-root) .sm\:col-span-2 {
+    @media (width >= 40rem) {
+      grid-column: span 2 / span 2;
     }
   }
 :where(.og-root).sm\:col-start-3,:where(.og-root) .sm\:col-start-3 {

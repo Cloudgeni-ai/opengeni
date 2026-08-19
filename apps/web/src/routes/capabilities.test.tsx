@@ -1,59 +1,24 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 
-import type { AccessContext } from "@/types";
+import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
+import { githubChip } from "@/components/capabilities/use-github-integration";
+import { googleDriveChip } from "@/components/capabilities/use-google-drive-integration";
 import {
   canInstallOpenGeniSlackBot,
-  canManageApiIntegrations,
   canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
-  googleDriveStatusLabel,
   localConnectedSlackPreview,
   slackBotDocumentDestinationAuthority,
-  SlackBotInstallControls,
+} from "@/components/capabilities/use-slack-integration";
+import type { AccessContext, GitHubAppInfo } from "@/types";
+import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import {
+  canManageApiIntegrations,
+  integrationQuickConnect,
+  integrationRowBusy,
+  shouldScrollToDeepLinkedBundles,
 } from "./capabilities";
-
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
-
-afterAll(() => {
-  GlobalRegistrator.unregister();
-});
-
-async function renderControls(props: Partial<Parameters<typeof SlackBotInstallControls>[0]> = {}) {
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  const onInstall = mock((_createNewConnection: boolean) => {});
-
-  await act(async () => {
-    root.render(
-      <SlackBotInstallControls
-        canInstall={true}
-        hasConnection={false}
-        busy={false}
-        onInstall={onInstall}
-        {...props}
-      />,
-    );
-  });
-
-  return {
-    container,
-    onInstall,
-    unmount: async () => {
-      await act(async () => root.unmount());
-      container.remove();
-    },
-  };
-}
 
 function accessContext(
   permissions: AccessContext["workspaceGrants"][number]["permissions"],
@@ -75,16 +40,69 @@ function accessContext(
   };
 }
 
-describe("OpenGeni Slack bot install controls", () => {
-  test("summarizes Google Drive state for the compact app catalog", () => {
-    expect(googleDriveStatusLabel("connected")).toBe("Connected");
-    expect(googleDriveStatusLabel("paused")).toBe("Paused");
-    expect(googleDriveStatusLabel("not_connected")).toBe("Not connected");
-    expect(googleDriveStatusLabel("disconnected")).toBe("Not connected");
-    expect(googleDriveStatusLabel("reconsent_required")).toBe("Needs attention");
-    expect(googleDriveStatusLabel("unverified")).toBe("Loading");
+describe("integration state chips", () => {
+  test("normalizes Google Drive states onto the shared chip vocabulary", () => {
+    expect(googleDriveChip("connected", true, true).label).toBe("Connected");
+    expect(googleDriveChip("connected", true, false).label).toBe("Set up by an admin");
+    expect(googleDriveChip("paused", true, true).label).toBe("Needs attention");
+    expect(googleDriveChip("not_connected", true, true).label).toBe("Not connected");
+    expect(googleDriveChip("disconnected", true, true).label).toBe("Not connected");
+    expect(googleDriveChip("reconsent_required", true, true).label).toBe("Needs attention");
+    expect(googleDriveChip("unverified", true, true).label).toBe("Loading");
+    expect(googleDriveChip("connected", false, false).label).toBe("Set up by an admin");
   });
 
+  test("normalizes Atlassian and GitHub states the same way", () => {
+    expect(atlassianChip("connected", true, true).label).toBe("Connected");
+    expect(atlassianChip("paused", true, true).label).toBe("Connected");
+    expect(atlassianChip("needs_attention", true, true).label).toBe("Needs attention");
+    expect(atlassianChip("not_connected", true, true).label).toBe("Not connected");
+    expect(atlassianChip("connected", true, false).label).toBe("Set up by an admin");
+
+    const bound: GitHubAppInfo = {
+      configured: true,
+      status: "bound",
+      setupMode: "platform",
+      appId: "1",
+      clientId: null,
+      appSlug: "opengeni",
+      installUrl: "https://github.example/install",
+      linkUrl: null,
+      installations: [
+        {
+          installationId: 7,
+          githubAccountId: 1,
+          accountLogin: "acme",
+          accountType: "Organization",
+          lifecycle: "active",
+          repositoryScope: "selected",
+          repositoryCount: 3,
+          configureUrl: null,
+          createdAt: "2026-08-01T00:00:00.000Z",
+          updatedAt: "2026-08-01T00:00:00.000Z",
+        },
+      ],
+      missing: [],
+    };
+    expect(githubChip(null, true).label).toBe("Loading");
+    expect(githubChip(bound, true).label).toBe("Connected");
+    expect(githubChip(bound, false).label).toBe("Set up by an admin");
+    expect(
+      githubChip(
+        {
+          ...bound,
+          installations: [{ ...bound.installations[0]!, lifecycle: "suspended" }],
+        },
+        true,
+      ).label,
+    ).toBe("Needs attention");
+    expect(githubChip({ ...bound, status: "unbound", installations: [] }, true).label).toBe(
+      "Not connected",
+    );
+  });
+});
+
+describe("Slack integration authority", () => {
   test("offers a local-only connected Slack preview without changing persisted connections", () => {
     expect(localConnectedSlackPreview("?previewSlack=connected", "workspace-a", false)).toBeNull();
 
@@ -132,74 +150,66 @@ describe("OpenGeni Slack bot install controls", () => {
     );
     expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
   });
+});
 
-  test("renders a disabled install control and administrator guidance without connections:write", async () => {
-    const rendered = await renderControls({ canInstall: false });
+describe("integration row quick-connect guard", () => {
+  const setup = (
+    footer: IntegrationViewModel["footer"],
+    chip: IntegrationViewModel["chip"] = { label: "Not connected", tone: "idle" },
+  ) => ({ chip, footer });
 
-    try {
-      const install = rendered.container.querySelector<HTMLButtonElement>(
-        "[data-opengeni-slack-install]",
-      );
-      expect(install?.disabled).toBe(true);
-      expect(rendered.container.textContent).toContain(
-        "Ask a workspace administrator or connection manager",
-      );
-      await act(async () => install!.click());
-      expect(rendered.onInstall).not.toHaveBeenCalled();
-    } finally {
-      await rendered.unmount();
-    }
+  test("offers the fast path only for a genuinely not-connected, idle setup footer", () => {
+    const onSetup = () => {};
+    expect(integrationQuickConnect(setup({ kind: "setup", onSetup }))).toBe(onSetup);
+    expect(
+      integrationQuickConnect(
+        setup({ kind: "setup", onSetup }, { label: "Connected", tone: "ok" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      integrationQuickConnect(
+        setup({ kind: "locked" }, { label: "Set up by an admin", tone: "plain" }),
+      ),
+    ).toBeUndefined();
   });
 
-  test("renders a disabled reconnect control without offering another installation", async () => {
-    const rendered = await renderControls({ canInstall: false, hasConnection: true });
-
-    try {
-      const buttons = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-      expect(buttons).toHaveLength(1);
-      expect(buttons[0]?.textContent?.trim()).toBe("Reconnect");
-      expect(buttons[0]?.disabled).toBe(true);
-      expect(rendered.container.textContent).not.toContain("Install in another workspace");
-      expect(rendered.container.textContent).toContain(
-        "Ask a workspace administrator or connection manager",
-      );
-    } finally {
-      await rendered.unmount();
-    }
+  test("a busy or disabled setup never fires a second connect", () => {
+    const onSetup = () => {};
+    // A double click must not mint a second instance key and start a second
+    // OAuth redirect.
+    expect(integrationQuickConnect(setup({ kind: "setup", onSetup, busy: true }))).toBeUndefined();
+    expect(
+      integrationQuickConnect(setup({ kind: "setup", onSetup, disabled: true })),
+    ).toBeUndefined();
   });
 
-  test("shows the Slack install badge only before installation", async () => {
-    const initial = await renderControls();
+  test("row busy comes from the adapter's own footer, never a chip label", () => {
+    expect(integrationRowBusy({ footer: { kind: "setup", onSetup: () => {}, busy: true } })).toBe(
+      true,
+    );
+    expect(integrationRowBusy({ footer: { kind: "setup", onSetup: () => {} } })).toBe(false);
+    expect(
+      integrationRowBusy({
+        footer: { kind: "connected", onReconnect: () => {}, onDisconnect: () => {}, busy: true },
+      }),
+    ).toBe(true);
+    expect(integrationRowBusy({ footer: { kind: "locked" } })).toBe(false);
+  });
+});
 
-    try {
-      const install = initial.container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Install OpenGeni in Slack"]',
-      );
-      expect(install).not.toBeNull();
-      await act(async () => install!.click());
-      expect(initial.onInstall).toHaveBeenCalledWith(false);
-    } finally {
-      await initial.unmount();
-    }
+describe("?section=packs deep link", () => {
+  test("waits for the catalog, then scrolls exactly once", () => {
+    // The first commit renders a Browse skeleton; resolving a 1000+ item
+    // catalog then inserts thousands of pixels above the Bundles section, so
+    // scrolling now lands the reader in the middle of the Browse grid.
+    expect(shouldScrollToDeepLinkedBundles("packs", true, false)).toBe(false);
+    expect(shouldScrollToDeepLinkedBundles("packs", false, false)).toBe(true);
+    // Once is once: a later refresh must not yank the page back.
+    expect(shouldScrollToDeepLinkedBundles("packs", false, true)).toBe(false);
+  });
 
-    const connected = await renderControls({ hasConnection: true });
-
-    try {
-      const buttons = [...connected.container.querySelectorAll<HTMLButtonElement>("button")];
-      const reconnect = buttons.find((button) => button.textContent?.trim() === "Reconnect");
-      const installAnother = [
-        ...connected.container.querySelectorAll<HTMLButtonElement>("button"),
-      ].find((button) => button.textContent?.trim() === "Install in another workspace");
-      expect(connected.container.querySelector("[data-opengeni-slack-install]")).toBeNull();
-      expect(reconnect).not.toBeUndefined();
-      expect(installAnother).not.toBeUndefined();
-
-      await act(async () => reconnect!.click());
-      await act(async () => installAnother!.click());
-      expect(connected.onInstall).toHaveBeenNthCalledWith(1, false);
-      expect(connected.onInstall).toHaveBeenNthCalledWith(2, true);
-    } finally {
-      await connected.unmount();
-    }
+  test("an ordinary visit is never scrolled", () => {
+    expect(shouldScrollToDeepLinkedBundles(undefined, false, false)).toBe(false);
+    expect(shouldScrollToDeepLinkedBundles(undefined, true, false)).toBe(false);
   });
 });

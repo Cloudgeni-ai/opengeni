@@ -17,6 +17,11 @@ import {
 } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import {
+  capabilityPresentation,
+  presentationPermissions,
+  type IntegrationPresentationCopy,
+} from "@/components/capabilities/integration-experience";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,6 +35,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
+  capabilityCategoryLabel,
   capabilityConnectPlan,
   capabilityItemKindLabel,
   capabilityReconnectPlan,
@@ -37,6 +43,7 @@ import {
   capabilitySourceLabel,
   curatedSkillProvenance,
   socialConnectionsForOwnership,
+  DEFAULT_CONNECTION_OWNERSHIP,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -107,7 +114,9 @@ export type ConnectAction =
     }
   | { type: "disconnect"; item: CapabilityCatalogItem };
 
-export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
+// Re-exported from the shared library so the sheet and the row/tile quick-connect
+// fast path can never drift on what a new connection defaults to.
+export { DEFAULT_CONNECTION_OWNERSHIP };
 
 export function CapabilityDetailSheet({
   item,
@@ -266,7 +275,9 @@ export function DetailBody({
             <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
             <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
               {capabilityItemKindLabel(item)}
-              {item.category && item.category !== "custom" ? ` · ${item.category}` : ""}
+              {capabilityCategoryLabel(item.category)
+                ? ` · ${capabilityCategoryLabel(item.category)}`
+                : ""}
             </SheetDescription>
           </div>
         </div>
@@ -430,8 +441,12 @@ export function DetailBody({
             </div>
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
+              <ConnectorConsentCopy
+                presentation={capabilityPresentation(item.metadata)}
+                requestedScopes={[]}
+              />
               {personalOnly ? (
-                <PersonalOnlyConnectionNotice />
+                <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
@@ -458,8 +473,12 @@ export function DetailBody({
             </div>
           ) : plan.mode === "oauth" ? (
             <div className="space-y-3">
+              <ConnectorConsentCopy
+                presentation={capabilityPresentation(item.metadata)}
+                requestedScopes={plan.requestedScopes}
+              />
               {personalOnly ? (
-                <PersonalOnlyConnectionNotice />
+                <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
@@ -568,12 +587,76 @@ function SkillControls({
   );
 }
 
-function PersonalOnlyConnectionNotice() {
+/**
+ * Curated consent copy for a connector's OAuth connect: what agents will do
+ * and what the requested scopes mean in plain language. Rendered only when the
+ * catalog row carries `metadata.presentation`; an uncurated connector keeps
+ * the plain connect button exactly as before. Presentation-only - the actual
+ * grant is whatever the provider's consent screen shows.
+ */
+function ConnectorConsentCopy({
+  presentation,
+  requestedScopes,
+}: {
+  presentation: IntegrationPresentationCopy | undefined;
+  requestedScopes: string[];
+}) {
+  if (!presentation) return null;
+  const permissions = presentationPermissions(requestedScopes, presentation);
+  // Content-derived keys with an ordinal suffix only for exact duplicates, so
+  // reordering or removing unrelated entries never remounts a row.
+  const uniqueKeys = (contents: string[]): string[] => {
+    const seen = new Map<string, number>();
+    return contents.map((content) => {
+      const occurrence = seen.get(content) ?? 0;
+      seen.set(content, occurrence + 1);
+      return occurrence === 0 ? content : `${content}#${occurrence}`;
+    });
+  };
+  const capabilityKeys = uniqueKeys(
+    (presentation.capabilities ?? []).map((entry) => `${entry.title}:${entry.description}`),
+  );
+  const permissionKeys = uniqueKeys(
+    permissions.map((entry) => `${entry.label}:${entry.description}`),
+  );
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface p-3 text-left">
+      {presentation.introduction ? (
+        <p className="text-sm text-fg">{presentation.introduction}</p>
+      ) : null}
+      {presentation.capabilities?.length ? (
+        <ul className="space-y-1.5">
+          {presentation.capabilities.map((capability, index) => (
+            <li key={capabilityKeys[index]} className="text-xs">
+              <span className="font-medium text-fg">{capability.title}</span>{" "}
+              <span className="text-fg-muted">{capability.description}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {permissions.length > 0 ? (
+        <ul className="space-y-1">
+          {permissions.map((permission, index) => (
+            <li key={permissionKeys[index]} className="text-xs">
+              <span className="font-medium text-fg">{permission.label}</span>{" "}
+              <span className="text-fg-muted">{permission.description}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {presentation.permissionSummary ? (
+        <p className="text-xs text-fg-subtle">{presentation.permissionSummary}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function PersonalOnlyConnectionNotice({ itemName }: { itemName: string }) {
   return (
     <Notice tone="info">
       <span className="font-medium">Personal connection.</span> Other workspace members cannot
-      discover or use this account. Each member connects their own. Gmail content added to a session
-      follows that session's visibility.
+      discover or use this account. Each member connects their own. {itemName} content added to a
+      session follows that session's visibility.
     </Notice>
   );
 }

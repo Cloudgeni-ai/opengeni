@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import type { FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import {
   browserFileAuthoritySubjectId,
   interactionActorForGrant,
   requireAuthorizedBrowserUploadFiles,
-  validateBrowserRequestOrigin,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
@@ -99,8 +99,10 @@ describe("BrowserSession route discipline", () => {
       ),
       source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/heartbeat"'),
     );
-    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
+    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("createInteractionFrameProxyAttachment");
   });
 
   test("rejects archived identities before acquiring a browser placement", async () => {
@@ -113,6 +115,16 @@ describe("BrowserSession route discipline", () => {
       create.indexOf("await withBrowserPlacement("),
     );
     expect(create).toContain('identity.status !== "active"');
+  });
+
+  test("routes attached-device BrowserSession end through the original placement fence", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withBrowserPlacement"),
+      source.indexOf("async function withActiveBrowserController"),
+    );
+    expect(placement).toContain("attachedEndPlacementInstanceId(");
+    expect(source).toContain('operation === "browser.end" && expectedPlacementInstanceId');
   });
 
   test("admits every controller call through the durable generation fence", async () => {
@@ -422,15 +434,27 @@ describe("BrowserSession route discipline", () => {
     });
   });
 
-  test("distinguishes malformed and disallowed browser origins", () => {
-    expect(validateBrowserRequestOrigin(undefined, "https://app\\.opengeni\\.test")).toBeNull();
-    expect(
-      validateBrowserRequestOrigin("https://app.opengeni.test", "https://app\\.opengeni\\.test"),
-    ).toBe("https://app.opengeni.test");
-    expect(() =>
-      validateBrowserRequestOrigin("https://other.test", "https://app\\.opengeni\\.test"),
-    ).toThrow(expect.objectContaining({ status: 403 }));
-    expect(() => validateBrowserRequestOrigin("https://app.opengeni.test/path", ".*")).toThrow(
+  test("accepts first-party interaction origins without widening credentialed CORS", () => {
+    const input = {
+      corsAllowOriginRegex: "https://trusted-embed\\.test",
+      publicBaseUrl: "https://app.opengeni.test/",
+      webBaseUrl: "https://web.opengeni.test",
+    };
+    expect(validateInteractionRequestOrigin(undefined, input)).toBeNull();
+    expect(validateInteractionRequestOrigin("https://app.opengeni.test", input)).toBe(
+      "https://app.opengeni.test",
+    );
+    expect(allowedCorsOrigin(input.corsAllowOriginRegex, "https://app.opengeni.test")).toBe(false);
+    expect(validateInteractionRequestOrigin("https://web.opengeni.test", input)).toBe(
+      "https://web.opengeni.test",
+    );
+    expect(validateInteractionRequestOrigin("https://trusted-embed.test", input)).toBe(
+      "https://trusted-embed.test",
+    );
+    expect(() => validateInteractionRequestOrigin("https://other.test", input)).toThrow(
+      expect.objectContaining({ status: 403 }),
+    );
+    expect(() => validateInteractionRequestOrigin("https://app.opengeni.test/path", input)).toThrow(
       expect.objectContaining({ status: 400 }),
     );
   });

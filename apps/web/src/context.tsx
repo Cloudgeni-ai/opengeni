@@ -119,25 +119,10 @@ export type AppContextValue = {
   keyAuthRequired: boolean;
   model: string;
   setModel: Dispatch<SetStateAction<string>>;
-  /**
-   * The model chosen for a specific open session. Composer state (draft, mode)
-   * is session-scoped, and so is the model: each session remembers its own pick
-   * in-memory. Until seeded, uses `fallback` when provided (typically durable
-   * `session.model`), else the frozen deployment default — never the mutable
-   * new-session {@link model} pick (that would cross-bleed).
-   * Seed with {@link ensureModelForSession} from `session.model` / draft.
-   */
-  modelForSession: (sessionId: string, fallback?: string) => string;
-  setModelForSession: (sessionId: string, value: string) => void;
-  /** Write only when this session has no override yet (safe metadata/draft seed). */
-  ensureModelForSession: (sessionId: string, value: string) => void;
-  /** Deployment/new-session default effort. Open sessions use {@link effortForSession}. */
+  /** New-session composer effort. Established sessions own their policy in their draft. */
   reasoningEffort: IntelligenceEffort;
   setReasoningEffort: Dispatch<SetStateAction<IntelligenceEffort>>;
-  effortForSession: (sessionId: string) => IntelligenceEffort;
-  setEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
-  /** Write only when this session has no override yet (safe metadata/draft seed). */
-  ensureEffortForSession: (sessionId: string, value: IntelligenceEffort) => void;
+  /** New-session composer latency. Established sessions own their policy in their draft. */
   latencyMode: LatencyMode;
   setLatencyMode: Dispatch<SetStateAction<LatencyMode>>;
   inspectorOpen: boolean;
@@ -158,6 +143,8 @@ export type AppContextValue = {
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
   githubStatus: GitHubAppInfo | null;
+  /** True when the last GitHub status/catalog fetch failed (unknown, not unbound). */
+  githubStatusFailed: boolean;
   /** True once the current workspace's repository catalog has completed its first load. */
   githubCatalogReady: boolean;
   githubAppOpen: boolean;
@@ -214,7 +201,8 @@ export type AppContextValue = {
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
-  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
+  /** Resolves true when the unlink succeeded; failures self-toast and resolve false. */
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<boolean>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -393,13 +381,6 @@ export function RootRouteComponent() {
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
-  // Per-session model overrides (session id → model). A session with no entry
-  // inherits the deployment default `model`; selecting in its picker writes here
-  // so each open session keeps its own choice independently.
-  const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
-  const [reasoningEffortBySession, setReasoningEffortBySession] = useState<
-    Record<string, IntelligenceEffort>
-  >({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
@@ -414,6 +395,7 @@ export function RootRouteComponent() {
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
+  const [githubStatusFailed, setGithubStatusFailed] = useState(false);
   const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
@@ -868,6 +850,7 @@ export function RootRouteComponent() {
           return;
         }
         setGithubStatus(status);
+        setGithubStatusFailed(false);
         setGithubAppOpen(status.status !== "bound");
         if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
@@ -893,6 +876,7 @@ export function RootRouteComponent() {
         // that the last-known installation or repository identities vanished.
         // Keep the last successful snapshot and readiness fence so draft
         // hydration cannot project it to [] and autosave destructive loss.
+        setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
           description: String(error),
         });
@@ -1033,7 +1017,7 @@ export function RootRouteComponent() {
   async function disconnectGitHubInstallation(
     workspaceId: string,
     installationId: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await client.unlinkGitHubInstallation(workspaceId, installationId);
       const removedRepositoryIds = new Set(
@@ -1054,10 +1038,12 @@ export function RootRouteComponent() {
       );
       await refreshGitHub(workspaceId, undefined, { sync: true });
       toast.success("GitHub installation unlinked from this workspace");
+      return true;
     } catch (error) {
       toast.error("Failed to unlink GitHub installation", {
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
@@ -1158,49 +1144,9 @@ export function RootRouteComponent() {
     sessionEventFeedStore.set(null);
   }, [sessionEventFeedStore, setSession]);
 
-  // Session-scoped model/effort: never fall back to the mutable new-session
-  // picks — those change while other sessions are open and would bleed across.
-  const deploymentDefaultModel = clientConfig?.defaultModel ?? model;
-  const modelForSession = useCallback(
-    (sessionId: string, fallback?: string): string =>
-      modelBySession[sessionId] ?? fallback ?? deploymentDefaultModel,
-    [deploymentDefaultModel, modelBySession],
-  );
-  const setModelForSession = useCallback((sessionId: string, value: string): void => {
-    setModelBySession((current) =>
-      current[sessionId] === value ? current : { ...current, [sessionId]: value },
-    );
-  }, []);
-  const ensureModelForSession = useCallback((sessionId: string, value: string): void => {
-    setModelBySession((current) =>
-      Object.prototype.hasOwnProperty.call(current, sessionId)
-        ? current
-        : { ...current, [sessionId]: value },
-    );
-  }, []);
-  const effortForSession = useCallback(
-    (sessionId: string): IntelligenceEffort =>
-      reasoningEffortBySession[sessionId] ?? clientConfig?.defaultReasoningEffort ?? "low",
-    [clientConfig?.defaultReasoningEffort, reasoningEffortBySession],
-  );
-  const setEffortForSession = useCallback((sessionId: string, value: IntelligenceEffort): void => {
-    setReasoningEffortBySession((current) =>
-      current[sessionId] === value ? current : { ...current, [sessionId]: value },
-    );
-  }, []);
-  const ensureEffortForSession = useCallback(
-    (sessionId: string, value: IntelligenceEffort): void => {
-      setReasoningEffortBySession((current) =>
-        Object.prototype.hasOwnProperty.call(current, sessionId)
-          ? current
-          : { ...current, [sessionId]: value },
-      );
-    },
-    [],
-  );
-
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
+    setGithubStatusFailed(false);
     setGithubRepos([]);
     setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
@@ -1255,14 +1201,8 @@ export function RootRouteComponent() {
           keyAuthRequired: keyAuthRequired === true,
           model,
           setModel,
-          modelForSession,
-          setModelForSession,
-          ensureModelForSession,
           reasoningEffort,
           setReasoningEffort,
-          effortForSession,
-          setEffortForSession,
-          ensureEffortForSession,
           latencyMode,
           setLatencyMode,
           inspectorOpen,
@@ -1282,6 +1222,7 @@ export function RootRouteComponent() {
           setSelectedRepoRefs,
           githubRepos,
           githubStatus,
+          githubStatusFailed,
           githubCatalogReady,
           githubAppOpen,
           setGithubAppOpen,
@@ -1351,6 +1292,7 @@ export function RootRouteComponent() {
     githubOrg,
     githubRepos,
     githubStatus,
+    githubStatusFailed,
     githubCatalogReady,
     inspectorOpen,
     keyAuthRequired,
@@ -1359,13 +1301,8 @@ export function RootRouteComponent() {
     model,
     preparePendingSlackLink,
     slackLinkContinuationWorkspaceId,
-    modelForSession,
-    ensureModelForSession,
     latencyMode,
     reasoningEffort,
-    effortForSession,
-    setEffortForSession,
-    ensureEffortForSession,
     refreshGitHub,
     refreshWorkspace,
     refreshWorkspaceMcpServers,
@@ -1379,7 +1316,6 @@ export function RootRouteComponent() {
     selectedRepoRefs,
     session,
     sessionEventFeedStore,
-    setModelForSession,
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,

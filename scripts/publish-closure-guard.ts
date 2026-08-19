@@ -349,9 +349,9 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
   failures.push(`@opengeni/react must keep @opengeni/sdk as a runtime dependency.`);
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
-if (reactPeerDependencies["@opengeni/artifact-tool"] !== ">=0.1.0 <0.3.0") {
+if (reactPeerDependencies["@opengeni/artifact-tool"] !== ">=0.1.0 <0.4.0") {
   failures.push(
-    `@opengeni/react must expose the supported @opengeni/artifact-tool 0.1 and 0.2 lines as a compatible peer.`,
+    `@opengeni/react must expose the supported @opengeni/artifact-tool 0.1, 0.2, and 0.3 lines as a compatible peer.`,
   );
 }
 const reactPeerMetadata = (
@@ -622,7 +622,7 @@ if (existsSync(contractsDistDir)) {
   if (!contractRuntime.includes("OGATX001")) {
     failures.push("The built editable-artifact contract entry does not contain the OGATX codec.");
   }
-  if (!contractRuntime.includes("OGALV001")) {
+  if (!contractRuntime.includes("OGALV002")) {
     failures.push(
       "The built editable-artifact live contract entry does not contain the OGALV codec.",
     );

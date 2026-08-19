@@ -174,6 +174,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       workspaceId: workspace.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `slack-routing-${crypto.randomUUID()}`,
     });
     expect(first.action).toBe("start");
     const session = await getSession(client.db, workspace.workspaceId, first.sessionId);
@@ -206,6 +207,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
     ).rejects.toThrow("not active (revoked)");
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
@@ -224,6 +226,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         workspaceId: workspace.workspaceId,
         taskId: personalTask.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
 
@@ -235,6 +238,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         workspaceId: workspace.workspaceId,
         taskId: crossWorkspaceTask.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
   });
@@ -254,6 +258,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       workspaceId: workspace.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `slack-routing-${crypto.randomUUID()}`,
     });
     expect(dispatched.action).toBe("start");
     const session = await getSession(client.db, workspace.workspaceId, dispatched.sessionId);
@@ -272,6 +277,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       workspaceId: workspace.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `slack-routing-${crypto.randomUUID()}`,
     });
     expect(first.action).toBe("start");
 
@@ -280,16 +286,22 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: unboundAgentConfig,
     });
-    await expect(
-      worker.dispatchScheduledTaskRun({
+    // A diverged binding is a deterministic terminal outcome for that
+    // occurrence: no retry loop, no delivery into the wrong session.
+    expect(
+      await worker.dispatchScheduledTaskRun({
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("binding does not match its reusable session");
+    ).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
 
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     expect(runs.map((run) => run.status).sort()).toEqual(["dispatched", "failed"]);
+    expect(runs.find((run) => run.status === "failed")?.error).toBe(
+      "scheduled_reusable_binding_changed",
+    );
   });
 
   test("completes an already-fired workflow after its task was deleted", async () => {
@@ -304,6 +316,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
     ).toEqual({ action: "deleted" });
   });
@@ -362,6 +375,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
     ).toEqual({ action: "blocked", reason: "insufficient_credits" });
   });

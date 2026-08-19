@@ -128,7 +128,6 @@ export async function submitAndDispatchCodemodeCall(
       ...request,
       caller: { kind: "codemode", subjectId: authority.subjectId },
     },
-    callLimit: deps.settings.codemodeMaxCallsPerTurn,
   });
   let operation = submitted.operation;
   let dispatch: CodemodeCallSubmissionValue["dispatch"] = terminal(operation)

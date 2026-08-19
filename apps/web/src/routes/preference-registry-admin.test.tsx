@@ -275,6 +275,14 @@ async function settle(): Promise<void> {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 async function setValue(
   element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
   value: string,
@@ -338,7 +346,8 @@ function controlForLabel<T extends HTMLInputElement | HTMLTextAreaElement | HTML
 }
 
 describe("structured preference Workspace State administration", () => {
-  test("shows descriptors, on-demand content boundaries, versions, provenance, and audit history", async () => {
+  test("reports loading while a cached preference inventory refresh is pending", async () => {
+    const onReviewSummary = mock(() => undefined);
     const container = document.createElement("div");
     const root = createRoot(container);
     try {
@@ -347,6 +356,111 @@ describe("structured preference Workspace State administration", () => {
           <PreferenceRegistryAdministration
             workspaceId={workspaceId}
             onWorkspaceStateReload={async () => undefined}
+            onReviewSummary={onReviewSummary}
+          />,
+        ),
+      );
+      await settle();
+      await settle();
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
+
+      const pending = deferred<{ preferences: PreferenceRegistryRecord[] }>();
+      listPreferenceRegistry.mockImplementationOnce(async () => await pending.promise);
+      const refresh = [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Refresh registry and detail"),
+      );
+      expect(refresh).toBeDefined();
+      await act(async () => {
+        refresh!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "loading",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
+
+      await act(async () => pending.resolve({ preferences: [preference] }));
+      await settle();
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("reports every distinct conflict declared by loaded active preferences", async () => {
+    const onReviewSummary = mock(() => undefined);
+    const conflictingPreference: PreferenceRegistryRecord = {
+      ...preference,
+      activeRevision: {
+        ...revisionTwo,
+        precedence: {
+          ...revisionTwo.precedence,
+          conflictsWith: ["response.verbose", "response.formal", "response.verbose"],
+        },
+      },
+    };
+    const historicalPreference: PreferenceRegistryRecord = {
+      ...replacementPreference,
+      status: "superseded",
+      activeRevision: {
+        ...replacementRevision,
+        precedence: {
+          ...replacementRevision.precedence,
+          conflictsWith: ["historical.conflict"],
+        },
+      },
+    };
+    listPreferenceRegistry.mockImplementationOnce(async () => ({
+      preferences: [conflictingPreference, historicalPreference],
+    }));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+            onReviewSummary={onReviewSummary}
+          />,
+        ),
+      );
+      await settle();
+      await settle();
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        conflictCount: 2,
+        partial: false,
+      });
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("shows descriptors, on-demand content boundaries, versions, provenance, and audit history", async () => {
+    const onReviewSummary = mock(() => undefined);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+            onReviewSummary={onReviewSummary}
           />,
         ),
       );
@@ -371,6 +485,12 @@ describe("structured preference Workspace State administration", () => {
       expect(container.textContent).toContain("Immutable lifecycle audit");
       expect(container.textContent).toContain("Clarify the descriptor");
       expect(container.textContent).toContain("Actor: user:admin");
+      expect(onReviewSummary).toHaveBeenLastCalledWith({
+        status: "ready",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
     } finally {
       await act(async () => root.unmount());
     }

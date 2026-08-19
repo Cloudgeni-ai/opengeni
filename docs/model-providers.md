@@ -149,20 +149,23 @@ rules disabled for the managed key because those rules operate outside the
 request body.
 
 Both models request Gateway automatic caching. Kimi remains catalogued as
-image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
-sends images inline as data URLs through the standard Responses input surface;
-it never gives an endpoint provider an object-store URL.
+image-capable, so the worker also attaches `view_image` and `computer_*`
+screenshot tools. DeepSeek stays text-only. OpenGeni verifies finalized
+attachment bytes and checksums, then sends images inline as data URLs through
+the standard Responses input surface; it never gives an endpoint provider an
+object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
-ordinary `tool_search` and `tool_invoke` schemas plus eager control tools, never
-the selected deferred MCP catalogue. A search result carries only bounded
-matching definitions. A valid `tool_invoke` call is rewritten inside the runtime
-to the real authorized tool before the Agents SDK performs approval, guardrail,
-timeout, MCP error, and event handling. Provider history is restored to the
-original dispatcher call before every later request—including exact stateless
-Responses replay, provider changes, lazy-mode rollback, and compaction input.
-This path completed live on both curated models on 2026-08-07.
+ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
+exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
+matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
+bound through `resolveMissingFunctionTool` in that same model response before
+normal approval, guardrail, timeout, MCP error, and event handling. Leftover
+historical registration items stay out of provider and user-visible history.
+Provider history is restored to the original dispatcher call before every later
+request—including exact stateless Responses replay, provider changes, lazy-mode
+rollback, and compaction input.
 
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in
@@ -193,7 +196,9 @@ portable sessions may use any supported route whose request adapter can express
 their canonical history.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
-`supergrok-subscription` provider. The xAI API-key rail remains separate. See
+`supergrok-subscription` provider. The catalog advertises image input, which is
+the worker gate for user image attachments, `view_image`, and `computer_*`
+screenshot tools. The xAI API-key rail remains separate. See
 [`supergrok-subscription.md`](supergrok-subscription.md) for account authority,
 allocator, lease, and durable capacity-wait semantics.
 
@@ -277,12 +282,13 @@ native `web_search`.
 
 Progressive disclosure is selected explicitly per resolved provider:
 
-- **Codex subscription — `codex_native`:** preserves the existing Codex-native
-  `defer_loading` plus client `tool_search` path.
+- **Codex subscription — `codex_native`:** native client `tool_search`; deferred
+  schemas stay off the first-request tool block. A remembered authorized name
+  binds through `resolveMissingFunctionTool` without requiring another search.
 - **Built-in direct OpenAI/Azure Responses — `openai_native`:** the runtime keeps
-  the original tool objects in the execution registry with the SDK deferred gate
-  disabled, removes lazy schemas only from the provider request, and returns
-  those same objects from native client `tool_search`.
+  the original tool objects available to that same hook with the SDK deferred
+  gate disabled, removes lazy schemas only from the provider request, and
+  returns those same objects from native client `tool_search`.
 - **Other ordinary function-calling providers — `generic_dispatch`:** the model
   receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
   protocol extension is required. This includes an OpenAI-compatible custom base
@@ -295,14 +301,14 @@ OpenAI/Azure native and generic paths; both settings default to enabled.
 
 The execution registry and model-visible tools are deliberately separate.
 Search never grants authority: every invocation resolves against the current
-turn's already-authorized tool snapshot. Generic dispatch accepts a remembered
-valid call after portable compaction without requiring a fragile disclosure
-ledger; a removed, revoked, or malformed target returns a typed model-visible
-error and tells the model to search again. The compacted textual summary is
-never trusted as an exact schema store. Historical generic-dispatch calls are
-restored independently of the current transport, so switching providers cannot
-expose OpenGeni's internal execution rewrite. Native disclosure state remains
-provider-owned; after compaction the model may need to search again.
+turn's already-authorized tool snapshot. Generic dispatch and native transports
+accept a remembered authorized name after portable compaction without requiring
+a fragile disclosure ledger; a removed, revoked, or malformed target returns a
+typed model-visible error (`tool_unavailable` on generic `tool_invoke`, the
+SDK not-found message on native) instead of killing the turn. The compacted
+textual summary is never trusted as an exact schema store. Historical
+generic-dispatch calls are restored independently of the current transport, so
+switching providers cannot expose OpenGeni's internal execution rewrite.
 
 Prompt-cache stability is a primary invariant. Generic control schemas,
 descriptions, and ordering are constant, so adding, removing, or changing a

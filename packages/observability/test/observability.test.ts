@@ -7,7 +7,9 @@ import {
   interactionOperationMetricObserver,
   logStartupDependencyRetry,
   parseHeaders,
+  recordTenancyCompatibilityLaneUse,
   sandboxOperationMetricObserver,
+  TENANCY_COMPATIBILITY_LANES,
 } from "../src";
 
 const settings = {
@@ -514,6 +516,40 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
   });
 
+  test("public structured logs retain only grammar-validated request correlation ids", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("valid", {
+        correlationId: "request.2026-08-19:abc_123",
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 502,
+        workspaceId: "workspace-must-not-leak",
+      });
+      obs.warn("invalid", {
+        correlationId: "request id with spaces and bearer material",
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 502,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "valid",
+      correlationId: "request.2026-08-19:abc_123",
+      errorClass: "HttpOperationError",
+      errorCode: "internal_error",
+      status: 502,
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
   test("physical cancellation logs retain duration and safe sandbox correlation", () => {
     const observed: string[] = [];
     const originalLog = console.log;
@@ -685,5 +721,82 @@ describe("observability", () => {
       errorCode: "otlp_export_failed",
       origin: "observability",
     });
+  });
+
+  test("publishes every tenancy compatibility lane at zero before any use", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const metrics = await obs.prometheusMetrics();
+    for (const lane of TENANCY_COMPATIBILITY_LANES) {
+      expect(metrics).toContain(`lane="${lane}"`);
+    }
+    // An operator watching the migration drain must be able to tell "this lane
+    // is already dead" from "this lane was never wired up".
+    expect(
+      metrics
+        .split("\n")
+        .filter((line) => line.startsWith("opengeni_tenancy_compatibility_lane_uses_total{")),
+    ).toHaveLength(TENANCY_COMPATIBILITY_LANES.length);
+    expect(metrics).toContain(
+      "# HELP opengeni_tenancy_compatibility_lane_uses_total " +
+        "Live uses of an organization-tenancy compatibility lane, by lane.",
+    );
+  });
+
+  test("counts one compatibility-lane use with the lane as its only label", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
+    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
+    recordTenancyCompatibilityLaneUse(obs, "connection_legacy_user");
+
+    const metrics = await obs.prometheusMetrics();
+    const sample = (lane: string): string =>
+      metrics
+        .split("\n")
+        .find(
+          (line) =>
+            line.startsWith("opengeni_tenancy_compatibility_lane_uses_total{") &&
+            line.includes(`lane="${lane}"`),
+        ) ?? "";
+    expect(sample("connection_pre_snapshot_ref")).toMatch(/\s2$/);
+    expect(sample("connection_legacy_user")).toMatch(/\s1$/);
+    expect(sample("workspace_writer_unattributed")).toMatch(/\s0$/);
+    // Content-free: only the reviewed lane name plus the registry's fixed
+    // deployment labels. No tenant, subject, connection, or resource identity.
+    const labels = sample("connection_legacy_user").slice(
+      sample("connection_legacy_user").indexOf("{") + 1,
+      sample("connection_legacy_user").indexOf("}"),
+    );
+    expect(
+      labels
+        .split(",")
+        .map((pair) => pair.split("=")[0])
+        .sort(),
+    ).toEqual(["component", "deployment_revision", "environment", "lane", "service"]);
+  });
+
+  test("ignores a lane name outside the reviewed set and a missing observability", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    recordTenancyCompatibilityLaneUse(
+      obs,
+      "connection_id_47f0d0a1" as unknown as (typeof TENANCY_COMPATIBILITY_LANES)[number],
+    );
+    expect(() => recordTenancyCompatibilityLaneUse(null, "connection_legacy_user")).not.toThrow();
+    expect(() =>
+      recordTenancyCompatibilityLaneUse(undefined, "connection_legacy_user"),
+    ).not.toThrow();
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).not.toContain("connection_id_47f0d0a1");
+  });
+
+  test("a compatibility-lane registry failure never escapes to the caller", () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const failing = Object.create(obs) as typeof obs;
+    failing.incrementCounter = () => {
+      throw new Error("registry unhealthy");
+    };
+    expect(() =>
+      recordTenancyCompatibilityLaneUse(failing, "workspace_writer_unattributed"),
+    ).not.toThrow();
   });
 });

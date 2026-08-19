@@ -60,6 +60,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const operationId = crypto.randomUUID();

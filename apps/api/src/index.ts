@@ -1,6 +1,7 @@
 import {
   dbSearchPath,
   getSettings,
+  resolveFirstPartyDelegationSecret,
   resolveNatsCalloutConfig,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
@@ -39,11 +40,13 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
-  type EditableArtifactWebSocketConnection,
 } from "./editable-artifact-websocket";
+import type { ApiWebSocketConnection } from "./api-websocket";
+import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -399,11 +402,17 @@ export async function startApi() {
     });
   }
   const artifactWebSockets = new EditableArtifactWebSocketTransport(routeDeps.editableArtifacts);
-  const server = Bun.serve<EditableArtifactWebSocketConnection>({
+  const interactionFrameProxies = new InteractionFrameProxyTransport(
+    resolveFirstPartyDelegationSecret(settings),
+  );
+  const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
     fetch: (request, bunServer) => {
+      if (interactionFrameProxies.handles(request)) {
+        return interactionFrameProxies.upgrade(request, bunServer);
+      }
       if (artifactWebSockets.handles(request)) {
         return artifactWebSockets.upgrade(request, bunServer);
       }
@@ -413,9 +422,9 @@ export async function startApi() {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
       backpressureLimit: 16 * 1024 * 1024,
       closeOnBackpressureLimit: true,
-      open: (socket) => artifactWebSockets.websocket.open(socket),
-      message: (socket, message) => artifactWebSockets.websocket.message(socket, message),
-      close: (socket) => artifactWebSockets.websocket.close(socket),
+      open: (socket) => socket.data.attach(socket),
+      message: (socket, message) => socket.data.receive(message),
+      close: (socket) => socket.data.transportClosed(),
     },
   });
   const stopSlackInteractionPump = settings.slackSigningSecret
@@ -424,6 +433,8 @@ export async function startApi() {
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
+    cleanupConnectorAuthorization: async (claim) =>
+      await cleanupScheduledTaskConnectorAuthorization(routeDeps, claim),
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },

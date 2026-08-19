@@ -335,6 +335,103 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 120_000);
 
+  test("keeps Company Brain attention and OKF export truthful across responsive breakpoints", async () => {
+    const bootstrap = await configuredContext(
+      browser,
+      {
+        viewport: { width: 1280, height: 900 },
+        extraHTTPHeaders: ownerHeaders,
+      },
+      browserTestSettings.sandboxSelfhostedEnabled,
+    );
+    let workspaceId: string;
+    try {
+      const page = await bootstrap.newPage();
+      await page.goto(webBaseUrl);
+      workspaceId = await workspaceFromPage(page);
+    } finally {
+      await bootstrap.close();
+    }
+
+    const matrix = [
+      { label: "320", viewport: { width: 320, height: 720 }, theme: "light" },
+      { label: "375", viewport: { width: 375, height: 812 }, theme: "dark" },
+      { label: "768", viewport: { width: 768, height: 1024 }, theme: "light" },
+      { label: "desktop", viewport: { width: 1280, height: 900 }, theme: "dark" },
+    ] as const;
+
+    for (const matrixCase of matrix) {
+      const context = await configuredContext(
+        browser,
+        {
+          viewport: matrixCase.viewport,
+          isMobile: matrixCase.label === "desktop" ? undefined : true,
+          hasTouch: matrixCase.label === "desktop" ? undefined : true,
+          acceptDownloads: true,
+          extraHTTPHeaders: ownerHeaders,
+        },
+        browserTestSettings.sandboxSelfhostedEnabled,
+      );
+      try {
+        const page = await context.newPage();
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
+        await page.getByRole("heading", { level: 1, name: "Company Brain", exact: true }).waitFor();
+        await page.getByRole("heading", { level: 2, name: "Needs attention" }).waitFor();
+        await page.getByText("Company profile is not set", { exact: true }).waitFor();
+        await page.getByText("Workspace instructions are not set", { exact: true }).waitFor();
+        expect(await page.getByText("No visible review signals", { exact: true }).count()).toBe(0);
+        await page.getByRole("heading", { level: 2, name: "Explore Company Brain" }).waitFor();
+        await page.getByRole("heading", { level: 3, name: "Guidance & history" }).waitFor();
+        await page.getByRole("heading", { level: 3, name: "Knowledge explorer" }).waitFor();
+        await page.getByRole("heading", { level: 3, name: "Why agents used context" }).waitFor();
+        await page.getByRole("heading", { level: 3, name: "Knowledge-backed proposals" }).waitFor();
+        await page.getByRole("textbox", { name: "Search company knowledge" }).waitFor();
+        await page.getByRole("button", { name: "Export OKF", exact: true }).waitFor();
+        await setTheme(page, matrixCase.theme);
+        await expectNoPageOverflow(page);
+        await expectNoAxeViolations(
+          page,
+          "[data-slot='content-page']",
+          `company-brain/${matrixCase.label}/${matrixCase.theme}`,
+        );
+
+        if (matrixCase.label === "desktop") {
+          await page
+            .getByRole("textbox", { name: "Search company knowledge" })
+            .fill("architecture handbook");
+          await page.getByRole("button", { name: "Search", exact: true }).click();
+          await page.getByText("No authorized knowledge records found.", { exact: true }).waitFor();
+          const downloadPromise = page.waitForEvent("download");
+          await page.getByRole("button", { name: "Export OKF", exact: true }).click();
+          const download = await downloadPromise;
+          expect(download.suggestedFilename()).toMatch(/^company-brain(?:-.+)?\.okf\.md$/u);
+          const downloadPath = await download.path();
+          expect(downloadPath).not.toBeNull();
+          const content = await Bun.file(downloadPath!).text();
+          expect(content).toContain("# OpenGeni Company Brain");
+          await page
+            .getByText("Permission-filtered Company Brain package downloaded.", { exact: true })
+            .waitFor();
+        }
+
+        await resetSurfaceCaptureViewport(page);
+        await page.screenshot({
+          path: `/tmp/company-brain-${matrixCase.label}-${matrixCase.theme}-overview.png`,
+          fullPage: true,
+        });
+        await page
+          .getByRole("heading", { level: 2, name: "Needs attention" })
+          .scrollIntoViewIfNeeded();
+        await page.screenshot({
+          path: `/tmp/company-brain-${matrixCase.label}-${matrixCase.theme}-attention.png`,
+        });
+        expect(unexpectedDiagnostics(context)).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  }, 120_000);
+
   async function exerciseTruthfulStates(
     page: Page,
     workspaceId: string,

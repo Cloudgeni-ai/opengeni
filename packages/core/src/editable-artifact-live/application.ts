@@ -23,9 +23,13 @@ import type { EditableArtifactLiveTicket } from "./types";
 
 export type EditableArtifactLiveCompatibilityRequest = Readonly<{
   artifact: EditableArtifact;
-  protocolVersion: number;
+  modality: EditableArtifactModality;
+  liveProtocolVersion: number;
   kernelVersion: string;
   modelSchemaVersion: number;
+  snapshotVersion: number;
+  commandProtocolVersion: number;
+  committedTransactionProtocolVersion: number;
 }>;
 
 /** A client/runtime protocol tuple cannot be served by the loaded kernel. */
@@ -71,9 +75,13 @@ export type ReadEditableArtifactApplicationInput = Readonly<{
 
 export type MintEditableArtifactApplicationTicketInput = ReadEditableArtifactApplicationInput &
   Readonly<{
-    protocolVersion: number;
+    modality: EditableArtifactModality;
+    liveProtocolVersion: number;
     kernelVersion: string;
     modelSchemaVersion: number;
+    snapshotVersion: number;
+    commandProtocolVersion: number;
+    committedTransactionProtocolVersion: number;
     allowEdit: boolean;
   }>;
 
@@ -148,9 +156,19 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
     const artifact = await this.readArtifact(input);
     await this.dependencies.compatibility.assertCompatible({
       artifact,
-      protocolVersion: positiveInteger(input.protocolVersion, "protocolVersion"),
+      modality: input.modality,
+      liveProtocolVersion: positiveInteger(input.liveProtocolVersion, "liveProtocolVersion"),
       kernelVersion: boundedVersion(input.kernelVersion, "kernelVersion"),
       modelSchemaVersion: positiveInteger(input.modelSchemaVersion, "modelSchemaVersion"),
+      snapshotVersion: positiveInteger(input.snapshotVersion, "snapshotVersion"),
+      commandProtocolVersion: positiveInteger(
+        input.commandProtocolVersion,
+        "commandProtocolVersion",
+      ),
+      committedTransactionProtocolVersion: positiveInteger(
+        input.committedTransactionProtocolVersion,
+        "committedTransactionProtocolVersion",
+      ),
     });
     return await this.dependencies.live.mintTicket({
       scope: artifact.scope,

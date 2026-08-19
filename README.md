@@ -384,6 +384,12 @@ Core endpoints:
 - `GET /v1/config/client`
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
+- bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
+  `POST /v1/organization-invitations/:id/accept`
+- `GET|POST /v1/organizations/:id/invitations` for bounded admin listing and
+  creation, plus explicit invitation revoke
+- `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
+- `GET|PATCH /v1/organizations/:id/retention-policy`
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`
@@ -391,6 +397,38 @@ Core endpoints:
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
+
+Expired offboarded personal data is removed through the explicit bounded
+operator command. Preview first, then execute the same organization-scoped
+batch (default 10, maximum 100):
+
+```bash
+bun run db:sweep-organization-retention --organization-id <uuid> --dry-run
+bun run db:sweep-organization-retention --organization-id <uuid> --limit 10
+```
+
+The command is retry-safe, continues past independently recorded member
+failures, and requires configured object storage for destructive execution.
+It first commits the database deletion and an immutable, exact-key cleanup
+obligation set; only then does it delete external objects and record
+content-free completion receipts. A provider failure retries only unfinished
+obligations. The configured storage bucket is frozen into that authority and
+must still match on resume; a legacy bucket mismatch or an unexpected retained
+database reference aborts before any external object is touched.
+
+Before activating organization authority, gate the cutover on the strictly
+read-only tenancy parity check. It exits `0` when every invariant gate passed,
+`1` when one failed, and `2` when it could not run; it never writes, repairs,
+or widens anything, and no reported mismatch is resolved toward user authority
+(see [`docs/organization-tenancy.md`](docs/organization-tenancy.md) phase E):
+
+```bash
+bun run db:check-tenancy-parity --organization-id <uuid>
+```
+
+Point it at a **writable primary** - it cannot run against a read replica,
+because it claims and releases its own transaction-local capability row
+(`25006: cannot execute DELETE in a read-only transaction`).
 
 GitHub endpoints:
 

@@ -1,5 +1,93 @@
 # @opengeni/react
 
+## 2.0.0
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+  - @opengeni/sdk@2.0.0
+
+## 1.2.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols. Preserve React compatibility with artifact-tool 0.1 and 0.2 while adding the 0.3 line.
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- Updated dependencies [b05130a]
+  - @opengeni/sdk@1.2.0
+
+## 1.1.1
+
+### Patch Changes
+
+- @opengeni/sdk@1.1.1
+
+## 1.1.0
+
+### Minor Changes
+
+- 1f860f0: Add durable publication and authenticated download support for session sandbox files. Agents can publish bounded `/workspace` outputs through a first-party tool, raw sandbox links can recover through the session API, retained file receipts render with downloads, and retained screenshots expose an explicit download action.
+
+### Patch Changes
+
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [30ba620]
+- Updated dependencies [6860c5f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+  - @opengeni/sdk@1.1.0
+
+## 1.0.3
+
+### Patch Changes
+
+- 2a69f65: Keep versioned direct-session web builds within the measured release bundle contract.
+
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- 79f57b5: Present an active goal yielding to a foreground human turn as waiting instead of blocked, and keep active-goal elapsed time advancing.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [d2f172c]
+- Updated dependencies [c056063]
+  - @opengeni/sdk@1.0.2
+
 ## 1.0.1
 
 ### Patch Changes

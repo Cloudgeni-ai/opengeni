@@ -74,9 +74,37 @@ describe("Company Brain first-party MCP policy", () => {
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
         "structured preferences are the only behavioral authority",
       );
-      expect(tools.find((tool) => tool.name === "memory_save")?.description).toContain(
-        "cannot become behavioral authority",
+      // Memory V1 writes are retired from the default retrieval-only surface;
+      // explicit user-directed knowledge goes through `remember`.
+      expect(tools.find((tool) => tool.name === "memory_save")).toBeUndefined();
+      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
+        "use `remember`",
       );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("Memory V1 writes are not registered even when explicitly selected", async () => {
+    // memory_save/memory_correct are retired. Selecting them by name must not
+    // resurrect them: the retirement is a property of the surface, not of what
+    // a caller happens to ask for.
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], [
+        "memory_search",
+        "memory_save",
+        "memory_correct",
+      ] as unknown as FirstPartyMcpToolName[]),
+      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "memory-retired-writes-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+      expect(names).toEqual(["memory_search"]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
@@ -87,6 +115,7 @@ describe("Company Brain first-party MCP policy", () => {
       "task_notes_list",
       "task_note_save",
       "task_note_archive",
+      "task_note_replace",
     ];
     const readOnly = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], selected));
     expect(registeredToolNames(readOnly)).toEqual(["task_notes_list"]);
@@ -101,5 +130,34 @@ describe("Company Brain first-party MCP policy", () => {
     humanGrant.principalKind = "human";
     const denied = buildOpenGeniMcpServer(deps(), humanGrant);
     expect(registeredToolNames(denied)).toEqual([]);
+  });
+
+  test("governed write tools are production-registered and permission filtered", () => {
+    const selected: FirstPartyMcpToolName[] = [
+      "knowledge_propose",
+      "knowledge_correct",
+      "task_note_promote_knowledge",
+      "task_note_promote_instruction_policy",
+      "task_note_promote_preference",
+      "instruction_policy_propose",
+      "preference_propose",
+    ];
+    const readOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read"], selected),
+    );
+    expect(registeredToolNames(readOnly)).toEqual(
+      selected.filter((name) => !name.startsWith("task_note_promote_")).sort(),
+    );
+
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["documents:search", "workspace:read", "sessions:control"], selected),
+    );
+    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
+
+    const humanGrant = grant(["documents:search", "workspace:read", "sessions:control"], selected);
+    humanGrant.principalKind = "human";
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
   });
 });

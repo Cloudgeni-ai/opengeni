@@ -1,5 +1,146 @@
 # @opengeni/sdk
 
+## 2.0.0
+
+### Major Changes
+
+- 2cb04e0: Retire Memory V1's standing prompt block and its agent writes. `memoryPromptMode` is now always `retrieval_only`: no pinned/recency working set is injected into any agent prompt, and the `legacy_standing` rollback opt-out can no longer be selected. The `memory_save` and `memory_correct` first-party tools are removed; durable agent writes go through `remember` (explicit user-directed) and task-note promotion (the agent's own findings), while `memory_search` remains so an agent can still read what a workspace knows.
+
+  Nothing is rewritten or deleted: `knowledge_memories` rows, human REST/UI audit, search, correction, export, and the Memory Slack publication path are unchanged. A workspace that stored `legacy_standing` keeps the stored value in its passthrough settings bag, where it simply stops meaning anything, and already accepted turns keep the mode they recorded because those snapshots are immutable facts about what was composed. Migration 0295 changes no data; it reports whether anything was still relying on the mode rather than assuming it was unused.
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+- 79ee99b: Preference descriptors now carry `activationAuthority` (`human_confirmed` | `automatic` | `null`) alongside `provenance.trust`. Trust stays the frozen creation-time fact - a revision an agent proposed reads `untrusted_proposal` forever, and both activation adapters still require that value - while the new field answers the separate question of whether a human explicitly confirmed the activation or policy activated it automatically, read from the governed-learning activation receipt at descriptor-build time. Descriptors built before this field existed parse as `null`, which keeps their immutable stored JSON and pinned descriptor hash valid.
+
+### Patch Changes
+
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+
+## 1.2.0
+
+### Minor Changes
+
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols. Preserve React compatibility with artifact-tool 0.1 and 0.2 while adding the 0.3 line.
+
+### Patch Changes
+
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+
+## 1.1.0
+
+### Minor Changes
+
+- ca75ed9: Add the governed-learning activation controller with exact authority revalidation, destination-native workspace activation, immutable content-free receipts, and supersession-safe append-only undo.
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- c297fc0: Add the permission-filtered Company Brain read and deterministic OKF export
+  surface, subject-scoped full guidance history, and the Company Brain discovery
+  and export experience.
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- 1f860f0: Add durable publication and authenticated download support for session sandbox files. Agents can publish bounded `/workspace` outputs through a first-party tool, raw sandbox links can recover through the session API, retained file receipts render with downloads, and retained screenshots expose an explicit download action.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 22c0c21: Add the managed-human organization invitation, role, suspension, offboarding,
+  and retention lifecycle with revision-fenced APIs and SDK methods. Self
+  invitation history is exposed only through bounded keyset pages, and acceptance
+  resolves one exact subject-bound invitation. Already-open session,
+  workspace-control, live, and interaction streams periodically recheck current
+  membership authority and close after revocation. A bounded operator command
+  commits expired offboarded personal database deletion together with a closed,
+  exact-key cleanup-obligation set before deleting external objects. Provider
+  failures retry only unfinished obligations, retained references abort before
+  external bytes are touched, File bucket identity stays frozen across retries,
+  and immutable lifecycle evidence survives cleanup.
+- 30ba620: Make every accepted scheduled agent occurrence an immutable, credential-free
+  execution snapshot bound to one run, session, scheduled update, logical turn,
+  and attempt chain. Agent tasks accept explicit `connectionAuthorities`
+  (omitted preserves, `[]` clears, an array replaces), execution-affecting edits
+  require the same causal human, `once` grants are consumed exactly once per
+  run, cold reusable sessions converge on one revision-bound materialization
+  receipt, and task deletion becomes a one-way paused tombstone with durable
+  connector cleanup. Create/update requests are byte-bounded at ingress while
+  stored rows stay readable. Migration `0275` is a maintenance cutover.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+
+### Patch Changes
+
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+
+## 1.0.2
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- d7dfc01: Add typed workspace model-access policy reads and full-replacement updates for admin settings surfaces, plus a provider-private per-model policy verdict in the authenticated catalog.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+
 ## 1.0.1
 
 ### Patch Changes

@@ -379,6 +379,50 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(storage.signed).toEqual([MANIFEST_KEY]);
   });
 
+  test("a signed manifest URL invokes the issuance recorder BEFORE returning; a throwing recorder fails closed", async () => {
+    const manifest = makeManifest([
+      fileEntry({ path: `src/${"x".repeat(CAPTURE_INLINE_MANIFEST_MAX_BYTES)}` }),
+    ]);
+    const big = new TextEncoder().encode(JSON.stringify(manifest));
+    const storage = fakeStorage({ [MANIFEST_KEY]: big });
+    const recorded: Array<{ kind: string; revision: number; expiresAt: string }> = [];
+    const res = await serveWorkspaceCapture(makeRow(), storage, undefined, async (fact) => {
+      recorded.push(fact);
+    });
+    expect(res.available).toBe(true);
+    expect(recorded).toEqual([
+      { kind: "capture_manifest", revision: 3, expiresAt: "2026-07-08T00:05:00.000Z" },
+    ]);
+
+    // Fail closed: no recorded fact, no bearer capability.
+    const failing = serveWorkspaceCapture(
+      makeRow(),
+      fakeStorage({ [MANIFEST_KEY]: big }),
+      undefined,
+      async () => {
+        throw new Error("audit unavailable");
+      },
+    );
+    await expect(failing).rejects.toThrow("audit unavailable");
+
+    // An inline (small) manifest mints nothing and records nothing.
+    const small = makeManifest([fileEntry({})]);
+    const inlineStorage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(small)),
+    });
+    const inlineRecorded: unknown[] = [];
+    const inlineRes = await serveWorkspaceCapture(
+      makeRow(),
+      inlineStorage,
+      undefined,
+      async (fact) => {
+        inlineRecorded.push(fact);
+      },
+    );
+    expect(inlineRes.available).toBe(true);
+    expect(inlineRecorded).toEqual([]);
+  });
+
   test("malformed manifest above the inline cap is never signed", async () => {
     const big = new Uint8Array(CAPTURE_INLINE_MANIFEST_MAX_BYTES + 1);
     const storage = fakeStorage({ [MANIFEST_KEY]: big });
@@ -498,6 +542,43 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
     expect(res.content).toBeNull();
     expect(res.contentUrl?.url).toContain(BIG_REF);
     expect(storage.signed).toEqual([BIG_REF]);
+  });
+
+  test("a signed file URL invokes the issuance recorder; inline content records nothing", async () => {
+    const storage = storageWith(
+      [
+        fileEntry({
+          path: "big.txt",
+          contentRef: BIG_REF,
+          sizeBytes: CAPTURE_INLINE_FILE_MAX_BYTES + 1,
+        }),
+      ],
+      { [BIG_REF]: new Uint8Array(1) },
+    );
+    const recorded: Array<{ kind: string; revision: number }> = [];
+    const res = await serveWorkspaceCaptureFile(makeRow(), "big.txt", storage, async (fact) => {
+      recorded.push(fact);
+    });
+    expect(res.contentUrl?.url).toContain(BIG_REF);
+    expect(recorded).toEqual([
+      { kind: "capture_file", revision: 3, expiresAt: "2026-07-08T00:05:00.000Z" },
+    ]);
+
+    // Inline content mints no URL and records nothing.
+    const inlineStorage = storageWith([fileEntry({})], {
+      [TEXT_REF]: new TextEncoder().encode("hello world!"),
+    });
+    const inlineRecorded: unknown[] = [];
+    const inlineRes = await serveWorkspaceCaptureFile(
+      makeRow(),
+      "src/app.ts",
+      inlineStorage,
+      async (fact) => {
+        inlineRecorded.push(fact);
+      },
+    );
+    expect(inlineRes.content).not.toBeNull();
+    expect(inlineRecorded).toEqual([]);
   });
 
   test("after-image blob missing (GC race) → marker, no throw", async () => {

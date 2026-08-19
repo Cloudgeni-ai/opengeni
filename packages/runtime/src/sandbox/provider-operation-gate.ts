@@ -28,12 +28,13 @@ function gateFor(session: object): ProviderOperationGate {
   return created;
 }
 
-async function enterOperation(gate: ProviderOperationGate): Promise<void> {
+async function enterOperation(gate: ProviderOperationGate): Promise<boolean> {
   if (!gate.captureActive && gate.captureWaiters.length === 0) {
     gate.activeOperations += 1;
-    return;
+    return false;
   }
   await new Promise<void>((resolve) => gate.operationWaiters.push(resolve));
+  return true;
 }
 
 function leaveOperation(gate: ProviderOperationGate): void {
@@ -81,9 +82,21 @@ function leaveCapture(gate: ProviderOperationGate): void {
 export async function withSandboxProviderOperation<T>(
   session: unknown,
   operation: () => Promise<T>,
+  onCaptureWait?: (observation: { durationMs: number; outcome: "completed" }) => void,
 ): Promise<T> {
   const gate = gateFor(sessionIdentity(session));
-  await enterOperation(gate);
+  const waitStartedAt = performance.now();
+  const waitedForCapture = await enterOperation(gate);
+  if (waitedForCapture && onCaptureWait) {
+    try {
+      onCaptureWait({
+        durationMs: Math.max(0, performance.now() - waitStartedAt),
+        outcome: "completed",
+      });
+    } catch {
+      // Diagnostics must never alter provider-operation ordering.
+    }
+  }
   try {
     return await operation();
   } finally {

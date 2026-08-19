@@ -23,6 +23,7 @@ import {
   createFileUpload,
   getFileUpload,
   getGeneratedImageArtifact,
+  recordAuditEvent,
   getGeneratedVideoArtifact,
   getFilesForSubject,
   getRetainedFileArtifact,
@@ -42,6 +43,7 @@ import {
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { buildFilesMcpServer } from "../mcp/files";
 
@@ -99,6 +101,23 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       bucket: objectStorage.bucket,
       objectKey,
       expiresAt: signed.expiresAt,
+    });
+    // Every principal-facing signed URL issuance is a
+    // metadata-only audit fact. Awaited before the URL leaves the platform:
+    // no recorded fact, no bearer capability. Never the URL or object key.
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_upload.issued",
+      targetType: "workspace_file",
+      targetId: fileId,
+      metadata: {
+        fileId,
+        contentType: payload.contentType,
+        sizeBytes: payload.sizeBytes,
+        expiresAt: signed.expiresAt.toISOString(),
+      },
     });
     return c.json(
       CreateFileUploadResponse.parse({
@@ -231,11 +250,13 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       const file = await rejectAndCleanObject(409, "file upload has expired", "expired");
       return c.json(CompleteFileUploadResponse.parse({ file }));
     }
-    const head = await objectStorage.headFile(upload.file).catch((error) => {
-      throw new HTTPException(409, {
-        message: `uploaded object is not available: ${error instanceof Error ? error.message : String(error)}`,
-      });
+    const head = await retryWhileMissing(async () => {
+      if (!(await objectStorage.fileExists(upload.file))) return null;
+      return await objectStorage.headFile(upload.file);
     });
+    if (!head) {
+      throw new HTTPException(409, { message: "uploaded object is not available" });
+    }
     if (Number(head.ContentLength ?? -1) !== upload.file.sizeBytes) {
       const file = await rejectAndCleanObject(
         422,
@@ -324,7 +345,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -337,10 +358,26 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(409, { message: `generated video is ${retained.file.status}` });
     }
     const file = generatedVideoFileAsset(retained.file);
-    if (!(await objectStorage.fileExists(file))) {
+    const videoPresent = await retryWhileMissing(async () =>
+      (await objectStorage.fileExists(file)) ? true : null,
+    );
+    if (!videoPresent) {
       throw new HTTPException(410, { message: "generated video bytes are unavailable" });
     }
     const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_url.issued",
+      targetType: "retained_artifact",
+      targetId: artifactId,
+      metadata: {
+        artifactId,
+        kind: "video_playback",
+        expiresAt: signed.expiresAt.toISOString(),
+      },
+    });
     return c.json(
       VideoArtifactPlaybackSource.parse({
         schemaVersion: 1,
@@ -416,7 +453,26 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (file.status !== "ready") {
       throw new HTTPException(409, { message: `file is ${file.status}` });
     }
+    const present = await retryWhileMissing(async () =>
+      (await objectStorage.fileExists(file)) ? true : null,
+    );
+    if (!present) {
+      throw new HTTPException(410, { message: "file bytes are unavailable" });
+    }
     const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    await recordAuditEvent(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      action: "file.signed_url.issued",
+      targetType: "workspace_file",
+      targetId: file.id,
+      metadata: {
+        fileId: file.id,
+        kind: "download",
+        expiresAt: signed.expiresAt.toISOString(),
+      },
+    });
     return c.json(
       FileDownloadUrlResponse.parse({
         url: signed.url,
@@ -480,16 +536,21 @@ async function serveRetainedArtifactContent(
     ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
   };
   if (range.kind === "empty") {
-    if (!(await objectStorage.fileExists(file))) {
+    const present = await retryWhileMissing(async () =>
+      (await objectStorage.fileExists(file)) ? true : null,
+    );
+    if (!present) {
       return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
     }
     return c.body(null, 200, headers);
   }
 
-  const bytes = await objectStorage.getFileRange(file, {
-    start: range.start,
-    end: range.end,
-  });
+  const bytes = await retryWhileMissing(async () =>
+    objectStorage.getFileRange(file, {
+      start: range.start,
+      end: range.end,
+    }),
+  );
   if (!bytes) {
     return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
   }

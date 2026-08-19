@@ -31,11 +31,20 @@ import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
+  ChannelAPartialMutationError,
   isDefinitePathNotFoundError,
   isExecSessionLostBanner,
+  SandboxChannelAService,
   stripExecBanner,
 } from "../channel-a";
-import type { ChannelAExecArgs, ChannelAExecResult } from "../channel-a";
+import type {
+  ChannelAExecArgs,
+  ChannelAExecResult,
+  ChannelARoutedWorkspaceImportBatchRequest,
+  ChannelARoutedWorkspaceImportRequest,
+  ChannelASession,
+  WorkspaceFileImportReceipt,
+} from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -192,11 +201,19 @@ export interface RoutingSandboxSessionDeps {
    * diagnostic only: callback failures are isolated and can never change the
    * provider result or durable mutation-settlement ordering. */
   onOperation?: RoutingSandboxOperationObserver;
+  /** Observe the first complete routed operation and only the subphases that
+   * actually ran. Child durations are exclusive; capture waits are removed
+   * from their enclosing admission/provider spans. */
+  onFirstOperation?: RoutingSandboxFirstOperationObserver;
   /** Admit a filesystem-writing operation after resolving its exact route but
    * before invoking the provider. A rejection fails closed and is deliberately
    * outside provider fence-retry/error handling, so it can never replay the op
    * against a rival backend. */
-  beforeMutation?: (input: { op: string; backend: ResolvedActiveBackend }) => Promise<unknown>;
+  beforeMutation?: (input: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    onCaptureWait?: (observation: RoutingSandboxWaitObservation) => void;
+  }) => Promise<unknown>;
   /** Mark a mutation physically settled after its provider promise resolves OR
    * rejects. A resolved result is also revalidated against the same durable
    * route and attempt fence before its output is accepted. Settlement rejection
@@ -259,6 +276,56 @@ export type RoutingSandboxOperationObserver = (
   observation: RoutingSandboxOperationObservation,
 ) => void;
 
+export type RoutingSandboxPhaseOutcome = "completed" | "failed";
+
+export type RoutingSandboxWaitObservation = {
+  durationMs: number;
+  outcome: RoutingSandboxPhaseOutcome;
+};
+
+export type RoutingSandboxFirstOperationPhase =
+  | "resolution"
+  | "mutationAdmission"
+  | "providerOperation"
+  | "mutationSettlement"
+  | "snapshotWait";
+
+export type RoutingSandboxFirstOperationPhaseObservation = {
+  durationMs: number;
+  outcome: RoutingSandboxPhaseOutcome;
+};
+
+export type RoutingSandboxFirstOperationObservation = {
+  op: string;
+  outcome: RoutingSandboxPhaseOutcome;
+  durationMs: number;
+  phases: Partial<
+    Record<RoutingSandboxFirstOperationPhase, RoutingSandboxFirstOperationPhaseObservation>
+  >;
+};
+
+export type RoutingSandboxFirstOperationObserver = (
+  observation: RoutingSandboxFirstOperationObservation,
+) => void;
+
+type RoutingSandboxFirstOperationTiming = Pick<RoutingSandboxFirstOperationObservation, "phases">;
+
+function recordFirstOperationPhase(
+  timing: RoutingSandboxFirstOperationTiming | undefined,
+  phase: RoutingSandboxFirstOperationPhase,
+  durationMs: number,
+  outcome: RoutingSandboxPhaseOutcome,
+): void {
+  if (!timing) return;
+  const prior = timing.phases[phase];
+  timing.phases[phase] = {
+    durationMs: Math.max(0, durationMs) + (prior?.durationMs ?? 0),
+    // A retried phase reports the final attempt's outcome while retaining all
+    // attempt time. A terminal failure cannot be hidden by an earlier success.
+    outcome,
+  };
+}
+
 export type DefaultBackendLossResult = {
   leaseEpoch: number;
   recovery: "pending" | "degraded" | "unrecoverable" | "superseded";
@@ -312,6 +379,18 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   ) {
     super(message, options);
     this.retainedProcess = options?.retainedProcess ?? null;
+  }
+}
+
+/** Recognize routed mutation uncertainty without allowing a hostile Proxy's
+ * prototype trap to replace the original provider failure. */
+export function isRoutingMutationOutcomeUnknownError(
+  error: unknown,
+): error is RoutingMutationOutcomeUnknownError {
+  try {
+    return error instanceof RoutingMutationOutcomeUnknownError;
+  } catch {
+    return false;
   }
 }
 
@@ -504,6 +583,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
+  /** Claimed synchronously before the first dispatch awaits, so concurrent
+   * callers cannot emit duplicate first-operation observations. */
+  private firstOperationClaimed = false;
   /** Provider session ids are scoped to one backend instance. Each entry copies
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
@@ -973,38 +1055,159 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
   ): Promise<T> {
+    const firstOperationObserver = this.deps.onFirstOperation;
+    if (this.firstOperationClaimed || !firstOperationObserver) {
+      return await this.dispatchWithRetries(op, mutatesWorkspace, fn);
+    }
+    this.firstOperationClaimed = true;
+    const startedAt = performance.now();
+    const timing: RoutingSandboxFirstOperationTiming = { phases: {} };
+    let outcome: RoutingSandboxPhaseOutcome = "failed";
+    try {
+      const result = await this.dispatchWithRetries(op, mutatesWorkspace, fn, timing);
+      outcome = "completed";
+      return result;
+    } finally {
+      try {
+        firstOperationObserver({
+          op,
+          outcome,
+          durationMs: Math.max(0, performance.now() - startedAt),
+          phases: timing.phases,
+        });
+      } catch {
+        // Diagnostics never participate in routing or settlement authority.
+      }
+    }
+  }
+
+  private async dispatchWithRetries<T>(
+    op: string,
+    mutatesWorkspace: boolean,
+    fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
+    firstOperationTiming?: RoutingSandboxFirstOperationTiming,
+  ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
-      const backend = await this.resolve();
+      const resolutionStartedAt = performance.now();
+      let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
+      let backend: ResolvedActiveBackend;
+      try {
+        backend = await this.resolve();
+        resolutionOutcome = "completed";
+      } finally {
+        recordFirstOperationPhase(
+          firstOperationTiming,
+          "resolution",
+          performance.now() - resolutionStartedAt,
+          resolutionOutcome,
+        );
+      }
       // Admission failures are NOT provider fence errors and must never enter
       // the retry/rebind loop. If this exact route cannot advance its durable
       // mutation generation, fail before the provider sees the operation.
-      const admission = mutatesWorkspace
-        ? await this.deps.beforeMutation?.({ op, backend })
-        : undefined;
+      let admission: unknown;
+      if (mutatesWorkspace && this.deps.beforeMutation) {
+        const admissionStartedAt = performance.now();
+        let admissionWaitMs = 0;
+        let admissionOutcome: RoutingSandboxPhaseOutcome = "failed";
+        try {
+          admission = await this.deps.beforeMutation({
+            op,
+            backend,
+            ...(firstOperationTiming
+              ? {
+                  onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
+                    admissionWaitMs += Math.max(0, observation.durationMs);
+                    recordFirstOperationPhase(
+                      firstOperationTiming,
+                      "snapshotWait",
+                      observation.durationMs,
+                      observation.outcome,
+                    );
+                  },
+                }
+              : {}),
+          });
+          admissionOutcome = "completed";
+        } finally {
+          recordFirstOperationPhase(
+            firstOperationTiming,
+            "mutationAdmission",
+            Math.max(0, performance.now() - admissionStartedAt - admissionWaitMs),
+            admissionOutcome,
+          );
+        }
+      }
       let result: T;
       try {
-        result = await this.invokeProviderOperation(op, backend, () =>
-          fn(backend.session, backend),
-        );
+        const providerStartedAt = performance.now();
+        let providerWaitMs = 0;
+        let providerOutcome: RoutingSandboxPhaseOutcome = "failed";
+        try {
+          result = await this.invokeProviderOperation(
+            op,
+            backend,
+            () => fn(backend.session, backend),
+            firstOperationTiming
+              ? (observation) => {
+                  providerWaitMs += Math.max(0, observation.durationMs);
+                  recordFirstOperationPhase(
+                    firstOperationTiming,
+                    "snapshotWait",
+                    observation.durationMs,
+                    observation.outcome,
+                  );
+                }
+              : undefined,
+          );
+          providerOutcome = "completed";
+        } finally {
+          recordFirstOperationPhase(
+            firstOperationTiming,
+            "providerOperation",
+            Math.max(0, performance.now() - providerStartedAt - providerWaitMs),
+            providerOutcome,
+          );
+        }
       } catch (error) {
+        const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
+          const settlementStartedAt = performance.now();
+          let settlementOutcome: RoutingSandboxPhaseOutcome = "failed";
           try {
             await this.deps.afterMutation({
               op,
               backend,
               admission,
-              outcome: "rejected",
+              outcome: partialMutation ? "resolved" : "rejected",
             });
+            settlementOutcome = "completed";
           } catch (settlementError) {
             this.invalidate(backend);
             throw new RoutingMutationOutcomeUnknownError(
               op,
-              `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+              partialMutation
+                ? `Mutating sandbox operation "${op}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+                : `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
               { cause: settlementError },
             );
+          } finally {
+            recordFirstOperationPhase(
+              firstOperationTiming,
+              "mutationSettlement",
+              performance.now() - settlementStartedAt,
+              settlementOutcome,
+            );
           }
+        }
+        if (partialMutation) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: error },
+          );
         }
         if (!isFenceError(error)) {
           if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
@@ -1062,8 +1265,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           result,
           ...(retainedProcess ? { retainedProcess } : {}),
         };
+        const settlementStartedAt = performance.now();
+        let settlementOutcome: RoutingSandboxPhaseOutcome = "failed";
         try {
           const settlementResult = await this.deps.afterMutation(settlement);
+          settlementOutcome = "completed";
           if (retainedRecord && settlementResult) {
             this.confirmDurableRejectedPromotion(retainedRecord, settlementResult);
             this.invalidate(backend);
@@ -1098,6 +1304,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               // replaying the workspace mutation.
               ...(retainedRecord ? { retainedProcess: retainedRecord.process } : {}),
             },
+          );
+        } finally {
+          recordFirstOperationPhase(
+            firstOperationTiming,
+            "mutationSettlement",
+            performance.now() - settlementStartedAt,
+            settlementOutcome,
           );
         }
       }
@@ -1151,11 +1364,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     op: string,
     backend: ResolvedActiveBackend,
     fn: () => Promise<T>,
+    onCaptureWait?: (observation: RoutingSandboxWaitObservation) => void,
   ): Promise<T> {
     const startedAt = performance.now();
     let outcome: RoutingSandboxOperationObservation["outcome"] = "failed";
     try {
-      const result = await withSandboxProviderOperation(backend.session, fn);
+      const result = await withSandboxProviderOperation(backend.session, fn, onCaptureWait);
       outcome = "ok";
       return result;
     } catch (error) {
@@ -1411,6 +1625,57 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return;
       }
       throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    });
+  }
+
+  /** Keep private download authority and its consuming import on one exact
+   * backend. A pointer move during the callback is handled by the enclosing
+   * mutation settlement; the operation is never replayed onto another route. */
+  async importWorkspaceFileOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportRequest,
+  ): Promise<WorkspaceFileImportReceipt> {
+    return await this.dispatch("importWorkspaceFile", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.importWorkspaceFile(input.request);
+    });
+  }
+
+  /** Keep every exact file in one logical attachment envelope on the same
+   * backend and under one mutation admission/settlement. A pointer move rejects
+   * the complete batch output as outcome-unknown; no attachment is replayed on
+   * the new route. */
+  async importWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[]> {
+    return await this.dispatch("importWorkspaceFiles", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.importWorkspaceFiles(input.requests);
+    });
+  }
+
+  /** Inspect an exact-file envelope on one resolved backend without entering
+   * mutation admission or staging private source authority. */
+  async inspectWorkspaceFilesOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
+    return await this.dispatch("inspectWorkspaceFiles", false, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.inspectWorkspaceFiles(input.requests);
     });
   }
 

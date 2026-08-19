@@ -9,9 +9,11 @@ import type {
   WorkspaceInstructionPolicyActivationEvent,
   WorkspaceInstructionPolicyActivationResponse,
   WorkspaceInstructionPolicyActivationType,
+  WorkspaceInstructionPolicyDeactivationEvent,
   WorkspaceInstructionPolicyDiffResponse,
   WorkspaceInstructionPolicyDraftProvenanceSource,
   WorkspaceInstructionPolicyHead,
+  WorkspaceInstructionPolicyInactiveHead,
   WorkspaceInstructionPolicyKind,
   WorkspaceInstructionPolicyListQuery,
   WorkspaceInstructionPolicyListResponse,
@@ -24,9 +26,14 @@ import type {
   WorkspaceInstructionPolicySnapshotEntry,
   WorkspaceInstructionPolicyTarget,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, notExists, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
-import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
+import {
+  withRlsContext,
+  withSessionRlsActorContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+} from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -87,6 +94,19 @@ type OnboardingProposalInput = OnboardingProposalRequestInput & {
   requestFingerprint: string;
 };
 
+export type WorkspaceInstructionPolicyKnowledgeProposalInput = WorkspaceInstructionPolicyTarget & {
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  content: string;
+  knowledgeProposalId: string;
+  knowledgeProposalContentHash: string;
+  confidenceBps: number;
+  expectedCurrentRevisionId: string | null;
+  expectedActivationVersion: number;
+  createdBySubjectId: string;
+};
+
 export class WorkspaceInstructionPolicyConflictError extends Error {
   readonly name = "WorkspaceInstructionPolicyConflictError";
   readonly code = "WORKSPACE_INSTRUCTION_POLICY_CONFLICT";
@@ -140,6 +160,16 @@ export class WorkspaceInstructionPolicyOnboardingProposalContentError extends Er
     );
   }
 }
+
+/**
+ * The exact diagnostic `activate_human_confirmed_learning_decision` raises when
+ * a proposal's compare-and-set baseline no longer matches the live head. It is
+ * matched by message because the SQLSTATE (40001) is shared with other
+ * conflicts. Kept here so the SQL and the code that keys recovery off it cannot
+ * drift apart silently - the migration test pins the same string.
+ */
+export const INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC =
+  "instruction-policy proposal baseline is stale";
 
 export class WorkspaceInstructionPolicyOnboardingProposalStaleError extends Error {
   readonly name = "WorkspaceInstructionPolicyOnboardingProposalStaleError";
@@ -268,6 +298,14 @@ function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
   ]);
 }
 
+// The activation baseline is deliberately NOT part of either fingerprint. Its
+// job is compare-and-set staleness detection at write time, not the identity of
+// the request: two calls that ask for the same rule on the same target are the
+// same operation even if the head moved between them. Hashing a live-read value
+// into the identity made an ordinary turn-recovery replay of the same
+// operationId fail as an operation-reuse conflict once a confirm advanced the
+// head. Staleness is still enforced - by the compare-and-set below and by the
+// activation function - it is just no longer conflated with request identity.
 function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
   return operationRequestFingerprint("create_onboarding_proposal", [
     ["accountId", true, input.accountId],
@@ -279,8 +317,21 @@ function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestIn
     ["sourceId", true, input.sourceId],
     ["sourceVersion", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
-    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
-    ["expectedActivationVersion", true, input.expectedActivationVersion],
+    ["createdBySubjectId", true, input.createdBySubjectId],
+  ]);
+}
+
+function knowledgeProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
+  return operationRequestFingerprint("create_knowledge_proposal", [
+    ["accountId", true, input.accountId],
+    ["workspaceId", true, input.workspaceId],
+    ["kind", true, input.kind],
+    ["scope", true, input.scope],
+    ["roleKey", true, input.roleKey],
+    ["content", true, input.content],
+    ["knowledgeProposalId", true, input.sourceId],
+    ["knowledgeProposalContentHash", true, input.sourceVersion],
+    ["confidenceBps", true, input.confidenceBps],
     ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
@@ -420,6 +471,7 @@ export async function getWorkspaceStateAcceptedAttemptGovernance(
 type RevisionRow = typeof schema.workspaceInstructionPolicyRevisions.$inferSelect;
 type HeadRow = typeof schema.workspaceInstructionPolicyHeads.$inferSelect;
 type EventRow = typeof schema.workspaceInstructionPolicyActivationEvents.$inferSelect;
+type DeactivationEventRow = typeof schema.workspaceInstructionPolicyDeactivationEvents.$inferSelect;
 type OnboardingProposalRow =
   typeof schema.workspaceInstructionPolicyOnboardingProposals.$inferSelect;
 
@@ -459,6 +511,17 @@ function headFromRow(row: HeadRow): WorkspaceInstructionPolicyHead {
   };
 }
 
+function inactiveHeadFromRow(row: DeactivationEventRow): WorkspaceInstructionPolicyInactiveHead {
+  return {
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    activationVersion: row.activationVersion,
+    deactivatedAt: iso(row.createdAt),
+  };
+}
+
 function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent {
   return {
     id: row.id,
@@ -482,6 +545,30 @@ function eventFromRow(row: EventRow): WorkspaceInstructionPolicyActivationEvent 
       id: row.newRevisionId,
       revision: row.newRevision,
       contentHash: row.newContentHash,
+    },
+    actorSubjectId: row.actorSubjectId,
+    reason: row.reason,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+function deactivationEventFromRow(
+  row: DeactivationEventRow,
+): WorkspaceInstructionPolicyDeactivationEvent {
+  return {
+    id: row.id,
+    operationId: row.operationId,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    kind: row.kind as WorkspaceInstructionPolicyKind,
+    scope: row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: row.roleKey,
+    type: "automatic_deactivate",
+    activationVersion: row.activationVersion,
+    oldRevision: {
+      id: row.oldRevisionId,
+      revision: row.oldRevision,
+      contentHash: row.oldContentHash,
     },
     actorSubjectId: row.actorSubjectId,
     reason: row.reason,
@@ -566,6 +653,20 @@ function eventTargetConditions(
     target.roleKey === null
       ? isNull(schema.workspaceInstructionPolicyActivationEvents.roleKey)
       : eq(schema.workspaceInstructionPolicyActivationEvents.roleKey, target.roleKey),
+  ];
+}
+
+function deactivationTargetConditions(
+  workspaceId: string,
+  target: WorkspaceInstructionPolicyTarget,
+): SQL[] {
+  return [
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.kind, target.kind),
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.scope, target.scope),
+    target.roleKey === null
+      ? isNull(schema.workspaceInstructionPolicyDeactivationEvents.roleKey)
+      : eq(schema.workspaceInstructionPolicyDeactivationEvents.roleKey, target.roleKey),
   ];
 }
 
@@ -656,6 +757,24 @@ async function getEventByOperationInTransaction(
   return row ?? null;
 }
 
+async function hasDeactivationOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.workspaceInstructionPolicyDeactivationEvents.id })
+    .from(schema.workspaceInstructionPolicyDeactivationEvents)
+    .where(
+      and(
+        eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+        eq(schema.workspaceInstructionPolicyDeactivationEvents.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 async function getOnboardingProposalByOperationInTransaction(
   db: Database,
   workspaceId: string,
@@ -696,6 +815,11 @@ async function getOnboardingProposalBySourceVersionInTransaction(
         eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceVersion, input.sourceVersion),
       ),
     )
+    .orderBy(
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.baselineActivationVersion),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
+    )
     .limit(1);
   return row ?? null;
 }
@@ -725,6 +849,23 @@ async function getHeadInTransaction(
   return row ?? null;
 }
 
+async function getLatestDeactivationInTransaction(
+  db: Database,
+  workspaceId: string,
+  target: WorkspaceInstructionPolicyTarget,
+): Promise<DeactivationEventRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceInstructionPolicyDeactivationEvents)
+    .where(and(...deactivationTargetConditions(workspaceId, target)))
+    .orderBy(
+      desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+      desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 function sameTarget(
   left: Pick<WorkspaceInstructionPolicyRevision, "kind" | "scope" | "roleKey">,
   right: WorkspaceInstructionPolicyTarget,
@@ -749,7 +890,10 @@ async function createDraftInTransaction(
   db: Database,
   input: DraftInput,
 ): Promise<WorkspaceInstructionPolicyRevision> {
-  if (await getEventByOperationInTransaction(db, input.workspaceId, input.operationId)) {
+  if (
+    (await getEventByOperationInTransaction(db, input.workspaceId, input.operationId)) ||
+    (await hasDeactivationOperationInTransaction(db, input.workspaceId, input.operationId))
+  ) {
     throw new WorkspaceInstructionPolicyOperationReuseError();
   }
   const existing = await getRevisionByOperationInTransaction(
@@ -844,7 +988,16 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
     async (scopedDb) => {
       const workspace = await lockWorkspace(scopedDb, input);
       if (
-        await getEventByOperationInTransaction(scopedDb, input.workspaceId, normalized.operationId)
+        (await getEventByOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        )) ||
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          normalized.operationId,
+        ))
       ) {
         throw new WorkspaceInstructionPolicyOperationReuseError();
       }
@@ -893,6 +1046,160 @@ export async function importLegacyWorkspaceInstructionPolicyDraft(
   );
 }
 
+async function createWorkspaceInstructionPolicySourceProposal(
+  db: Database,
+  input: OnboardingProposalInput,
+  draftProvenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource,
+  draftProvenanceSourceId: (proposalId: string) => string,
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await lockWorkspace(scopedDb, input);
+      const existing = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        input.operationId,
+      );
+      if (existing) {
+        if (existing.requestFingerprint !== input.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, existing);
+      }
+      if (
+        (await getEventByOperationInTransaction(scopedDb, input.workspaceId, input.operationId)) ||
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          input.operationId,
+        )) ||
+        (await getRevisionByOperationInTransaction(scopedDb, input.workspaceId, input.operationId))
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
+
+      const target: WorkspaceInstructionPolicyTarget = {
+        kind: input.kind,
+        scope: input.scope,
+        roleKey: input.roleKey,
+      };
+      const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
+      const currentHead = currentRow ? headFromRow(currentRow) : null;
+      const inactiveBoundary = currentRow
+        ? null
+        : await getLatestDeactivationInTransaction(scopedDb, input.workspaceId, target);
+      const currentActivationVersion =
+        currentRow?.activationVersion ?? inactiveBoundary?.activationVersion ?? 0;
+      if (
+        (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
+        currentActivationVersion !== input.expectedActivationVersion
+      ) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
+      }
+
+      // A second proposal for the same knowledge proposal is legitimate when it
+      // is a rebaselined successor - the confirm path adds one when the head
+      // moved after the human already answered. Only a duplicate against the
+      // same baseline is a conflict.
+      const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        input,
+      );
+      if (
+        sourceConflict &&
+        sourceConflict.baselineActivationVersion === currentActivationVersion &&
+        (sourceConflict.baselineRevisionId ?? null) === (currentHead?.revisionId ?? null)
+      ) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          sourceConflict.id,
+          sourceConflict.draftRevisionId,
+        );
+      }
+
+      const proposalId = randomUUID();
+      const draft = await createDraftInTransaction(scopedDb, {
+        operationId: input.operationId,
+        requestFingerprint: input.requestFingerprint,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        kind: input.kind,
+        scope: input.scope,
+        roleKey: input.roleKey,
+        content: input.content,
+        provenanceSource: draftProvenanceSource,
+        provenanceSourceId: draftProvenanceSourceId(proposalId),
+        supersedesRevisionId: currentHead?.revisionId ?? null,
+        createdBySubjectId: input.createdBySubjectId,
+      });
+      const createdAt = new Date();
+      const [created] = await scopedDb
+        .insert(schema.workspaceInstructionPolicyOnboardingProposals)
+        .values({
+          id: proposalId,
+          operationId: input.operationId,
+          requestFingerprint: input.requestFingerprint,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          kind: input.kind,
+          scope: input.scope,
+          roleKey: input.roleKey,
+          sourceId: input.sourceId,
+          sourceVersion: input.sourceVersion,
+          confidenceBps: input.confidenceBps,
+          baselineRevisionId: currentHead?.revisionId ?? null,
+          baselineRevision: currentHead?.revision ?? null,
+          baselineContentHash: currentHead?.contentHash ?? null,
+          baselineActivationVersion: currentActivationVersion,
+          // The head's activated_at may carry microseconds (the governed
+          // learning SQL controller writes clock_timestamp()), and the draft
+          // trigger compares it exactly. A JS Date truncates to milliseconds,
+          // so copy the stored value in SQL instead of round-tripping it.
+          baselineActivatedAt: currentRow
+            ? sql`(select ${schema.workspaceInstructionPolicyHeads.activatedAt} from ${schema.workspaceInstructionPolicyHeads} where ${schema.workspaceInstructionPolicyHeads.id} = ${currentRow.id})`
+            : null,
+          draftRevisionId: draft.id,
+          draftRevision: draft.revision,
+          draftContentHash: draft.contentHash,
+          status: "proposed",
+          createdBySubjectId: input.createdBySubjectId,
+          createdAt,
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (created) {
+        const draftRow = await getRevisionInTransaction(scopedDb, input.workspaceId, draft.id);
+        if (!draftRow) throw new Error("Instruction-policy proposal draft was not recorded");
+        return onboardingProposalFromRow(created, draftRow);
+      }
+
+      const concurrentOperation = await getOnboardingProposalByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        input.operationId,
+      );
+      if (concurrentOperation) {
+        if (concurrentOperation.requestFingerprint !== input.requestFingerprint) {
+          throw new WorkspaceInstructionPolicyOperationReuseError();
+        }
+        return await resolveOnboardingProposalInTransaction(scopedDb, concurrentOperation);
+      }
+      const concurrentSource = await getOnboardingProposalBySourceVersionInTransaction(
+        scopedDb,
+        input,
+      );
+      if (concurrentSource) {
+        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
+          concurrentSource.id,
+          concurrentSource.draftRevisionId,
+        );
+      }
+      throw new Error("Workspace instruction-policy proposal was not created");
+    },
+  );
+}
+
 export async function createWorkspaceInstructionPolicyOnboardingProposal(
   db: Database,
   input: Omit<OnboardingProposalRequestInput, "operationId"> & { operationId?: string },
@@ -913,139 +1220,146 @@ export async function createWorkspaceInstructionPolicyOnboardingProposal(
     sourceId: input.sourceId.trim(),
     sourceVersion: input.sourceVersion.trim(),
   };
-  const normalized: OnboardingProposalInput = {
-    ...request,
-    requestFingerprint: onboardingProposalRequestFingerprint(request),
-  };
-  return await withRlsContext(
+  return await createWorkspaceInstructionPolicySourceProposal(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await lockWorkspace(scopedDb, input);
-      const existing = await getOnboardingProposalByOperationInTransaction(
-        scopedDb,
-        input.workspaceId,
-        normalized.operationId,
-      );
-      if (existing) {
-        if (existing.requestFingerprint !== normalized.requestFingerprint) {
-          throw new WorkspaceInstructionPolicyOperationReuseError();
-        }
-        return await resolveOnboardingProposalInTransaction(scopedDb, existing);
-      }
-      if (
-        (await getEventByOperationInTransaction(
-          scopedDb,
-          input.workspaceId,
-          normalized.operationId,
-        )) ||
-        (await getRevisionByOperationInTransaction(
-          scopedDb,
-          input.workspaceId,
-          normalized.operationId,
-        ))
-      ) {
-        throw new WorkspaceInstructionPolicyOperationReuseError();
-      }
+    { ...request, requestFingerprint: onboardingProposalRequestFingerprint(request) },
+    "onboarding",
+    (proposalId) => proposalId,
+  );
+}
 
-      const target: WorkspaceInstructionPolicyTarget = {
-        kind: normalized.kind,
-        scope: normalized.scope,
-        roleKey: normalized.roleKey,
-      };
-      const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, target);
-      const currentHead = currentRow ? headFromRow(currentRow) : null;
-      if (
-        (currentHead?.revisionId ?? null) !== normalized.expectedCurrentRevisionId ||
-        (currentHead?.activationVersion ?? 0) !== normalized.expectedActivationVersion
-      ) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
-      }
+/**
+ * Materialize an immutable Knowledge change proposal as an inactive instruction
+ * draft. Human activation remains exclusively in the existing lifecycle API.
+ */
+export async function createWorkspaceInstructionPolicyKnowledgeProposal(
+  db: Database,
+  input: WorkspaceInstructionPolicyKnowledgeProposalInput,
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  if (input.content.trim().length === 0) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "A Knowledge-backed instruction proposal must contain non-blank content",
+    );
+  }
+  if (input.content.length > WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      `A Knowledge-backed instruction proposal must not exceed ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+    );
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.knowledgeProposalContentHash)) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "Knowledge proposal content hash must be lowercase SHA-256",
+    );
+  }
+  const request: OnboardingProposalRequestInput = {
+    operationId: input.operationId,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    kind: input.kind,
+    scope: input.scope,
+    roleKey: input.roleKey,
+    content: input.content,
+    sourceId: input.knowledgeProposalId,
+    sourceVersion: input.knowledgeProposalContentHash,
+    confidenceBps: input.confidenceBps,
+    expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+    expectedActivationVersion: input.expectedActivationVersion,
+    createdBySubjectId: input.createdBySubjectId,
+  };
+  return await createWorkspaceInstructionPolicySourceProposal(
+    db,
+    { ...request, requestFingerprint: knowledgeProposalRequestFingerprint(request) },
+    "knowledge_proposal",
+    () => input.knowledgeProposalId,
+  );
+}
 
-      const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
-        scopedDb,
-        normalized,
-      );
-      if (sourceConflict) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
-          sourceConflict.id,
-          sourceConflict.draftRevisionId,
-        );
-      }
-
-      const proposalId = randomUUID();
-      const draft = await createDraftInTransaction(scopedDb, {
-        operationId: normalized.operationId,
-        requestFingerprint: normalized.requestFingerprint,
-        accountId: normalized.accountId,
-        workspaceId: normalized.workspaceId,
-        kind: normalized.kind,
-        scope: normalized.scope,
-        roleKey: normalized.roleKey,
-        content: normalized.content,
-        provenanceSource: "onboarding",
-        provenanceSourceId: proposalId,
-        supersedesRevisionId: currentHead?.revisionId ?? null,
-        createdBySubjectId: normalized.createdBySubjectId,
-      });
-      const createdAt = new Date();
-      const [created] = await scopedDb
-        .insert(schema.workspaceInstructionPolicyOnboardingProposals)
-        .values({
-          id: proposalId,
-          operationId: normalized.operationId,
-          requestFingerprint: normalized.requestFingerprint,
-          accountId: normalized.accountId,
-          workspaceId: normalized.workspaceId,
-          kind: normalized.kind,
-          scope: normalized.scope,
-          roleKey: normalized.roleKey,
-          sourceId: normalized.sourceId,
-          sourceVersion: normalized.sourceVersion,
-          confidenceBps: normalized.confidenceBps,
-          baselineRevisionId: currentHead?.revisionId ?? null,
-          baselineRevision: currentHead?.revision ?? null,
-          baselineContentHash: currentHead?.contentHash ?? null,
-          baselineActivationVersion: currentHead?.activationVersion ?? 0,
-          baselineActivatedAt: currentHead ? new Date(currentHead.activatedAt) : null,
-          draftRevisionId: draft.id,
-          draftRevision: draft.revision,
-          draftContentHash: draft.contentHash,
-          status: "proposed",
-          createdBySubjectId: normalized.createdBySubjectId,
-          createdAt,
-        })
-        .onConflictDoNothing()
-        .returning();
-      if (created) {
-        const draftRow = await getRevisionInTransaction(scopedDb, input.workspaceId, draft.id);
-        if (!draftRow) throw new Error("Onboarding proposal draft was not recorded");
-        return onboardingProposalFromRow(created, draftRow);
-      }
-
-      const concurrentOperation = await getOnboardingProposalByOperationInTransaction(
-        scopedDb,
-        input.workspaceId,
-        normalized.operationId,
-      );
-      if (concurrentOperation) {
-        if (concurrentOperation.requestFingerprint !== normalized.requestFingerprint) {
-          throw new WorkspaceInstructionPolicyOperationReuseError();
-        }
-        return await resolveOnboardingProposalInTransaction(scopedDb, concurrentOperation);
-      }
-      const concurrentSource = await getOnboardingProposalBySourceVersionInTransaction(
-        scopedDb,
-        normalized,
-      );
-      if (concurrentSource) {
-        throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
-          concurrentSource.id,
-          concurrentSource.draftRevisionId,
-        );
-      }
-      throw new Error("Workspace instruction-policy onboarding proposal was not created");
+/**
+ * Add a successor instruction-policy proposal for a knowledge proposal whose
+ * existing proposal was left behind by a moved head.
+ *
+ * This exists for one case: the human already answered "save", and only then
+ * did the head move. Re-asking them would be the alternative. The successor
+ * reuses the exact immutable source facts of the stranded proposal - same
+ * knowledge proposal id, same content hash, same target, same author - so the
+ * human's confirmation, which is bound to the knowledge proposal id, still
+ * describes precisely what gets activated. Only the compare-and-set baseline
+ * and the draft's place in the revision chain move forward.
+ *
+ * Returns the existing proposal unchanged when it is already current, so a
+ * retry of the same confirmation is idempotent.
+ */
+export async function rebaselineWorkspaceInstructionPolicyKnowledgeProposal(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    knowledgeProposalId: string;
+    operationId: string;
+    initiatingHumanSubjectId: string;
+  },
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  const stranded = await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyOnboardingProposals)
+      .where(
+        and(
+          eq(schema.workspaceInstructionPolicyOnboardingProposals.workspaceId, input.workspaceId),
+          eq(
+            schema.workspaceInstructionPolicyOnboardingProposals.sourceId,
+            input.knowledgeProposalId,
+          ),
+          eq(schema.workspaceInstructionPolicyOnboardingProposals.status, "proposed"),
+        ),
+      )
+      .orderBy(
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.baselineActivationVersion),
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
+      )
+      .limit(1);
+    if (!row) return null;
+    const draft = await getRevisionInTransaction(scoped, input.workspaceId, row.draftRevisionId);
+    return draft ? { row, draft } : null;
+  });
+  if (!stranded) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "No inactive instruction-policy proposal exists for this knowledge proposal",
+    );
+  }
+  const target: WorkspaceInstructionPolicyTarget = {
+    kind: stranded.row.kind as WorkspaceInstructionPolicyKind,
+    scope: stranded.row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: stranded.row.roleKey,
+  };
+  const baseline = await getWorkspaceInstructionPolicyBaseline(db, {
+    workspaceId: input.workspaceId,
+    target,
+  });
+  // The draft-validation trigger binds a knowledge-proposal draft to the
+  // initiating human carried in the transaction, exactly as the original write
+  // did through the governed-write authority seam. The successor must be
+  // created under that same frozen human, not the ambient caller.
+  return await withSessionRlsActorContext(
+    {
+      subjectId: input.initiatingHumanSubjectId,
+      initiatingHumanSubjectId: input.initiatingHumanSubjectId,
     },
+    async () =>
+      await createWorkspaceInstructionPolicyKnowledgeProposal(db, {
+        operationId: input.operationId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...target,
+        content: stranded.draft.content,
+        knowledgeProposalId: stranded.row.sourceId,
+        knowledgeProposalContentHash: stranded.row.sourceVersion,
+        confidenceBps: stranded.row.confidenceBps,
+        expectedCurrentRevisionId: baseline.expectedCurrentRevisionId,
+        expectedActivationVersion: baseline.expectedActivationVersion,
+        createdBySubjectId: stranded.row.createdBySubjectId,
+      }),
   );
 }
 
@@ -1119,6 +1433,29 @@ function listFilterConditions(
   return conditions;
 }
 
+function inactiveHeadFilterConditions(
+  workspaceId: string,
+  query: WorkspaceInstructionPolicyListQuery,
+): SQL[] {
+  const conditions: SQL[] = [
+    eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId),
+  ];
+  if (query.kind !== undefined) {
+    conditions.push(eq(schema.workspaceInstructionPolicyDeactivationEvents.kind, query.kind));
+  }
+  if (query.scope !== undefined) {
+    conditions.push(eq(schema.workspaceInstructionPolicyDeactivationEvents.scope, query.scope));
+  }
+  if (query.roleKey !== undefined) {
+    conditions.push(
+      query.roleKey === null
+        ? isNull(schema.workspaceInstructionPolicyDeactivationEvents.roleKey)
+        : eq(schema.workspaceInstructionPolicyDeactivationEvents.roleKey, query.roleKey),
+    );
+  }
+  return conditions;
+}
+
 export async function listWorkspaceInstructionPolicyRevisions(
   db: Database,
   workspaceId: string,
@@ -1133,7 +1470,7 @@ export async function listWorkspaceInstructionPolicyRevisions(
       .limit(query.limit + 1);
     const hasMore = rows.length > query.limit;
     const page = rows.slice(0, query.limit);
-    const [heads, events] = await Promise.all([
+    const [heads, inactiveHeadRows, events, deactivationEvents] = await Promise.all([
       scopedDb
         .select()
         .from(schema.workspaceInstructionPolicyHeads)
@@ -1144,19 +1481,81 @@ export async function listWorkspaceInstructionPolicyRevisions(
           asc(schema.workspaceInstructionPolicyHeads.roleKey),
         ),
       scopedDb
+        .selectDistinctOn([
+          schema.workspaceInstructionPolicyDeactivationEvents.kind,
+          schema.workspaceInstructionPolicyDeactivationEvents.scope,
+          sql`coalesce(${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}, '')`,
+        ])
+        .from(schema.workspaceInstructionPolicyDeactivationEvents)
+        .where(
+          and(
+            ...inactiveHeadFilterConditions(workspaceId, query),
+            notExists(
+              scopedDb
+                .select({ id: schema.workspaceInstructionPolicyHeads.id })
+                .from(schema.workspaceInstructionPolicyHeads)
+                .where(
+                  and(
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.workspaceId,
+                      schema.workspaceInstructionPolicyDeactivationEvents.workspaceId,
+                    ),
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.kind,
+                      schema.workspaceInstructionPolicyDeactivationEvents.kind,
+                    ),
+                    eq(
+                      schema.workspaceInstructionPolicyHeads.scope,
+                      schema.workspaceInstructionPolicyDeactivationEvents.scope,
+                    ),
+                    sql`${schema.workspaceInstructionPolicyHeads.roleKey} IS NOT DISTINCT FROM ${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}`,
+                  ),
+                ),
+            ),
+          ),
+        )
+        .orderBy(
+          asc(schema.workspaceInstructionPolicyDeactivationEvents.kind),
+          asc(schema.workspaceInstructionPolicyDeactivationEvents.scope),
+          sql`coalesce(${schema.workspaceInstructionPolicyDeactivationEvents.roleKey}, '')`,
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+        )
+        .limit(query.limit + 1),
+      scopedDb
         .select()
         .from(schema.workspaceInstructionPolicyActivationEvents)
-        .where(eq(schema.workspaceInstructionPolicyActivationEvents.workspaceId, workspaceId))
+        .where(
+          and(
+            eq(schema.workspaceInstructionPolicyActivationEvents.workspaceId, workspaceId),
+            inArray(schema.workspaceInstructionPolicyActivationEvents.type, [
+              "activate",
+              "rollback",
+            ]),
+          ),
+        )
         .orderBy(
           desc(schema.workspaceInstructionPolicyActivationEvents.createdAt),
           desc(schema.workspaceInstructionPolicyActivationEvents.id),
+        )
+        .limit(query.limit),
+      scopedDb
+        .select()
+        .from(schema.workspaceInstructionPolicyDeactivationEvents)
+        .where(eq(schema.workspaceInstructionPolicyDeactivationEvents.workspaceId, workspaceId))
+        .orderBy(
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.createdAt),
+          desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
         )
         .limit(query.limit),
     ]);
     return {
       revisions: page.map(revisionFromRow),
       activeHeads: heads.map(headFromRow),
+      inactiveHeads: inactiveHeadRows.slice(0, query.limit).map(inactiveHeadFromRow),
+      inactiveHeadsTruncated: inactiveHeadRows.length > query.limit,
       activationEvents: events.map(eventFromRow),
+      deactivationEvents: deactivationEvents.map(deactivationEventFromRow),
       nextAfterRevision: hasMore ? page.at(-1)!.revision : null,
     };
   });
@@ -1271,6 +1670,16 @@ async function changeActiveRevision(
         input.workspaceId,
         input.operationId,
       );
+      if (
+        !existingEvent &&
+        (await hasDeactivationOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          input.operationId,
+        ))
+      ) {
+        throw new WorkspaceInstructionPolicyOperationReuseError();
+      }
       if (existingEvent) {
         const legacyRequestMatches =
           hasOwnField(input, "expectedCurrentRevisionId") &&
@@ -1303,10 +1712,15 @@ async function changeActiveRevision(
       };
       const currentRow = await getHeadInTransaction(scopedDb, input.workspaceId, targetIdentity);
       const currentHead = currentRow ? headFromRow(currentRow) : null;
+      const inactiveBoundary = currentRow
+        ? null
+        : await getLatestDeactivationInTransaction(scopedDb, input.workspaceId, targetIdentity);
+      const currentActivationVersion =
+        currentRow?.activationVersion ?? inactiveBoundary?.activationVersion ?? 0;
       if (
         (currentHead?.revisionId ?? null) !== input.expectedCurrentRevisionId ||
         (input.expectedActivationVersion !== undefined &&
-          (currentHead?.activationVersion ?? 0) !== input.expectedActivationVersion)
+          currentActivationVersion !== input.expectedActivationVersion)
       ) {
         throw new WorkspaceInstructionPolicyConflictError(currentHead);
       }
@@ -1337,7 +1751,7 @@ async function changeActiveRevision(
           );
         }
       }
-      const activationVersion = (currentHead?.activationVersion ?? 0) + 1;
+      const activationVersion = currentActivationVersion + 1;
       const createdAt = new Date();
       const [eventRow] = await scopedDb
         .insert(schema.workspaceInstructionPolicyActivationEvents)
@@ -1544,4 +1958,41 @@ function snapshotEntryMatchesRevision(
     revision.scope === entry.scope &&
     revision.roleKey === entry.roleKey
   );
+}
+
+/**
+ * Current activation baseline for one instruction-policy target: the active
+ * head's revision (or null) and the CAS activation version that a new draft
+ * proposal must expect. A deactivated-to-null target keeps its monotonic
+ * boundary, so the version is the max of the head and latest deactivation.
+ * Read-only under workspace RLS; used by `remember` to bind a user-directed
+ * rule to the exact current baseline instead of assuming an empty workspace.
+ */
+export async function getWorkspaceInstructionPolicyBaseline(
+  db: Database,
+  input: { workspaceId: string; target: WorkspaceInstructionPolicyTarget },
+): Promise<{ expectedCurrentRevisionId: string | null; expectedActivationVersion: number }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [head] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyHeads)
+      .where(and(...headTargetConditions(input.workspaceId, input.target)))
+      .limit(1);
+    const [deactivation] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyDeactivationEvents)
+      .where(and(...deactivationTargetConditions(input.workspaceId, input.target)))
+      .orderBy(
+        desc(schema.workspaceInstructionPolicyDeactivationEvents.activationVersion),
+        desc(schema.workspaceInstructionPolicyDeactivationEvents.id),
+      )
+      .limit(1);
+    return {
+      expectedCurrentRevisionId: head?.revisionId ?? null,
+      expectedActivationVersion: Math.max(
+        Number(head?.activationVersion ?? 0),
+        Number(deactivation?.activationVersion ?? 0),
+      ),
+    };
+  });
 }

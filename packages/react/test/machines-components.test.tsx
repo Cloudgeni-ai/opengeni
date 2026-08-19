@@ -6,7 +6,7 @@
    the consent screen's whole-machine + screen-control toggle render.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
 import { MachineDetail } from "../src/components/machines/machine-detail";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
@@ -78,6 +78,9 @@ function machine(
     runtime: null,
     metrics: idle,
     ...overrides,
+    scope: overrides.scope ?? "workspace",
+    generation: overrides.generation ?? 1,
+    operationPolicy: overrides.operationPolicy ?? null,
   };
 }
 
@@ -184,6 +187,23 @@ describe("MachineMetrics", () => {
 });
 
 describe("MachineCard — attach/swap affordance", () => {
+  test("distinguishes personal, workspace, and organization machine scope", async () => {
+    for (const [scope, label] of [
+      ["user", "personal"],
+      ["workspace", "workspace"],
+      ["organization", "organization"],
+    ] as const) {
+      const r = await renderComponent(
+        <MachineCard machine={machine({ sandboxId: `scope-${scope}`, state: "online", scope })} />,
+      );
+      await flush();
+      expect(
+        r.container.querySelector(`[data-machine-scope="${scope}"]`)?.textContent?.toLowerCase(),
+      ).toBe(label);
+      await r.unmount();
+    }
+  });
+
   test("an outdated agent shows exact build truth and one-click update without opening detail", async () => {
     const updated: MachineView[] = [];
     const opened: MachineView[] = [];
@@ -204,6 +224,8 @@ describe("MachineCard — attach/swap affordance", () => {
           desktop: true,
           opStream: true,
           browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: null,
       },
@@ -244,6 +266,8 @@ describe("MachineCard — attach/swap affordance", () => {
           desktop: true,
           opStream: true,
           browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: {
           operationId: "00000000-0000-4000-8000-000000000001",
@@ -285,6 +309,8 @@ describe("MachineCard — attach/swap affordance", () => {
           desktop: true,
           opStream: true,
           browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: true,
         },
         update: {
           operationId: "00000000-0000-4000-8000-000000000001",
@@ -408,6 +434,147 @@ describe("MachineDetail — runner authority diagnostics", () => {
     expect(r.container.textContent).toContain("Blocked 2 competing runners");
     await r.unmount();
   });
+
+  test("shows configured policy incompatibility and saves with the current revision", async () => {
+    const requests: unknown[] = [];
+    const m = machine({
+      sandboxId: "policy-machine",
+      state: "online",
+      operationPolicy: {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: 805_306_368,
+        cpuMaxMillicores: 1_500,
+        revision: 4,
+        updatedAt: "2026-08-14T10:00:00.000Z",
+      },
+      runtime: {
+        installedVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "outdated",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+          operationResourcePolicy: false,
+          operationCpuQuota: false,
+        },
+        update: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onUpdateOperationPolicy={async (_machine, request) => requests.push(request)}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Command execution fails closed");
+    (
+      r.container.querySelector(
+        '[data-machine-operation-policy] button[type="submit"]',
+      ) as HTMLButtonElement
+    ).click();
+    await flush();
+    expect(requests).toEqual([
+      {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: 805_306_368,
+        cpuMaxMillicores: 1_500,
+        expectedRevision: 4,
+      },
+    ]);
+    await r.unmount();
+  });
+
+  test("surfaces an asynchronous policy-save failure", async () => {
+    const m = machine({
+      sandboxId: "policy-save-failure",
+      state: "online",
+      operationPolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 2,
+        updatedAt: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onUpdateOperationPolicy={async () => {
+          throw new Error("policy revision changed");
+        }}
+      />,
+    );
+    await flush();
+    (
+      r.container.querySelector(
+        '[data-machine-operation-policy] button[type="submit"]',
+      ) as HTMLButtonElement
+    ).click();
+    await flush();
+    expect(
+      r.container.querySelector('[data-machine-operation-policy] [role="alert"]')?.textContent,
+    ).toBe("policy revision changed");
+    await r.unmount();
+  });
+
+  test("gates only the configured policy subset", async () => {
+    const m = machine({
+      sandboxId: "memory-only-policy",
+      state: "online",
+      operationPolicy: {
+        memoryMaxBytes: 1_073_741_824,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+        updatedAt: null,
+      },
+      runtime: {
+        installedVersion: "0.1.16",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "current",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: false,
+        },
+        update: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onUpdateOperationPolicy={async () => {}}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).not.toContain("Command execution fails closed");
+    await r.unmount();
+  });
 });
 
 describe("MachinesDashboard", () => {
@@ -519,13 +686,13 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
     await r.unmount();
   });
 
-  test("approve passes the screen-control consent through", async () => {
-    const got: boolean[] = [];
+  test("approve submits the user scope by default with the screen-control consent", async () => {
+    const got: Array<[boolean, string]> = [];
     const r = await renderComponent(
       <EnrollmentConsent
         userCode="A"
         machine={display}
-        onApprove={(v) => got.push(v)}
+        onApprove={(screenControl, scope) => got.push([screenControl, scope])}
         onDeny={() => {}}
       />,
     );
@@ -533,7 +700,76 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
     (r.container.querySelector("[data-approve]") as HTMLButtonElement).click();
     await flush();
     // The toggle defaults to requestsScreenControl (true) for a display machine.
-    expect(got).toEqual([true]);
+    expect(got).toEqual([[true, "user"]]);
+    await r.unmount();
+  });
+
+  test("scope choices are explicit and organization publication is admin-gated", async () => {
+    const got: string[] = [];
+    const r = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        onApprove={(_screenControl, scope) => got.push(scope)}
+      />,
+    );
+    await flush();
+    expect(
+      (r.container.querySelector('[data-enrollment-scope="user"] input') as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    expect(
+      (
+        r.container.querySelector(
+          '[data-enrollment-scope="organization"] input',
+        ) as HTMLInputElement
+      ).disabled,
+    ).toBe(true);
+    expect(r.container.textContent).toContain("organization admin required");
+    await actRun(() =>
+      (
+        r.container.querySelector('[data-enrollment-scope="workspace"] input') as HTMLInputElement
+      ).click(),
+    );
+    (r.container.querySelector("[data-approve]") as HTMLButtonElement).click();
+    await flush();
+    expect(got).toEqual(["workspace"]);
+    await r.unmount();
+
+    const admin = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        allowOrganizationScope
+        onApprove={(_screenControl, scope) => got.push(scope)}
+      />,
+    );
+    await flush();
+    const organization = admin.container.querySelector(
+      '[data-enrollment-scope="organization"] input',
+    ) as HTMLInputElement;
+    expect(organization.disabled).toBe(false);
+    await actRun(() => organization.click());
+    (admin.container.querySelector("[data-approve]") as HTMLButtonElement).click();
+    await flush();
+    expect(got).toEqual(["workspace", "organization"]);
+    expect(admin.container.textContent).toContain("Members of this organization");
+    await admin.unmount();
+  });
+
+  test("scope copy truthfully follows the selected audience", async () => {
+    const r = await renderComponent(
+      <EnrollmentConsent userCode="A" machine={headless} onApprove={() => {}} />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Only you can use this machine");
+    await actRun(() =>
+      (
+        r.container.querySelector('[data-enrollment-scope="workspace"] input') as HTMLInputElement
+      ).click(),
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Everyone with access to this workspace");
     await r.unmount();
   });
 

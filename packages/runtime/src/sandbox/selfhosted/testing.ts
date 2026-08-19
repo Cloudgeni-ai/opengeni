@@ -151,6 +151,18 @@ export class MockAgentResponder implements ControlRpc {
         const res: FsWriteResponse = { bytesWritten: String(op.fsWrite.content.length) };
         return ok(req.requestId, { $case: "fsWrite", fsWrite: res });
       }
+      case "fsRemove": {
+        const path = normalize(op.fsRemove.path);
+        if (!this.files.delete(path)) {
+          return errorResponse(
+            req.requestId,
+            ErrorCode.ERROR_CODE_NOT_FOUND,
+            `no such file: ${op.fsRemove.path}`,
+            false,
+          );
+        }
+        return ok(req.requestId, { $case: "fsRemove", fsRemove: {} });
+      }
       case "fsList": {
         const prefix = normalize(op.fsList.path).replace(/\/?$/, "/");
         const res: FsListResponse = {

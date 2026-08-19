@@ -25,6 +25,9 @@ describe("workspace retained artifact loader", () => {
     const calls: Array<{ workspaceId: string; artifact: RetainedArtifactReference }> = [];
     const loader = createWorkspaceRetainedArtifactLoader(
       {
+        downloadRetainedArtifact: async () => {
+          throw new Error("unexpected byte download");
+        },
         createRetainedArtifactDownloadUrl: async (workspaceId, received) => {
           calls.push({ workspaceId, artifact: received });
           return {
@@ -39,5 +42,30 @@ describe("workspace retained artifact loader", () => {
     const result = await loader(artifact, new AbortController().signal);
     expect(result).toEqual({ url: "https://objects.example/generated.png?signature=test" });
     expect(calls).toEqual([{ workspaceId: "workspace-a", artifact }]);
+  });
+
+  test("downloads ordinary workspace-file artifacts through the authenticated SDK path", async () => {
+    const { dimensions: _dimensions, ...artifactWithoutDimensions } = artifact;
+    const fileArtifact: RetainedArtifactReference = {
+      ...artifactWithoutDimensions,
+      kind: "file",
+      contentType: "application/pdf",
+    };
+    const bytes = new Uint8Array([37, 80, 68, 70]);
+    const loader = createWorkspaceRetainedArtifactLoader(
+      {
+        createRetainedArtifactDownloadUrl: async () => {
+          throw new Error("unexpected signed URL");
+        },
+        downloadRetainedArtifact: async (workspaceId, received) => {
+          expect(workspaceId).toBe("workspace-a");
+          expect(received).toEqual(fileArtifact);
+          return { artifact: received, bytes };
+        },
+      },
+      "workspace-a",
+    );
+
+    expect(await loader(fileArtifact, new AbortController().signal)).toEqual(bytes);
   });
 });

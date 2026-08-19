@@ -76,6 +76,9 @@ function machine(
     runtime: null,
     metrics: idleMetrics,
     ...overrides,
+    scope: overrides.scope ?? "workspace",
+    generation: overrides.generation ?? 1,
+    operationPolicy: overrides.operationPolicy ?? null,
   };
 }
 

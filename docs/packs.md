@@ -235,4 +235,4 @@ The SDK exposes:
 - component resolution/ownership: `packages/db/src/pack-components.ts`
 - schema and rolling migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0216_pack_component_ownership.sql`
 - legacy worker compatibility: `apps/worker/src/activities/packs.ts`
-- web review UI: `apps/web/src/components/capabilities/packs-section.tsx`
+- web review UI: `apps/web/src/components/capabilities/pack-dialogs.tsx`, listed as a Bundle row by `apps/web/src/components/capabilities/bundles-section.tsx`

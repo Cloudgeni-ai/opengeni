@@ -4,6 +4,7 @@ import {
   type ControlRpc,
   MockAgentResponder,
   SelfhostedControlError,
+  type SelfhostedOperationAdmission,
   SelfhostedSandboxClient,
   SelfhostedSession,
   agentErrorToControlError,
@@ -50,6 +51,297 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // The request was addressed to the agent subject.
     expect(mock.requests[0]?.subject).toBe(subjectFor(WS, AGENT));
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
+  });
+
+  test("configured command policy carries exact memory and CPU limits", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: 100_663_296,
+        cpuMaxMillicores: 1_500,
+        revision: 3,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    });
+
+    await session.exec({ cmd: "true" });
+
+    expect(mock.requests[0]?.req.resourcePolicy).toEqual({
+      memoryMaxBytes: "134217728",
+      memoryHighBytes: "100663296",
+      cpuMaxMillicores: 1_500,
+    });
+  });
+
+  test("cached sessions admit each command against current policy and connection truth", async () => {
+    const mock = new MockAgentResponder();
+    let reads = 0;
+    let admission: SelfhostedOperationAdmission = {
+      connectionInstanceId: "instance-a",
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: false,
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc: mock,
+      relay: RELAY,
+      resolveOperationAdmission: async () => {
+        reads += 1;
+        return admission;
+      },
+    });
+
+    await session.exec({ cmd: "first" });
+    admission = {
+      connectionInstanceId: "instance-b",
+      operationResourcePolicy: {
+        memoryMaxBytes: 268_435_456,
+        memoryHighBytes: null,
+        cpuMaxMillicores: 2_000,
+        revision: 2,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    };
+    await session.exec({ cmd: "second" });
+    admission = {
+      connectionInstanceId: "instance-b",
+      operationResourcePolicy: {
+        memoryMaxBytes: null,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 3,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: true,
+    };
+    await session.exec({ cmd: "third" });
+
+    expect(reads).toBe(3);
+    expect(mock.requests.map((request) => request.subject)).toEqual([
+      subjectFor(WS, AGENT, "instance-a"),
+      subjectFor(WS, AGENT, "instance-b"),
+      subjectFor(WS, AGENT, "instance-b"),
+    ]);
+    expect(mock.requests.map((request) => request.req.resourcePolicy)).toEqual([
+      { memoryMaxBytes: "134217728" },
+      { memoryMaxBytes: "268435456", cpuMaxMillicores: 2_000 },
+      undefined,
+    ]);
+
+    await session.ping();
+    await session.writeFile({ path: "/tmp/no-policy-read", content: "ok" });
+    expect(reads).toBe(5);
+  });
+
+  test("a provably unstarted physical retry revalidates live authority", async () => {
+    const responder = new MockAgentResponder();
+    const requests: Array<{ subject: string; req: ControlRequest }> = [];
+    let admissionReads = 0;
+    let admission: SelfhostedOperationAdmission = {
+      connectionInstanceId: "instance-a",
+      operationResourcePolicy: {
+        memoryMaxBytes: 134_217_728,
+        memoryHighBytes: null,
+        cpuMaxMillicores: null,
+        revision: 1,
+      },
+      operationResourcePolicySupported: true,
+      operationCpuQuotaSupported: false,
+    };
+    const controlRpc: ControlRpc = {
+      request: async (subject, req, opts) => {
+        requests.push({ subject, req });
+        if (requests.length === 1) {
+          admission = {
+            connectionInstanceId: "instance-b",
+            operationResourcePolicy: {
+              memoryMaxBytes: 268_435_456,
+              memoryHighBytes: null,
+              cpuMaxMillicores: null,
+              revision: 2,
+            },
+            operationResourcePolicySupported: true,
+            operationCpuQuotaSupported: false,
+          };
+          return {
+            requestId: req.requestId,
+            error: {
+              code: ErrorCode.ERROR_CODE_DRAINING,
+              message: "the runner is draining",
+              retryable: true,
+              detail: {},
+            },
+          };
+        }
+        return await responder.request(subject, req, opts);
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc,
+      relay: RELAY,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => {
+        admissionReads += 1;
+        return admission;
+      },
+    });
+
+    await session.exec({ cmd: "true" });
+
+    expect(admissionReads).toBe(2);
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.subject)).toEqual([
+      subjectFor(WS, AGENT, "instance-a"),
+      subjectFor(WS, AGENT, "instance-b"),
+    ]);
+    expect(requests.map((request) => request.req.resourcePolicy)).toEqual([
+      { memoryMaxBytes: "134217728" },
+      { memoryMaxBytes: "268435456" },
+    ]);
+  });
+
+  test("a revoked live-authority resolver fences every operation family before dispatch", async () => {
+    const operations: Array<(session: SelfhostedSession) => Promise<unknown>> = [
+      (session) => session.exec({ cmd: "true" }),
+      (session) => session.readFile({ path: "/workspace/read.txt" }),
+      (session) => session.writeFile({ path: "/workspace/write.txt", content: "x" }),
+      (session) => session.listFiles({ path: "/workspace" }),
+      (session) => session.statFile({ path: "/workspace/read.txt" }),
+      (session) => session.materializeEntry({ path: "/workspace/staged", entry: {} }),
+      (session) => session.screenshot(),
+      (session) =>
+        session.desktopInput({
+          $case: "key",
+          key: { key: "Escape", isText: false, action: 1 },
+        }),
+      (session) => session.resolveExposedPort(7681),
+      (session) => session.resolveExposedPort(6080),
+    ];
+
+    for (const operation of operations) {
+      const mock = new MockAgentResponder();
+      const session = new SelfhostedSession({
+        workspaceId: WS,
+        agentId: AGENT,
+        connectionInstanceId: "stale-instance",
+        controlRpc: mock,
+        relay: RELAY,
+        resolveOperationAdmission: async () => null,
+      });
+      const failure = await operation(session).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        name: "SelfhostedControlError",
+        code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      });
+      expect(mock.requests).toHaveLength(0);
+    }
+  });
+
+  test("configured CPU fails closed on capability drift and never reaches the runner", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: "instance-a",
+      controlRpc: mock,
+      relay: RELAY,
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: "instance-b",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: 1_000,
+          revision: 8,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: false,
+      }),
+    });
+
+    const failure = await session.exec({ cmd: "true" }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(String((failure as Error).message)).toContain("CPU quotas");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  test("configured policy fails closed before dispatch to an incapable runner", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
+
+    const failure = await session.exec({ cmd: "true" }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(String((failure as Error).message)).toContain("cannot enforce");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  test("configured command policy does not disable typed non-command capabilities", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
+
+    expect(await session.ping()).toBe(true);
+    expect(mock.requests[0]?.req.op?.$case).toBe("ping");
+    expect(mock.requests[0]?.req.resourcePolicy).toBeUndefined();
+
+    await session.writeFile({ path: "/tmp/policy-independent", content: "ok" });
+    expect(mock.requests[1]?.req.op?.$case).toBe("fsWrite");
+    expect(mock.requests[1]?.req.resourcePolicy).toBeUndefined();
+  });
+
+  test("invalid byte policy is rejected when the session is constructed", () => {
+    expect(
+      () =>
+        new SelfhostedSession({
+          workspaceId: WS,
+          agentId: AGENT,
+          controlRpc: new MockAgentResponder(),
+          relay: RELAY,
+          operationResourcePolicy: {
+            memoryMaxBytes: 1_000,
+            memoryHighBytes: 1_001,
+          },
+          operationResourcePolicySupported: true,
+        }),
+    ).toThrow("memoryHighBytes cannot exceed memoryMaxBytes");
   });
 
   test("exec snapshots renewed transient values without persisting them", async () => {
@@ -161,8 +453,16 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
 
-    await session.exec({ cmd: "printf non-login", shell: "/bin/bash", login: false });
-    await session.execCommand({ cmd: "printf login", shell: "/bin/zsh", login: true });
+    await session.exec({
+      cmd: "printf non-login",
+      shell: "/bin/bash",
+      login: false,
+    });
+    await session.execCommand({
+      cmd: "printf login",
+      shell: "/bin/zsh",
+      login: true,
+    });
 
     const first = mock.requests[0]?.req.op;
     const second = mock.requests[1]?.req.op;
@@ -183,9 +483,20 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
 
-    await session.exec({ cmd: "echo cmd", shell: String.raw`C:\Windows\System32\cmd.exe` });
-    await session.exec({ cmd: "Write-Output profile", shell: "pwsh.exe", login: true });
-    await session.exec({ cmd: "Write-Output clean", shell: "powershell.exe", login: false });
+    await session.exec({
+      cmd: "echo cmd",
+      shell: String.raw`C:\Windows\System32\cmd.exe`,
+    });
+    await session.exec({
+      cmd: "Write-Output profile",
+      shell: "pwsh.exe",
+      login: true,
+    });
+    await session.exec({
+      cmd: "Write-Output clean",
+      shell: "powershell.exe",
+      login: false,
+    });
 
     const requests = mock.requests.map((request) => request.req.op);
     if (requests.some((op) => op?.$case !== "exec")) throw new Error("expected exec requests");
@@ -219,7 +530,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
-    const wrote = await session.writeFile({ path: "/tmp/marker", content: "hello machine" });
+    const wrote = await session.writeFile({
+      path: "/tmp/marker",
+      content: "hello machine",
+    });
     expect(wrote).toBe("hello machine".length);
     const bytes = await session.readFile({ path: "/tmp/marker" });
     expect(new TextDecoder().decode(bytes)).toBe("hello machine");
@@ -303,14 +617,26 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("interaction sidecar and Browser/Computer frame relays use typed control ops", async () => {
     const mock = new MockAgentResponder();
-    const session = sessionWith(mock);
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      // A command policy on an incapable runner must not disable or rewrite the
+      // independent typed Browser/Computer planes.
+      operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
+      operationResourcePolicySupported: false,
+    });
     const ensured = await session.ensureBrowserControl({
       scopeId: `${WS}:attached:device-1`,
       scopeGeneration: "connection-1",
       adminToken: "a".repeat(32),
       allowedOrigins: ["https://app.example"],
     });
-    expect(ensured).toEqual({ port: 17_321, sidecarGeneration: "mock-sidecar-1" });
+    expect(ensured).toEqual({
+      port: 17_321,
+      sidecarGeneration: "mock-sidecar-1",
+    });
     const opened = await session.openBrowserFrames({
       scopeId: `${WS}:attached:device-1`,
       scopeGeneration: "connection-1",
@@ -330,7 +656,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       "browserFramesOpen",
     ]);
     expect(opened.channel).toMatchObject({ kind: 3, port: 20_000 });
-    expect(opened.endpoint).toMatchObject({ host: "relay.test", path: "/stream" });
+    expect(opened.endpoint).toMatchObject({
+      host: "relay.test",
+      path: "/stream",
+    });
     expect(opened.endpoint.query).toContain("port=20000");
     expect(opened.endpoint.query).toContain("channel=mock-browser-target-1");
 
@@ -352,6 +681,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(openedComputer.channel).toMatchObject({ kind: 4, port: 20_001 });
     expect(openedComputer.endpoint.query).toContain("port=20001");
     expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
+    expect(mock.requests.every((request) => request.req.resourcePolicy === undefined)).toBe(true);
   });
 
   test("frame startup failures retain the exact inner control request correlation", async () => {
@@ -444,7 +774,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       relay: RELAY,
       environment: { HOME: "/workspace", FOO: "bar" },
     });
-    expect(threaded.state.environment).toEqual({ HOME: "/workspace", FOO: "bar" });
+    expect(threaded.state.environment).toEqual({
+      HOME: "/workspace",
+      FOO: "bar",
+    });
     // The negotiation/test path (no env) defaults to `{}` — still a defined object.
     const bare = sessionWith(new MockAgentResponder());
     expect(bare.state.environment).toEqual({});
@@ -457,7 +790,11 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // validateNoEnvironmentDelta throws "Live sandbox sessions cannot change manifest
     // environment variables" unless the session manifest's environment EQUALS the
     // turn's. The session must carry the run's declared environment for parity.
-    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const env = {
+      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      HOME: "/workspace",
+      DEPLOY_TARGET: "vm2",
+    };
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
@@ -551,6 +888,43 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
     const rop = mock.requests[1]?.req.op;
     if (rop?.$case !== "fsRead") throw new Error("expected fsRead");
     expect(rop.fsRead.path).toBe("notes.md");
+  });
+
+  test("placement-private staging uses mode 0600 and idempotent host-side removal", async () => {
+    const privatePath = "/tmp/opengeni-private/workspace-imports/authority.curl";
+    const signedUrl = "https://files.example.test/download?signature=private";
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+
+    await session.writePlacementPrivate({
+      path: privatePath,
+      content: signedUrl,
+      createParents: true,
+    });
+    const write = mock.requests[0]?.req.op;
+    if (write?.$case !== "fsWrite") throw new Error("expected private fsWrite");
+    expect(write.fsWrite).toMatchObject({
+      path: privatePath,
+      createParents: true,
+      append: false,
+      mode: 0o600,
+    });
+    expect(new TextDecoder().decode(write.fsWrite.content)).toBe(signedUrl);
+    expect(mock.fileText(privatePath)).toBe(signedUrl);
+
+    await session.deletePlacementPrivate(privatePath);
+    expect(mock.requests[1]?.req.op).toMatchObject({
+      $case: "fsRemove",
+      fsRemove: { path: privatePath, recursive: false },
+    });
+    expect(mock.fileText(privatePath)).toBeUndefined();
+    await expect(session.deletePlacementPrivate(privatePath)).resolves.toBeUndefined();
+    await expect(
+      session.writePlacementPrivate({
+        path: "/workspace/not-private",
+        content: signedUrl,
+      }),
+    ).rejects.toThrow(/placement-private path/);
   });
 });
 
@@ -787,7 +1161,9 @@ describe("SelfhostedSandboxClient — create/resume bind + serialize round-trips
   });
 
   test("deserialize reads agentId nested under providerState (envelope shape)", async () => {
-    const back = await client().deserializeSessionState({ providerState: { agentId: "nested" } });
+    const back = await client().deserializeSessionState({
+      providerState: { agentId: "nested" },
+    });
     expect(back).toEqual({ agentId: "nested" });
   });
 
@@ -902,7 +1278,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const res = await rpc.request(
       "agent.x.y.rpc",
-      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1" } },
+      } as ControlRequest,
       { timeoutMs: 10 },
     );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
@@ -919,7 +1299,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const res = await rpc.request(
       "agent.x.y.rpc",
-      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1" } },
+      } as ControlRequest,
       { timeoutMs: 10 },
     );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_TIMEOUT);

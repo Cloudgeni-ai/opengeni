@@ -14,7 +14,6 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
-  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -38,6 +37,7 @@ import {
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   sessionGoalUtf8Bytes,
   TASK_NOTE_LIST_DEFAULT_LIMIT,
   TASK_NOTE_LIST_MAX_LIMIT,
@@ -50,7 +50,6 @@ import {
   beginRigChangeVerificationAttempt,
   createVariableSet,
   decryptVariableSetValue,
-  deleteScheduledTask,
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
@@ -64,6 +63,7 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  listEnrollments,
   projectEffectiveControlForRelatedAccess,
   projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
@@ -77,8 +77,6 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  MEMORY_CORRECT_TOOL_DESCRIPTION,
-  MEMORY_SAVE_TOOL_DESCRIPTION,
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
@@ -87,7 +85,6 @@ import {
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
   setVariableSetVariable,
-  updateScheduledTask,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   RigChangeTransitionError,
@@ -100,12 +97,9 @@ import {
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
+  replaceTaskNote,
 } from "@opengeni/db";
-import {
-  appendAndPublishEvents,
-  appendAndPublishTurnEventsFenced,
-  publishDurableSessionEvents,
-} from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
@@ -128,24 +122,24 @@ import {
   authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
   nativeConnectionCapabilityRecommendations,
-  correctWorkspaceMemoryWithSlackPublication,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
-  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
+import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -154,7 +148,6 @@ import {
   socialSearchLive,
   socialThreadLive,
 } from "../integrations/social-api";
-import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -179,6 +172,7 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validateScheduledTaskTarget,
+  updateScheduledTaskForApi,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -228,12 +222,14 @@ import { createFikenClient, resolveFikenConnectionForTool } from "../integration
 import {
   browseAtlassianSources,
   getAtlassianLiveItem,
-  revokeAtlassianScheduleAuthorization,
   searchAtlassianLive,
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
+import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
+import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -373,6 +369,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
+  // Retired: never registered, so these are never consulted. The map must stay
+  // total over the tool-name union, which still carries both names so that
+  // previously written scheduled-task snapshots keep parsing.
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
   preference_registry_summary: {
@@ -383,6 +382,39 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
+  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
+  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
+  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
+  task_note_promote_knowledge: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control"],
+  },
+  task_note_promote_instruction_policy: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  task_note_promote_preference: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  instruction_policy_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
+  preference_propose: {
+    sessionRequired: true,
+    allOf: ["documents:search", "workspace:read"],
+  },
+  // Explicit user-directed remember composes task-note evidence with the
+  // governed promotion path, so it needs the union of both permission sets.
+  remember: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
+  remember_confirm: {
+    sessionRequired: true,
+    allOf: ["documents:search", "sessions:control", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -484,6 +516,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
   slack_bot_list_channels: { allOf: ["connections:read"] },
+  slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
   slack_bot_thread_replies: { allOf: ["connections:read"] },
   slack_bot_list_users: { allOf: ["connections:read"] },
@@ -512,6 +545,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  sandbox_file_publish: {
+    sessionRequired: true,
+    allOf: ["files:read", "files:upload"],
+  },
   editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   editable_artifact_create: {
     sessionRequired: true,
@@ -707,15 +744,43 @@ export function buildOpenGeniMcpServer(
       grant,
       sessionId,
       json,
-      options.workspaceMemoryPromptMode ?? "legacy_standing",
+      options.workspaceMemoryPromptMode ?? "retrieval_only",
     );
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
+    const attempt = exactAgentAttemptClaims(grant)!;
+    registerCompanyBrainGovernedWriteTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
+    registerRememberTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    registerSandboxFileArtifactTool(server, deps, grant, sessionId, json);
     registerEditableArtifactAgentTools({
       server,
       deps,
@@ -737,7 +802,7 @@ export function buildOpenGeniMcpServer(
     registerFleetTools(server, deps, grant, sessionId, json);
   }
   if (can("enrollments:manage") && deps.settings.sandboxSelfhostedEnabled) {
-    registerConnectedMachineTools(server, deps, grant, json);
+    registerConnectedMachineTools(server, deps, grant, sessionId, json);
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
@@ -1384,6 +1449,9 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
+          // Explicit credential-free connection authority selections; declared
+          // so MCP validation doesn't strip them before the contract parse.
+          connectionAuthorities: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -1448,6 +1516,9 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
+          // Omitted preserves the frozen selections, [] clears them, and an
+          // array replaces them; declared so MCP validation doesn't strip it.
+          connectionAuthorities: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -1476,7 +1547,7 @@ export function buildOpenGeniMcpServer(
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
         }
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1499,7 +1570,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
@@ -1524,9 +1595,17 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
-          status: "active",
+        const update = await validatedScheduledTaskUpdate({
+          settings: deps.settings,
+          db: deps.db,
+          objectStorage: deps.objectStorage,
+          grant,
+          existing,
+          payload: { status: "active" },
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
         });
+        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1630,41 +1709,19 @@ export function buildOpenGeniMcpServer(
         inputSchema: { id: z4.string().uuid() },
       },
       async ({ id }) => {
-        const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-        if (task.metadata.connectorKind === "atlassian") {
-          await revokeAtlassianScheduleAuthorization(deps, {
-            task,
-            subjectId: grant.subjectId,
-          });
-        } else {
-          await revokeKnowledgeSourceScheduleAuthorization(deps, {
-            task,
-            subjectId: grant.subjectId,
-          });
-        }
-        await deps.workflowClient.deleteScheduledTaskSchedule({
-          temporalScheduleId: task.temporalScheduleId,
+        const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
+          workspaceId: grant.workspaceId,
+          taskId: id,
+          subjectId: grant.subjectId,
         });
-        try {
-          await deleteScheduledTask(deps.db, grant.workspaceId, id);
-        } catch {
-          return json(
-            scheduledTaskReceipt("scheduled_tasks_delete", task, "partial_failure", true, {
-              partialFailure: { stage: "database_delete", retryable: true },
-              warnings: [
-                "The Temporal schedule was deleted, but the task database record remains.",
-              ],
-            }),
-          );
-        }
         return json(
           mcpMutationReceipt({
             operation: "scheduled_tasks_delete",
             committed: true,
             outcome: "deleted",
-            changed: true,
+            changed,
             resource: { type: "scheduled_task", id: task.id, state: "deleted" },
-            idempotency: { status: "not_supported" },
+            idempotency: { status: changed ? "applied" : "replayed" },
           }),
         );
       },
@@ -1691,6 +1748,36 @@ export function buildOpenGeniMcpServer(
   server.ensureToolsListHandler();
 
   return server;
+}
+
+function registerSandboxFileArtifactTool(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool(
+    "sandbox_file_publish",
+    {
+      description:
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Returns a permanent, authenticated artifact receipt; never invent or expose a sandbox: URL as the durable result.",
+      inputSchema: {
+        path: z4.string().min(1).max(4_096),
+      },
+    },
+    async ({ path }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      return json(
+        await publishSandboxFileArtifact(deps, {
+          grant,
+          session,
+          path,
+        }),
+      );
+    },
+  );
 }
 
 function registerSlackBotTools(
@@ -1726,6 +1813,57 @@ function registerSlackBotTools(
         await (
           await clientFor(connectionId)
         ).listChannels({
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_search",
+    {
+      description:
+        "Search public Slack channels workspace-wide as the workspace-shared OpenGeni bot: messages by default, plus files and channels via contentTypes. Public content only; private channels, DMs, and group DMs are searchable only through a member's personal Slack connection. Requires a bot install with the search scopes; older installs must be reinstalled by an admin. Continue with cursor for more results.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        query: z4.string().min(1).max(500),
+        contentTypes: z4
+          .array(z4.enum(["messages", "files", "channels"]))
+          .min(1)
+          .max(3)
+          .optional(),
+        includeBots: z4.boolean().optional(),
+        before: z4.number().int().min(0).optional(),
+        after: z4.number().int().min(0).optional(),
+        sort: z4.enum(["score", "timestamp"]).optional(),
+        sortDir: z4.enum(["asc", "desc"]).optional(),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(20).optional(),
+      },
+    },
+    async ({
+      connectionId,
+      query,
+      contentTypes,
+      includeBots,
+      before,
+      after,
+      sort,
+      sortDir,
+      cursor,
+      limit,
+    }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).searchContext({
+          query,
+          ...(contentTypes ? { contentTypes } : {}),
+          ...(includeBots !== undefined ? { includeBots } : {}),
+          ...(before !== undefined ? { before } : {}),
+          ...(after !== undefined ? { after } : {}),
+          ...(sort ? { sort } : {}),
+          ...(sortDir ? { sortDir } : {}),
           ...(cursor ? { cursor } : {}),
           ...(limit !== undefined ? { limit } : {}),
         }),
@@ -2332,7 +2470,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
@@ -2343,9 +2481,9 @@ function registerGoalTools(
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (existing) {
+      if (existing && existing.status !== "completed") {
         throw new Error(
-          `this session already has a goal at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
+          `this session's goal is ${existing.status} at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
         );
       }
       const callerTurnId =
@@ -2391,19 +2529,13 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
+        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. Every rewrite must use the exact expected objective revision and a concise rationale. Root constraints cannot be changed by an agent. A rewrite is not an execution-progress audit fact; use the optional goal_progress tool when such a fact should be recorded.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
-        // Optional for rolling compatibility with the former goal_update
-        // surface. Omitted semantic metadata is classified as a refinement of
-        // the currently fenced objective; new callers should always supply it.
-        changeKind: z4.enum(["refinement", "adaptation", "replacement"]).optional(),
-        rationale: goalRationale.optional(),
-        expectedObjectiveRevision: z4.number().int().positive().optional(),
-        // Deprecated compatibility input. It is committed through the new
-        // progress operation and never makes a semantic rewrite count itself.
-        progressNote: progressNoteSchema.optional(),
+        changeKind: z4.enum(["refinement", "adaptation", "replacement"]),
+        rationale: goalRationale,
+        expectedObjectiveRevision: z4.number().int().positive(),
         idempotencyKey: z4.string().uuid(),
       },
     },
@@ -2413,12 +2545,11 @@ function registerGoalTools(
       changeKind,
       rationale,
       expectedObjectiveRevision,
-      progressNote,
       idempotencyKey,
     }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
-      if (text === undefined && successCriteria === undefined && progressNote === undefined) {
-        throw new Error("goal_update requires semantic content or a progressNote");
+      if (text === undefined && successCriteria === undefined) {
+        throw new Error("goal_update requires text or successCriteria");
       }
       const context = exactAgentCommandContext(grant, sessionId);
       const command = {
@@ -2432,36 +2563,22 @@ function registerGoalTools(
         },
         operationKey: idempotencyKey,
       };
-      const semantic =
-        text !== undefined || successCriteria !== undefined
-          ? await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
-              ...(text !== undefined ? { text } : {}),
-              ...(successCriteria !== undefined ? { successCriteria } : {}),
-              changeKind: changeKind ?? "refinement",
-              rationale: rationale ?? "Compatibility refinement from goal_update",
-              ...(expectedObjectiveRevision !== undefined ? { expectedObjectiveRevision } : {}),
-              actor: "agent",
-              command,
-            })
-          : null;
-      const progress = progressNote
-        ? await recordSessionGoalProgressWithEvent(deps.db, grant.workspaceId, sessionId, {
-            progressNote,
-            command,
-          })
-        : null;
-      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [
-        ...(semantic?.events ?? []),
-        ...(progress?.events ?? []),
-      ]);
-      const goal = progress?.goal ?? semantic?.goal;
-      if (!goal) throw new Error("goal_update produced no mutation");
+      const semantic = await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
+        ...(text !== undefined ? { text } : {}),
+        ...(successCriteria !== undefined ? { successCriteria } : {}),
+        changeKind,
+        rationale,
+        expectedObjectiveRevision,
+        actor: "agent",
+        command,
+      });
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, semantic.events);
       return json({
-        ...goal,
-        operationId: semantic?.operationId ?? progress?.operationId ?? null,
-        replay: Boolean(semantic?.replay || progress?.replay),
-        outcome: semantic?.outcome ?? "progress_recorded",
-        proposalId: semantic?.proposalId ?? null,
+        ...semantic.goal,
+        operationId: semantic.operationId,
+        replay: semantic.replay,
+        outcome: semantic.outcome,
+        proposalId: semantic.proposalId,
       });
     },
   );
@@ -2714,7 +2831,9 @@ function registerWorkspaceArtifactTools(
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await deps.objectStorage.getObjectBytes(ref.contentKey);
+      const object = await retryWhileMissing(async () =>
+        deps.objectStorage!.getObjectBytes(ref.contentKey),
+      );
       if (!object) throw new Error("Artifact content is unavailable");
       const actualHash = createHash("sha256").update(object.bytes).digest("hex");
       if (actualHash !== ref.version.contentSha256)
@@ -2858,7 +2977,11 @@ function registerTaskNoteTools(
     if (!resolved || resolved.sessionId !== sessionId) {
       throw new Error("Exact signed task-note attempt authority is required.");
     }
-    return { accountId: grant.accountId, workspaceId: grant.workspaceId, ...resolved };
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...resolved,
+    };
   };
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
@@ -2892,7 +3015,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(await listTaskNotes(deps.db, { ...attemptClaims(), includeArchived, limit }));
+      return json(
+        await listTaskNotes(deps.db, {
+          ...attemptClaims(),
+          includeArchived,
+          limit,
+        }),
+      );
     },
   );
 
@@ -2942,6 +3071,53 @@ function registerTaskNoteTools(
           operationId,
           noteId,
           expectedVersion,
+          reason,
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "task_note_replace",
+    {
+      description:
+        "Atomically correct one exact active coordination note: archive the old immutable note and create a fresh linked replacement. Exact retries replay safely; stale versions or changed input fail closed.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        replacedNoteId: z4.string().uuid(),
+        expectedReplacedVersion: z4.number().int().min(1).max(1),
+        replacementKind: z4.enum([
+          "finding",
+          "decision",
+          "blocker",
+          "ownership",
+          "artifact",
+          "handoff",
+        ]),
+        replacementText: boundedUtf8(TASK_NOTE_TEXT_MAX_BYTES, "Task note replacement text"),
+        replacementExpiresInDays: z4.number().int().min(1).max(TASK_NOTE_MAX_LIFETIME_DAYS),
+        reason: boundedUtf8(TASK_NOTE_REASON_MAX_BYTES, "Task note replacement reason"),
+      },
+    },
+    async ({
+      operationId,
+      replacedNoteId,
+      expectedReplacedVersion,
+      replacementKind,
+      replacementText,
+      replacementExpiresInDays,
+      reason,
+    }) => {
+      await authorize();
+      return json(
+        await replaceTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          replacedNoteId,
+          expectedReplacedVersion,
+          replacementKind,
+          replacementText,
+          replacementExpiresInDays,
           reason,
         }),
       );
@@ -3061,11 +3237,6 @@ function scheduledTaskUpdateChangesState(
   return false;
 }
 
-function memoryPreview(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
-}
-
 export function memorySlackPublicationActor(
   actor: Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>,
   sessionId: string,
@@ -3092,24 +3263,10 @@ function registerMemoryTools(
   json: JsonResult,
   promptMode: WorkspaceMemoryPromptMode,
 ): void {
-  const publicationActor = async () => {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-    return memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null);
-  };
-  const publicationInputSchema = z4.object({
-    importance: z4.enum(["major", "normal", "minor"]),
-    audience: z4.literal("workspace"),
-    slackMode: z4.enum(["auto", "review", "never"]),
-    shareSummary: z4.string().trim().min(1).max(4_096),
-  });
-
   server.registerTool(
     "memory_search",
     {
-      description:
-        promptMode === "retrieval_only"
-          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded here because structured preferences are the only behavioral authority.`
-          : MEMORY_SEARCH_TOOL_DESCRIPTION,
+      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded from this tool because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
@@ -3132,204 +3289,10 @@ function registerMemoryTools(
       }),
   );
 
-  server.registerTool(
-    "memory_save",
-    {
-      description:
-        promptMode === "retrieval_only"
-          ? `${MEMORY_SAVE_TOOL_DESCRIPTION} A preference-kind save is retained only as a legacy observation and cannot become behavioral authority; use the structured preference proposal surface for behavioral guidance.`
-          : MEMORY_SAVE_TOOL_DESCRIPTION,
-      inputSchema: {
-        text: z4.string().min(1),
-        kind: MemoryKindSchema,
-        confidence: z4.number().min(0).max(1).optional(),
-        replaces_id: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ text, kind, confidence, replaces_id, slack_publication }) => {
-      const principal = slack_publication ? await publicationActor() : null;
-      const result = await saveWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          text,
-          kind,
-          ...(confidence !== undefined ? { confidence } : {}),
-          ...(replaces_id ? { replacesId: replaces_id } : {}),
-          origin: "agent",
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: principal!.actor,
-              ownerLabel: principal!.ownerLabel,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.saved",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            deduped: result.deduped,
-            ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
-          },
-        },
-      ]);
-      const changed = !result.deduped || result.updated || result.superseded !== null;
-      const outcome =
-        result.updated || result.superseded !== null
-          ? "updated"
-          : result.deduped
-            ? "unchanged"
-            : "created";
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_save",
-          committed: true,
-          outcome,
-          changed,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.superseded
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.superseded.id,
-                  state: result.superseded.status,
-                },
-              ]
-            : undefined,
-          timestamp: result.memory.updatedAt,
-          idempotency: { status: "not_supported" },
-          warnings: !result.embedded
-            ? ["Memory committed without a vector embedding; keyword search remains available."]
-            : [],
-          facts: {
-            deduped: result.deduped,
-            dedupeReason: result.dedupeReason,
-            updatedInPlace: result.updated,
-            embedded: result.embedded,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
-
-  server.registerTool(
-    "memory_correct",
-    {
-      description: MEMORY_CORRECT_TOOL_DESCRIPTION,
-      inputSchema: {
-        id: z4.string().min(1),
-        reason: z4.string().min(1).optional(),
-        replacement_text: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ id, reason, replacement_text, slack_publication }) => {
-      const principal = slack_publication ? await publicationActor() : null;
-      const result = await correctWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          id,
-          ...(reason ? { reason } : {}),
-          ...(replacement_text ? { replacementText: replacement_text } : {}),
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: principal!.actor,
-              ownerLabel: principal!.ownerLabel,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.corrected",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            action: result.action,
-            ...(reason ? { reason: memoryPreview(reason) } : {}),
-            ...(result.replacement
-              ? {
-                  replacementMemoryId: result.replacement.id,
-                  replacementPreview: memoryPreview(result.replacement.text),
-                }
-              : {}),
-          },
-        },
-      ]);
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_correct",
-          committed: true,
-          outcome: "updated",
-          changed: true,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.replacement
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.replacement.id,
-                  state: result.replacement.status,
-                },
-              ]
-            : undefined,
-          timestamp: (result.replacement ?? result.memory).updatedAt,
-          idempotency: { status: "not_supported" },
-          facts: {
-            correctionAction: result.action,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
+  // Memory V1 writes are retired. Explicit user-directed knowledge goes
+  // through `remember`; an agent's own findings go through task notes and
+  // governed promotion. `memory_search` stays: reading the existing record
+  // set is still how an agent recalls what a workspace already knows.
 }
 
 // Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
@@ -3354,7 +3317,12 @@ function registerFleetTools(
       const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
       return await ensureViewerSessionGroupReady(
         { db: deps.db, settings: deps.settings, bus: deps.bus },
-        { accountId: ctx.accountId, workspaceId: ctx.workspaceId, session },
+        {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          session,
+          subjectId: ctx.subjectId ?? null,
+        },
       );
     },
   };
@@ -3363,12 +3331,28 @@ function registerFleetTools(
   // call-time via the shared helper (same context the user-authenticated swap
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
-  const fleetContext = async (): Promise<FleetContext> =>
-    await buildFleetContextForSession(deps, {
+  const fleetContext = async (): Promise<FleetContext> => {
+    const claims = exactAgentAttemptClaims(grant);
+    const actor = claims
+      ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
+      : null;
+    return await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
+      ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
+      ...(actor?.initiatingHumanSubjectId && claims
+        ? {
+            attemptAuthority: {
+              turnId: claims.turnId,
+              attemptId: claims.attemptId,
+              executionGeneration: claims.executionGeneration,
+              initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+            },
+          }
+        : {}),
     });
+  };
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
@@ -3483,6 +3467,7 @@ function registerConnectedMachineTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
+  sessionId: string | null,
   json: JsonResult,
 ): void {
   server.registerTool(
@@ -3497,13 +3482,31 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const resourceGrant =
+        sessionId && exactAgentAttemptClaims(grant)
+          ? {
+              ...grant,
+              subjectId:
+                (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+                  .initiatingHumanSubjectId ?? grant.subjectId,
+            }
+          : grant;
+      const enrollment = (await listEnrollments(deps.db, resourceGrant, { status: "active" })).find(
+        (candidate) => candidate.id === enrollmentId,
+      );
+      if (!enrollment) {
+        throw new Error("machine enrollment not found in this access scope");
+      }
+      if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
+        throw new Error("missing permission: account:admin");
+      }
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
+        workspaceId: enrollment.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey?.trim() || randomUUID(),
         ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
-        subjectId: grant.subjectId,
+        subjectId: resourceGrant.subjectId,
       });
       if (!result) {
         throw new Error("machine enrollment not found in this workspace");
@@ -3547,6 +3550,22 @@ function registerRigTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const resourceGrant = async (): Promise<AccessGrant> => {
+    if (!sessionId || exactAgentAttemptClaims(grant) === null) return grant;
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+    return actor.initiatingHumanSubjectId
+      ? { ...grant, subjectId: actor.initiatingHumanSubjectId }
+      : grant;
+  };
+  const requireMutableRig = async (rigId: string) => {
+    const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
+    if (rig.scope === "organization") {
+      throw new Error(
+        "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
+      );
+    }
+    return rig;
+  };
   if (can("rigs:use")) {
     server.registerTool(
       "rig_list",
@@ -3554,7 +3573,7 @@ function registerRigTools(
         description: "List workspace rigs and their active versions.",
         inputSchema: {},
       },
-      async () => json({ rigs: await listRigs(deps.db, grant.workspaceId) }),
+      async () => json({ rigs: await listRigs(deps.db, await resourceGrant()) }),
     );
 
     server.registerTool(
@@ -3569,17 +3588,17 @@ function registerRigTools(
         },
       },
       async ({ rigId, versionLimit, changeLimit }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
         const [versions, changes] = await Promise.all([
           listRigVersionMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(versionLimit),
           ),
           listRigChangeMonitoringSummaries(
             deps.db,
-            grant.workspaceId,
+            rig.workspaceId,
             rig.id,
             boundedRigHistoryLimit(changeLimit),
           ),
@@ -3600,10 +3619,11 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           {
             kind: "setup_append",
@@ -3611,11 +3631,11 @@ function registerRigTools(
           },
           sessionId ? { proposedBy: `session:${sessionId}` } : {},
         );
-        const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
+        const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
         const attempt = verificationAttempt(verifying);
         try {
           await deps.workflowClient.startRigVerification({
-            workspaceId: grant.workspaceId,
+            workspaceId: rig.workspaceId,
             changeId: change.id,
             workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
           });
@@ -3680,18 +3700,14 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+        const rig = await requireMutableRig(rigId);
         if (changeId) {
-          const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
-          const verifying = await beginMcpRigVerificationAttempt(
-            deps,
-            grant.workspaceId,
-            change.id,
-          );
+          const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+          const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
           const attempt = verificationAttempt(verifying);
           try {
             await deps.workflowClient.startRigVerification({
-              workspaceId: grant.workspaceId,
+              workspaceId: rig.workspaceId,
               changeId: change.id,
               workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
             });
@@ -3750,7 +3766,7 @@ function registerRigTools(
           throw new Error("rig has no active version");
         }
         await deps.workflowClient.startRigVerification({
-          workspaceId: grant.workspaceId,
+          workspaceId: rig.workspaceId,
           versionId: rig.activeVersion.id,
           workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
         });
@@ -3787,11 +3803,12 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
-        const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
-        const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const rig = await requireMutableRig(rigId);
+        const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const promoted = await promoteVerifiedDefinitionEditChangeForApi(
           { db: deps.db },
-          grant,
+          originGrant,
           rig,
           change,
         );
@@ -4067,7 +4084,7 @@ function registerWorkspaceOrchestrationTools(
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
-        instructions: z4.string().min(1).max(32768).optional(),
+        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
         goal: z4.unknown().optional(),
         resources: z4.array(z4.unknown()).optional(),
         tools: z4.array(z4.unknown()).optional(),
@@ -4128,7 +4145,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -4240,7 +4257,11 @@ function registerWorkspaceOrchestrationTools(
               },
               relatedResources: [
                 { type: "session", id: targetSessionId },
-                { type: "session_event", id: accepted.id, state: accepted.type },
+                {
+                  type: "session_event",
+                  id: accepted.id,
+                  state: accepted.type,
+                },
               ],
               timestamp: accepted.occurredAt,
               idempotency: { status: replay ? "replayed" : "applied" },
@@ -4470,6 +4491,11 @@ function registerVariableSetTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
+  const variableSetAccess = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
   const registerListTool = (name: string, description: string): void => {
     server.registerTool(
       name,
@@ -4478,7 +4504,7 @@ function registerVariableSetTools(
         inputSchema: {},
       },
       async () => {
-        const variableSets = await listVariableSets(deps.db, grant.workspaceId);
+        const variableSets = await listVariableSets(deps.db, variableSetAccess);
         return json({ variableSets, environments: variableSets });
       },
     );
@@ -4520,14 +4546,14 @@ function registerVariableSetTools(
       let created = false;
       let variableSet =
         targetId !== undefined
-          ? await getVariableSet(deps.db, grant.workspaceId, targetId)
-          : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+          ? await getVariableSet(deps.db, variableSetAccess, targetId)
+          : await getVariableSetByName(deps.db, variableSetAccess, trimmedVariableSetName!);
       if (!variableSet && targetId !== undefined) {
         throw new Error("variable set/environment not found");
       }
       if (!variableSet) {
         if (
-          (await countVariableSets(deps.db, grant.workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
+          (await countVariableSets(deps.db, variableSetAccess)) >= MAX_ENVIRONMENTS_PER_WORKSPACE
         ) {
           throw new Error(
             `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`,
@@ -4536,6 +4562,8 @@ function registerVariableSetTools(
         variableSet = await createVariableSet(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
+          scope: "workspace",
+          subjectId: grant.subjectId,
           name: trimmedVariableSetName!,
         });
         created = true;
@@ -4554,6 +4582,7 @@ function registerVariableSetTools(
       const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
         variableSetId: variableSet.id,
         name: parsedName.data,
         valueEncrypted: encryptVariableSetValue(key, value),
@@ -5011,7 +5040,8 @@ function registerGitHubConnectTool(
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
-// first-party delegated token never carries variable-sets:use, so sandboxed
+// first-party delegated token must carry both exact attachment and use
+// permissions, so a token narrowed to only one cannot attach a variable set.
 // agents calling these MCP tools cannot attach a variable set.
 // Explicit detach (variableSetId: null) is also an attachment change and is
 // blocked the same way.
@@ -5019,7 +5049,11 @@ function requireVariableSetsUseForMcpAttachment(
   grant: AccessGrant,
   variableSetId: string | null | undefined,
 ): void {
-  if (variableSetId !== undefined && !hasPermission(grant.permissions, "variable-sets:use")) {
+  if (variableSetId === undefined) return;
+  if (!hasPermission(grant.permissions, "variable-sets:attach")) {
+    throw new Error("missing permission: variable-sets:attach");
+  }
+  if (variableSetId !== null && !hasPermission(grant.permissions, "variable-sets:use")) {
     throw new Error("missing permission: variable-sets:use");
   }
 }

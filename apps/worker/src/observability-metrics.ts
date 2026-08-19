@@ -136,6 +136,19 @@ export function runtimeMetricsHooksForObservability(
         labels: { backend, outcome },
       });
     },
+    onMcpToolCall: ({ outcome, durationSeconds }) => {
+      observability.incrementCounter({
+        name: "opengeni_mcp_tool_calls_total",
+        help: "Total physical MCP tool calls by bounded structural outcome.",
+        labels: { outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_mcp_tool_call_duration_seconds",
+        help: "MCP tool-call duration in seconds by bounded structural outcome.",
+        labels: { outcome },
+        value: durationSeconds,
+      });
+    },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
       observability.incrementCounter({
         name: "opengeni_machine_op_total",
@@ -1079,6 +1092,17 @@ export type TurnStartupPhase =
   | "model_prepare_sandbox_client_delete"
   | "model_prepare_sandbox_client_state_serialize"
   | "model_prepare_sandbox_client_reuse_check"
+  | "model_prepare_sandbox_workspace_mutation_admission"
+  | "model_prepare_sandbox_workspace_mutation_provider"
+  | "model_prepare_sandbox_workspace_mutation_settlement"
+  | "model_prepare_sandbox_first_routed_resolution_other"
+  | "model_prepare_sandbox_first_routed_mutation_admission"
+  | "model_prepare_sandbox_first_routed_provider_operation"
+  | "model_prepare_sandbox_first_routed_mutation_settlement"
+  | "model_prepare_sandbox_first_routed_other"
+  | "model_prepare_sandbox_snapshot_wait"
+  | "model_prepare_runner_before_first_sandbox_operation"
+  | "model_prepare_sdk_after_first_sandbox_operation"
   | "model_prepare_runner_before_mcp_tools"
   | "model_prepare_mcp_tools_snapshot"
   | "model_prepare_mcp_tools_before_input_filter"
@@ -1096,6 +1120,7 @@ export type TurnStartupPhase =
   | "stream_bootstrap";
 
 export type TurnStartupOutcome = "completed" | "failed";
+export type TurnStartupMilestone = "queue" | "provider_dispatch" | "first_byte";
 export type TurnStartupCache = "hit" | "miss" | "disabled" | "none";
 export type TurnStartupCountBucket = "0" | "1" | "2-5" | "6-20" | "21+" | "unknown";
 export type TurnSandboxEstablishPolicy = "eager" | "on-demand";
@@ -1105,6 +1130,7 @@ export type TurnSandboxEstablishReason =
   | "machine_primary"
   | "backend_none"
   | "initial_run_credentials"
+  | "initial_run_credentials_deferred"
   | "generated_video_files"
   | "signed_file_resources";
 export type SandboxLogicalProvisionCategory =
@@ -1134,6 +1160,14 @@ export type SandboxProvisionAttemptOutcome = "completed" | "retrying" | "failed"
 
 const TURN_STARTUP_PHASE_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
+const TURN_STARTUP_MILESTONE_BUCKETS = [
+  ...TURN_STARTUP_PHASE_BUCKETS,
+  300,
+  600,
+  1_800,
+  3_600,
+  7_200,
 ];
 
 export function turnStartupCountBucket(count: number | null): TurnStartupCountBucket {
@@ -1313,6 +1347,36 @@ export function recordTurnWorkerPreparationTotal(
     help: "Worker preparation from the durable turn-start boundary until entering the runtime; lazy SDK request preparation and model-request audit are separate phases.",
     buckets: TURN_STARTUP_PHASE_BUCKETS,
     labels: {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/**
+ * Measure cumulative user-visible startup latency from the durable turn queue
+ * timestamp to a bounded milestone. Unlike the per-phase histogram above,
+ * these samples are end-to-end and can therefore back real queue/dispatch/TTFB
+ * SLOs without adding turn or session identifiers to Prometheus.
+ */
+export function recordTurnStartupMilestone(
+  observability: Observability,
+  input: {
+    milestone: TurnStartupMilestone;
+    provider: string;
+    backend: string;
+    outcome: TurnStartupOutcome;
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_milestone_duration_seconds",
+    help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels: {
+      milestone: input.milestone,
       provider: input.provider,
       backend: input.backend,
       outcome: input.outcome,

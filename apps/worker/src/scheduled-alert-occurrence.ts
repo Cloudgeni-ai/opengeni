@@ -21,7 +21,32 @@ export type ScheduledAlertOccurrenceDeclaration = {
 export type ScheduledAlertOccurrenceIdentity = {
   status: "firing" | "resolved";
   sessionCreateIdempotencyKey: string;
+  /** Exact bounded labels from the validated structured occurrence. */
+  labels: Readonly<Record<string, string>>;
 };
+
+/**
+ * Bind the series-stable occurrence identity to one accepted task execution
+ * definition. A later task revision must not adopt the prior responder root,
+ * because that session has already frozen the old prompt/tool/authority policy.
+ */
+export function scheduledAlertResponderSessionCreateIdempotencyKey(input: {
+  occurrence: ScheduledAlertOccurrenceIdentity;
+  taskAuthorityRevision: number;
+  taskExecutionDigest: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        version: 1,
+        occurrenceKey: input.occurrence.sessionCreateIdempotencyKey,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+      }),
+    )
+    .digest("hex");
+  return `scheduled-alert-occurrence:v1:${digest}`;
+}
 
 /**
  * Derive one content-free, workspace-bound identity for an Alertmanager-style
@@ -68,6 +93,7 @@ export function scheduledAlertOccurrenceIdentity(input: {
   return {
     status,
     sessionCreateIdempotencyKey: `scheduled-alert-occurrence:v1:${digest}`,
+    labels: Object.fromEntries(labels),
   };
 }
 

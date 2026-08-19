@@ -3,6 +3,7 @@ import type {
   GeneratedVideoReceipt,
   MediaGenerationResult,
   RetainedArtifactReference,
+  SandboxFileArtifactReceipt,
 } from "./types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -15,6 +16,94 @@ const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_DIMENSION = 16_384;
 const MAX_PIXELS = 67_108_864;
 const MAX_RANGE_BYTES = 1024 * 1024;
+const MAX_SANDBOX_FILE_BYTES = 25 * 1024 * 1024 - 1;
+
+/** Zero-dependency validation for a permanent generic workspace-file receipt. */
+export function parseRetainedWorkspaceFileReference(
+  value: unknown,
+  expectedWorkspaceId?: string,
+): RetainedArtifactReference | null {
+  if (!recordWithKeys(value, WORKSPACE_FILE_REFERENCE_KEYS)) return null;
+  const artifact = value as Record<string, unknown>;
+  if (
+    artifact.available !== true ||
+    artifact.kind !== "file" ||
+    typeof artifact.artifactId !== "string" ||
+    !UUID.test(artifact.artifactId) ||
+    typeof artifact.contentType !== "string" ||
+    !/^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/.test(
+      artifact.contentType,
+    ) ||
+    !safeIntegerBetween(artifact.originalBytes, 1, MAX_SANDBOX_FILE_BYTES) ||
+    typeof artifact.sha256 !== "string" ||
+    !SHA256.test(artifact.sha256) ||
+    typeof artifact.retainedAt !== "string" ||
+    artifact.retainedAt.length > 64 ||
+    !ISO_DATETIME_WITH_OFFSET.test(artifact.retainedAt) ||
+    !Number.isFinite(Date.parse(artifact.retainedAt)) ||
+    !recordWithKeys(artifact.retention, RETENTION_KEYS) ||
+    !recordWithKeys(artifact.retrieval, RETRIEVAL_KEYS)
+  ) {
+    return null;
+  }
+  const retention = artifact.retention as Record<string, unknown>;
+  if (retention.policy !== "workspace_file" || retention.expiresAt !== null) return null;
+  const retrieval = artifact.retrieval as Record<string, unknown>;
+  if (
+    retrieval.method !== "GET" ||
+    retrieval.acceptRanges !== "bytes" ||
+    retrieval.maxRangeBytes !== MAX_RANGE_BYTES ||
+    typeof retrieval.path !== "string" ||
+    retrieval.path.length > 256
+  ) {
+    return null;
+  }
+  const match = WORKSPACE_PATH.exec(retrieval.path);
+  if (
+    !match ||
+    !UUID.test(match[1] ?? "") ||
+    match[2] !== artifact.artifactId ||
+    (expectedWorkspaceId !== undefined && match[1] !== expectedWorkspaceId)
+  ) {
+    return null;
+  }
+  return value as RetainedArtifactReference;
+}
+
+/** Parse the closed result returned by sandbox_file_publish and the session API. */
+export function parseSandboxFileArtifactReceipt(
+  value: unknown,
+  expectedWorkspaceId?: string,
+): SandboxFileArtifactReceipt | null {
+  if (typeof value === "string" && value.length <= 8_192) {
+    try {
+      return parseSandboxFileArtifactReceipt(JSON.parse(value), expectedWorkspaceId);
+    } catch {
+      return null;
+    }
+  }
+  if (!recordWithKeys(value, SANDBOX_FILE_RECEIPT_KEYS)) return null;
+  const artifact = parseRetainedWorkspaceFileReference(value.artifact, expectedWorkspaceId);
+  const pathSegments = typeof value.sandboxPath === "string" ? value.sandboxPath.split("/") : [];
+  if (
+    value.type !== "sandbox_file" ||
+    typeof value.sandboxPath !== "string" ||
+    !value.sandboxPath.startsWith("/workspace/") ||
+    value.sandboxPath.length > 4_096 ||
+    value.sandboxPath.includes("\0") ||
+    pathSegments.some(
+      (segment, index) => index > 1 && (!segment || segment === "." || segment === ".."),
+    ) ||
+    typeof value.filename !== "string" ||
+    value.filename.length < 1 ||
+    value.filename.length > 1_024 ||
+    pathSegments.at(-1) !== value.filename ||
+    !artifact
+  ) {
+    return null;
+  }
+  return value as SandboxFileArtifactReceipt;
+}
 
 /** Zero-dependency validation for the SDK's permanent generated-image wire receipt. */
 export function parseRetainedGeneratedImageReference(
@@ -272,10 +361,22 @@ const GENERATED_IMAGE_REFERENCE_KEYS = new Set([
   "retention",
   "retrieval",
 ]);
+const WORKSPACE_FILE_REFERENCE_KEYS = new Set([
+  "available",
+  "artifactId",
+  "kind",
+  "contentType",
+  "originalBytes",
+  "sha256",
+  "retainedAt",
+  "retention",
+  "retrieval",
+]);
 const DIMENSION_KEYS = new Set(["width", "height"]);
 const RETENTION_KEYS = new Set(["policy", "expiresAt"]);
 const RETRIEVAL_KEYS = new Set(["method", "path", "acceptRanges", "maxRangeBytes"]);
 const GENERATED_IMAGE_RECEIPT_KEYS = new Set(["type", "artifact", "sandboxPath"]);
+const SANDBOX_FILE_RECEIPT_KEYS = new Set(["type", "sandboxPath", "filename", "artifact"]);
 const GENERATED_VIDEO_RECEIPT_KEYS = new Set([
   "type",
   "schemaVersion",

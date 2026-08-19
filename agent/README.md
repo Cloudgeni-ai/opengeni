@@ -22,14 +22,14 @@ never `git clone`s a repo onto the machine.
 
 ## Crates
 
-| Crate | Role |
+| Crate                     | Role                                                                                                                         |
 |---|---|
-| `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list|call` client; multi-deployment dial, RPC dispatch, supervisor. |
-| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
-| `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
-| `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
-| `opengeni-relay` | The stateless stream-relay edge image. |
+| `opengeni-agent-proto`    | Generated wire-protocol types (Rust side of the codegen).                                                                    |
+| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | call` client; multi-deployment dial, RPC dispatch, supervisor. |
+| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer.                                                            |
+| `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
+| `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
+| `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
 
 ## Distribution + self-update (M11)
 
@@ -43,7 +43,10 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   requested workspace, and leaves the ordinary background service running. It
   contains **no secrets**. Read it before
   piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
-  dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
+  dir or the direct GitHub-Releases URL). A script served by a deployment also
+  defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
+  managed-cloud fallback is `https://app.opengeni.ai`.
+  [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
   [`install/opengeni-agent-minisign.pub`](install/opengeni-agent-minisign.pub) and
@@ -52,9 +55,11 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
 - **Self-update** — `opengeni-agent update [--check]` discovers signed manifests
   from the enrolled deployments, verifies minisign + sha256 + version monotonicity,
-  selects the highest valid release, atomically self-replaces, executes the swapped
-  binary as a health gate, and automatically rolls back on failure. A tampered or
-  non-booting artifact is always rejected.
+  selects the highest valid release, atomically self-replaces, reconciles any
+  required generated background-service definition, executes the updated
+  installation as a health gate, and automatically rolls back on failure. A
+  tampered or non-booting artifact is always rejected. Capabilities that depend on
+  service topology remain unadvertised until that reconciliation succeeds.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
@@ -98,11 +103,22 @@ bearer; established op-stream commands detach, keep running, and replay any
 missed output after re-attachment. Full-jitter backoff is reserved for actual
 transport failures.
 
-On Linux the systemd aggregate is deliberately unlimited and each accepted host
-operation gets a separate cgroup-v2 leaf. The supervisor has its own leaf carrying
-systemd-oomd's avoid marker before it is moved, so memory pressure in a command
-cannot erase the control process's protection. Local opt-in operation limits apply
-only to command leaves; the default remains the machine's available resources.
+On Linux each accepted host operation gets a separate cgroup-v2 memory/lifecycle
+leaf while the generated systemd fragment requests an unlimited aggregate. Admin
+drop-ins and ancestor constraints remain authoritative. The
+generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
+replacement control process starts in the same supervisor leaf while the delegated
+root remains empty and restart-safe. Startup verifies this topology and stamps that
+leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
+subgroup is reported as incapable and stays on unrestricted ambient execution;
+an explicit resource policy then fails closed. Optional per-enrollment memory and
+exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;
+an in-flight command keeps its admitted snapshot. Limits compose with stricter local
+`OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` / `OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`
+or ancestor policy. Memory and CPU enforcement are separately advertised. Startup
+enables memory only; CPU is leased only while a CPU-limited leaf exists, and I/O and
+PID controllers remain untouched. The default remains the machine's ambient
+resources, and typed PTY/desktop/browser/computer operations are unchanged.
 
 An installation upgraded from the old single-connection file keeps that link
 online immediately. Because the old file did not record its deployment URL,
@@ -110,10 +126,18 @@ online immediately. Because the old file did not record its deployment URL,
 deployment's connect command once confirms the origin and replaces only that
 legacy record. An unverified URL hint is never used as an update source; the
 signed public channel (or an explicit `update --base-url …`) remains the safe
-fallback until reconnect confirms it. Self-update is binary-wide: matching
-per-connection channels are used automatically, while mixed `stable`/`beta`
-links require an explicit `opengeni-agent update --channel …` choice instead of
-silently picking one.
+fallback until reconnect confirms it. Self-update is installation-wide (including
+the background-service definition when a release requires it): matching
+per-connection channels are used automatically, while mixed `stable`/`beta` links
+require an explicit `opengeni-agent update --channel …` choice instead of silently
+picking one.
+
+If the control plane rejects a saved enrollment bearer, refresh only that exact
+deployment/workspace connection with the force flag shown in the agent log:
+
+```sh
+opengeni-agent connect --force --api-url https://<deployment> --workspace-id <workspace-uuid>
+```
 
 ## Wire protocol — single source of truth
 

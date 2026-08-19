@@ -21,7 +21,6 @@ import {
   createRigChange,
   createRigVersion,
   createRigVersionForChangePromotion,
-  deleteRigIfNoActiveSessions,
   getRig,
   getRigByName,
   getRigChange,
@@ -30,12 +29,15 @@ import {
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
+  revokeScopedRig,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
-  updateRig,
+  updateScopedRig,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
+import { requirePermission } from "../access";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -44,6 +46,34 @@ export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
 export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
+export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
+
+type VariableSetEnvironment = { values: Record<string, string> } | null;
+
+/** Load complete rig defaults concurrently while preserving listed precedence. */
+export async function loadRigDefaultVariableSetEnvironment(
+  variableSetIds: readonly string[],
+  load: (variableSetId: string) => Promise<VariableSetEnvironment>,
+): Promise<Record<string, string>> {
+  const variableSets = await boundedParallelMap(
+    variableSetIds,
+    RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
+    load,
+  );
+  const values: Record<string, string> = {};
+  for (const variableSet of variableSets) {
+    Object.assign(values, variableSet?.values ?? {});
+  }
+  return values;
+}
+
+/** Rig defaults layer below the session's explicitly selected variable set. */
+export function mergeRigDefaultVariableSetEnvironment(
+  rigDefaultValues: Record<string, string>,
+  sessionValues: Record<string, string>,
+): Record<string, string> {
+  return { ...rigDefaultValues, ...sessionValues };
+}
 
 export type RigServices = {
   db: Database;
@@ -92,10 +122,10 @@ export function rigActorForGrant(grant: AccessGrant): string {
 
 export async function requireRigForApi(
   db: Database,
-  workspaceId: string,
+  grant: AccessGrant,
   rigId: string,
 ): Promise<Rig> {
-  const rig = await getRig(db, workspaceId, rigId);
+  const rig = await getRig(db, grant, rigId);
   if (!rig) {
     throw new HTTPException(404, { message: "rig not found" });
   }
@@ -133,7 +163,9 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
   const seen = new Set<string>();
   for (const check of checks) {
     if (seen.has(check.name)) {
-      throw new HTTPException(422, { message: `duplicate rig check name: ${check.name}` });
+      throw new HTTPException(422, {
+        message: `duplicate rig check name: ${check.name}`,
+      });
     }
     seen.add(check.name);
   }
@@ -143,17 +175,24 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
 // cross-workspace id indistinguishable from a missing one, so both map to 422.
 async function assertVariableSetsExist(
   db: Database,
-  workspaceId: string,
+  access: AccessGrant,
   ids: ReadonlyArray<string> | undefined,
 ): Promise<void> {
-  if (!ids || ids.length === 0) {
+  if (ids === undefined) {
     return;
   }
+  requirePermission(access, "variable-sets:attach");
+  if (ids.length === 0) {
+    return;
+  }
+  requirePermission(access, "variable-sets:use");
   const unique = [...new Set(ids)];
   for (const id of unique) {
-    const variableSet = await getVariableSet(db, workspaceId, id);
+    const variableSet = await getVariableSet(db, access, id);
     if (!variableSet) {
-      throw new HTTPException(422, { message: `unknown defaultVariableSetId: ${id}` });
+      throw new HTTPException(422, {
+        message: `unknown defaultVariableSetId: ${id}`,
+      });
     }
   }
 }
@@ -162,23 +201,32 @@ export async function createRigForApi(
   deps: RigServices,
   grant: AccessGrant,
   payload: CreateRigRequest,
+  options: { allowOrganization?: boolean } = {},
 ): Promise<Rig> {
-  const workspaceId = grant.workspaceId;
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(deps.db, workspaceId, payload.defaultVariableSetIds);
-  if ((await countRigs(deps.db, workspaceId)) >= MAX_RIGS_PER_WORKSPACE) {
+  await assertVariableSetsExist(
+    deps.db,
+    grant,
+    payload.defaultVariableSetIds.length > 0 ? payload.defaultVariableSetIds : undefined,
+  );
+  if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
     });
   }
-  if (await getRigByName(deps.db, workspaceId, name)) {
-    throw new HTTPException(409, { message: `rig name is already in use: ${name}` });
+  if (await getRigByName(deps.db, grant, name, payload.scope)) {
+    throw new HTTPException(409, {
+      message: `rig name is already in use: ${name}`,
+    });
   }
   const createdBy = rigActorForGrant(grant);
   const rig = await createRig(deps.db, {
     accountId: grant.accountId,
-    workspaceId,
+    workspaceId: grant.workspaceId,
+    scope: payload.scope,
+    subjectId: grant.subjectId,
+    allowOrganization: options.allowOrganization === true,
     name,
     description: payload.description ?? null,
     createdBy,
@@ -192,7 +240,11 @@ export async function createRigForApi(
       createdBy,
     },
   });
-  await recordRigAuditEvent(deps.db, { grant, action: "rig.created", rigId: rig.id });
+  await recordRigAuditEvent(deps.db, {
+    grant,
+    action: "rig.created",
+    rigId: rig.id,
+  });
   return rig;
 }
 
@@ -201,20 +253,27 @@ export async function updateRigForApi(
   grant: AccessGrant,
   rig: Rig,
   payload: UpdateRigRequest,
+  options: { allowOrganization?: boolean } = {},
 ): Promise<Rig> {
-  const workspaceId = grant.workspaceId;
   const name = payload.name !== undefined ? trimmedRigName(payload.name) : undefined;
   if (name !== undefined && name !== rig.name) {
-    const existing = await getRigByName(deps.db, workspaceId, name);
+    const existing = await getRigByName(deps.db, grant, name, rig.scope);
     if (existing && existing.id !== rig.id) {
-      throw new HTTPException(409, { message: `rig name is already in use: ${name}` });
+      throw new HTTPException(409, {
+        message: `rig name is already in use: ${name}`,
+      });
     }
   }
-  const updated = await updateRig(deps.db, workspaceId, rig.id, {
+  const updated = await updateScopedRig(deps.db, grant, rig.id, {
     ...(name !== undefined ? { name } : {}),
     ...(payload.description !== undefined ? { description: payload.description } : {}),
+    allowOrganization: options.allowOrganization === true,
   });
-  await recordRigAuditEvent(deps.db, { grant, action: "rig.updated", rigId: rig.id });
+  await recordRigAuditEvent(deps.db, {
+    grant,
+    action: "rig.updated",
+    rigId: rig.id,
+  });
   return updated;
 }
 
@@ -222,18 +281,27 @@ export async function deleteRigForApi(
   deps: RigServices,
   grant: AccessGrant,
   rig: Rig,
+  options: { allowOrganization?: boolean } = {},
 ): Promise<void> {
-  const workspaceId = grant.workspaceId;
-  const deleted = await deleteRigIfNoActiveSessions(deps.db, workspaceId, rig.id);
-  if (deleted.activeSessionCount > 0) {
-    throw new HTTPException(409, {
-      message: `rig is referenced by ${deleted.activeSessionCount} active session(s); it cannot be deleted`,
+  try {
+    await revokeScopedRig(deps.db, grant, rig.id, {
+      allowOrganization: options.allowOrganization === true,
     });
+  } catch (error) {
+    let current: unknown = error;
+    while (current instanceof Error) {
+      if (current.message.includes("active sessions")) {
+        throw new HTTPException(409, { message: current.message });
+      }
+      current = current.cause;
+    }
+    throw error;
   }
-  if (!deleted.deleted) {
-    throw new HTTPException(404, { message: "rig not found" });
-  }
-  await recordRigAuditEvent(deps.db, { grant, action: "rig.deleted", rigId: rig.id });
+  await recordRigAuditEvent(deps.db, {
+    grant,
+    action: "rig.deleted",
+    rigId: rig.id,
+  });
 }
 
 // Records a proposed change against the rig's CURRENT active version (the base
@@ -247,15 +315,17 @@ export async function proposeRigChangeForApi(
   request: ProposeRigChangeRequest,
   options: { proposedBy?: string } = {},
 ): Promise<RigChange> {
-  const workspaceId = grant.workspaceId;
+  const workspaceId = rig.workspaceId;
   if (!rig.activeVersion) {
-    throw new HTTPException(422, { message: "rig has no active version to base a change on" });
+    throw new HTTPException(422, {
+      message: "rig has no active version to base a change on",
+    });
   }
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
     await assertVariableSetsExist(
       deps.db,
-      workspaceId,
+      grant,
       request.payload.defaultVariableSetIds ?? undefined,
     );
   }
@@ -342,18 +412,22 @@ export async function promoteSetupAppendChange(
     });
   }
   if (change.status !== "proposed" && change.status !== "verifying") {
-    throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
+    throw new HTTPException(409, {
+      message: `rig change is ${change.status}; cannot promote`,
+    });
   }
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
-  const base = await getRigVersion(deps.db, grant.workspaceId, rig.id, change.baseVersionId);
+  const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
     throw new HTTPException(404, { message: "base rig version not found" });
   }
   const payload = change.payload as { command?: unknown; note?: unknown };
   if (typeof payload.command !== "string" || !payload.command.trim()) {
-    throw new HTTPException(422, { message: "setup_append change is missing command" });
+    throw new HTTPException(422, {
+      message: "setup_append change is missing command",
+    });
   }
   const nextDefinition = {
     image: base.image,
@@ -364,7 +438,7 @@ export async function promoteSetupAppendChange(
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
-    grant.workspaceId,
+    rig.workspaceId,
     rig.id,
     change.id,
     {
@@ -382,13 +456,21 @@ export async function promoteSetupAppendChange(
     grant,
     action: "rig.change.merged",
     rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    metadata: {
+      changeId: change.id,
+      versionId: version.id,
+      version: version.version,
+    },
   });
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.version.promoted",
     rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    metadata: {
+      changeId: change.id,
+      versionId: version.id,
+      version: version.version,
+    },
   });
   return { change: updated, version };
 }
@@ -400,10 +482,14 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
   change: RigChange,
 ): Promise<{ change: RigChange; version: RigVersion }> {
   if (change.kind !== "definition_edit") {
-    throw new HTTPException(422, { message: "only definition_edit changes use explicit promote" });
+    throw new HTTPException(422, {
+      message: "only definition_edit changes use explicit promote",
+    });
   }
   if (change.status !== "proposed") {
-    throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
+    throw new HTTPException(409, {
+      message: `rig change is ${change.status}; cannot promote`,
+    });
   }
   if (change.verification?.passed !== true) {
     throw new HTTPException(422, {
@@ -413,7 +499,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
-  const base = await getRigVersion(deps.db, grant.workspaceId, rig.id, change.baseVersionId);
+  const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
     throw new HTTPException(404, { message: "base rig version not found" });
   }
@@ -439,7 +525,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
   };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
-    grant.workspaceId,
+    rig.workspaceId,
     rig.id,
     change.id,
     {
@@ -457,13 +543,21 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     grant,
     action: "rig.change.merged",
     rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    metadata: {
+      changeId: change.id,
+      versionId: version.id,
+      version: version.version,
+    },
   });
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.version.promoted",
     rigId: rig.id,
-    metadata: { changeId: change.id, versionId: version.id, version: version.version },
+    metadata: {
+      changeId: change.id,
+      versionId: version.id,
+      version: version.version,
+    },
   });
   return { change: updated, version };
 }
@@ -478,15 +572,11 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "rig has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant.workspaceId,
-    payload.defaultVariableSetIds ?? undefined,
-  );
+  await assertVariableSetsExist(deps.db, grant, payload.defaultVariableSetIds ?? undefined);
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,
-    grant.workspaceId,
+    rig.workspaceId,
     rig.id,
     {
       image: payload.image === undefined ? base.image : payload.image,
@@ -516,7 +606,7 @@ export async function activateRigVersionForApi(
   rig: Rig,
   versionId: string,
 ): Promise<RigVersion> {
-  const workspaceId = grant.workspaceId;
+  const workspaceId = rig.workspaceId;
   const version = await activateRigVersion(deps.db, workspaceId, rig.id, versionId);
   await recordRigAuditEvent(deps.db, {
     grant,

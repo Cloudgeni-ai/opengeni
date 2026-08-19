@@ -21,12 +21,8 @@ const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 const slackAuthorizationUrl =
   "https://slack.com/oauth/v2/authorize?client_id=browser-fixture&scope=chat%3Awrite&state=server-signed-browser-fixture";
 
-const transparentPng = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64",
-);
-
 type SlackUiState = {
+  role: "member" | "admin";
   botConnected: boolean;
   personalConnection: ConnectionMetadata | null;
   personalEnabled: boolean;
@@ -81,6 +77,7 @@ describe("Slack OAuth browser acceptance", () => {
 
   test("manages personal Slack separately from the workspace bot without exposing credentials", async () => {
     const state: SlackUiState = {
+      role: "member",
       botConnected: false,
       personalConnection: null,
       personalEnabled: false,
@@ -96,9 +93,6 @@ describe("Slack OAuth browser acceptance", () => {
     let personalSlackNavigations = 0;
     try {
       await installSlackCapabilityApi(page, state);
-      await page.route("https://platform.slack-edge.com/img/**", async (route) => {
-        await route.fulfill({ status: 200, contentType: "image/png", body: transparentPng });
-      });
       await page.route("https://slack.com/**", async (route) => {
         const url = new URL(route.request().url());
         expect(url.pathname).toBe("/oauth/v2/authorize");
@@ -119,23 +113,14 @@ describe("Slack OAuth browser acceptance", () => {
       });
 
       const capabilitiesUrl = `${webBaseUrl}/workspaces/${workspaceId}/capabilities`;
+
+      // A member sees only their own Slack account: no bot install, no scopes.
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      await openSlackSettings(page);
-
-      let personalRegion = page.getByRole("region", { name: "Personal Slack access" });
-      let botRegion = page.getByRole("region", { name: "OpenGeni workspace bot" });
-      await expectVisible(personalRegion.getByRole("button", { name: "Connect", exact: true }));
-      await expectText(page.getByRole("region", { name: "Slack settings" }), "Your Slack account");
-      await expectText(botRegion, "Workspace shared · bot identity");
-      expect(((await personalRegion.textContent()) ?? "").toLowerCase()).not.toContain(
-        "bot scopes",
-      );
-      expect(((await botRegion.textContent()) ?? "").toLowerCase()).not.toContain(
-        "your slack account",
-      );
-
-      const connectPersonal = personalRegion.getByRole("button", { name: "Connect", exact: true });
-      await Promise.all([page.waitForURL("https://slack.com/**"), connectPersonal.click()]);
+      let sheet = await openSlackSheet(page, "Not connected");
+      expect(((await sheet.textContent()) ?? "").toLowerCase()).not.toContain("bot");
+      expect(((await sheet.textContent()) ?? "").toLowerCase()).not.toContain("scope");
+      const setUpPersonal = sheet.getByRole("button", { name: "Set up", exact: true });
+      await Promise.all([page.waitForURL("https://slack.com/**"), setUpPersonal.click()]);
       await expectVisible(page.getByRole("heading", { name: "Slack personal consent" }));
       expect(state.personalOAuthRequests).toHaveLength(1);
       expect(state.personalOAuthRequests[0]).toEqual({
@@ -155,9 +140,10 @@ describe("Slack OAuth browser acceptance", () => {
         { waitUntil: "domcontentloaded" },
       );
       await waitForCondition(() => state.personalEnableRequests.length === 1);
-      await openSlackSettings(page);
-      personalRegion = page.getByRole("region", { name: "Personal Slack access" });
-      await expectVisible(personalRegion.getByRole("button", { name: "Disconnect" }));
+      sheet = await openSlackSheet(page, "Connected");
+      await expectText(sheet, "Your account");
+      await expectText(sheet, "What OpenGeni can see as you");
+      await expectVisible(sheet.getByRole("button", { name: "Disconnect" }));
       expect(state.personalEnableRequests).toEqual([
         {
           connectionRef: {
@@ -168,7 +154,7 @@ describe("Slack OAuth browser acceptance", () => {
         },
       ]);
       expect(JSON.stringify(state.personalEnableRequests)).not.toContain(personalConnectionId);
-      expect((await personalRegion.textContent()) ?? "").not.toContain(personalConnectionId);
+      expect((await sheet.textContent()) ?? "").not.toContain(personalConnectionId);
       expect(new URL(page.url()).search).toBe("");
 
       state.personalConnection = personalSlackConnection({
@@ -176,20 +162,18 @@ describe("Slack OAuth browser acceptance", () => {
         expiresAt: new Date(Date.now() - 60_000).toISOString(),
       });
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      await openSlackSettings(page);
-      personalRegion = page.getByRole("region", { name: "Personal Slack access" });
+      sheet = await openSlackSheet(page, "Needs attention");
       await Promise.all([
         page.waitForURL("https://slack.com/**"),
-        personalRegion.getByRole("button", { name: "Reconnect", exact: true }).click(),
+        sheet.getByRole("button", { name: "Reconnect", exact: true }).click(),
       ]);
       expect(state.personalOAuthRequests[1]).toMatchObject({ connectionId: personalConnectionId });
       expect(personalSlackNavigations).toBe(2);
 
       state.personalConnection = personalSlackConnection();
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      await openSlackSettings(page);
-      personalRegion = page.getByRole("region", { name: "Personal Slack access" });
-      await personalRegion.getByRole("button", { name: "Disconnect" }).click();
+      sheet = await openSlackSheet(page, "Connected");
+      await sheet.getByRole("button", { name: "Disconnect" }).click();
       const disconnectDialog = page.getByRole("dialog", {
         name: "Disconnect your Slack account?",
       });
@@ -197,24 +181,17 @@ describe("Slack OAuth browser acceptance", () => {
       await expectText(disconnectDialog, "does not disconnect the workspace bot");
       await disconnectDialog.getByRole("button", { name: "Disconnect my Slack account" }).click();
       await expectHidden(disconnectDialog);
-      await expectVisible(
-        page
-          .getByRole("region", { name: "Personal Slack access" })
-          .getByRole("button", { name: "Reconnect", exact: true }),
-      );
+      sheet = page.getByRole("region", { name: "Slack settings" });
+      await expectVisible(sheet.getByRole("button", { name: "Reconnect", exact: true }));
       expect(state.personalDeleteRequests).toEqual([personalConnectionId]);
 
-      const install = page.getByRole("button", { name: "Install OpenGeni in Slack" });
+      // A workspace admin sees the OpenGeni bot instead, through the same sheet.
+      state.role = "admin";
+      await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
+      sheet = await openSlackSheet(page, "Not connected");
+      expect(((await sheet.textContent()) ?? "").toLowerCase()).not.toContain("your slack account");
+      const install = sheet.getByRole("button", { name: "Set up", exact: true });
       await expectVisible(install);
-      const artwork = install.locator("img");
-      expect(await artwork.getAttribute("src")).toBe(
-        "https://platform.slack-edge.com/img/add_to_slack.png",
-      );
-      expect(await artwork.getAttribute("srcset")).toBe(
-        "https://platform.slack-edge.com/img/add_to_slack@2x.png 2x",
-      );
-      expect(await install.evaluate((element) => element.closest("a"))).toBeNull();
-
       await Promise.all([page.waitForURL("https://slack.com/**"), install.click()]);
       await expectVisible(page.getByRole("heading", { name: "Slack workspace consent" }));
       expect(state.installRequests).toEqual([{}]);
@@ -225,53 +202,35 @@ describe("Slack OAuth browser acceptance", () => {
       await page.goto(`${capabilitiesUrl}?slack=connected&connection_id=${botConnectionId}`, {
         waitUntil: "domcontentloaded",
       });
-      await openSlackSettings(page);
-      await expectText(page.getByRole("region", { name: "OpenGeni workspace bot" }), "Installed");
+      sheet = await openSlackSheet(page, "Connected");
+      await expectText(sheet, "Installed");
+      await expectText(sheet, "Slack Browser Workspace");
+      await expectText(sheet, "What OpenGeni can see");
+      await expectText(sheet, "All public channels");
       expect(new URL(page.url()).search).toBe("");
       expect(state.connectionReads).toBeGreaterThanOrEqual(2);
+      const reactionSwitch = sheet.getByRole("switch", { name: "Start work with a reaction" });
+      await expectVisible(reactionSwitch);
+      expect(await reactionSwitch.getAttribute("aria-checked")).toBe("false");
 
-      await openWorkspaceBotInstallationDetails(
-        page.getByRole("region", { name: "OpenGeni workspace bot" }),
-      );
-      const reconnect = page
-        .getByRole("region", { name: "OpenGeni workspace bot" })
-        .getByRole("button", { name: "Reconnect", exact: true });
+      const reconnect = sheet.getByRole("button", { name: "Reconnect", exact: true });
       await expectVisible(reconnect);
       await Promise.all([page.waitForURL("https://slack.com/**"), reconnect.click()]);
       expect(state.installRequests[1]).toEqual({ connectionId: botConnectionId });
-
-      await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      await openSlackSettings(page);
-      botRegion = page.getByRole("region", { name: "OpenGeni workspace bot" });
-      await expectText(botRegion, "explicitly bound scheduled tasks");
-      await openWorkspaceBotInstallationDetails(botRegion);
-      const installAnother = botRegion.getByRole("button", {
-        name: "Install in another workspace",
-      });
-      await Promise.all([page.waitForURL("https://slack.com/**"), installAnother.click()]);
-      expect(state.installRequests[2]).toEqual({});
-      expect(JSON.stringify(state.installRequests[2]).toLowerCase()).not.toContain("schedule");
-      expect(botSlackNavigations).toBe(3);
+      expect(botSlackNavigations).toBe(2);
     } finally {
       await context.close();
     }
   }, 90_000);
 });
 
-async function openSlackSettings(page: Page): Promise<void> {
-  await page
-    .getByRole("button", { name: /Slack.*Chat with OpenGeni and start work from Slack/u })
-    .click();
-  await page.getByRole("region", { name: "Slack settings" }).waitFor({ state: "visible" });
-}
-
-async function openWorkspaceBotInstallationDetails(
-  botRegion: import("playwright").Locator,
-): Promise<void> {
-  await botRegion.getByText("Settings", { exact: true }).click();
-  await botRegion
-    .getByText("Workspace bot permissions and installation details", { exact: true })
-    .click();
+async function openSlackSheet(page: Page, chip: string): Promise<import("playwright").Locator> {
+  const row = page.getByRole("button", { name: `Slack. ${chip}`, exact: true });
+  await row.waitFor({ state: "visible", timeout: 15_000 });
+  await row.click();
+  const sheet = page.getByRole("region", { name: "Slack settings" });
+  await sheet.waitFor({ state: "visible", timeout: 15_000 });
+  return sheet;
 }
 
 async function installSlackCapabilityApi(page: Page, state: SlackUiState): Promise<void> {
@@ -322,7 +281,7 @@ async function installSlackCapabilityApi(page: Page, state: SlackUiState): Promi
             accountId,
             subjectId: "slack-browser-subject",
             permissions: [
-              "workspace:admin",
+              ...(state.role === "admin" ? ["workspace:admin"] : []),
               "capabilities:read",
               "capabilities:write",
               "connections:read",

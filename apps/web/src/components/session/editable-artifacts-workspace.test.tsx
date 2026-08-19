@@ -27,6 +27,55 @@ afterAll(() => {
 });
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
+  test("restores and reports the selected artifact", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onSelectionChange = mock(() => undefined);
+    const firstId = "a".repeat(32);
+    const secondId = "b".repeat(32);
+    const route = createRootRoute({
+      component: () => (
+        <SessionEditableArtifactsWorkspace
+          workspaceId="11111111-1111-4111-8111-111111111111"
+          artifacts={[
+            { id: firstId, modality: "document", title: "Plan" },
+            { id: secondId, modality: "spreadsheet", title: "Budget" },
+          ]}
+          status="ready"
+          onRetry={() => undefined}
+          initialSelectedArtifactId={secondId}
+          onSelectedArtifactIdChange={onSelectionChange}
+        />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      const select = container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Choose editable artifact"]',
+      );
+      expect(select?.value).toBe(secondId);
+
+      await act(async () => {
+        if (!select) return;
+        select.value = firstId;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(onSelectionChange).toHaveBeenCalledWith(firstId);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("keeps the first-class artifact surface discoverable before one exists", async () => {
     const container = document.createElement("div");
     document.body.append(container);

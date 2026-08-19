@@ -64,6 +64,8 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const sandboxGroupId = session.sandboxGroupId;
@@ -101,24 +103,43 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
       insert into session_turns
         (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
          status, source, position, prompt, resources, tools, model, reasoning_effort,
-         sandbox_backend, metadata, lineage)
+         sandbox_backend, metadata, lineage, execution_generation)
       values
         (${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, ${trigger!.id},
          ${`session-${session.id}`}, 'completed', 'user', 0, 'capture repositories',
-         '[]'::jsonb, '[]'::jsonb, 'test-model', 'medium', 'none', '{}'::jsonb, '{}'::jsonb)
+         '[]'::jsonb, '[]'::jsonb, 'test-model', 'medium', 'none', '{}'::jsonb, '{}'::jsonb, 1)
       returning id, execution_generation`;
     expect(turn).toBeDefined();
     const attemptId = randomUUID();
-    await admin`
-      insert into session_turn_attempts
-        (id, account_id, workspace_id, session_id, turn_id, execution_generation,
-         state, outcome, temporal_workflow_id, temporal_workflow_run_id,
-         temporal_activity_id, verified_control_revision, mcp_approval_policies, closed_at)
-      values
-        (${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
-         ${turn!.id}, ${turn!.execution_generation}, 'closed', 'completed',
-         ${`session-${session.id}`}, 'capture-test-run', 'capture-test-activity', 0,
-         '{}'::jsonb, now())`;
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await tx`
+        update sessions set active_turn_id = ${turn!.id}, status = 'running'
+        where id = ${session.id}`;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+        where id = ${turn!.id}`;
+      await tx`
+        insert into session_turn_attempts
+          (id, account_id, workspace_id, session_id, turn_id, execution_generation,
+           state, temporal_workflow_id, temporal_workflow_run_id,
+           temporal_activity_id, verified_control_revision, mcp_approval_policies)
+        values
+          (${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id},
+           ${turn!.id}, ${turn!.execution_generation}, 'running',
+           ${`session-${session.id}`}, 'capture-test-run', 'capture-test-activity', 0,
+           '{}'::jsonb)`;
+      await tx`
+        update session_turn_attempts
+        set state = 'closed', outcome = 'completed', closed_at = now()
+        where id = ${attemptId}`;
+      await tx`
+        update session_turns set active_attempt_id = null, status = 'completed'
+        where id = ${turn!.id}`;
+      await tx`
+        update sessions set active_turn_id = null
+        where id = ${session.id}`;
+    });
 
     const input = {
       ...workspace,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  SESSION_GOAL_CONTEXT_LABEL,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   numberTimelineAnnotations,
   renderTimelineAnnotationsForModel,
@@ -74,5 +75,29 @@ describe("exact DB-bound content", () => {
       content: renderTimelineAnnotationsForModel("Continue", annotations),
       [MODEL_TIMELINE_ANNOTATIONS_FIELD]: annotations,
     });
+  });
+
+  test("durable user history carries the accepted turn's frozen goal", () => {
+    const goal = {
+      state: "active" as const,
+      goalId: "11111111-1111-4111-8111-111111111111",
+      objectiveRevision: 2,
+      text: "Keep the prompt prefix append-only",
+      successCriteria: null,
+      rootConstraints: [],
+      mutationPolicy: "review_changes" as const,
+      capturedAt: "2026-08-17T12:00:00.000Z",
+    };
+    const item = durableUserHistoryItem("Continue", [], [], null, goal);
+    expect(item).toMatchObject({ type: "message", role: "user" });
+    expect(item.content).toEqual([
+      {
+        type: "input_text",
+        text: expect.stringContaining(
+          `${SESSION_GOAL_CONTEXT_LABEL}\nStanding session goal (frozen at logical-turn acceptance; objective revision 2`,
+        ),
+      },
+      { type: "input_text", text: "Continue" },
+    ]);
   });
 });

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const TASK_NOTE_TEXT_MAX_BYTES = 4_096;
 export const TASK_NOTE_REASON_MAX_BYTES = 2_048;
-export const TASK_NOTE_MAX_LIFETIME_DAYS = 30;
+export const TASK_NOTE_MAX_LIFETIME_DAYS = 90;
 export const TASK_NOTE_ACTIVE_RECORD_CAP = 500;
 export const TASK_NOTE_LIST_DEFAULT_LIMIT = 10;
 export const TASK_NOTE_LIST_MAX_LIMIT = 20;
@@ -76,6 +76,19 @@ export const TaskNoteMutationResult = z.object({
   replayed: z.boolean(),
 });
 export type TaskNoteMutationResult = z.infer<typeof TaskNoteMutationResult>;
+
+/** Atomic correction lineage: archive one exact v1 note and create one v1 replacement. */
+export const TaskNoteReplacementResult = z.object({
+  operationId: z.string().uuid(),
+  inputHash: z.string().regex(/^[0-9a-f]{64}$/),
+  replaces: z.object({
+    noteId: z.string().uuid(),
+    archivedVersion: z.literal(2),
+  }),
+  replacement: TaskNote,
+  replayed: z.boolean(),
+});
+export type TaskNoteReplacementResult = z.infer<typeof TaskNoteReplacementResult>;
 
 export const TaskNoteListResponse = z
   .object({

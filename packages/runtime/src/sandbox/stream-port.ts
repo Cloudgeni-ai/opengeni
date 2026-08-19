@@ -74,6 +74,10 @@ export type ExposeStreamPortInput = {
   resolution?: [number, number];
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** The authenticated viewer subject the token is minted for (0281). */
+  subjectId?: string;
+  /** The session authority epoch observed at mint (0281). */
+  authorityEpoch?: number;
 };
 
 export type ExposeStreamPortResult = {
@@ -215,6 +219,8 @@ export async function exposeStreamPort(
     port,
     ttlSeconds,
     nowSeconds,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
+    ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
   });
 
   return {

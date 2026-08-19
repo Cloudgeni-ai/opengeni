@@ -13,6 +13,83 @@ This contract applies to the built-in OpenGeni MCP and docs MCP. It does not
 change REST response bodies. Codemode-proxied tools retain the result contract
 of their selected first-party, capability, or per-session provider.
 
+## Connector attachment transfer v1
+
+Connection-backed capability and per-session MCP servers can make an authorized
+provider attachment available as an exact sandbox file without placing its
+bytes or access URL in model-visible output. The provider-neutral contract is
+`ConnectorAttachmentTransferEnvelope` in
+`packages/contracts/src/connector-attachments.ts`.
+
+A provider returns the private envelope only at the top-level MCP `_meta` key
+`opengeni/connector-attachment-transfers`:
+
+```json
+{
+  "version": 1,
+  "attachments": [
+    {
+      "providerAttachmentId": {
+        "provider": "example",
+        "kind": "attachment",
+        "value": "opaque-provider-file-id"
+      },
+      "fileName": "report.pdf",
+      "mediaType": "application/pdf",
+      "byteSize": 12345,
+      "contentSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source": {
+        "url": "https://files.example.test/short-lived-authorized-download",
+        "expiresAt": "2030-01-02T03:04:05.000Z"
+      }
+    }
+  ]
+}
+```
+
+The source URL is private transport authority, not a model result. Runtime
+handling is fail-closed and ordered:
+
+1. Parse the strict, versioned envelope and reject unsafe filenames, invalid
+   media types, non-lowercase SHA-256 values, expired sources, non-HTTP(S)
+   sources, URL userinfo/fragments, more than 16 attachments, or any attachment
+   larger than 5,000,000,000 bytes. Public identity and content-type fields
+   cannot contain HTTP URL references, and credential-bearing query values from
+   the private source URL cannot be copied into the provider identity, filename,
+   or content type.
+2. Require a `connectionRef`-backed server with an explicit provider binding,
+   require every attachment identity to use that exact provider namespace, and
+   re-resolve its credential after the provider call with the exact workspace
+   and immutable initiating subject. The live result must still be authorized
+   and must equal the connection ID frozen for the attempt. Revocation, expiry,
+   tenant/user mismatch, or identity drift prevents materialization.
+3. Remove the entire provider result projection. Provider text, structured
+   content, vendor fields, metadata, inline image/audio/blob content, and the
+   private transfer key do not enter model output, Codemode output, MCP custom
+   data, or durable session events. Inline binary forms fail closed rather than
+   being copied beside the out-of-band transfer.
+4. Stream the source through Channel A's placement-private importer. The URL is
+   written only to a protected file outside `/workspace`; it never enters shell
+   arguments, environment, stdout, public receipts, or filesystem events. The
+   importer checks expiry, exact byte length, and SHA-256 before atomically
+   publishing the target.
+5. Return only a bounded receipt plus a concise list of sandbox paths. The
+   deterministic target is
+   `.opengeni/connector-attachments/<provider>/<identity-digest>/<exact-file-name>`.
+
+The public `_meta` key is `opengeni/connector-attachment-receipts`. Each receipt
+preserves provider attachment identity, exact filename, content type, byte
+length, SHA-256, and the local sandbox path; it never contains the source URL.
+The sanitized provider result is capped at 64 KiB before transfer, and the
+worker-generated model/Codemode result is capped at 128 KiB. A multi-gigabyte
+attachment therefore contributes only bounded metadata to model context.
+
+Model MCP and Codemode execute the same attempt catalog and the same transfer
+hook. Recovery must retry or reconcile the same authorized provider operation
+and exact-byte import. It may use Channel A's target-hash replay, but it must
+never reconstruct a file from prior model text, tool-result text, event
+previews, or another provider attachment identity.
+
 ## Mutation receipt v1
 
 The public schema is `McpMutationReceipt` in
@@ -116,8 +193,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | --- | --- | --- |
 | First-party: `set_session_title` | Mutation | v1 receipt |
 | First-party: `scheduled_tasks_create`, `scheduled_tasks_update`, `scheduled_tasks_pause`, `scheduled_tasks_resume`, `scheduled_tasks_trigger`, `scheduled_tasks_delete` | Mutation | v1 receipt |
-| First-party: `goal_set`, `goal_update`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
-| First-party: `memory_save`, `memory_correct` | Mutation | v1 receipt |
+| First-party: `goal_set`, `goal_update`, `goal_progress`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
 | First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |
@@ -257,10 +333,10 @@ Canonical measurement: `apps/api/test/mcp-receipt-size.test.ts`.
   contract-shaped receipt is tested below 64 KiB. Universal output
   normalization/truncation across arbitrary provider and tool output remains
   a separate safety layer; compact receipts do not replace it.
-- **Connector/raw-transfer boundary:** this contract does not change the exact
-  attempt Codemode dispatcher, runtime connector adaptation, worker/storage
-  attachment transfer, provider wrappers, or raw-byte paths. Those prepared
-  tool results remain provider-owned.
+- **Connector/raw-transfer boundary:** only the versioned private transfer key
+  above opts a result into exact-byte materialization. Arbitrary provider URLs,
+  resource links, inline blobs, and unversioned metadata remain ordinary
+  provider output and are not treated as sandbox file authority.
 - **Compatibility risk:** public MCP behavior is intentionally breaking for
   third-party clients that parse full mutation entities. Consumers must migrate
   to `receipt.resource.id` plus explicit reads. REST behavior is unchanged.

@@ -27,22 +27,29 @@ export function SessionEditableArtifactsWorkspace({
   artifacts,
   status,
   onRetry,
+  initialSelectedArtifactId,
+  onSelectedArtifactIdChange,
 }: Readonly<{
   workspaceId: string;
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
   onRetry: () => void;
+  initialSelectedArtifactId?: string | null;
+  onSelectedArtifactIdChange?: (artifactId: string | null) => void;
 }>) {
-  const [selectedArtifactId, setSelectedArtifactId] = useState(() => artifacts[0]?.id ?? null);
+  const [selectedArtifactId, setSelectedArtifactId] = useState(
+    () => initialSelectedArtifactId ?? artifacts[0]?.id ?? null,
+  );
 
   useEffect(() => {
-    setSelectedArtifactId((current) => {
-      if (current && artifacts.some((artifact) => artifact.id === current)) {
-        return current;
-      }
-      return artifacts[0]?.id ?? null;
-    });
-  }, [artifacts]);
+    if (status === "loading") return;
+    if (selectedArtifactId && artifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      return;
+    }
+    const next = artifacts[0]?.id ?? null;
+    setSelectedArtifactId(next);
+    onSelectedArtifactIdChange?.(next);
+  }, [artifacts, onSelectedArtifactIdChange, selectedArtifactId, status]);
 
   const artifact =
     artifacts.find((candidate) => candidate.id === selectedArtifactId) ?? artifacts[0];
@@ -96,7 +103,10 @@ export function SessionEditableArtifactsWorkspace({
               aria-label="Choose editable artifact"
               className="h-8 min-w-0 border-0 bg-transparent pl-1 font-medium shadow-none"
               value={artifact.id}
-              onChange={(event) => setSelectedArtifactId(event.target.value)}
+              onChange={(event) => {
+                setSelectedArtifactId(event.target.value);
+                onSelectedArtifactIdChange?.(event.target.value);
+              }}
             >
               {artifacts.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>

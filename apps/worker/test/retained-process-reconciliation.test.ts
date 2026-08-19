@@ -92,6 +92,7 @@ type ProcessFixture = WorkspaceIds & {
   providerSessionId: number;
   admissionId: string;
   attempt?: TurnFixture;
+  directOwner?: { holderId: string };
 };
 
 async function freshWorkspace(): Promise<WorkspaceIds> {
@@ -119,6 +120,8 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   ids.groupId = session.sandboxGroupId;
@@ -277,7 +280,9 @@ async function promoteTurnProcess(
   };
 }
 
-async function promoteDirectProcess(): Promise<ProcessFixture> {
+async function promoteDirectProcess(
+  input: { releaseOwner?: boolean } = {},
+): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
   const session = await createSession(db, {
     accountId: ids.accountId,
@@ -286,6 +291,8 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   ids.groupId = session.sandboxGroupId;
@@ -303,6 +310,7 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
     sessionId: session.id,
     requestId,
     holderId,
+    initiatorSubjectId: "subject-retained-direct",
     sandboxGroupId: ids.groupId,
     expectedEpoch: 7,
     expectedInstanceId: instanceId,
@@ -325,6 +333,7 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
       kind: "direct",
       requestId,
       holderId,
+      initiatorSubjectId: "subject-retained-direct",
       sandboxGroupId: ids.groupId,
       expectedEpoch: 7,
       expectedInstanceId: instanceId,
@@ -332,14 +341,16 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
       routeEpoch: 0,
     },
   });
-  await releaseLeaseHolder(db, {
-    accountId: ids.accountId,
-    workspaceId: ids.workspaceId,
-    sandboxGroupId: ids.groupId,
-    kind: "direct",
-    holderId,
-    idleGraceMs: SETTINGS.sandboxIdleGraceMs,
-  });
+  if (input.releaseOwner !== false) {
+    await releaseLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      kind: "direct",
+      holderId,
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+  }
   return {
     ...ids,
     leaseId,
@@ -347,6 +358,7 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
     process,
     providerSessionId: 81,
     admissionId: admission.id,
+    directOwner: { holderId },
   };
 }
 
@@ -729,6 +741,43 @@ describe("retained-process terminal-owner reconciliation", () => {
         expect(claim.ownerAttemptOutcome).toBe(expectedOutcome);
       }
     }
+  }, 60_000);
+
+  test("does not reconcile a direct process until its exact request holder closes", async () => {
+    if (!available) return;
+    const fixture = await promoteDirectProcess({ releaseOwner: false });
+
+    const activeClaims = await claimTerminalRetainedProcesses(db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 300_000,
+    });
+    expect(activeClaims.some((claim) => claim.process.id === fixture.process.id)).toBe(false);
+    expect(await countActiveRetainedProcessesByOwnerState(db)).toContainEqual({
+      ownerState: "direct",
+      activeCount: 1,
+      terminalOwnerCount: 0,
+    });
+
+    await releaseLeaseHolder(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.groupId,
+      kind: "direct",
+      holderId: fixture.directOwner!.holderId,
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    await admin`
+      update sandbox_retained_processes
+      set reconcile_after = now()
+      where id = ${fixture.process.id}`;
+
+    const closedClaims = await claimTerminalRetainedProcesses(db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 300_000,
+    });
+    expect(closedClaims.some((claim) => claim.process.id === fixture.process.id)).toBe(true);
   }, 60_000);
 
   test("restricted app TEMP shadows cannot influence privileged claims or inventories", async () => {

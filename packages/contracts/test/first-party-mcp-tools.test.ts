@@ -6,6 +6,10 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
 } from "../src";
 
+// Retired Memory V1 writes: still in the name union so previously written
+// scheduled-task snapshots parse, but never default and never registered.
+const RETIRED_TOOLS = ["memory_save", "memory_correct"] as const;
+
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "social_connections_list",
   "social_posts_recent",
@@ -28,6 +32,7 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "reddit_posts_sync",
   "reddit_post_reply",
   "slack_bot_list_channels",
+  "slack_bot_search",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
   "slack_bot_list_users",
@@ -73,10 +78,22 @@ describe("first-party MCP tool-name contract", () => {
     ).toEqual(["slack_bot_post_message"]);
   });
 
-  test("keeps every connector-wide tool outside the ordinary default selection", () => {
+  test("keeps connector-wide and retired tools outside the ordinary default selection", () => {
     expect(
       FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name)),
-    ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+    ).toEqual([...RETIRED_TOOLS, ...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+  });
+
+  test("still parses a retired tool name so stored selections keep loading", () => {
+    // Immutable scheduled-task execution snapshots recorded the tool set that
+    // was default when they were accepted. Dropping the name from the union
+    // would make those snapshots fail to parse on replay.
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "replay a stored selection",
+        firstPartyMcpTools: [...RETIRED_TOOLS],
+      }).success,
+    ).toBe(true);
   });
 
   test("resource attachment remains independent of model-visible first-party tools", () => {

@@ -52,7 +52,7 @@ function committed(
     priorStateHash: state(startSequence - 1),
     stateHash,
     causalFrontier: [{ replicaId: REPLICA_ID, counter: endSequence }],
-    protocolVersion: 1,
+    operationProtocolVersion: 2,
   });
 }
 
@@ -71,9 +71,10 @@ function replica(): SpreadsheetStoredReplica {
       stateHash: state(2),
       causalFrontier: [{ replicaId: REPLICA_ID, counter: 2 }],
       digest: testStateHash("digest-2"),
-      protocolVersion: 1,
+      operationProtocolVersion: 2,
+      snapshotVersion: 2,
       kernelVersion: "kernel-1",
-      modelSchemaVersion: 1,
+      modelSchemaVersion: 2,
       bytes: new Uint8Array([1, 2]),
     },
     tail: [committed(3, 4, state(4), 4), committed(5, 5, state(5), 5)],
@@ -93,8 +94,8 @@ function pending(
     artifactId: ARTIFACT_ID,
     clientTransactionId: transactionId,
     protocolVersion: 1,
-    modelSchemaVersion: 1,
-    commandVersion: 1,
+    modelSchemaVersion: 2,
+    commandVersion: 2,
     replicaId: REPLICA_ID,
     replicaCounter: createdAt,
     previousLocalTransactionId: null,
@@ -428,6 +429,29 @@ describe("MemoryEditableArtifactStorage", () => {
 });
 
 describe("IndexedDbEditableArtifactStorage", () => {
+  test("hard-resets every version-3 replica and pending-command store", async () => {
+    const factory = new IDBFactory();
+    const databaseName = "editable-artifact-v3-hard-cut";
+    await seedVersionThreeDatabase(factory, databaseName);
+
+    const storage = new IndexedDbEditableArtifactStorage({ indexedDB: factory, databaseName });
+    expect(await storage.loadReplica(SCOPE)).toBeNull();
+    expect(await storage.listPending(SCOPE)).toEqual([]);
+
+    const database = await openTestDatabase(factory, databaseName);
+    for (const storeName of [
+      "replicas",
+      "snapshots",
+      "committedTransactions",
+      "pendingTransactions",
+    ]) {
+      const transaction = database.transaction(storeName, "readonly");
+      expect(await requestResult(transaction.objectStore(storeName).count())).toBe(0);
+    }
+    database.close();
+    await storage.close();
+  });
+
   test("rejects hostile structured-clone fields with a bounded typed validation error", async () => {
     const factory = new IDBFactory();
     const databaseName = "editable-artifact-hostile-pending";
@@ -640,9 +664,56 @@ describe("IndexedDbEditableArtifactStorage", () => {
   });
 });
 
-function openTestDatabase(factory: IDBFactory, databaseName: string): Promise<IDBDatabase> {
+function seedVersionThreeDatabase(factory: IDBFactory, databaseName: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = factory.open(databaseName, 3);
+    request.onerror = () => reject(request.error ?? new Error("version-3 database seed failed"));
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      database
+        .createObjectStore("replicas", { keyPath: ["namespace", "artifactId"] })
+        .put({ namespace: SCOPE.namespace, artifactId: SCOPE.artifactId, marker: "old-head" });
+      database
+        .createObjectStore("snapshots", { keyPath: ["namespace", "artifactId"] })
+        .put({ namespace: SCOPE.namespace, artifactId: SCOPE.artifactId, marker: "old-snapshot" });
+      const committedStore = database.createObjectStore("committedTransactions", {
+        keyPath: ["namespace", "artifactId", "startSequence"],
+      });
+      committedStore.createIndex("byScope", ["namespace", "artifactId"], { unique: false });
+      committedStore.put({
+        namespace: SCOPE.namespace,
+        artifactId: SCOPE.artifactId,
+        startSequence: 1,
+        marker: "old-commit",
+      });
+      const pendingStore = database.createObjectStore("pendingTransactions", {
+        keyPath: ["namespace", "artifactId", "transactionId"],
+      });
+      pendingStore.createIndex("byScope", ["namespace", "artifactId"], { unique: false });
+      pendingStore.put({
+        namespace: SCOPE.namespace,
+        artifactId: SCOPE.artifactId,
+        transactionId: "old-pending",
+        marker: "old-pending",
+      });
+    };
+    request.onsuccess = () => {
+      request.result.close();
+      resolve();
+    };
+  });
+}
+
+function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function openTestDatabase(factory: IDBFactory, databaseName: string): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = factory.open(databaseName, 4);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("test database open failed"));
   });

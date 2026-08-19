@@ -87,7 +87,15 @@ export type HumanInputFormProps = {
  * options, sticky ask/submit chrome. Hosts can replace title/description or
  * use `useHumanInputRequests` headlessly.
  */
-export function HumanInputForm({
+export function HumanInputForm(props: HumanInputFormProps) {
+  // The pending-request read model is refreshed after session events and
+  // returns newly allocated question arrays for the same durable request.
+  // Key the state owner by that request's lifecycle identity so reconciliation
+  // cannot erase an answer that the operator is still typing.
+  return <HumanInputRequestForm key={props.request.id} {...props} />;
+}
+
+function HumanInputRequestForm({
   request,
   onSubmit,
   submitting = false,
@@ -134,16 +142,6 @@ export function HumanInputForm({
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
   const busy = submitting || submittingInternally;
-
-  useEffect(() => {
-    submissionGeneration.current += 1;
-    submissionInFlight.current = false;
-    setDrafts(initialDrafts(request.questions));
-    setValidationErrors({});
-    setSubmissionError(null);
-    setSubmittingInternally(false);
-    setCollapsed(defaultCollapsed);
-  }, [request.id, request.questions, defaultCollapsed]);
 
   useEffect(() => {
     if (collapsed) {

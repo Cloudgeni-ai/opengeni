@@ -50,6 +50,25 @@ export async function requireAccessGrant(
   return (await requireAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
 }
 
+/**
+ * Re-resolve the authenticated principal and its current grants without using
+ * the request-local access cache. Long-lived responses use this to ensure a
+ * membership suspension or revocation takes effect while the connection is
+ * still open.
+ */
+export async function requireFreshAccessGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrant> {
+  const context = await resolveAccessContext(c, deps);
+  if (!context) {
+    throw new HTTPException(401, { message: "authentication required" });
+  }
+  return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
+}
+
 export type AccessGrantAuthorization = {
   grant: AccessGrant;
   accountGrant: AccountGrant | null;
@@ -96,6 +115,15 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
+  return await accessGrantAuthorization(context, deps, workspaceId, permission);
+}
+
+async function accessGrantAuthorization(
+  context: AccessContext,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrantAuthorization> {
   const principalKind = hostedHumanSessionPrincipalKind(context);
   const grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
@@ -172,35 +200,10 @@ export function hasPermission(permissions: Permission[], permission: Permission)
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
-  const aliases: Partial<Record<Permission, Permission[]>> = {
-    "variable-sets:use": ["environments:use" as Permission],
-    "variable-sets:manage": ["environments:manage" as Permission],
-    "variable-sets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "variable-sets:read": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "variable-sets:write": ["variable-sets:manage", "environments:manage" as Permission],
-    "secrets:list": [
-      "variable-sets:use",
-      "variable-sets:manage",
-      "environments:use" as Permission,
-      "environments:manage" as Permission,
-    ],
-    "secrets:write": ["variable-sets:manage", "environments:manage" as Permission],
-  };
-  return (
-    permissions.includes(permission) ||
-    (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false) ||
-    permissions.includes("workspace:admin")
-  );
+  // Variable-set metadata, plaintext read, write/rotation, attachment, and
+  // runtime use are independent capabilities. Deprecated broad permissions
+  // remain parseable but do not imply any of the exact permissions.
+  return permissions.includes(permission) || permissions.includes("workspace:admin");
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {

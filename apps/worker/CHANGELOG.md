@@ -1,5 +1,246 @@
 # @opengeni/worker-bundle
 
+## 0.20.12
+
+### Patch Changes
+
+- f4afa19: Expose computer-use as ordinary `computer_*` function tools on every proven visual route. Stop advertising OpenAI's hosted computer tool.
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- Updated dependencies [5dc88ef]
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [f4afa19]
+- Updated dependencies [d581eef]
+- Updated dependencies [994a743]
+- Updated dependencies [a7df809]
+- Updated dependencies [51123b4]
+- Updated dependencies [8583779]
+- Updated dependencies [a99ef33]
+- Updated dependencies [79ee99b]
+- Updated dependencies [368ee6c]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [747222a]
+- Updated dependencies [7bc1cd1]
+- Updated dependencies [6d22ab5]
+  - @opengeni/db@2.0.0
+  - @opengeni/contracts@2.0.0
+  - @opengeni/core@1.5.0
+  - @opengeni/runtime@1.1.2
+  - @opengeni/config@0.17.0
+  - @opengeni/observability@0.8.0
+  - @opengeni/documents@0.6.5
+  - @opengeni/events@0.3.119
+  - @opengeni/codemode@0.4.9
+  - @opengeni/github@0.4.64
+  - @opengeni/storage@0.2.101
+
+## 0.20.11
+
+### Patch Changes
+
+- Updated dependencies [a03b86f]
+  - @opengeni/db@1.5.0
+  - @opengeni/core@1.4.1
+  - @opengeni/documents@0.6.4
+  - @opengeni/events@0.3.118
+
+## 0.20.10
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- Updated dependencies [0a6c577]
+- Updated dependencies [f804057]
+- Updated dependencies [6937eaf]
+- Updated dependencies [e6c2fee]
+- Updated dependencies [b05130a]
+- Updated dependencies [418b531]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/db@1.4.0
+  - @opengeni/storage@0.2.100
+  - @opengeni/contracts@1.4.0
+  - @opengeni/core@1.4.0
+  - @opengeni/documents@0.6.3
+  - @opengeni/github@0.4.63
+  - @opengeni/runtime@1.1.1
+  - @opengeni/events@0.3.117
+  - @opengeni/codemode@0.4.8
+  - @opengeni/observability@0.7.11
+
+## 0.20.9
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/core@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/codemode@0.4.7
+  - @opengeni/config@0.16.7
+  - @opengeni/documents@0.6.2
+  - @opengeni/events@0.3.116
+  - @opengeni/github@0.4.62
+  - @opengeni/observability@0.7.10
+  - @opengeni/storage@0.2.99
+
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [a65505d]
+  - @opengeni/db@1.2.0
+  - @opengeni/core@1.2.1
+  - @opengeni/documents@0.6.1
+  - @opengeni/events@0.3.115
+
+## 0.20.7
+
+### Patch Changes
+
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 987742d: Skip the redundant in-box rig marker probe when a live Modal session reports
+  the exact immutable image that already passed the rig's content, source,
+  provider-binding, and independent cold-boot verification. Missing or mismatched
+  image identity retains the existing fail-closed marker and setup path.
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- d168b8f: Allow exact scheduled service turns to materialize organization- and workspace-scoped Variable Sets while preserving causal-human and personal-grant checks for user-scoped sets.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Freeze Company Brain mode and bounded legacy instructions when a turn is
+  accepted, then bind them to a content-free first-attempt selection receipt whose
+  candidate and rendered-budget subsets make replacement recovery shrink-only.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [02e21fa]
+- Updated dependencies [c297fc0]
+- Updated dependencies [987742d]
+- Updated dependencies [987742d]
+- Updated dependencies [db758f3]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [6a8954f]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [5cd7b46]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [304462e]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+- Updated dependencies [ea52ff2]
+- Updated dependencies [cac85bc]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/db@1.1.0
+  - @opengeni/documents@0.6.0
+  - @opengeni/runtime@1.0.3
+  - @opengeni/github@0.4.61
+  - @opengeni/storage@0.2.98
+  - @opengeni/codemode@0.4.6
+  - @opengeni/events@0.3.114
+  - @opengeni/observability@0.7.9
+
+## 0.20.6
+
+### Patch Changes
+
+- Updated dependencies [b06071c]
+  - @opengeni/capabilities@0.2.3
+
+## 0.20.5
+
+### Patch Changes
+
+- Updated dependencies [a77e804]
+  - @opengeni/capabilities@0.2.2
+
+## 0.20.4
+
+### Patch Changes
+
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e98daf6: Measure physical MCP tool calls by bounded structural outcome and lock the existing provider-declared error path with an HTTP-200 SDK/durability regression.
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- 1ab8023: Deduplicate scheduled alert deliveries onto one atomic responder session per scheduled task and canonical alert occurrence while preserving separate roots for distinct tasks and reopened occurrences.
+- 79f57b5: Close terminal SuperGrok SSE streams deterministically; abort any accepted stream after a configurable interval without a complete valid event; and expose metadata-only durable lifecycle audits, bounded metrics, dashboard panels, and timeout alerting without replaying partial work.
+- c3f0598: Materialize authorized connector attachments as exact, hash-verified sandbox files while keeping provider bytes and private download URLs out of model, Codemode, and durable event output.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- Updated dependencies [79f57b5]
+- Updated dependencies [a551666]
+- Updated dependencies [31231dc]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [4d1ed07]
+- Updated dependencies [ce3b370]
+- Updated dependencies [e98daf6]
+- Updated dependencies [b2af2df]
+- Updated dependencies [e9e1016]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [3843825]
+- Updated dependencies [1ab8023]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [886682d]
+- Updated dependencies [234a5e7]
+- Updated dependencies [c3f0598]
+- Updated dependencies [79f57b5]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/capabilities@0.2.1
+  - @opengeni/db@1.0.2
+  - @opengeni/observability@0.7.8
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.1.0
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/xai-subscription@0.1.1
+  - @opengeni/documents@0.5.42
+  - @opengeni/github@0.4.60
+  - @opengeni/storage@0.2.97
+
 ## 0.20.3
 
 ### Patch Changes

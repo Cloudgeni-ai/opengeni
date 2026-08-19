@@ -1,6 +1,9 @@
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
+  ListSessionGoalRevisionsQuery,
+  RejectSessionGoalRevisionRequest,
+  RollbackSessionGoalRevisionRequest,
   ActivateCodexRealtimeConnectionRequest,
   AttachViewerRequest,
   BeginSessionRealtimeRequest,
@@ -30,6 +33,7 @@ import {
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
+  PublishSandboxFileArtifactRequest,
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
@@ -45,6 +49,7 @@ import {
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
@@ -73,6 +78,7 @@ import {
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
+  recordAuditEvent,
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
@@ -94,7 +100,9 @@ import {
   insertPtySession,
   listSessionEventPage,
   listSessionHumanInputRequests,
+  listSessionGoalRevisionPage,
   listSessionGoalRevisions,
+  rejectSessionGoalRevisionWithEvent,
   listSessionIdsInGroup,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
@@ -182,6 +190,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   hasPermission,
   requireAccessGrant,
+  requireFreshAccessGrant,
   requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -208,6 +217,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  acceptSessionUserMessageWithOutcome,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   deleteHumanQueuePrompt,
@@ -237,6 +247,7 @@ import {
   serveWorkspaceCaptureFile,
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
+import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -1577,6 +1588,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await listSessionGoalRevisions(db, workspaceId, sessionId));
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/page", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const parsedQuery = ListSessionGoalRevisionsQuery.safeParse({
+      limit: c.req.query("limit"),
+      before: c.req.query("before"),
+    });
+    if (!parsedQuery.success) {
+      throw new HTTPException(400, { message: "invalid goal revision page query" });
+    }
+    const query = parsedQuery.data;
+    try {
+      return c.json(
+        await listSessionGoalRevisionPage(db, workspaceId, sessionId, {
+          limit: query.limit,
+          ...(query.before ? { before: query.before } : {}),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SessionControlConflictError) {
+        throw new HTTPException(409, { message: error.message, cause: error });
+      }
+      throw error;
+    }
+  });
+
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/apply",
     async (c) => {
@@ -1608,6 +1647,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           text: revision.text,
           successCriteria: revision.successCriteria,
+          rootConstraints: revision.rootConstraints,
           mutationPolicy: revision.mutationPolicy,
           expectedObjectiveRevision: payload.expectedObjectiveRevision,
           expectedGoalId: revision.goalId,
@@ -1640,6 +1680,88 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     },
   );
 
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/reject",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const payload = RejectSessionGoalRevisionRequest.parse(await c.req.json());
+      try {
+        const result = await rejectSessionGoalRevisionWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          revisionId: c.req.param("revisionId"),
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          rationale: payload.rationale,
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+        return c.json({ revision: result.revision, replay: result.replay });
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, { message: error.message, cause: error });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions/:revisionId/rollback",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const payload = RollbackSessionGoalRevisionRequest.parse(await c.req.json());
+      const revision = await getSessionGoalRevision(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("revisionId"),
+      );
+      if (!revision || revision.disposition !== "applied") {
+        throw new HTTPException(404, { message: "applied goal revision not found" });
+      }
+      try {
+        const { goal, workflowWakeRevision, events } = await upsertSessionGoalWithEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          text: revision.text,
+          successCriteria: revision.successCriteria,
+          rootConstraints: revision.rootConstraints,
+          mutationPolicy: revision.mutationPolicy,
+          expectedObjectiveRevision: payload.expectedObjectiveRevision,
+          expectedGoalId: revision.goalId,
+          changeKind: "replacement",
+          changeRationale: payload.rationale,
+          rollbackOfRevisionId: revision.id,
+          createdBy: "api",
+          actor: "api",
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, events);
+        if (workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+        return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+      } catch (error) {
+        if (error instanceof SessionControlConflictError) {
+          throw new HTTPException(409, { message: error.message, cause: error });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -1661,6 +1783,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             payload.successCriteria !== undefined
               ? payload.successCriteria
               : existing.successCriteria,
+          rootConstraints:
+            payload.rootConstraints !== undefined
+              ? payload.rootConstraints
+              : existing.rootConstraints,
           maxAutoContinuations: existing.maxAutoContinuations,
           mutationPolicy: payload.mutationPolicy ?? existing.mutationPolicy,
           expectedObjectiveRevision: payload.expectedObjectiveRevision,
@@ -2022,19 +2148,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
-        ...(authorization
-          ? {
-              reauthorizeAfterMs:
-                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
-              reauthorize: async () => {
-                await requireSessionAuthorization(deps, grant, {
-                  sessionId,
-                  operation: "session.stream.read",
-                  surface: "stream",
-                });
-              },
-            }
-          : {}),
+        reauthorizeAfterMs:
+          authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+        reauthorize: async () => {
+          const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
+          await requireSessionAuthorization(deps, freshGrant, {
+            sessionId,
+            operation: "session.stream.read",
+            surface: "stream",
+          });
+        },
       },
     );
   });
@@ -2264,6 +2387,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       reasoningEffort: payload.reasoningEffort ?? null,
       latencyMode: payload.latencyMode ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+      connectionAuthorities: payload.connectionAuthorities,
       delivery: "steer",
       origin: "human",
       ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
@@ -2273,6 +2397,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     });
     return c.json(result, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft/submit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
+    let result: Awaited<ReturnType<typeof acceptSessionUserMessageWithOutcome>>;
+    try {
+      result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
+        text: payload.text,
+        annotations: payload.annotations,
+        modelContext: payload.modelContext ?? null,
+        resources: payload.resources,
+        model: payload.model,
+        reasoningEffort: payload.reasoningEffort,
+        latencyMode: payload.latencyMode,
+        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: payload.connectionAuthorities,
+        delivery: payload.delivery,
+        origin: "human",
+        expectedDraftRevision: payload.expectedDraftRevision,
+        clientEventId: payload.clientEventId,
+        ...(payload.controlEtag ? { controlEtag: payload.controlEtag } : {}),
+      });
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+    if (!result.draft) {
+      throw new Error("Accepted composer draft submission did not return its next draft");
+    }
+    return c.json(
+      {
+        accepted: result.accepted,
+        turn: result.turn,
+        draft: result.draft,
+        interruptionCount: result.interruptionCount,
+        replay: result.replay,
+      },
+      202,
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -2307,6 +2473,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reasoningEffort: event.payload.reasoningEffort ?? null,
         latencyMode: event.payload.latencyMode ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: event.payload.connectionAuthorities,
         ...(event.payload.controlEtag !== undefined
           ? { controlEtag: event.payload.controlEtag }
           : {}),
@@ -2482,7 +2649,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // would mint its relay terminal/desktop cells. Resolve the active target once
     // and use the selfhosted liveness probe when it is a connected machine.
     const activeSandbox = session.activeSandboxId
-      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      ? await getSandbox(
+          db,
+          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+          session.activeSandboxId,
+        )
       : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
     const lease = await readGroupLease(
@@ -2531,13 +2702,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let capabilities;
     if (selfhostedActive && activeSandbox.enrollmentId) {
       const [enrollment, liveConnection] = await Promise.all([
-        getEnrollment(db, workspaceId, activeSandbox.enrollmentId),
-        getLiveEnrollmentConnection(db, workspaceId, activeSandbox.enrollmentId),
+        getEnrollment(db, grant, activeSandbox.enrollmentId),
+        getLiveEnrollmentConnection(db, grant, activeSandbox.enrollmentId),
       ]);
       let probeResponded = false;
       if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
-          workspaceId,
+          workspaceId: activeSandbox.workspaceId,
           agentId: liveConnection.id,
           connectionInstanceId: liveConnection.connectionInstanceId,
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
@@ -2728,7 +2899,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // attachViewer (it warms the Modal group box — the wrong target). Synthesize a
     // result shaped like ViewerAttachResult and mint relay cells directly.
     const activeSandbox = session.activeSandboxId
-      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      ? await getSandbox(
+          db,
+          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+          session.activeSandboxId,
+        )
       : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
 
@@ -2758,6 +2933,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           stream = await mintDesktopStream(viewerServices, {
             accountId: grant.accountId,
             workspaceId,
+            resourceSubjectId: grant.subjectId,
+            resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2767,6 +2944,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           terminal = await mintTerminalStream(viewerServices, {
             accountId: grant.accountId,
             workspaceId,
+            resourceSubjectId: grant.subjectId,
+            resourceSubjectDelegated: grant.metadata?.delegated === true,
             session,
             viewerId,
             // No Modal lease for selfhosted-active; the mint routes to the relay.
@@ -2778,6 +2957,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         session,
+        viewerSubjectId: grant.subjectId,
         waitSignal: c.req.raw.signal,
         ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });
@@ -2805,6 +2985,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             stream = await mintDesktopStream(viewerServices, {
               accountId: grant.accountId,
               workspaceId,
+              resourceSubjectId: grant.subjectId,
+              resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
               lease,
@@ -2814,6 +2996,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             terminal = await mintTerminalStream(viewerServices, {
               accountId: grant.accountId,
               workspaceId,
+              resourceSubjectId: grant.subjectId,
+              resourceSubjectDelegated: grant.metadata?.delegated === true,
               session,
               viewerId: result.viewerId,
               lease,
@@ -2956,6 +3140,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // (rides files:read); Terminal exec + PTY ride terminal:attach.
 
   type ChannelARouteCtx = ChannelAContext & {
+    grant: AccessGrant;
     waitSignal: AbortSignal;
     operation: ChannelAOperation;
   };
@@ -2976,6 +3161,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return {
+      grant,
       accountId: grant.accountId,
       workspaceId,
       session,
@@ -3023,6 +3209,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const req = await parseChannelABody(c, FsReadRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsRead(req));
     return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const ctx = await channelAPreamble(c, "files:read", "artifact.publish");
+    const request = await parseChannelABody(c, PublishSandboxFileArtifactRequest);
+    return c.json(
+      await publishSandboxFileArtifact(deps, {
+        grant: ctx.grant,
+        session: ctx.session,
+        path: request.path,
+        signal: ctx.waitSignal,
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
@@ -3147,7 +3348,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // the live/wake path — the feature degrades to today's behavior, never worse.
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture", async (c) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
     const lookup = await sessionLatestWorkspaceCapture(db, workspaceId, sessionId);
     if (!lookup.sessionExists) {
@@ -3158,13 +3359,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json({ available: false });
     }
     return c.json(
-      await serveWorkspaceCapture(lookup.capture, objectStorage, workspaceCaptureManifestCache),
+      await serveWorkspaceCapture(
+        lookup.capture,
+        objectStorage,
+        workspaceCaptureManifestCache,
+        (fact) =>
+          recordAuditEvent(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "file.signed_url.issued",
+            targetType: "workspace_capture",
+            targetId: sessionId,
+            metadata: { sessionId, ...fact },
+          }),
+      ),
     );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const sessionId = c.req.param("sessionId") ?? "";
     const path = c.req.query("path");
     if (!path) {
@@ -3193,7 +3408,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } else {
       row = await latestWorkspaceCapture(db, workspaceId, sessionId);
     }
-    return c.json(await serveWorkspaceCaptureFile(row, path, objectStorage));
+    return c.json(
+      await serveWorkspaceCaptureFile(row, path, objectStorage, (fact) =>
+        recordAuditEvent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          action: "file.signed_url.issued",
+          targetType: "workspace_capture",
+          targetId: sessionId,
+          // The captured PATH is workspace-file identity (like a filename),
+          // not content; the signed URL and object key are never recorded.
+          metadata: { sessionId, path, ...fact },
+        }),
+      ),
+    );
   });
 
   // ── Terminal: synchronous exec ────────────────────────────────────────────
@@ -3559,7 +3788,11 @@ export function sessionAuthorizationOperationForHttp(
         : null;
   }
   if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
+  if (suffix === "/goal/revisions/page" && verb === "GET") return "session.goal.read";
   if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
+    return "session.goal.write";
+  }
+  if (/^\/goal\/revisions\/[^/]+\/(reject|rollback)$/.test(suffix) && verb === "POST") {
     return "session.goal.write";
   }
   if (suffix === "/context/clear" || suffix === "/context/compact") {
@@ -3579,6 +3812,9 @@ export function sessionAuthorizationOperationForHttp(
     if (verb === "PUT") return "session.composer.write";
     return null;
   }
+  // Same HTTP gate as POST /events. Delivery `steer` is re-authorized inside
+  // acceptSessionUserMessageWithOutcome after the body is parsed.
+  if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
@@ -3598,6 +3834,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
     return verb === "POST" ? "session.files.read" : null;
   }
+  if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }
@@ -3888,6 +4125,20 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         message: `Invalid session create request: ${zodErrorFields(error)} failed schema validation`,
       },
       422,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 409 &&
+    error.cause instanceof NewSessionDraftConflictError
+  ) {
+    return c.json(
+      {
+        code: "NEW_SESSION_DRAFT_CONFLICT",
+        message: error.cause.message,
+        currentRevision: error.cause.currentRevision,
+      },
+      409,
     );
   }
   if (error instanceof HTTPException && error.status === 422) {

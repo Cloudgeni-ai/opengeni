@@ -516,10 +516,14 @@ state remains application-owned; durable draft and session state remain in
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order; `steer()` supersedes the current direction. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
-  `clientEventId` across retries so the server dedupes.
-  `sendExtras` (object or function evaluated at send time) merges
-  resources/tools/model/reasoningEffort into every message. All human input is
-  plain chat text by design; approvals flow as control events
+  `clientEventId` across retries so the server dedupes. `composer.policy` and
+  `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
+  owned by that actor/session draft; policy is `null` until hydration completes.
+  `sendExtras` (object or function evaluated at send time) is only for
+  non-policy per-message fields such as live attachment resources and connection
+  authority. Disabling durable draft persistence requires an explicit
+  `initialPolicy`; no session or workspace fallback is invented. All human input
+  is plain chat text by design; approvals flow as control events
   (`useSessionControl`), not bespoke widgets.
 - `useTurnQueue(sessionId, { events })` — the one server-authoritative human
   prompt queue with `moveTurn`, crash-safe `editTurn`, identity-preserving

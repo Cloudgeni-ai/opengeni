@@ -66,6 +66,58 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
+  "list_self_organization_memberships(text)",
+  "list_self_organization_invitations(text)",
+  "list_self_organization_invitations(text, uuid, integer)",
+  "get_self_organization_invitation(text, uuid)",
+  "list_organization_invitations(uuid, text, uuid, integer)",
+  "list_organization_members(uuid, text)",
+  "organization_membership_command(jsonb)",
+  "prepare_organization_membership_protocol_settlements(jsonb)",
+  "assert_active_managed_human_organization_membership(uuid, text)",
+  "resolve_workspace_writer_grant_identity(uuid, text)",
+  "prepare_workspace_membership_removal_settlements(jsonb)",
+  "workspace_membership_removal_command(jsonb)",
+  "get_organization_retention_policy(uuid, text)",
+  "preview_organization_retention_deletions(uuid, integer)",
+  "claim_organization_retention_deletion(uuid, uuid, uuid[])",
+  "list_organization_retention_deletion_objects(uuid, uuid, uuid, text, integer)",
+  "record_organization_retention_object_deleted(uuid, uuid, uuid, text, text, text, text)",
+  "fail_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "finalize_organization_retention_deletion(uuid, uuid, uuid, text)",
+  "complete_organization_retention_deletion(uuid, uuid, uuid, text)",
+] as const;
+const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
+  "organization_user_retention_policies",
+] as const;
+const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
+  "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
+const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
+  "company_brain_preference_proposal_receipts",
+  "knowledge_change_proposals",
+  "knowledge_claim_evidence",
+  "knowledge_claim_reviews",
+  "knowledge_claims",
+  "preference_registry_events",
+  "preference_registry_preferences",
+  "preference_registry_revisions",
+  "session_attempt_interruptions",
+  "session_turn_attempts",
+  "session_turns",
+  "sessions",
+  "workspaces",
+] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_user_retention_policies",
@@ -74,9 +126,81 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 ] as const;
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
+const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "list_self_user_resource_authorities(uuid)",
+  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean)",
+  "revoke_self_user_resource_grant(uuid, uuid)",
+  "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
+] as const;
+const CONNECTION_AUTHORITY_ROUTINES = [
+  "list_self_connection_authorities(uuid)",
+  "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
+  "revoke_self_connection_use_grant(uuid, uuid)",
+  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
+  "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
+  "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
+] as const;
+const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
+  "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
+  "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
+  "refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint)",
+  "create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb)",
+  "materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text)",
+  "scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)",
+  "scheduled_task_run_connection_authority_subject(uuid, uuid, uuid)",
+  "scheduled_task_personal_resource_authority_subject(uuid, uuid, uuid, bigint)",
+  "record_scheduled_task_revision_authority(uuid, uuid, uuid, bigint)",
+  "clone_scheduled_task_revision_authority(uuid, uuid, uuid, bigint, bigint)",
+  "scheduled_task_revision_authority_subject(uuid, uuid, uuid, bigint)",
+  "scheduled_task_revision_authority_snapshot(uuid, uuid, uuid, bigint)",
+  "validate_scheduled_agent_run_live_authority(uuid, uuid, uuid)",
+  "scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid)",
+  "scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "bind_scheduled_task_run_session(uuid, uuid, uuid, uuid)",
+  "transition_scheduled_agent_run(uuid, uuid, uuid, uuid, uuid, text, text)",
+] as const;
 const PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "personal_resource_delegation_capability_active(text)";
 const PERSONAL_RESOURCE_CAPABILITY_TABLE = "personal_resource_delegation_capabilities";
+const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
+  "scheduled_personal_resource_capability_active(text)";
+const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
+const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
+const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
+const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
+  "personal_document_authority_capability_active(text)";
+const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
+const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
+  "create_personal_document_authority(uuid, uuid, uuid)",
+  "resolve_document_original_file(uuid, uuid, text, uuid)",
+  "resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid)",
+] as const;
+const VARIABLE_SET_AUTHORITY_ROUTINES = [
+  "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
+  "list_scoped_variable_sets(uuid, uuid, uuid, text, text)",
+  "count_scoped_variable_sets(uuid, uuid, text)",
+  "mutate_scoped_variable_set(uuid, uuid, uuid, text, text, boolean, text, boolean, text, text, boolean)",
+  "read_scoped_variable_set_secret(uuid, uuid, uuid, text, text, text, uuid, uuid, uuid, integer)",
+  "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
+] as const;
+const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
+const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
+const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
+  "create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean)",
+  "list_scoped_rigs(uuid, uuid, uuid, text, text)",
+  "count_scoped_rigs(uuid, uuid, text)",
+  "mutate_scoped_rig(uuid, uuid, uuid, text, text, boolean, text, boolean, boolean)",
+  "finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean)",
+  "list_scoped_enrollments(uuid, uuid, uuid, text)",
+  "get_scoped_sandbox(uuid, uuid, uuid)",
+  "authorize_scoped_sandbox_attach(uuid, uuid, uuid)",
+  "materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer)",
+  "authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+  "assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean)",
+  "list_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+  "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
+] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
@@ -96,6 +220,71 @@ const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
   "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
   "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
+  "replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text)",
+  "resolve_task_note_knowledge_promotion_source(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text)",
+] as const;
+const COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE =
+  "company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer)";
+const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
+  "company_brain_inspect_context_receipts(uuid, uuid, text, uuid, timestamp with time zone, uuid, integer)";
+const GOVERNED_LEARNING_EVALUATION_ROUTINE =
+  "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)";
+const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
+  "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
+  "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
+  "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
+  "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
+] as const;
+const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
+  "inspect_governed_learning_decisions(uuid, uuid, text, integer)",
+  "inspect_governed_learning_activations(uuid, uuid, text, integer)",
+  "inspect_governed_learning_activation_undos(uuid, uuid, text, integer)",
+] as const;
+const GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES = [
+  "governed_learning_decision_receipts",
+  "governed_learning_activation_receipts",
+  "governed_learning_activation_undo_receipts",
+  "sessions",
+] as const;
+const GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES = [
+  "document_chunks",
+  "documents",
+  "governed_learning_decision_receipts",
+  "knowledge_change_proposals",
+  "knowledge_claim_evidence",
+  "knowledge_claim_relations",
+  "knowledge_claim_reviews",
+  "knowledge_claims",
+  "knowledge_document_versions",
+  "knowledge_providers",
+  "knowledge_source_acl_versions",
+  "knowledge_source_objects",
+  "knowledge_sources",
+  "session_attempt_interruptions",
+  "session_turn_attempts",
+  "session_turns",
+  "sessions",
+  "task_notes",
+  "workspace_learning_policy_snapshots",
+  "workspaces",
+] as const;
+const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
+  ...GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES,
+  "company_brain_preference_proposal_receipts",
+  "governed_learning_activation_receipts",
+  "governed_learning_activation_undo_receipts",
+  "preference_registry_events",
+  "preference_registry_preferences",
+  "preference_registry_revisions",
+  "remember_knowledge_confirmation_receipts",
+  "session_human_input_requests",
+  "workspace_instruction_policy_activation_events",
+  "workspace_instruction_policy_deactivation_events",
+  "workspace_instruction_policy_heads",
+  "workspace_instruction_policy_onboarding_proposals",
+  "workspace_instruction_policy_revisions",
+  "workspace_learning_policy_heads",
+  "workspace_learning_policy_revisions",
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
@@ -104,10 +293,15 @@ const FORK_SESSION_CONTENT_ROUTINE =
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  ...USER_RESOURCE_LIFECYCLE_ROUTINES,
+  ...CONNECTION_AUTHORITY_ROUTINES,
+  ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
+  COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
+  COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
@@ -128,6 +322,11 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
+  COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
+  GOVERNED_LEARNING_EVALUATION_ROUTINE,
+  ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
+  ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
@@ -136,8 +335,16 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
+  ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  ...CONNECTION_AUTHORITY_ROUTINES,
+  ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
+  ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
+  ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
@@ -200,6 +407,9 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "company_brain_context_selection_receipts",
+  "company_brain_preference_proposal_receipts",
+  "company_brain_turn_context_snapshots",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_revisions",
@@ -208,6 +418,8 @@ export const FORCE_RLS_TABLES = [
   "computer_session_associations",
   "computer_sessions",
   "connection_disconnect_operations",
+  "connection_use_audit_facts",
+  "connection_use_once_consumption_receipts",
   "connections",
   "connector_action_policies",
   "connector_action_requests",
@@ -241,6 +453,9 @@ export const FORCE_RLS_TABLES = [
   "github_installations",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
+  "governed_learning_activation_receipts",
+  "governed_learning_activation_undo_receipts",
+  "governed_learning_decision_receipts",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -290,17 +505,26 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
+  "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
   "preference_registry_events",
   "preference_registry_preferences",
   "preference_registry_revisions",
   "preference_registry_snapshots",
+  "remember_knowledge_confirmation_receipts",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -313,10 +537,22 @@ export const FORCE_RLS_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
+  "scheduled_task_connection_authority_snapshots",
+  "scheduled_task_personal_resource_authorities",
+  "scheduled_task_personal_resource_snapshots",
+  "scheduled_task_reusable_connection_materializations",
+  "scheduled_task_revision_authorities",
+  "scheduled_task_run_connection_authority_snapshots",
+  "scheduled_task_run_personal_resource_admissions",
+  "scheduled_task_run_personal_resource_once_receipts",
+  "scheduled_task_run_personal_resource_snapshots",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
+  "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
+  "session_attempt_personal_document_admissions",
+  "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_attempt_tool_catalogs",
@@ -364,13 +600,18 @@ export const FORCE_RLS_TABLES = [
   "social_connections",
   "social_posts",
   "task_note_events",
+  "task_note_knowledge_promotion_capabilities",
+  "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
   "temporal_schedule_cleanup_outbox",
+  "tenancy_backfill_receipts",
+  "tenancy_backfill_unresolved_rows",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  "turn_connection_authority_snapshots",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -381,6 +622,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_control_events",
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
+  "workspace_instruction_policy_deactivation_events",
   "workspace_instruction_policy_heads",
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
@@ -507,8 +749,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_session_envelopes",
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
-  "scheduled_task_runs",
-  "scheduled_tasks",
   "session_attempt_interruptions",
   "session_command_receipts",
   "session_events",
@@ -559,8 +799,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_variable_set_variables",
-  "workspace_variable_sets",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
   "workspaces",
@@ -586,6 +824,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
   "slack_task_policy_revisions",
+  "workspace_instruction_policy_deactivation_events",
   "workspace_instruction_policy_snapshots",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
@@ -671,6 +910,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
+  "scheduled_task_runs",
+  "scheduled_tasks",
   "session_attempt_codemode_calls",
   "site_auth_connections",
   "slack_user_link_access_requests",
@@ -686,24 +927,60 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
   "canonical_human_login_bindings",
+  "company_brain_context_selection_receipts",
+  "company_brain_preference_proposal_receipts",
+  "company_brain_turn_context_snapshots",
+  "connection_use_audit_facts",
+  "connection_use_once_consumption_receipts",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
+  "governed_learning_activation_receipts",
+  "governed_learning_activation_undo_receipts",
+  "governed_learning_decision_receipts",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_membership_invitations",
+  "organization_membership_lifecycle_events",
+  "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
+  "organization_user_retention_deletion_events",
+  "organization_user_retention_deletions",
+  "organization_user_retention_object_deletion_receipts",
+  "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
+  "remember_knowledge_confirmation_receipts",
+  "scheduled_task_connection_authority_snapshots",
+  "scheduled_task_personal_resource_authorities",
+  "scheduled_task_personal_resource_snapshots",
+  "scheduled_task_reusable_connection_materializations",
+  "scheduled_task_revision_authorities",
+  "scheduled_task_run_connection_authority_snapshots",
+  "scheduled_task_run_personal_resource_admissions",
+  "scheduled_task_run_personal_resource_once_receipts",
+  "scheduled_task_run_personal_resource_snapshots",
+  "session_attempt_connected_machine_authorizations",
+  "session_attempt_personal_document_admissions",
+  "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_visibility_write_capabilities",
   "task_note_events",
+  "task_note_knowledge_promotion_capabilities",
+  "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "tenancy_backfill_receipts",
+  "tenancy_backfill_unresolved_rows",
+  "turn_connection_authority_snapshots",
+  "workspace_variable_set_variables",
+  "workspace_variable_sets",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1068,7 +1345,13 @@ export async function inspectRuntimeDatabasePosture(
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
             and c.relkind in ('r', 'p')
-            and c.relname = ${PERSONAL_RESOURCE_CAPABILITY_TABLE}
+            and c.relname in (
+              ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
+              ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
+              ${VARIABLE_SET_CAPABILITY_TABLE},
+              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
+              ${SCOPED_COMPUTE_CAPABILITY_TABLE}
+            )
         `),
       ).map((row) => ({
         name: row.name,
@@ -1111,13 +1394,15 @@ export async function inspectRuntimeDatabasePosture(
             )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        execute: row.can_execute,
-        publicExecute: row.public_execute,
-        securityDefiner: row.security_definer,
-      }));
+      )
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          execute: row.can_execute,
+          publicExecute: row.public_execute,
+          securityDefiner: row.security_definer,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       const privateRoutines = resultRows<{
         name: string;
@@ -1411,6 +1696,137 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
       }
+    } else if (routine.name === GOVERNED_LEARNING_EVALUATION_ROUTINE) {
+      if (!tableByName.has("governed_learning_decision_receipts")) {
+        continue;
+      }
+      const missingAuthorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
+      GOVERNED_LEARNING_INSPECTION_ROUTINES.includes(
+        routine.name as (typeof GOVERNED_LEARNING_INSPECTION_ROUTINES)[number],
+      )
+    ) {
+      if (!tableByName.has("governed_learning_decision_receipts")) continue;
+      const missingAuthorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
+        (name) => !tableByName.has(name),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map(
+          (name) => tableByName.get(name)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1 || routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner does not match governed-learning inspection authority`,
+          );
+        }
+      }
+    } else if (
+      GOVERNED_LEARNING_ACTIVATION_ROUTINES.includes(
+        routine.name as (typeof GOVERNED_LEARNING_ACTIVATION_ROUTINES)[number],
+      )
+    ) {
+      if (!tableByName.has("governed_learning_activation_receipts")) {
+        continue;
+      }
+      const missingAuthorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
+      (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const missingAuthorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
+      if (!tableByName.has("company_brain_preference_proposal_receipts")) {
+        continue;
+      }
+      const missingAuthorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
     } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
         tableByName.has(tableName),
@@ -1428,6 +1844,47 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
+      }
+    } else if ((PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;
+      if (authorityOwner && routine.owner !== authorityOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match document authority owner ${authorityOwner}`,
+        );
+      }
+    } else if ((VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["workspace_variable_sets", "workspace_variable_set_variables"]
+        .map((tableName) => tableByName.get(tableName))
+        .filter((table): table is RuntimeTablePosture => table !== undefined);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} variable-set table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match variable-set authority owner ${authorityOwner}`,
+          );
+        }
+      }
+    } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
+        .map((tableName) => tableByName.get(tableName))
+        .filter((table): table is RuntimeTablePosture => table !== undefined);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} scoped-compute table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match scoped-compute authority owner ${authorityOwner}`,
+          );
+        }
       }
     } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
       const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
@@ -1702,6 +2159,211 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(
         `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
       );
+    }
+  }
+
+  const personalDocumentCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === PERSONAL_DOCUMENT_CAPABILITY_TABLE,
+  );
+  const personalDocumentCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (personalDocumentCapabilityTables.length !== 1) {
+    violations.push(
+      `personal-document capability table ${PERSONAL_DOCUMENT_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (personalDocumentCapabilityRoutines.length !== 1) {
+    violations.push(
+      `personal-document capability predicate ${PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (
+    personalDocumentCapabilityTables.length === 1 &&
+    personalDocumentCapabilityRoutines.length === 1
+  ) {
+    const table = personalDocumentCapabilityTables[0]!;
+    const routine = personalDocumentCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `personal-document capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `personal-document capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks personal-document capability predicate ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden personal-document capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+  }
+
+  const scheduledCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  );
+  const scheduledCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (scheduledCapabilityTables.length !== 1) {
+    violations.push(
+      `scheduled personal-resource capability table ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (scheduledCapabilityRoutines.length !== 1) {
+    violations.push(
+      `scheduled personal-resource capability predicate ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (scheduledCapabilityTables.length === 1 && scheduledCapabilityRoutines.length === 1) {
+    const table = scheduledCapabilityTables[0]!;
+    const routine = scheduledCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `scheduled personal-resource capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `scheduled personal-resource capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(
+        `runtime role lacks scheduled personal-resource capability predicate ${routine.name}`,
+      );
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden scheduled personal-resource capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+  }
+
+  if (options.protectedTables === undefined) {
+    const variableSetCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === VARIABLE_SET_CAPABILITY_TABLE,
+    );
+    const variableSetCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (variableSetCapabilityTables.length !== 1) {
+      violations.push(
+        `variable-set capability table ${VARIABLE_SET_CAPABILITY_TABLE} is missing or ambiguous`,
+      );
+    }
+    if (variableSetCapabilityRoutines.length !== 1) {
+      violations.push(
+        `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (variableSetCapabilityTables.length === 1 && variableSetCapabilityRoutines.length === 1) {
+      const table = variableSetCapabilityTables[0]!;
+      const routine = variableSetCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `variable-set capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(
+          `variable-set capability predicate ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks variable-set capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
+    }
+    const scopedComputeCapabilityTables = posture.privateTables.filter(
+      (table) => table.name === SCOPED_COMPUTE_CAPABILITY_TABLE,
+    );
+    const scopedComputeCapabilityRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name === SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE,
+    );
+    if (scopedComputeCapabilityTables.length !== 1) {
+      violations.push(
+        `scoped-compute capability table ${SCOPED_COMPUTE_CAPABILITY_TABLE} is missing or ambiguous`,
+      );
+    }
+    if (scopedComputeCapabilityRoutines.length !== 1) {
+      violations.push(
+        `scoped-compute capability predicate ${SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+      );
+    }
+    if (
+      scopedComputeCapabilityTables.length === 1 &&
+      scopedComputeCapabilityRoutines.length === 1
+    ) {
+      const table = scopedComputeCapabilityTables[0]!;
+      const routine = scopedComputeCapabilityRoutines[0]!;
+      if (routine.owner !== table.owner) {
+        violations.push(
+          `scoped-compute capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+        );
+      }
+      if (!routine.securityDefiner) {
+        violations.push(
+          `scoped-compute capability predicate ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks scoped-compute capability predicate ${routine.name}`);
+      }
+      if (routine.publicExecute) {
+        violations.push(`PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`);
+      }
+      const directPrivileges = [
+        ["SELECT", table.select],
+        ["INSERT", table.insert],
+        ["UPDATE", table.update],
+        ["DELETE", table.delete],
+      ].filter(([, granted]) => granted);
+      if (directPrivileges.length > 0) {
+        violations.push(
+          `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+        );
+      }
     }
   }
 

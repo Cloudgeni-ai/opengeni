@@ -1,5 +1,5 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import { requireFileForSubject } from "@opengeni/db";
+import { recordAuditEvent, requireFileForSubject } from "@opengeni/db";
 import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -47,6 +47,21 @@ export function buildFilesMcpServer(deps: ApiRouteDeps, grant: AccessGrant): Mcp
         throw new Error(`file is ${file.status}`);
       }
       const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+      // Principal-facing signed URL issuance is a metadata-only audit
+      // fact, awaited before the URL leaves the platform. Never the URL/key.
+      await recordAuditEvent(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        action: "file.signed_url.issued",
+        targetType: "workspace_file",
+        targetId: file.id,
+        metadata: {
+          fileId: file.id,
+          kind: "mcp_download",
+          expiresAt: signed.expiresAt.toISOString(),
+        },
+      });
       return {
         content: [
           {

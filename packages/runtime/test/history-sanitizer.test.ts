@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { MODEL_TIMELINE_ANNOTATIONS_FIELD } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_TIMELINE_ANNOTATIONS_FIELD,
+} from "@opengeni/contracts";
 import {
   computerCallNormalizingFetch,
   elideSupersededViewImagePairs,
+  extractOpenSuffixMembers,
   normalizeComputerCallActions,
   projectRejectedProviderArtifactsFromSerializedRunState,
   rewriteComputerCallsToActionsOnly,
@@ -77,6 +82,20 @@ describe("sanitizeHistoryItemsForModel", () => {
     expect(item).toHaveProperty(MODEL_TIMELINE_ANNOTATIONS_FIELD);
   });
 
+  test("strips compact attachment catalog metadata at the provider boundary", () => {
+    const item = {
+      ...userMessage("[OpenGeni retained attachment references]"),
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_REFS_FIELD]: [
+        { kind: "file", fileId: "00000000-0000-4000-8000-000000000099" },
+      ],
+    };
+    const [sanitized] = sanitizeHistoryItemsForModel([item]);
+    expect(sanitized).toEqual(userMessage("[OpenGeni retained attachment references]"));
+    expect(item).toHaveProperty(MODEL_ATTACHMENT_CATALOG_MARKER);
+    expect(item).toHaveProperty(MODEL_ATTACHMENT_REFS_FIELD);
+  });
+
   test("drops an orphaned function_call_result whose function_call is absent", () => {
     // This is the session-bricking corruption: a tool output replayed without
     // its tool call (observed live for journal / goal-pause tools near turn
@@ -108,6 +127,30 @@ describe("sanitizeHistoryItemsForModel", () => {
     // The dangling call is dropped, and the reasoning item that produced it is
     // dropped with it (Responses API ties reasoning to its following call).
     expect(result).toEqual([items[0]]);
+  });
+
+  test("extracts a dangling call and its tied reasoning as the open suffix", () => {
+    const items = [userMessage("hi"), reasoning("rs_1"), functionCall("call_dangling")];
+    expect(extractOpenSuffixMembers(items)).toEqual([
+      {
+        callId: "call_dangling",
+        callType: "function_call",
+        callItem: items[2],
+        reasoningItems: [items[1]],
+      },
+    ]);
+    expect(sanitizeHistoryItemsForModel(items)).toEqual([items[0]]);
+  });
+
+  test("paired history yields an empty open suffix", () => {
+    const items = [
+      userMessage("hi"),
+      reasoning("rs_keep"),
+      functionCall("call_ok"),
+      functionResult("call_ok"),
+    ];
+    expect(extractOpenSuffixMembers(items)).toEqual([]);
+    expect(sanitizeHistoryItemsForModel(items)).toEqual(items);
   });
 
   test("keeps reasoning when its following call is well-formed", () => {

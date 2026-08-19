@@ -157,12 +157,12 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/packs/:packId/installation-preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     const payload = PreviewPackInstallationRequest.parse(await c.req.json());
     return c.json(
       PackInstallationPreview.parse(
-        await previewCapabilityPackInstallation(db, workspaceId, pack, {
+        await previewCapabilityPackInstallation(db, grant, pack, {
           ...(payload.rigId ? { rigId: payload.rigId } : {}),
           ...(payload.variableSetId ? { variableSetId: payload.variableSetId } : {}),
         }),
@@ -176,7 +176,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     const payload = InstallPackRequest.parse(await c.req.json());
     const preview = PackInstallationPreview.parse(
-      await previewCapabilityPackInstallation(db, workspaceId, pack, {
+      await previewCapabilityPackInstallation(db, grant, pack, {
         ...(payload.rigId ? { rigId: payload.rigId } : {}),
         ...(payload.variableSetId ? { variableSetId: payload.variableSetId } : {}),
       }),
@@ -599,6 +599,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           name: payload.name ?? "Daily social media analysis",
           status: payload.status,
           action: { kind: "agent_turn" },
+          connectionAuthorities: [],
           schedule: {
             type: "calendar",
             timeZone: payload.timeZone,

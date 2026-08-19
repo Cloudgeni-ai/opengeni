@@ -43,6 +43,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
         rootDirectory: config.rootDirectory,
         nativeBinaryPath: computerNativeBinaryPath,
         maxSessions: config.maxComputerSessions,
+        displaceExistingSessions: config.computerEnvironmentMode === "existing",
         environmentAllocator:
           config.computerEnvironmentMode === "isolated_linux"
             ? new LinuxVirtualComputerEnvironmentAllocator()

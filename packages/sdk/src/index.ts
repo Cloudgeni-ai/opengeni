@@ -48,6 +48,8 @@ export {
   parseMediaGenerationResult,
   parseRetainedGeneratedImageReference,
   parseRetainedGeneratedVideoReference,
+  parseRetainedWorkspaceFileReference,
+  parseSandboxFileArtifactReceipt,
 } from "./retained-artifacts";
 export {
   CodexRealtimeMicrophoneError,
@@ -158,6 +160,25 @@ export {
   normalizeWorkspaceInstructionPolicyRoleKey,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
 } from "./workspace-instruction-policies";
+export type {
+  ActivateWorkspaceLearningPolicyRevisionRequest,
+  CreateWorkspaceLearningPolicyRevisionRequest,
+  GovernedLearningActivationReceipt,
+  GovernedLearningActivationUndoReceipt,
+  GovernedLearningDecisionReceipt,
+  RollbackWorkspaceLearningPolicyRevisionRequest,
+  WorkspaceLearningHistoryOptions,
+  WorkspaceLearningHistoryResponse,
+  WorkspaceLearningMode,
+  WorkspaceLearningOverrideMode,
+  WorkspaceLearningPolicyEvent,
+  WorkspaceLearningPolicyHead,
+  WorkspaceLearningPolicyMutationResponse,
+  WorkspaceLearningPolicyRevision,
+  WorkspaceLearningPolicyRevisionIdentity,
+  WorkspaceLearningSourceOverride,
+  WorkspaceLearningSourceOverrideInput,
+} from "./workspace-learning";
 export {
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_ENTRY_MAX_COUNT,
@@ -226,6 +247,28 @@ export type {
   WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
 export type {
+  CompanyBrainContextReceiptListOptions,
+  CompanyBrainContextReceiptPage,
+  CompanyBrainInspectorTransport,
+  CompanyBrainKnowledgeBrowseRequest,
+  CompanyBrainKnowledgeBrowseResponse,
+  CompanyBrainKnowledgeGetResponse,
+  CompanyBrainKnowledgeRecord,
+  CompanyBrainKnowledgeProposalListOptions,
+  CompanyBrainKnowledgeProposalPage,
+  CompanyBrainKnowledgeSearchRequest,
+  CompanyBrainKnowledgeSearchResponse,
+  CompanyBrainOkfDownload,
+  CompanyBrainOkfPackage,
+} from "./company-brain";
+export {
+  browseCompanyBrainKnowledge,
+  getCompanyBrainKnowledge,
+  listCompanyBrainContextReceipts,
+  listCompanyBrainKnowledgeProposals,
+  searchCompanyBrainKnowledge,
+} from "./company-brain";
+export type {
   MemorySlackImportance,
   MemorySlackPublication,
   MemorySlackPublicationActionRequest,
@@ -250,6 +293,7 @@ export type {
   DeactivatePreferenceRegistryRequest,
   PreferenceRegistryConflictStrategy,
   PreferenceRegistryDescriptor,
+  PreferenceRegistryActivationAuthority,
   PreferenceRegistryDescriptorProvenance,
   PreferenceRegistryDetailResponse,
   PreferenceRegistryEvent,
@@ -308,6 +352,7 @@ export {
   GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  SANDBOX_FILE_ARTIFACT_MAX_BYTES,
   SESSION_EVENT_TYPES,
 } from "./types";
 export type {
@@ -658,6 +703,8 @@ export type {
   NewSessionDraft,
   NewSessionDraftOptions,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
+  SubmitComposerDraftResponse,
   SaveNewSessionDraftRequest,
   SessionCommandReceipt,
   SteerSessionQueueItemRequest,
@@ -706,6 +753,12 @@ export type {
   SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
+  SessionGoalRevision,
+  ListSessionGoalRevisionsOptions,
+  ListSessionGoalRevisionsResponse,
+  RejectSessionGoalRevisionRequest,
+  RejectSessionGoalRevisionResponse,
+  RollbackSessionGoalRevisionRequest,
   SessionGoalCreatedBy,
   SessionGoalStatus,
   SessionHumanInputRequest,
@@ -745,6 +798,8 @@ export type {
   FsListBatchResponse,
   FsReadRequest,
   FsReadResponse,
+  PublishSandboxFileArtifactRequest,
+  SandboxFileArtifactReceipt,
   FsWriteRequest,
   FsWriteResponse,
   FsDeleteRequest,
@@ -906,6 +961,8 @@ export type {
   MachineUpdateState,
   MachineRuntime,
   UpdateMachineAgentResponse,
+  MachineOperationPolicy,
+  UpdateMachineOperationPolicyRequest,
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,
@@ -917,6 +974,7 @@ export type {
   // Self-hosted enrollment UX (design 11): click-Grant approve-page lookup/deny +
   // headless enroll-token mint/exchange.
   EnrollmentOs,
+  ResourceAuthorityScope,
   DeviceEnrollmentLookupRequest,
   DeviceEnrollmentLookupResponse,
   DeviceEnrollmentLookupMachine,

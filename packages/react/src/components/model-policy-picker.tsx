@@ -20,7 +20,6 @@ import {
 import { cn } from "../lib/cn";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
-  coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,
   groupPickerRowsByBillingClass,
@@ -354,17 +353,6 @@ export function ModelPolicyPickerMenu(
   const focusModel =
     effectiveNav.modelId === null ? undefined : findPickerRow(rows, effectiveNav.modelId);
   const selectedRow = findPickerRow(rows, props.model);
-  const { latencyMode, loading, onLatencyModeChange } = props;
-
-  useEffect(() => {
-    if (loading || !selectedRow?.selectable) return;
-    const supportsCurrentMode = runnableLatencyModesForModel(selectedRow.catalog).includes(
-      latencyMode,
-    );
-    if (!supportsCurrentMode && latencyMode !== "standard") {
-      onLatencyModeChange("standard");
-    }
-  }, [latencyMode, loading, onLatencyModeChange, selectedRow]);
 
   const go = (next: PickerNavState, nextDirection: 1 | -1) => {
     setDirection(nextDirection);
@@ -374,7 +362,7 @@ export function ModelPolicyPickerMenu(
   const selectEffort = (row: ClientPickerModelRow, effort: ReasoningEffort) => {
     if (!row.selectable) return;
     if (row.id !== props.model) props.onModelChange(row.id);
-    props.onEffortChange(coerceReasoningEffortForModel(row.catalog, effort));
+    props.onEffortChange(effort);
   };
 
   const pageKey =
@@ -460,9 +448,6 @@ export function ModelPolicyPickerMenu(
                 onClick={() => {
                   if (!activeModel) {
                     props.onModelChange(focusModel.id);
-                    props.onEffortChange(
-                      coerceReasoningEffortForModel(focusModel.catalog, props.effort),
-                    );
                   }
                   props.onLatencyModeChange(
                     activeModel && props.latencyMode === "fast" ? "standard" : "fast",

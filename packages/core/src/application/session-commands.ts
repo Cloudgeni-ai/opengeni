@@ -16,11 +16,7 @@ import type {
   WorkspaceInferenceControlRequest,
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
-import {
-  DraftTimelineAnnotations,
-  latencyModeForMetadata,
-  reasoningEffortForMetadata,
-} from "@opengeni/contracts";
+import { DraftTimelineAnnotations } from "@opengeni/contracts";
 import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
@@ -762,8 +758,8 @@ export async function getHumanComposerDraft(
     annotations: [],
     resources: [],
     model: session.model,
-    reasoningEffort: reasoningEffortForMetadata(session.metadata, "medium"),
-    latencyMode: latencyModeForMetadata(session.metadata, "standard"),
+    reasoningEffort: session.reasoningEffort,
+    latencyMode: session.latencyMode,
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,

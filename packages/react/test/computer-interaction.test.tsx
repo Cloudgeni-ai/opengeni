@@ -30,6 +30,7 @@ const PEER_COMPUTER_SESSION_ID = "55555555-5555-4555-8555-555555555555";
 const PEER_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const ACCOUNT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SANDBOX_GROUP_ID = "66666666-6666-4666-8666-666666666666";
+const ATTACHED_DEVICE_ID = "77777777-7777-4777-8777-777777777777";
 const NOW = "2026-08-10T12:00:00.000Z";
 const PNG_SHA256 = "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460";
 
@@ -81,6 +82,20 @@ function computerSession(
     createdAt: NOW,
     lastUsedAt: NOW,
     failureCode: null,
+  };
+}
+
+function lostAttachedComputer(
+  id = COMPUTER_SESSION_ID,
+  associationSessionId = SESSION_ID,
+): ComputerSession {
+  return {
+    ...computerSession(id, associationSessionId),
+    lifecycle: "lost",
+    failureCode: "controller_transition_expired",
+    placement: { kind: "attached_device", deviceId: ATTACHED_DEVICE_ID },
+    platform: "macos",
+    adapter: "opengeni.ax.v1",
   };
 }
 
@@ -590,9 +605,166 @@ describe("ComputerSession frame stream", () => {
     expect(sockets[0]?.closed).toBe(true);
     await hook.unmount();
   });
+
+  test("does not auto-reconnect after a placement-generation 409", async () => {
+    let attachCalls = 0;
+    const client = fakeClient({
+      attachComputerSession: async () => {
+        attachCalls += 1;
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({ message: "ComputerSession placement instance changed" }),
+        );
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "window-1",
+        }),
+      undefined,
+    );
+    await flush(80);
+    expect(attachCalls).toBe(1);
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toMatch(/placement instance changed/i);
+    await flush(400);
+    expect(attachCalls).toBe(1);
+    await hook.unmount();
+  });
 });
 
 describe("ComputerViewer", () => {
+  test("restores the task's last selected Desktop session", async () => {
+    const current = computerSession();
+    const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [current, peer] }),
+      getComputerSession: async (_workspaceId, computerSessionId) =>
+        computerSessionId === peer.id ? peer : current,
+      listComputerTargets: async (_workspaceId, computerSessionId) => ({
+        computerSessionId,
+        controllerGeneration: "controller-1",
+        targets: [],
+      }),
+    });
+    const changes: Array<string | null> = [];
+    const viewer = (enabled: boolean) => (
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        enabled={enabled}
+        initialComputerSessionId={peer.id}
+        onComputerSessionIdChange={(computerSessionId) => changes.push(computerSessionId)}
+      />
+    );
+    const rendered = await renderComponent(viewer(true));
+    await flush(40);
+
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer Mac");
+    await rendered.rerender(viewer(false));
+    await flush(10);
+    await rendered.rerender(viewer(true));
+    await flush(40);
+    expect(rendered.container.querySelector("summary")?.textContent).toContain("Peer Mac");
+    expect(changes).toEqual([]);
+    await rendered.unmount();
+  });
+
+  test("reuses the task desktop when a hidden surface is enabled", async () => {
+    let createCalls = 0;
+    const current = computerSession();
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [current] }),
+      createComputerSession: async () => {
+        createCalls += 1;
+        return mutation(startingComputerSession());
+      },
+    });
+    const viewer = (enabled: boolean) => (
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        enabled={enabled}
+      />
+    );
+
+    const rendered = await renderComponent(viewer(false));
+    await flush(10);
+    await rendered.rerender(viewer(true));
+    await flush(40);
+
+    expect(createCalls).toBe(0);
+    expect(rendered.container.textContent).toContain("Agent computer");
+    await rendered.unmount();
+  });
+
+  test("never auto-creates a duplicate after this task's desktop was observed", async () => {
+    let listCalls = 0;
+    let createCalls = 0;
+    const current = computerSession();
+    const client = fakeClient({
+      listComputerSessions: async () => ({
+        revision: ++listCalls,
+        sessions: listCalls === 1 ? [current] : [],
+      }),
+      createComputerSession: async () => {
+        createCalls += 1;
+        return mutation(startingComputerSession());
+      },
+    });
+    const viewer = (enabled: boolean) => (
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        enabled={enabled}
+      />
+    );
+
+    const rendered = await renderComponent(viewer(true));
+    await flush(40);
+    await rendered.rerender(viewer(false));
+    await flush(10);
+    await rendered.rerender(viewer(true));
+    await flush(60);
+
+    expect(listCalls).toBe(2);
+    expect(createCalls).toBe(0);
+    await rendered.unmount();
+  });
+
+  test("confirms an empty catalog before lazily creating a desktop", async () => {
+    let listCalls = 0;
+    let createCalls = 0;
+    const current = computerSession();
+    const client = fakeClient({
+      listComputerSessions: async () => ({
+        revision: ++listCalls,
+        sessions: listCalls === 1 ? [] : [current],
+      }),
+      createComputerSession: async () => {
+        createCalls += 1;
+        return mutation(startingComputerSession());
+      },
+    });
+
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(80);
+
+    expect(listCalls).toBe(2);
+    expect(createCalls).toBe(0);
+    expect(rendered.container.textContent).toContain("Agent computer");
+    await rendered.unmount();
+  });
+
   test("lazily creates this agent's computer on first visit even when peers exist", async () => {
     const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");
     const starting = startingComputerSession();
@@ -611,9 +783,44 @@ describe("ComputerViewer", () => {
     await flush(60);
 
     expect(createRequests).toHaveLength(1);
-    expect(createRequests[0]).toMatchObject({ sessionId: SESSION_ID, name: "Computer" });
-    expect(rendered.container.textContent).toContain("Opening computer");
+    expect(createRequests[0]).toMatchObject({ sessionId: SESSION_ID, name: "Desktop" });
+    expect(rendered.container.textContent).toContain("Opening desktop");
     expect(rendered.container.textContent).not.toContain("No computer for this agent");
+    await rendered.unmount();
+  });
+
+  test("does not create a generic desktop after attached Chrome generation loss", async () => {
+    let createCalls = 0;
+    let endCalls = 0;
+    const lost = lostAttachedComputer();
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [lost] }),
+      createComputerSession: async () => {
+        createCalls += 1;
+        return mutation(startingComputerSession());
+      },
+      endComputerSession: async () => {
+        endCalls += 1;
+        return mutation({ ...lost, lifecycle: "ended", failureCode: null }, "end");
+      },
+    });
+
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(80);
+
+    expect(createCalls).toBe(0);
+    expect(endCalls).toBe(1);
+    expect(rendered.container.textContent).toContain("Chrome reconnected");
+    expect(rendered.container.textContent).toContain("Connected Chrome");
+    expect(
+      [...rendered.container.querySelectorAll("button")].some(
+        (button) =>
+          button.textContent?.includes("Try again") ||
+          button.getAttribute("aria-label") === "Open a new desktop",
+      ),
+    ).toBe(false);
     await rendered.unmount();
   });
 
@@ -633,7 +840,7 @@ describe("ComputerViewer", () => {
     await flush(80);
 
     expect(createCalls).toBe(1);
-    expect(rendered.container.textContent).toContain("Computer didn’t open");
+    expect(rendered.container.textContent).toContain("Desktop didn’t open");
     expect(rendered.container.textContent).toContain("No computer placement is available.");
     const retry = [...rendered.container.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Try again",
@@ -826,7 +1033,7 @@ describe("ComputerViewer", () => {
     expect(rendered.container.textContent).toContain("semantic controls stay in the background");
     expect(
       rendered.container.querySelector<HTMLTextAreaElement>(
-        "textarea[aria-label='Computer keyboard input']",
+        "textarea[aria-label='Desktop keyboard input']",
       )?.disabled,
     ).toBe(false);
     await rendered.unmount();
@@ -864,7 +1071,7 @@ describe("ComputerViewer", () => {
     await flush(40);
 
     const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
-      "textarea[aria-label='Computer keyboard input']",
+      "textarea[aria-label='Desktop keyboard input']",
     );
     expect(keyboard?.disabled).toBe(true);
     if (keyboard) {
@@ -934,7 +1141,7 @@ describe("ComputerViewer", () => {
     );
     await flush(40);
     const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
-      "textarea[aria-label='Computer keyboard input']",
+      "textarea[aria-label='Desktop keyboard input']",
     );
     expect(keyboard).not.toBeNull();
     const paste = new Event("paste", { bubbles: true, cancelable: true });

@@ -2,16 +2,24 @@ import {
   decodeEditableArtifactMutationIntent,
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
+  EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
   EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES,
   hashEditableArtifactMutationIntentBytes,
 } from "@opengeni/contracts/editable-artifacts";
 import {
+  COMMITTED_TRANSACTION_PROTOCOL_VERSION,
   decodeCommittedTransactionSummary,
   MAX_COMMITTED_TRANSACTION_BYTES,
 } from "@opengeni/contracts/editable-artifact-committed-transaction";
 import { editableArtifactCodecFor } from "@opengeni/contracts/editable-artifact-codec-registry";
+import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-live";
 import { decodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
+import { SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION } from "@opengeni/contracts/editable-artifact-versions";
 import { EditableArtifactSyncError } from "./errors";
+import {
+  classifyEditableArtifactOpenFailure,
+  type EditableArtifactOpenFailureReporter,
+} from "./open-failure";
 import { EditableArtifactStorageConflictError } from "./storage";
 import type { EditableArtifactStoragePort, EditableArtifactStorageScope } from "./storage";
 import type {
@@ -42,7 +50,6 @@ import type {
   EditableArtifactWorkerKernel,
 } from "./types";
 
-const DEFAULT_PROTOCOL_VERSION = 1;
 const DEFAULT_REPLAY_PAGE_SIZE = 256;
 const DEFAULT_MAX_QUEUE_MESSAGES = 512;
 const DEFAULT_MAX_QUEUE_BYTES = 8 * 1024 * 1024;
@@ -70,7 +77,7 @@ export type CreateEditableArtifactSyncControllerOptions = {
   kernelVersion: string;
   modelSchemaVersion: number;
   commandVersion: number;
-  protocolVersion?: number;
+  protocolVersion: number;
   replayPageSize?: number;
   maxQueuedMessages?: number;
   maxQueuedBytes?: number;
@@ -87,6 +94,8 @@ export type CreateEditableArtifactSyncControllerOptions = {
   maxReconnectAttempts?: number;
   scheduler?: EditableArtifactSyncScheduler;
   clientTransactionIdFactory?: () => string;
+  /** Receives bounded categories/codes only; never workbook or formula content. */
+  onOpenFailure?: EditableArtifactOpenFailureReporter;
   /** Tests/embedded runtimes may inject; defaults to a fresh per-controller UUID. */
   writerReplicaIdFactory?: () => string;
 };
@@ -186,6 +195,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
   private readonly maxReconnectAttempts: number;
   private readonly scheduler: EditableArtifactSyncScheduler;
   private readonly clientTransactionIdFactory: () => string;
+  private readonly onOpenFailure: EditableArtifactOpenFailureReporter | undefined;
 
   private readonly abortController = new AbortController();
   private readonly listeners = new Set<EditableArtifactSyncListener>();
@@ -258,10 +268,10 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     );
     this.modelSchemaVersion = positiveSafeInteger(options.modelSchemaVersion, "modelSchemaVersion");
     this.commandVersion = positiveSafeInteger(options.commandVersion, "commandVersion");
-    this.protocolVersion = positiveSafeInteger(
-      options.protocolVersion ?? DEFAULT_PROTOCOL_VERSION,
-      "protocolVersion",
-    );
+    this.protocolVersion = positiveSafeInteger(options.protocolVersion, "protocolVersion");
+    if (this.protocolVersion !== EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION) {
+      throw new TypeError("protocolVersion is incompatible with the current intent protocol");
+    }
     this.replayPageSize = positiveSafeInteger(
       options.replayPageSize ?? DEFAULT_REPLAY_PAGE_SIZE,
       "replayPageSize",
@@ -324,6 +334,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     this.scheduler = options.scheduler ?? defaultScheduler;
     this.clientTransactionIdFactory =
       options.clientTransactionIdFactory ?? (() => crypto.randomUUID());
+    this.onOpenFailure = options.onOpenFailure;
   }
 
   start(): void {
@@ -331,6 +342,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     this.runTask = this.run().catch((error: unknown) => {
       if (this.abortController.signal.aborted) return;
       const failure = asError(error);
+      this.reportOpenFailure(failure);
       if (failure instanceof EditableArtifactSyncError && failure.code === "unsupported_protocol") {
         this.lastError = failure;
         this.setState("unsupported");
@@ -664,7 +676,8 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     try {
       await this.restoreReplica(stored);
       await this.replacePendingOverlay();
-    } catch {
+    } catch (error) {
+      this.reportOpenFailure(error);
       await this.kernel.reset();
       this.replica = null;
       this.retainedTailTransactions = 0;
@@ -680,8 +693,8 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       stored.snapshot,
       this.artifactId,
       this.modality,
-      this.protocolVersion,
-      this.kernelVersion,
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+      SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
       this.modelSchemaVersion,
       this.maxSnapshotBytes,
     );
@@ -706,7 +719,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
         transaction,
         this.artifactId,
         this.modality,
-        this.protocolVersion,
+        COMMITTED_TRANSACTION_PROTOCOL_VERSION,
         this.maxCommittedTransactionBytes,
       );
       if (transaction.startSequence !== cursor + 1) {
@@ -776,6 +789,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
           delayMs = this.reconnectDelayMs;
         }
         const failure = asError(error);
+        this.reportOpenFailure(failure);
         this.lastError = failure;
         if (failure instanceof EditableArtifactSyncError && failure.requiresSnapshot) {
           this.requireSnapshot = true;
@@ -956,14 +970,11 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     if (bootstrap.modality !== this.modality) {
       throw invalidBootstrap("bootstrap modality does not match the controller");
     }
-    this.requireProtocol(bootstrap.protocolVersion);
-    if (
-      bootstrap.kernelVersion !== this.kernelVersion ||
-      bootstrap.modelSchemaVersion !== this.modelSchemaVersion
-    ) {
+    this.requireLiveProtocol(bootstrap.liveProtocolVersion);
+    if (bootstrap.modelSchemaVersion !== this.modelSchemaVersion) {
       throw new EditableArtifactSyncError(
         "unsupported_protocol",
-        `artifact kernel/schema ${bootstrap.kernelVersion}/${bootstrap.modelSchemaVersion} is incompatible with ${this.kernelVersion}/${this.modelSchemaVersion}`,
+        `artifact schema ${bootstrap.modelSchemaVersion} is incompatible with ${this.modelSchemaVersion}`,
       );
     }
     requireSha256(bootstrap.headStateHash, "bootstrap.headStateHash");
@@ -1035,8 +1046,8 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       snapshot,
       this.artifactId,
       this.modality,
-      this.protocolVersion,
-      this.kernelVersion,
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
+      SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
       this.modelSchemaVersion,
       this.maxSnapshotBytes,
     );
@@ -1136,7 +1147,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
           transaction,
           this.artifactId,
           this.modality,
-          this.protocolVersion,
+          COMMITTED_TRANSACTION_PROTOCOL_VERSION,
           this.maxCommittedTransactionBytes,
         );
         pageBytes += estimateCommittedTransactionBytes(transaction);
@@ -1167,7 +1178,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
         message,
         this.artifactId,
         this.modality,
-        this.protocolVersion,
+        COMMITTED_TRANSACTION_PROTOCOL_VERSION,
         this.maxCommittedTransactionBytes,
       );
       bytes = estimateLiveMessageBytes(message);
@@ -1271,7 +1282,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       transaction,
       this.artifactId,
       this.modality,
-      this.protocolVersion,
+      COMMITTED_TRANSACTION_PROTOCOL_VERSION,
       this.maxCommittedTransactionBytes,
     );
     if (embeddedPending) {
@@ -1568,7 +1579,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
         receipt.committed,
         this.artifactId,
         this.modality,
-        this.protocolVersion,
+        COMMITTED_TRANSACTION_PROTOCOL_VERSION,
         this.maxCommittedTransactionBytes,
       );
       this.recordAcceptedMapping(receipt);
@@ -1641,7 +1652,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
         "sync ticket is not bound to the requested writer replica",
       );
     }
-    this.requireProtocol(ticket.protocolVersion);
+    this.requireLiveProtocol(ticket.protocolVersion);
     boundedNonEmpty(ticket.token, "ticket.token", MAX_TICKET_BYTES);
     const expiresAt = Date.parse(ticket.expiresAt);
     if (!Number.isFinite(expiresAt)) {
@@ -1758,11 +1769,11 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     );
   }
 
-  private requireProtocol(actual: number): void {
-    if (actual !== this.protocolVersion) {
+  private requireLiveProtocol(actual: number): void {
+    if (actual !== EDITABLE_ARTIFACT_LIVE_WIRE_VERSION) {
       throw new EditableArtifactSyncError(
         "unsupported_protocol",
-        `artifact protocol ${actual} is incompatible with client ${this.protocolVersion}`,
+        `live protocol ${actual} is incompatible with ${EDITABLE_ARTIFACT_LIVE_WIRE_VERSION}`,
       );
     }
   }
@@ -1792,6 +1803,16 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
   private rejectLiveWaiters(error: Error): void {
     for (const waiter of this.liveWaiters) waiter.reject(error);
     this.liveWaiters.clear();
+  }
+
+  private reportOpenFailure(error: unknown): void {
+    const event = classifyEditableArtifactOpenFailure(error);
+    if (event === null || this.onOpenFailure === undefined) return;
+    try {
+      this.onOpenFailure(event);
+    } catch {
+      // Observability must never change recovery or availability behavior.
+    }
   }
 
   private fail(error: Error): void {
@@ -1971,7 +1992,7 @@ function validateCommittedTransaction(
   transaction: EditableArtifactCommittedTransaction,
   artifactId: EditableArtifactId,
   modality: EditableArtifactModality,
-  protocolVersion: number,
+  operationProtocolVersion: number,
   maxCommittedTransactionBytes: number,
 ): Readonly<{
   clientTransactionId: string;
@@ -2000,10 +2021,10 @@ function validateCommittedTransaction(
     throw invalidSequence("transaction committedTransactionBytes exceeds the configured bound");
   }
   if (transaction.modality === "spreadsheet") {
-    if (transaction.protocolVersion !== protocolVersion) {
+    if (transaction.operationProtocolVersion !== operationProtocolVersion) {
       throw new EditableArtifactSyncError(
         "unsupported_protocol",
-        `transaction protocol ${transaction.protocolVersion} is incompatible with client ${protocolVersion}`,
+        `transaction operation protocol ${transaction.operationProtocolVersion} is incompatible with ${operationProtocolVersion}`,
       );
     }
     validateFrontier(transaction.causalFrontier, "causalFrontier");
@@ -2015,7 +2036,7 @@ function validateCommittedTransaction(
     }
     if (
       summary.transactionId !== transaction.transactionId ||
-      summary.operationProtocolVersion !== transaction.protocolVersion ||
+      summary.operationProtocolVersion !== transaction.operationProtocolVersion ||
       summary.priorStateHash !== transaction.priorStateHash ||
       summary.stateHash !== transaction.stateHash ||
       !frontiersEqual(summary.resultingCausalFrontier, transaction.causalFrontier)
@@ -2061,8 +2082,8 @@ function validateSnapshot(
   snapshot: EditableArtifactStoredReplica["snapshot"],
   artifactId: EditableArtifactId,
   modality: EditableArtifactModality,
-  protocolVersion: number,
-  kernelVersion: string,
+  operationProtocolVersion: number,
+  snapshotVersion: number,
   modelSchemaVersion: number,
   maxSnapshotBytes: number,
 ): void {
@@ -2076,22 +2097,22 @@ function validateSnapshot(
   positiveSafeInteger(snapshot.modelSchemaVersion, "snapshot.modelSchemaVersion");
   if (snapshot.modality === "spreadsheet") {
     validateFrontier(snapshot.causalFrontier, "snapshot.causalFrontier");
-    if (snapshot.protocolVersion !== protocolVersion) {
+    if (
+      snapshot.operationProtocolVersion !== operationProtocolVersion ||
+      snapshot.snapshotVersion !== snapshotVersion
+    ) {
       throw new EditableArtifactSyncError(
         "unsupported_protocol",
-        `snapshot protocol ${snapshot.protocolVersion} is incompatible with client ${protocolVersion}`,
+        `snapshot operation/state versions ${snapshot.operationProtocolVersion}/${snapshot.snapshotVersion} are incompatible with ${operationProtocolVersion}/${snapshotVersion}`,
       );
     }
   } else {
     requireNativeRevision(snapshot.nativeRevision, "snapshot.nativeRevision");
   }
-  if (
-    snapshot.kernelVersion !== kernelVersion ||
-    snapshot.modelSchemaVersion !== modelSchemaVersion
-  ) {
+  if (snapshot.modelSchemaVersion !== modelSchemaVersion) {
     throw new EditableArtifactSyncError(
       "unsupported_protocol",
-      `snapshot kernel/schema ${snapshot.kernelVersion}/${snapshot.modelSchemaVersion} is incompatible with ${kernelVersion}/${modelSchemaVersion}`,
+      `snapshot schema ${snapshot.modelSchemaVersion} is incompatible with ${modelSchemaVersion}`,
     );
   }
   if (!(snapshot.bytes instanceof Uint8Array)) {
@@ -2131,7 +2152,7 @@ function validateLiveMessage(
   message: EditableArtifactLiveMessage,
   artifactId: EditableArtifactId,
   modality: EditableArtifactModality,
-  protocolVersion: number,
+  operationProtocolVersion: number,
   maxCommittedTransactionBytes: number,
 ): void {
   if (!message || typeof message !== "object") {
@@ -2142,7 +2163,7 @@ function validateLiveMessage(
       message.transaction,
       artifactId,
       modality,
-      protocolVersion,
+      operationProtocolVersion,
       maxCommittedTransactionBytes,
     );
     return;
@@ -2198,7 +2219,7 @@ function estimateCommittedTransactionBytes(
 function requireStateHash(actual: string, expected: string, source: string): void {
   if (actual !== expected) {
     throw new EditableArtifactSyncError(
-      "kernel_diverged",
+      "authored_causal_mismatch",
       `${source} produced state hash ${actual}; expected ${expected}`,
       { retryable: true, requiresSnapshot: true },
     );
@@ -2209,7 +2230,7 @@ function requireDigest(actual: string, expected: string, source: string): void {
   requireSha256(actual, `${source} computed digest`);
   if (actual !== expected) {
     throw new EditableArtifactSyncError(
-      "kernel_diverged",
+      "byte_corruption",
       `${source} bytes produced digest ${actual}; expected ${expected}`,
       { retryable: true, requiresSnapshot: true },
     );
@@ -2230,7 +2251,7 @@ function requireFrontier(
     )
   ) {
     throw new EditableArtifactSyncError(
-      "kernel_diverged",
+      "authored_causal_mismatch",
       `${source} causal frontier does not match the authoritative barrier`,
       { retryable: true, requiresSnapshot: true },
     );
@@ -2416,7 +2437,7 @@ function requireNativeRevisionEqual(actual: number, expected: number, source: st
   requireNativeRevision(expected, `${source} expected native revision`);
   if (actual !== expected) {
     throw new EditableArtifactSyncError(
-      "kernel_diverged",
+      "authored_causal_mismatch",
       `${source} native revision ${actual} does not match ${expected}`,
       { retryable: true, requiresSnapshot: true },
     );

@@ -42,6 +42,8 @@ export type {
   NoticeItem,
   ReasoningItem,
   SandboxItem,
+  StartupPhase,
+  StartupPhaseItem,
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,

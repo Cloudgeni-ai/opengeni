@@ -88,6 +88,12 @@ config:
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
+  # Canonical organization-tenancy authority activation. Pinned to the
+  # reversible pre-activation posture so an upgrade can never cross the one-way
+  # boundary implicitly. Flip to "true" only after proving the preconditions in
+  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
+  # rollback.
+  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
@@ -720,9 +726,11 @@ migrations:
     pullPolicy: IfNotPresent
   secret:
     # Separate secret for migration/admin-only settings:
-    # OPENGENI_MIGRATIONS_DATABASE_URL plus the exact opengeni_app username and
-    # password consumed by db:provision-roles. Production must not reuse the
-    # runtime Secret here; API/worker receive only the restricted runtime URL.
+    # OPENGENI_MIGRATIONS_DATABASE_URL, the comma-separated exact API/worker
+    # login list OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES, plus the exact
+    # application username/password consumed by db:provision-roles. Include old
+    # and new runtime identities during a role rotation. Production must not
+    # reuse the runtime Secret here; API/worker receive only the restricted URL.
     # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime
@@ -752,8 +760,11 @@ migrations:
 catalogImport:
   enabled: true
   snapshotPath: /app/data/catalog/integrations-snapshot.json
-  # Keep deployment success independent of hundreds of third-party logo hosts.
-  # Set false to fetch, validate, and self-host logos during the import.
+  # Skip network logo fetches for the uncurated long tail so deployment success
+  # stays independent of hundreds of third-party logo hosts. Curated connectors
+  # still get their logos: the importer copies the vendored assets committed
+  # under data/catalog/logos/ into object storage regardless of this flag. Set
+  # false to also fetch, validate, and self-host the long tail during import.
   skipLogos: true
   backoffLimit: 3
   annotations:
@@ -1094,6 +1105,17 @@ observability:
     # Must cover at least three configured sandbox reaper periods; Helm rejects
     # an incompatible pairing before generating a rule that would age out live data.
     inventoryFreshnessSeconds: 300
+    # Cumulative p95 startup SLOs, measured from the durable turn queue time.
+    # Keep these aligned with the canonical Turn Startup dashboard annotations.
+    turnStartupQueueP95Seconds: 5
+    turnStartupProviderDispatchP95Seconds: 60
+    turnStartupFirstByteP95Seconds: 120
+    # Exclusive logical-turn first-byte completions divided by completed plus
+    # terminal failed-without-byte milestones over the alert window. A failed
+    # turn after dispatch reduces availability instead of disappearing from
+    # latency quantiles; later tool-loop failures cannot downgrade a success.
+    turnStartupFirstByteAvailabilityRatio: 0.95
+    turnStartupMinSamples: 5
     labels: {}
     annotations: {}
     rules: []

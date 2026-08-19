@@ -167,6 +167,8 @@ async function createRunningTurn(db: Database, grant: WorkspaceGrant) {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId, (scoped) =>

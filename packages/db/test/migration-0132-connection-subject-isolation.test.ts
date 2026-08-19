@@ -220,14 +220,55 @@ describe("0132 connection subject isolation migration", () => {
     await insertInstallation("mcp:ambiguous", ambiguousId);
     await insertInstallation("mcp:shared", sharedBotId);
 
+    const [productionAuthorityTrigger] = await admin<{ definition: string }[]>`
+      select pg_get_functiondef(
+        'opengeni_private.bind_connection_authority()'::regprocedure
+      ) as definition
+    `;
+    if (!productionAuthorityTrigger) {
+      throw new Error("connection authority trigger function is missing");
+    }
+
     await admin.begin(async (sql) => {
+      // This shared fixture is already at the latest schema, while the SQL under
+      // test originally ran before 0255 made connection ownership immutable.
+      // Recreate only that historical transition, then restore the production
+      // trigger function before committing the replay.
+      await sql.unsafe(`
+        CREATE OR REPLACE FUNCTION opengeni_private.bind_connection_authority()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = public, pg_catalog, pg_temp
+        AS $body$
+        BEGIN
+          IF OLD.subject_id IS NULL AND NEW.subject_id IS NOT NULL THEN
+            NEW.authority_scope := 'legacy_user';
+            NEW.authority_id := NULL;
+            NEW.owner_organization_membership_id := NULL;
+            NEW.origin_workspace_id := NEW.workspace_id;
+            RETURN NEW;
+          END IF;
+          RAISE EXCEPTION '0132 replay may only backfill a previously shared owner'
+            USING ERRCODE = '23514';
+        END
+        $body$;
+      `);
       await sql.unsafe(migrationSql);
+      await sql.unsafe(productionAuthorityTrigger.definition);
     });
 
     const rows = await admin<
-      Array<{ id: string; subjectId: string | null; kind: string; providerDomain: string }>
+      Array<{
+        id: string;
+        subjectId: string | null;
+        kind: string;
+        providerDomain: string;
+        authorityScope: string;
+      }>
     >`
-      select id, subject_id as "subjectId", kind, provider_domain as "providerDomain"
+      select id, subject_id as "subjectId", kind, provider_domain as "providerDomain",
+        authority_scope as "authorityScope"
       from connections
       where workspace_id = ${workspace!.id}`;
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -236,10 +277,25 @@ describe("0132 connection subject isolation migration", () => {
     expect(byId.get(aliceOlderId)?.subjectId).toBe("subject-alice");
     expect(byId.get(aliceRevokedId)?.subjectId).toBe("subject-alice");
     expect(byId.get(bobId)?.subjectId).toBe("subject-bob");
+    expect(byId.get(aliceId)?.authorityScope).toBe("legacy_user");
+    expect(byId.get(bobId)?.authorityScope).toBe("legacy_user");
     expect(byId.get(ambiguousId)?.subjectId).toBeNull();
     expect(byId.get(manualSlackId)?.subjectId).toBeNull();
     expect(byId.get(nonSlackId)?.subjectId).toBeNull();
-    expect(byId.get(sharedBotId)).toMatchObject({ subjectId: null, kind: "app_install" });
+    expect(byId.get(sharedBotId)).toMatchObject({
+      subjectId: null,
+      kind: "app_install",
+    });
+
+    await expect(
+      admin.begin(async (sql) => {
+        await sql`
+          update connections
+          set subject_id = 'subject-reassigned'
+          where id = ${aliceId}
+        `;
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
 
     const [equalMigrationTimestamps] = await admin<
       Array<{ distinctUpdatedAt: number; rowCount: number }>
@@ -247,7 +303,10 @@ describe("0132 connection subject isolation migration", () => {
       select count(distinct updated_at)::int as "distinctUpdatedAt", count(*)::int as "rowCount"
       from connections
       where id in (${aliceId}, ${aliceCanonicalId}, ${aliceOlderId}, ${aliceRevokedId})`;
-    expect(equalMigrationTimestamps).toEqual({ distinctUpdatedAt: 1, rowCount: 4 });
+    expect(equalMigrationTimestamps).toEqual({
+      distinctUpdatedAt: 1,
+      rowCount: 4,
+    });
 
     const installations = await admin<
       Array<{ capabilityId: string; ref: Record<string, unknown> }>
@@ -263,7 +322,9 @@ describe("0132 connection subject isolation migration", () => {
       kind: "oauth2",
       subjectScope: "subject",
     });
-    expect(refs.get("mcp:ambiguous")).toMatchObject({ connectionId: ambiguousId });
+    expect(refs.get("mcp:ambiguous")).toMatchObject({
+      connectionId: ambiguousId,
+    });
     expect(refs.get("mcp:shared")).toMatchObject({ connectionId: sharedBotId });
 
     const app = postgres(shared!.appUrl, { max: 1 });

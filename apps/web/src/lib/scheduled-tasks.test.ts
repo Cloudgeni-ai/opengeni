@@ -25,6 +25,8 @@ function scheduledTask(): ScheduledTask {
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
     action: { kind: "agent_turn" },
+    authorityRevision: 1,
+    executionDigest: "a".repeat(64),
     agentConfig: {
       prompt: "Use the selected OpenGeni Slack bot",
       resources: [],
@@ -53,6 +55,8 @@ describe("scheduled task Slack bot selection", () => {
           accountId: scheduledTask().accountId,
           workspaceId: scheduledTask().workspaceId,
           taskId: scheduledTask().id,
+          taskAuthorityRevision: null,
+          taskExecutionDigest: null,
           status: "succeeded",
           triggerType: "manual",
           scheduledAt: null,

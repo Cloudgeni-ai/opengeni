@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       controller_sha:
-        description: Exact retained trusted Version-PR base SHA.
+        description: Exact retained trusted controller SHA.
         required: true
         type: string
 

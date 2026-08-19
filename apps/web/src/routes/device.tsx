@@ -16,7 +16,7 @@ import {
   type EnrollmentConsentMachine,
   type EnrollmentConsentPhase,
 } from "@opengeni/react/machines";
-import type { DeviceEnrollmentLookupResponse } from "@opengeni/sdk";
+import type { DeviceEnrollmentLookupResponse, ResourceAuthorityScope } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { LaptopIcon, LogInIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -24,6 +24,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
+import { hasAccountPermission } from "@/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
  * shape (the server is authoritative) — we just trim + uppercase what the user
@@ -48,7 +49,7 @@ function toConsentMachine(
 }
 
 export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string | undefined }) {
-  const { client, authSession, clientConfig } = useAppContext();
+  const { client, authSession, clientConfig, accessContext } = useAppContext();
 
   // The code we are resolving. Seed from the URL (the agent's
   // verificationUriComplete) when present; otherwise the user pastes it below.
@@ -131,7 +132,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
     );
   }
 
-  async function approve(allowScreenControl: boolean) {
+  async function approve(allowScreenControl: boolean, scope: ResourceAuthorityScope) {
     if (!lookup) {
       return;
     }
@@ -141,6 +142,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       await client.approveDeviceEnrollment(lookup.workspaceId, {
         userCode: lookup.userCode,
         allowScreenControl,
+        scope,
       });
       setPhase("approved");
     } catch (error) {
@@ -185,7 +187,15 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
         userCode={lookup ? lookup.userCode : userCode}
         machine={lookup ? toConsentMachine(lookup.machine) : EMPTY_MACHINE}
         phase={phase}
-        onApprove={(allowScreenControl) => void approve(allowScreenControl)}
+        allowOrganizationScope={Boolean(
+          lookup &&
+          accessContext.workspaceGrants.some(
+            (grant) =>
+              grant.workspaceId === lookup.workspaceId &&
+              hasAccountPermission(accessContext, grant.accountId, "account:admin"),
+          ),
+        )}
+        onApprove={(allowScreenControl, scope) => void approve(allowScreenControl, scope)}
         onDeny={() => void deny()}
         errorMessage={errorMessage}
       />

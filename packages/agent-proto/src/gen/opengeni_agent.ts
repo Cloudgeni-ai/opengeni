@@ -1019,6 +1019,18 @@ export interface Capabilities {
    * one machine may host multiple Chrome profiles.
    */
   browserBridge: boolean;
+  /**
+   * The runner enforces the optional per-connection operation memory policy on
+   * every contained exec/git child. A control plane must fail closed rather than
+   * send a configured policy to a runner that does not advertise this bit.
+   */
+  operationResourcePolicy: boolean;
+  /**
+   * The runner additionally understands and enforces cpu_max_millicores. This is
+   * separate from the memory-policy bit so a newer control plane never sends a
+   * CPU quota that an older memory-only runner would ignore as an unknown field.
+   */
+  operationCpuQuota: boolean;
 }
 
 /**
@@ -1164,6 +1176,29 @@ export interface EnrollmentCredentials {
    * presents an empty token the relay rejects, surfacing the gap loudly).
    */
   relayToken: string;
+}
+
+/**
+ * Optional policy selected for one Connected Machine enrollment. Absence means
+ * the control plane requests no limit; there is deliberately no runner-created
+ * default quota. cpu_max_millicores is an exact, period-independent public ratio.
+ * The Linux runner selects a cgroup-v2 period within the kernel's 1ms..1s ABI so
+ * every positive uint32 millicore value is represented without rounding or
+ * silent loosening. Local runner policy and ancestor OS/cgroup policy may tighten
+ * these values but never loosen them.
+ */
+export interface OperationResourcePolicy {
+  memoryMaxBytes?: string | undefined;
+  memoryHighBytes?:
+    | string
+    | undefined;
+  /**
+   * Exact thousandths of one CPU (1000 = one CPU). Absence is unlimited.
+   * The runner preserves the kernel cpu.max period when it can represent this
+   * ratio exactly, otherwise minimally lengthens it to satisfy cgroup v2's 1 ms
+   * minimum quota/period and 1 s maximum period without rounding the ratio.
+   */
+  cpuMaxMillicores?: number | undefined;
 }
 
 export interface ExecRequest {
@@ -2018,6 +2053,12 @@ export interface OpAck {
 export interface ControlRequest {
   requestId: string;
   epoch: number;
+  /**
+   * Per-connection policy snapshot attached to the operation request. It lives
+   * on the envelope so both legacy exec/git and replayable OpStart share one
+   * contract. Absent means unrestricted by the control plane.
+   */
+  resourcePolicy: OperationResourcePolicy | undefined;
   op:
     | { $case: "ping"; ping: PingRequest }
     | { $case: "hello"; hello: Hello }
@@ -2785,6 +2826,8 @@ function createBaseCapabilities(): Capabilities {
     desktopUnavailableReason: "",
     opStream: false,
     browserBridge: false,
+    operationResourcePolicy: false,
+    operationCpuQuota: false,
   };
 }
 
@@ -2822,6 +2865,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.browserBridge !== false) {
       writer.uint32(88).bool(message.browserBridge);
+    }
+    if (message.operationResourcePolicy !== false) {
+      writer.uint32(96).bool(message.operationResourcePolicy);
+    }
+    if (message.operationCpuQuota !== false) {
+      writer.uint32(104).bool(message.operationCpuQuota);
     }
     return writer;
   },
@@ -2921,6 +2970,22 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.browserBridge = reader.bool();
           continue;
         }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.operationResourcePolicy = reader.bool();
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.operationCpuQuota = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2963,6 +3028,16 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.browser_bridge)
         ? globalThis.Boolean(object.browser_bridge)
         : false,
+      operationResourcePolicy: isSet(object.operationResourcePolicy)
+        ? globalThis.Boolean(object.operationResourcePolicy)
+        : isSet(object.operation_resource_policy)
+        ? globalThis.Boolean(object.operation_resource_policy)
+        : false,
+      operationCpuQuota: isSet(object.operationCpuQuota)
+        ? globalThis.Boolean(object.operationCpuQuota)
+        : isSet(object.operation_cpu_quota)
+        ? globalThis.Boolean(object.operation_cpu_quota)
+        : false,
     };
   },
 
@@ -3001,6 +3076,12 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.browserBridge !== false) {
       obj.browserBridge = message.browserBridge;
     }
+    if (message.operationResourcePolicy !== false) {
+      obj.operationResourcePolicy = message.operationResourcePolicy;
+    }
+    if (message.operationCpuQuota !== false) {
+      obj.operationCpuQuota = message.operationCpuQuota;
+    }
     return obj;
   },
 
@@ -3022,6 +3103,8 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.desktopUnavailableReason = object.desktopUnavailableReason ?? "";
     message.opStream = object.opStream ?? false;
     message.browserBridge = object.browserBridge ?? false;
+    message.operationResourcePolicy = object.operationResourcePolicy ?? false;
+    message.operationCpuQuota = object.operationCpuQuota ?? false;
     return message;
   },
 };
@@ -4430,6 +4513,110 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     message.consentedWholeMachine = object.consentedWholeMachine ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
     message.relayToken = object.relayToken ?? "";
+    return message;
+  },
+};
+
+function createBaseOperationResourcePolicy(): OperationResourcePolicy {
+  return { memoryMaxBytes: undefined, memoryHighBytes: undefined, cpuMaxMillicores: undefined };
+}
+
+export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
+  encode(message: OperationResourcePolicy, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.memoryMaxBytes !== undefined) {
+      writer.uint32(8).uint64(message.memoryMaxBytes);
+    }
+    if (message.memoryHighBytes !== undefined) {
+      writer.uint32(16).uint64(message.memoryHighBytes);
+    }
+    if (message.cpuMaxMillicores !== undefined) {
+      writer.uint32(24).uint32(message.cpuMaxMillicores);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationResourcePolicy {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationResourcePolicy();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.memoryMaxBytes = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.memoryHighBytes = reader.uint64().toString();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.cpuMaxMillicores = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationResourcePolicy {
+    return {
+      memoryMaxBytes: isSet(object.memoryMaxBytes)
+        ? globalThis.String(object.memoryMaxBytes)
+        : isSet(object.memory_max_bytes)
+        ? globalThis.String(object.memory_max_bytes)
+        : undefined,
+      memoryHighBytes: isSet(object.memoryHighBytes)
+        ? globalThis.String(object.memoryHighBytes)
+        : isSet(object.memory_high_bytes)
+        ? globalThis.String(object.memory_high_bytes)
+        : undefined,
+      cpuMaxMillicores: isSet(object.cpuMaxMillicores)
+        ? globalThis.Number(object.cpuMaxMillicores)
+        : isSet(object.cpu_max_millicores)
+        ? globalThis.Number(object.cpu_max_millicores)
+        : undefined,
+    };
+  },
+
+  toJSON(message: OperationResourcePolicy): unknown {
+    const obj: any = {};
+    if (message.memoryMaxBytes !== undefined) {
+      obj.memoryMaxBytes = message.memoryMaxBytes;
+    }
+    if (message.memoryHighBytes !== undefined) {
+      obj.memoryHighBytes = message.memoryHighBytes;
+    }
+    if (message.cpuMaxMillicores !== undefined) {
+      obj.cpuMaxMillicores = Math.round(message.cpuMaxMillicores);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationResourcePolicy>, I>>(base?: I): OperationResourcePolicy {
+    return OperationResourcePolicy.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationResourcePolicy>, I>>(object: I): OperationResourcePolicy {
+    const message = createBaseOperationResourcePolicy();
+    message.memoryMaxBytes = object.memoryMaxBytes ?? undefined;
+    message.memoryHighBytes = object.memoryHighBytes ?? undefined;
+    message.cpuMaxMillicores = object.cpuMaxMillicores ?? undefined;
     return message;
   },
 };
@@ -13085,7 +13272,7 @@ export const OpAck: MessageFns<OpAck> = {
 };
 
 function createBaseControlRequest(): ControlRequest {
-  return { requestId: "", epoch: 0, op: undefined };
+  return { requestId: "", epoch: 0, resourcePolicy: undefined, op: undefined };
 }
 
 export const ControlRequest: MessageFns<ControlRequest> = {
@@ -13095,6 +13282,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
     }
     if (message.epoch !== 0) {
       writer.uint32(16).uint32(message.epoch);
+    }
+    if (message.resourcePolicy !== undefined) {
+      OperationResourcePolicy.encode(message.resourcePolicy, writer.uint32(26).fork()).join();
     }
     switch (message.op?.$case) {
       case "ping":
@@ -13212,6 +13402,14 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           }
 
           message.epoch = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.resourcePolicy = OperationResourcePolicy.decode(reader, reader.uint32());
           continue;
         }
         case 10: {
@@ -13489,6 +13687,11 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         ? globalThis.String(object.request_id)
         : "",
       epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
+      resourcePolicy: isSet(object.resourcePolicy)
+        ? OperationResourcePolicy.fromJSON(object.resourcePolicy)
+        : isSet(object.resource_policy)
+        ? OperationResourcePolicy.fromJSON(object.resource_policy)
+        : undefined,
       op: isSet(object.ping)
         ? { $case: "ping", ping: PingRequest.fromJSON(object.ping) }
         : isSet(object.hello)
@@ -13627,6 +13830,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
     if (message.epoch !== 0) {
       obj.epoch = Math.round(message.epoch);
     }
+    if (message.resourcePolicy !== undefined) {
+      obj.resourcePolicy = OperationResourcePolicy.toJSON(message.resourcePolicy);
+    }
     if (message.op?.$case === "ping") {
       obj.ping = PingRequest.toJSON(message.op.ping);
     } else if (message.op?.$case === "hello") {
@@ -13698,6 +13904,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
     const message = createBaseControlRequest();
     message.requestId = object.requestId ?? "";
     message.epoch = object.epoch ?? 0;
+    message.resourcePolicy = (object.resourcePolicy !== undefined && object.resourcePolicy !== null)
+      ? OperationResourcePolicy.fromPartial(object.resourcePolicy)
+      : undefined;
     switch (object.op?.$case) {
       case "ping": {
         if (object.op?.ping !== undefined && object.op?.ping !== null) {

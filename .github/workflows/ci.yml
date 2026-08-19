@@ -527,6 +527,25 @@ jobs:
         with:
           name: ci-impact-plan
 
+      - name: Stabilize Ubuntu package downloads
+        run: |
+          for source_file in \
+            /etc/apt/apt-mirrors.txt \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources; do
+            if [[ -f "$source_file" ]]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                "$source_file"
+            fi
+          done
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
+
       # Firefox is included because the impact plan can select the artifact
       # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts), which
       # launch Firefox; a Chromium-only install fails those shards on any
@@ -641,6 +660,25 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Stabilize Ubuntu package downloads
+        run: |
+          for source_file in \
+            /etc/apt/apt-mirrors.txt \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources; do
+            if [[ -f "$source_file" ]]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                "$source_file"
+            fi
+          done
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       - name: Install pinned Chromium runtime
         if: ${{ matrix.lane != 'workbench' }}
@@ -779,6 +817,14 @@ jobs:
             /tmp/knowledge-surfaces-768-dark-documents.png
             /tmp/knowledge-surfaces-desktop-light-memory.png
             /tmp/knowledge-surfaces-desktop-dark-memory.png
+            /tmp/company-brain-320-light-overview.png
+            /tmp/company-brain-320-light-attention.png
+            /tmp/company-brain-375-dark-overview.png
+            /tmp/company-brain-375-dark-attention.png
+            /tmp/company-brain-768-light-overview.png
+            /tmp/company-brain-768-light-attention.png
+            /tmp/company-brain-desktop-dark-overview.png
+            /tmp/company-brain-desktop-dark-attention.png
 
       - name: Upload workbench visual evidence
         if: >-
@@ -879,6 +925,25 @@ jobs:
 
       - name: Reproduce committed modality WASM packages from clean Rust sources
         run: bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
+
+      - name: Stabilize Ubuntu package downloads
+        run: |
+          for source_file in \
+            /etc/apt/apt-mirrors.txt \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources; do
+            if [[ -f "$source_file" ]]; then
+              sudo sed -i \
+                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+                "$source_file"
+            fi
+          done
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       - name: Install Chromium for packed WASM package proof
         run: bun x playwright install --with-deps --only-shell chromium

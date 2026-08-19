@@ -274,7 +274,7 @@ and receives the pending updates at its normal boundary. Explicit `/compact`
 also remains runnable; it does not consume those updates, but a successful
 checkpoint supplies newer finished-turn truth so the existing pending batch can
 run next. This gate neither creates queue work nor consumes a goal
-continuation/no-progress counter.
+continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
 the worker observes it at the next model boundary and retries sampling in the

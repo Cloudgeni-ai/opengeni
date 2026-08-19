@@ -224,6 +224,8 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(db, {
@@ -3656,19 +3658,32 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(routeMismatch.blockers).toContain("exact_route_mismatch");
 
     const possibleWriterAttemptId = crypto.randomUUID();
-    await admin`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id,
-        execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${possibleWriterAttemptId}, ${ids.accountId}, ${ids.workspaceId},
-        ${attempt.sessionId}, ${attempt.turnId},
-        ${attempt.executionGeneration + 1}, 'running',
-        ${`session-${attempt.sessionId}`}, ${crypto.randomUUID()},
-        ${`possible-writer-${possibleWriterAttemptId}`}, 0, '{}'::jsonb
-      )`;
+    await admin.begin(async (tx) => {
+      await tx`
+        update sessions
+        set active_turn_id = ${attempt.turnId}, status = 'running'
+        where account_id = ${ids.accountId} and workspace_id = ${ids.workspaceId}
+          and id = ${attempt.sessionId}`;
+      await tx`
+        update session_turns
+        set active_attempt_id = ${possibleWriterAttemptId},
+          execution_generation = ${attempt.executionGeneration + 1}, status = 'running'
+        where account_id = ${ids.accountId} and workspace_id = ${ids.workspaceId}
+          and session_id = ${attempt.sessionId} and id = ${attempt.turnId}`;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${possibleWriterAttemptId}, ${ids.accountId}, ${ids.workspaceId},
+          ${attempt.sessionId}, ${attempt.turnId},
+          ${attempt.executionGeneration + 1}, 'running',
+          ${`session-${attempt.sessionId}`}, ${crypto.randomUUID()},
+          ${`possible-writer-${possibleWriterAttemptId}`}, 0, '{}'::jsonb
+        )`;
+    });
     await insertHolder(
       ids,
       leaseId,
@@ -3687,8 +3702,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       delete from sandbox_lease_holders
       where lease_id = ${leaseId}
         and holder_id = ${sandboxLeaseHolderIdForAttempt(possibleWriterAttemptId)}`;
-    await admin`
-      delete from session_turn_attempts where id = ${possibleWriterAttemptId}`;
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await tx`
+        update session_turns set active_attempt_id = null, status = 'recovering'
+        where account_id = ${ids.accountId} and workspace_id = ${ids.workspaceId}
+          and session_id = ${attempt.sessionId} and id = ${attempt.turnId}`;
+      await tx`
+        delete from session_turn_attempts where id = ${possibleWriterAttemptId}`;
+    });
 
     const [interruptionReceipt] = await admin<{ id: string }[]>`
       insert into session_command_receipts (

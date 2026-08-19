@@ -102,7 +102,7 @@ impl ArtifactCollaborationSession {
             .map_err(binding_error)
     }
 
-    /// Opens one canonical OGACRD01 full-state snapshot.
+    /// Opens one canonical OGACRD02 full-state snapshot.
     #[napi(factory, js_name = "open", strict)]
     pub fn open(snapshot: Buffer) -> Result<Self> {
         protocol::CollaborationBindingSession::open(snapshot.as_ref())
@@ -123,7 +123,7 @@ impl ArtifactCollaborationSession {
             .map_err(binding_error)
     }
 
-    /// Replays one whole canonical OGACO001 committed transaction atomically.
+    /// Replays one whole canonical OGACO002 committed transaction atomically.
     #[napi(js_name = "applyCommitted", strict)]
     pub fn apply_committed(&mut self, operation_envelope: Buffer) -> Result<()> {
         self.inner
@@ -131,7 +131,7 @@ impl ArtifactCollaborationSession {
             .map_err(binding_error)
     }
 
-    /// Returns the full canonical OGACRD01 snapshot.
+    /// Returns the full canonical OGACRD02 snapshot.
     #[napi(js_name = "snapshot", strict)]
     pub fn snapshot(&self) -> Result<Buffer> {
         self.inner
@@ -149,7 +149,7 @@ impl ArtifactCollaborationSession {
             .map_err(binding_error)
     }
 
-    /// Returns SHA-256 of the exact canonical OGACRD01 snapshot.
+    /// Returns SHA-256 of the exact canonical OGACRD02 snapshot.
     #[napi(js_name = "stateHash", strict)]
     pub fn state_hash(&self) -> Result<String> {
         self.inner.state_hash().map_err(binding_error)
@@ -291,7 +291,7 @@ mod tests {
         decode_snapshot, AtomicBatch, Cell, CellBlock, CellCoord, Command, StableId,
     };
 
-    const COLLABORATION_PARITY_INTENT: &str = "4f47415458303031010001000100010020003131313131313131313131313131313131313131313131313131313131313131110062696e64696e672e7061726974792e76311000303030303030303030303030343534350100000000000000000000000000000000000000003c0000004f4741534330303101000000010000001c0000000000000000020000000000000045450000000000000600000050617269747900d2d2aa22ef1d9d0a";
+    const COLLABORATION_PARITY_INTENT: &str = "4f47415458303031010001000200020020003131313131313131313131313131313131313131313131313131313131313131160062696e64696e672e7061726974792e63757272656e741000303030303030303030303030343534350100000000000000000000000000000000000000003c0000004f4741534330303202000000010000001c0000000000000000020000000000000045450000000000000600000050617269747900e0e621d2780145b7";
     const EMPTY_FRONTIER: &str = "4f4741434630303101000000000000003fb3b04f29ccf857";
 
     fn unhex(value: &str) -> Vec<u8> {

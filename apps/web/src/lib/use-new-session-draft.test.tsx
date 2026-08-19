@@ -29,6 +29,7 @@ function editable(overrides: Partial<NewSessionDraftEditable> = {}): NewSessionD
     toolsProvided: false,
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     options: {},
     ...overrides,
   };

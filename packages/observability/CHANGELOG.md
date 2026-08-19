@@ -1,5 +1,82 @@
 # @opengeni/observability
 
+## 0.8.0
+
+### Minor Changes
+
+- 747222a: Add content-free compatibility-lane telemetry for the organization-tenancy migration. `opengeni_tenancy_compatibility_lane_uses_total{lane}` counts live uses of a bounded legacy lane - a `legacy_user` connection resolved for accepted use, a workspace-scope connection ref with no connection id taking the pre-snapshot resolution, and a `/workspace` mutation refused `authority_unattributed`. The closed lane set is `TENANCY_COMPATIBILITY_LANES`; the lane name is the only label, an unreviewed name is ignored instead of minting a series, every lane is published at zero on startup so a dormant lane is distinguishable from an unwired one, and a registry failure is swallowed so counting can never change an authorization or credential outcome. This is a use rate, deliberately not a burndown gauge: `docs/organization-tenancy.md` records why none of the tenancy compatibility populations is drainable on the current write paths, and which lanes are intentionally left uninstrumented.
+
+### Patch Changes
+
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+
+## 0.7.11
+
+### Patch Changes
+
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+
+## 0.7.10
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+
+## 0.7.9
+
+### Patch Changes
+
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+
+## 0.7.8
+
+### Patch Changes
+
+- 31231dc: Expose bounded configured and effective sandbox rollout state for every API and worker workload revision.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+
 ## 0.7.7
 
 ### Patch Changes

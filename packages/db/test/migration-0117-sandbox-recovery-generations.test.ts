@@ -380,7 +380,9 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
     await withBlankDatabase("migration-0117-dedicated", async (admin, databaseUrl) => {
       await ensureAppRole(admin);
       const schema = `sandbox_recovery_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      await migrate(databaseUrl, schema);
+      await migrate(databaseUrl, schema, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
       await provisionRoles(databaseUrl, {
         targetSchema: schema,
         rlsStrategy: "force",
@@ -558,6 +560,8 @@ async function seedScope(
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
       });
     } finally {

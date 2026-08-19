@@ -166,6 +166,8 @@ async function seedSession(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "modal",
     sandboxGroupId: input.groupId,
   });
@@ -497,6 +499,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       accountId,
       workspaceId,
       temporalScheduleId,
+      scheduledTaskId: null,
+      connectorCleanupSubjectId: null,
+      connectorCleanupSnapshot: null,
+      connectorCleanupCompletedAt: null,
       claimId: cleanup.claimId,
       attemptCount: 1,
     });
@@ -545,6 +551,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         accountId,
         workspaceId,
         temporalScheduleId,
+        scheduledTaskId: null,
+        connectorCleanupSubjectId: null,
+        connectorCleanupSnapshot: null,
+        connectorCleanupCompletedAt: null,
         claimId: successorClaimId,
         attemptCount: 2,
       },
@@ -746,6 +756,128 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const row = await readRow(workspaceId, groupId);
     expect(row?.refcount).toBe(N);
     expect(row?.liveness).toBe("warming");
+  }, 60_000);
+
+  test("(0281) a viewer acquire records the authority claims; re-acquire is monotone", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const subject = `user:${crypto.randomUUID()}`;
+    const readHolder = async () => {
+      const rows = await admin`
+        select viewer_subject_id, viewer_authority_epoch
+        from sandbox_lease_holders
+        where workspace_id = ${workspaceId} and holder_id = 'authority-viewer'
+      `;
+      return rows[0] as
+        | { viewer_subject_id: string | null; viewer_authority_epoch: number | null }
+        | undefined;
+    };
+
+    // First attach carries the claims -> recorded on the holder row.
+    const first = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      viewerSubjectId: subject,
+      viewerAuthorityEpoch: 3,
+    });
+    expect(await readHolder()).toMatchObject({
+      viewer_subject_id: subject,
+      viewer_authority_epoch: 3,
+    });
+    // Bring the box to WARM so the later re-acquires attach instead of
+    // entering the spawner's warming-retry wait.
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: first.lease.leaseEpoch,
+      instanceId: "inst-authority",
+      dataPlaneUrl: null,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+
+    // A claimless re-acquire (a pre-0281 caller in the rolling window)
+    // preserves the recorded claims instead of nulling them.
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(await readHolder()).toMatchObject({
+      viewer_subject_id: subject,
+      viewer_authority_epoch: 3,
+    });
+
+    // A newer mint after a revocation bump raises the recorded epoch...
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      viewerSubjectId: subject,
+      viewerAuthorityEpoch: 5,
+    });
+    expect((await readHolder())?.viewer_authority_epoch).toBe(5);
+
+    // ...and a stale lower claim can never lower it back (monotone evidence).
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      viewerSubjectId: subject,
+      viewerAuthorityEpoch: 4,
+    });
+    expect((await readHolder())?.viewer_authority_epoch).toBe(5);
+
+    // A DIFFERENT subject reusing the holder id starts a fresh (subject,
+    // epoch) pair: the previous subject's higher epoch must not be carried.
+    const otherSubject = `user:${crypto.randomUUID()}`;
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "authority-viewer",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      viewerSubjectId: otherSubject,
+      viewerAuthorityEpoch: 2,
+    });
+    expect(await readHolder()).toMatchObject({
+      viewer_subject_id: otherSubject,
+      viewer_authority_epoch: 2,
+    });
+
+    // The 0281 CHECK rejects a non-positive epoch and a blank subject.
+    const zeroEpoch = await admin`
+      update sandbox_lease_holders set viewer_authority_epoch = 0
+      where workspace_id = ${workspaceId} and holder_id = 'authority-viewer'
+    `.catch((error: unknown) => error);
+    expect(zeroEpoch).toMatchObject({ code: "23514" });
+    const blankSubject = await admin`
+      update sandbox_lease_holders set viewer_subject_id = '   '
+      where workspace_id = ${workspaceId} and holder_id = 'authority-viewer'
+    `.catch((error: unknown) => error);
+    expect(blankSubject).toMatchObject({ code: "23514" });
   }, 60_000);
 
   test("(1b) cold->warming stamps the warming budget, so slow creates are not 90s-reaped", async () => {
@@ -1588,20 +1720,25 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         1, 'lease heartbeat fixture', '[]'::jsonb, '[]'::jsonb,
         'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
       )`;
-    await admin`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id,
-        execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
-        1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
-        0, '{}'::jsonb
-      )`;
-    await admin`
-      update session_turns set active_attempt_id = ${attemptId}
-      where workspace_id = ${workspaceId} and id = ${turnId}`;
+    await admin.begin(async (tx) => {
+      await tx`
+        update sessions set active_turn_id = ${turnId}
+        where workspace_id = ${workspaceId} and id = ${sessionId}`;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}
+        where workspace_id = ${workspaceId} and id = ${turnId}`;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
+          1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
+          0, '{}'::jsonb
+        )`;
+    });
 
     await acquireLease(db, {
       accountId,
@@ -3168,6 +3305,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sessionId,
       requestId,
       holderId,
+      initiatorSubjectId: "subject-direct-release",
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
       expectedInstanceId: "box-direct-release",

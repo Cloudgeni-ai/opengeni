@@ -69,10 +69,18 @@ export const requireEnvironmentEncryption = requireVariableSetEncryption;
 
 export async function requireVariableSetForApi(
   db: Database,
-  workspaceId: string,
+  grant: AccessGrant,
   variableSetId: string,
 ): Promise<VariableSet> {
-  const variableSet = await getVariableSet(db, workspaceId, variableSetId);
+  const variableSet = await getVariableSet(
+    db,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    },
+    variableSetId,
+  );
   if (!variableSet) {
     throw new HTTPException(404, { message: "variableSet not found" });
   }
@@ -97,9 +105,14 @@ export async function validateVariableSetAttachment(
 ): Promise<VariableSet> {
   requireVariableSetEncryption(deps.settings);
   if (!options.preauthorized) {
+    requirePermission(grant, "variable-sets:attach");
     requirePermission(grant, "variable-sets:use");
   }
-  const variableSet = await getVariableSet(deps.db, workspaceId, variableSetId);
+  const variableSet = await getVariableSet(
+    deps.db,
+    { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+    variableSetId,
+  );
   if (!variableSet) {
     throw new HTTPException(422, { message: "unknown variableSetId" });
   }

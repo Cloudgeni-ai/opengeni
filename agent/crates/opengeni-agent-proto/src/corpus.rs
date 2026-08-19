@@ -61,6 +61,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
     v1::ControlRequest {
         request_id: "req-0002".to_string(),
         epoch: 7,
+        resource_policy: None,
         op: Some(v1::control_request::Op::Exec(v1::ExecRequest {
             command: vec!["echo".to_string(), "hello".to_string()],
             shell: false,
@@ -105,6 +106,8 @@ pub fn canonical_hello() -> v1::Hello {
             // bytes are unchanged and the existing cross-stack fixtures stay valid.
             op_stream: false,
             browser_bridge: false,
+            operation_resource_policy: false,
+            operation_cpu_quota: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

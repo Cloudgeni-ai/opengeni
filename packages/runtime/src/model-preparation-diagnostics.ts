@@ -14,6 +14,17 @@ export type ModelPreparationPhase =
   | "sandbox_client_delete"
   | "sandbox_client_state_serialize"
   | "sandbox_client_reuse_check"
+  | "sandbox_workspace_mutation_admission"
+  | "sandbox_workspace_mutation_provider"
+  | "sandbox_workspace_mutation_settlement"
+  | "sandbox_first_routed_resolution_other"
+  | "sandbox_first_routed_mutation_admission"
+  | "sandbox_first_routed_provider_operation"
+  | "sandbox_first_routed_mutation_settlement"
+  | "sandbox_first_routed_other"
+  | "sandbox_snapshot_wait"
+  | "runner_before_first_sandbox_operation"
+  | "sdk_after_first_sandbox_operation"
   | "runner_before_mcp_tools"
   | "mcp_tools_snapshot"
   | "mcp_tools_before_input_filter"
@@ -39,11 +50,14 @@ type ModelPreparationObservation = {
   observer: ModelPreparationObserver;
   startedAt: number;
   mcpToolsEndedAt?: number;
+  firstSandboxOperationEndedAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
+  sdkAfterSandboxRecorded: boolean;
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
+const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
 
 class ModelPreparationTraceProcessor implements TracingProcessor {
   async onTraceStart(_trace: Trace): Promise<void> {}
@@ -83,10 +97,48 @@ export function withModelPreparationObserver<T>(
           startedAt: performance.now(),
           runnerGapRecorded: false,
           postMcpGapRecorded: false,
+          sdkAfterSandboxRecorded: false,
         },
         callback,
       )
     : callback();
+}
+
+/** Bind one attempt-local durable checkpoint immediately before generic model
+ * transport enters fetch. Cached provider clients are process-global, so this
+ * authority must be async-local rather than stored on the client instance. */
+export function withModelTransportStartedObserver<T>(
+  observer: (() => Promise<void> | void) | undefined,
+  callback: () => T,
+): T {
+  return observer ? modelTransportStartedObserver.run(observer, callback) : callback();
+}
+
+export async function recordModelTransportStarted(): Promise<void> {
+  await modelTransportStartedObserver.getStore()?.();
+}
+
+/** Record the first routed sandbox operation boundary without publishing an
+ * overlapping parent duration. The observer receives only exclusive leaf
+ * buckets; this boundary exists solely to split the surrounding SDK work. */
+export function markModelPreparationFirstSandboxOperation(durationSeconds: number): void {
+  try {
+    const observation = modelPreparationObserver.getStore();
+    if (!observation || observation.firstSandboxOperationEndedAt !== undefined) return;
+    const endedAt = performance.now();
+    const startedAt = endedAt - Math.max(0, durationSeconds) * 1_000;
+    observation.firstSandboxOperationEndedAt = endedAt;
+    if (!observation.runnerGapRecorded) {
+      observation.runnerGapRecorded = true;
+      observation.observer({
+        phase: "runner_before_first_sandbox_operation",
+        outcome: "completed",
+        durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
+      });
+    }
+  } catch {
+    // Diagnostics must never affect model preparation or provider dispatch.
+  }
 }
 
 export function recordModelPreparationMeasurement(measurement: ModelPreparationMeasurement): void {
@@ -105,18 +157,41 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
           durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
         });
       }
+      if (
+        !observation.sdkAfterSandboxRecorded &&
+        observation.firstSandboxOperationEndedAt !== undefined
+      ) {
+        observation.sdkAfterSandboxRecorded = true;
+        observation.observer({
+          phase: "sdk_after_first_sandbox_operation",
+          outcome: measurement.outcome,
+          durationSeconds:
+            Math.max(0, startedAt - observation.firstSandboxOperationEndedAt) / 1_000,
+        });
+      }
       observation.mcpToolsEndedAt = endedAt;
-    } else if (
-      measurement.phase.startsWith("input_filter_") &&
-      !observation.postMcpGapRecorded &&
-      observation.mcpToolsEndedAt !== undefined
-    ) {
-      observation.postMcpGapRecorded = true;
-      observation.observer({
-        phase: "mcp_tools_before_input_filter",
-        outcome: measurement.outcome,
-        durationSeconds: Math.max(0, startedAt - observation.mcpToolsEndedAt) / 1_000,
-      });
+    } else if (measurement.phase.startsWith("input_filter_")) {
+      if (!observation.postMcpGapRecorded && observation.mcpToolsEndedAt !== undefined) {
+        observation.postMcpGapRecorded = true;
+        observation.observer({
+          phase: "mcp_tools_before_input_filter",
+          outcome: measurement.outcome,
+          durationSeconds: Math.max(0, startedAt - observation.mcpToolsEndedAt) / 1_000,
+        });
+      }
+      if (
+        !observation.sdkAfterSandboxRecorded &&
+        observation.firstSandboxOperationEndedAt !== undefined &&
+        observation.mcpToolsEndedAt === undefined
+      ) {
+        observation.sdkAfterSandboxRecorded = true;
+        observation.observer({
+          phase: "sdk_after_first_sandbox_operation",
+          outcome: measurement.outcome,
+          durationSeconds:
+            Math.max(0, startedAt - observation.firstSandboxOperationEndedAt) / 1_000,
+        });
+      }
     }
     observation.observer(measurement);
   } catch {

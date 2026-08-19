@@ -7,6 +7,8 @@ export default defineConfig({
     "src/index.ts",
     "src/atlassian.ts",
     "src/canonical-human-identities.ts",
+    "src/connection-authority.ts",
+    "src/connector-attachments.ts",
     "src/connector-destinations.ts",
     "src/google-drive.ts",
     "src/slack-bot-scopes.ts",

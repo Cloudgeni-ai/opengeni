@@ -10,8 +10,13 @@ import {
   RigChangeTransitionError,
 } from "@opengeni/db";
 import type { Hono } from "hono";
+import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requirePermission,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   activateRigVersionForApi,
@@ -30,6 +35,28 @@ import { boundedLimit } from "../http/common";
 
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
+
+  async function requireRigMutation(
+    c: Context,
+    workspaceId: string,
+    permission: "rigs:manage" | "rigs:use",
+  ) {
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
+    const rigId = c.req.param("rigId");
+    if (!rigId) {
+      throw new HTTPException(400, { message: "rig id is required" });
+    }
+    const rig = await requireRigForApi(db, authorization.grant, rigId);
+    if (
+      rig.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, {
+        message: "missing permission: account:admin",
+      });
+    }
+    return { authorization, grant: authorization.grant, rig };
+  }
 
   async function startChangeVerification(
     workspaceId: string,
@@ -114,15 +141,27 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    return c.json(await listRigs(db, workspaceId));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    return c.json(await listRigs(db, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "rigs:manage");
     const payload = CreateRigRequest.parse(await c.req.json());
-    const rig = await createRigForApi({ db }, grant, payload);
+    const allowOrganization =
+      payload.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") === true;
+    if (payload.scope === "organization" && !allowOrganization) {
+      throw new HTTPException(403, {
+        message: "missing permission: account:admin",
+      });
+    }
+    const rig = await createRigForApi({ db }, grant, payload, {
+      allowOrganization,
+    });
     if (rig.activeVersion) {
       const started = await tryStartInitialVersionVerification(workspaceId, rig.activeVersion.id);
       if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
@@ -132,40 +171,59 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    return c.json(await requireRigForApi(db, workspaceId, c.req.param("rigId")));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    return c.json(await requireRigForApi(db, grant, c.req.param("rigId")));
   });
 
   app.patch("/v1/workspaces/:workspaceId/rigs/:rigId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "rigs:manage");
+    const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
+    const allowOrganization =
+      rig.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") === true;
+    if (rig.scope === "organization" && !allowOrganization) {
+      throw new HTTPException(403, {
+        message: "missing permission: account:admin",
+      });
+    }
     const payload = UpdateRigRequest.parse(await c.req.json());
-    return c.json(await updateRigForApi({ db }, grant, rig, payload));
+    return c.json(await updateRigForApi({ db }, grant, rig, payload, { allowOrganization }));
   });
 
   app.delete("/v1/workspaces/:workspaceId/rigs/:rigId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
-    await deleteRigForApi({ db }, grant, rig);
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const grant = authorization.grant;
+    requirePermission(grant, "rigs:manage");
+    const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
+    const allowOrganization =
+      rig.scope === "organization" &&
+      authorization.accountGrant?.permissions.includes("account:admin") === true;
+    if (rig.scope === "organization" && !allowOrganization) {
+      throw new HTTPException(403, {
+        message: "missing permission: account:admin",
+      });
+    }
+    await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
-    return c.json(await listRigVersionsForApi({ db }, workspaceId, rig.id));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
+    return c.json(await listRigVersionsForApi({ db }, rig.workspaceId, rig.id));
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
     const payload = RigDefinitionEditPayload.parse(await c.req.json());
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
-    const started = await tryStartInitialVersionVerification(workspaceId, version.id);
+    const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(version, 201);
   });
@@ -173,18 +231,22 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Rollback / promote-activate: flips which existing version is active.
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/:versionId/activate", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
     const version = await activateRigVersionForApi({ db }, grant, rig, c.req.param("versionId"));
     return c.json(version);
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/changes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     return c.json(
-      await listRigChangesForApi({ db }, workspaceId, rig.id, boundedLimit(c.req.query("limit"))),
+      await listRigChangesForApi(
+        { db },
+        rig.workspaceId,
+        rig.id,
+        boundedLimit(c.req.query("limit")),
+      ),
     );
   });
 
@@ -193,54 +255,57 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   // promote gate (definition_edit) land in M4.
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     const request = ProposeRigChangeRequest.parse(await c.req.json());
     const change = await proposeRigChangeForApi({ db }, grant, rig, request);
-    const verification = await startChangeVerification(workspaceId, change.id);
+    const verification = await startChangeVerification(rig.workspaceId, change.id);
     if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(verification.change, 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     return c.json(
-      await requireRigChangeForApi(db, workspaceId, c.req.param("rigId"), c.req.param("changeId")),
+      await requireRigChangeForApi(db, rig.workspaceId, rig.id, c.req.param("changeId")),
     );
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     const change = await requireRigChangeForApi(
       db,
-      workspaceId,
-      c.req.param("rigId"),
+      rig.workspaceId,
+      rig.id,
       c.req.param("changeId"),
     );
-    const verification = await startChangeVerification(workspaceId, change.id);
+    const verification = await startChangeVerification(rig.workspaceId, change.id);
     if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(verification.change, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId/promote", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
-    const change = await requireRigChangeForApi(db, workspaceId, rig.id, c.req.param("changeId"));
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    const change = await requireRigChangeForApi(
+      db,
+      rig.workspaceId,
+      rig.id,
+      c.req.param("changeId"),
+    );
     const promoted = await promoteVerifiedDefinitionEditChangeForApi({ db }, grant, rig, change);
     return c.json(promoted.version, 201);
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:use");
-    const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
-    await startVersionVerification(workspaceId, rig.activeVersion.id);
+    await startVersionVerification(rig.workspaceId, rig.activeVersion.id);
     return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);
   });
 }

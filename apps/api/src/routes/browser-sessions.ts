@@ -59,6 +59,7 @@ import {
   type SiteAuthAuthority,
 } from "@opengeni/contracts";
 import {
+  getSessionAuthorityEpoch,
   acquireLease,
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
@@ -171,6 +172,7 @@ import {
   type PlacementBrowserTransport,
   type RestorePlacementBrowserStateInput,
 } from "@opengeni/runtime/sandbox";
+import { retryWhileMissing } from "@opengeni/storage";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -196,8 +198,9 @@ import {
   resolveProtectedAuthFieldValues,
 } from "../browser-auth-broker";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
-import { allowedCorsOrigin } from "../http/cors";
+import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -303,7 +306,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
     const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
-    const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+    const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
 
     try {
@@ -1684,7 +1687,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         context,
         "stream:view",
       );
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,
@@ -1740,6 +1743,18 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
           const stream = relayed
             ? await (async () => {
+                // 0281: stamp the authenticated viewer subject and the live
+                // session authority epoch into the relay stream token.
+                const relayAuthorityEpoch = await getSessionAuthorityEpoch(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId: record.sourceSessionId,
+                });
+                if (relayAuthorityEpoch === null) {
+                  throw new BrowserControlUnsupportedError(
+                    "stream authority is unavailable for this session",
+                  );
+                }
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
                   sessionId: record.sourceSessionId,
@@ -1747,6 +1762,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   leaseEpoch: record.tokenGeneration,
                   port: relayed.channel.port,
                   ttlSeconds: request.expiresInSeconds,
+                  subjectId: grant.subjectId,
+                  authorityEpoch: relayAuthorityEpoch,
                 });
                 return {
                   kind: "relay" as const,
@@ -1761,14 +1778,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   },
                 };
               })()
-            : {
-                kind: "direct_websocket" as const,
-                url: await client.frameStreamUrl(reference, request.targetId, request.stream),
-                protocols: [
+            : await (async () => {
+                const protocols = [
                   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                ],
-              };
+                ] as const;
+                const upstreamUrl = await client.frameStreamUrl(
+                  reference,
+                  request.targetId,
+                  request.stream,
+                );
+                const attachment =
+                  placement.lease?.backend === "docker"
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        rootSecret,
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
+                return {
+                  kind: "direct_websocket" as const,
+                  ...attachment,
+                };
+              })();
           return BrowserSessionAttachment.parse({
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
@@ -1979,7 +2014,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2205,7 +2240,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       let restore: RestorePlacementBrowserStateInput | null = null;
       try {
         let before = await getBrowserSessionControlRecord(deps.db, {
@@ -2448,7 +2483,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
       const startedAtMs = performance.now();
-      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
+      const origin = requestOrigin(context, deps.settings);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2603,7 +2638,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
-      assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
+      const placementInstanceId = attachedEndPlacementInstanceId(
+        operation,
+        expectedPlacementInstanceId,
+        device.connectionGeneration,
+      );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
@@ -2616,6 +2655,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         epoch: 0,
         timeoutMs: deps.settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: deps.settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -2632,13 +2675,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       return await callback({
         placement: expectedPlacement,
         controllerHostSandboxGroupId: null,
-        placementInstanceId: device.connectionGeneration,
+        placementInstanceId,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
         transport: {
           kind: "attached_chrome",
           deviceId: device.id,
-          connectionGeneration: device.connectionGeneration,
+          connectionGeneration: placementInstanceId,
           browserName: device.browserName,
           browserVersion: device.browserVersion,
         },
@@ -3089,7 +3132,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             grant,
             record,
             placement,
-            requestOrigin(context, deps.settings.corsAllowOriginRegex),
+            requestOrigin(context, deps.settings),
           );
           await endCapturedBrowserController(client, browserSessionId, binding);
           await clearSuspendedBrowserSessionController(deps.db, {
@@ -3965,32 +4008,8 @@ function isUuid(value: unknown): value is string {
   );
 }
 
-function requestOrigin(context: Context, allowedPattern: string): string | null {
-  return validateBrowserRequestOrigin(context.req.header("origin"), allowedPattern);
-}
-
-export function validateBrowserRequestOrigin(
-  value: string | undefined,
-  allowedPattern: string,
-): string | null {
-  if (!value) return null;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (
-    url.origin === "null" ||
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.origin !== value
-  ) {
-    throw new HTTPException(400, { message: "invalid request origin" });
-  }
-  if (!allowedCorsOrigin(allowedPattern, url.origin)) {
-    throw new HTTPException(403, { message: "request origin is not allowed" });
-  }
-  return url.origin;
+function requestOrigin(context: Context, settings: ApiRouteDeps["settings"]): string | null {
+  return validateInteractionRequestOrigin(context.req.header("origin"), settings);
 }
 
 export function interactionActorForGrant(
@@ -4016,6 +4035,20 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
   if (expected !== null && expected !== actual) {
     throw new BrowserSessionStateError("BrowserSession placement instance changed");
   }
+}
+
+/** End keeps the original controller token fence so a later Chrome generation
+ *  can still dispose the stale browserd session. */
+function attachedEndPlacementInstanceId(
+  operation: ChannelAOperation,
+  expectedPlacementInstanceId: string | null,
+  liveGeneration: string,
+): string {
+  if (operation === "browser.end" && expectedPlacementInstanceId) {
+    return expectedPlacementInstanceId;
+  }
+  assertPlacementInstance(expectedPlacementInstanceId, liveGeneration);
+  return liveGeneration;
 }
 
 function isTerminalOperation(state: string): boolean {
@@ -4473,9 +4506,14 @@ async function finalizeBrowserDownloadFile(
   if (upload.expiresAt.getTime() <= Date.now()) {
     throw new InteractionResourceStateError("Browser download file upload authority expired");
   }
-  const head = await objectStorage.headFile(upload.file).catch(() => {
-    throw new HTTPException(503, { message: "browser download object is not available" });
+  const pendingFile = upload.file;
+  const head = await retryWhileMissing(async () => {
+    if (!(await objectStorage.fileExists(pendingFile))) return null;
+    return await objectStorage.headFile(pendingFile);
   });
+  if (!head) {
+    throw new HTTPException(503, { message: "browser download object is not available" });
+  }
   if (
     Number(head.ContentLength ?? -1) !== upload.file.sizeBytes ||
     (head.ContentType !== undefined && head.ContentType !== upload.file.contentType) ||

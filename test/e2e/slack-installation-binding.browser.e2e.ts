@@ -81,29 +81,29 @@ describe("Slack installation binding browser acceptance", () => {
       const capabilitiesUrl = `${webBaseUrl}/workspaces/${workspaceId}/capabilities`;
 
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      let settings = await openSlackSettings(page);
-      await openConnectionDetails(settings);
-      await expectText(settings, "Slack Binding Team · T_BINDING_BROWSER");
-      await expectText(settings, "bot B_BINDING_BROWSER · user U_BINDING_BROWSER");
-      await expectText(settings, `Binding Account · ${accountId}`);
-      await expectText(settings, `Binding Workspace · ${workspaceId}`);
+      let settings = await openSlackSettings(page, "Connected");
+      await expectText(settings, "Slack Binding Team (T_BINDING_BROWSER)");
+      await expectText(settings, "B_BINDING_BROWSER · user U_BINDING_BROWSER");
+      await expectText(settings, "Binding Account");
+      await expectText(settings, "Binding Workspace");
       await expectText(settings, "active · version 3");
       expect(((await settings.textContent()) ?? "").toLowerCase()).not.toContain("xoxb-");
       expect(((await settings.textContent()) ?? "").toLowerCase()).not.toContain("authorization");
+      expect((await settings.textContent()) ?? "").not.toContain(accountId);
+      expect((await settings.textContent()) ?? "").not.toContain(workspaceId);
+      expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(false);
 
       state.bindingState = "quarantined";
       state.connectionStatus = "needs_reauth";
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      settings = await openSlackSettings(page);
-      await openConnectionDetails(settings);
+      settings = await openSlackSettings(page, "Needs attention");
       await expectText(settings, "quarantined · version 3");
-      await expectText(settings, "legacy installations conflict");
+      await expectText(settings, "Legacy installations conflict");
       expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(true);
 
       state.bindingState = null;
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
-      settings = await openSlackSettings(page);
-      await openConnectionDetails(settings);
+      settings = await openSlackSettings(page, "Needs attention");
       await expectText(settings, "No verified installation binding is available");
       expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(true);
       expect(state.installRequests).toBe(0);
@@ -113,19 +113,13 @@ describe("Slack installation binding browser acceptance", () => {
   }, 90_000);
 });
 
-async function openSlackSettings(page: Page) {
-  const tile = page.getByRole("button", {
-    name: /Slack.*Chat with OpenGeni and start work from Slack/u,
-  });
-  await tile.click();
+async function openSlackSettings(page: Page, chip: string) {
+  const row = page.getByRole("button", { name: `Slack. ${chip}`, exact: true });
+  await row.waitFor({ state: "visible", timeout: 15_000 });
+  await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });
   return settings;
-}
-
-async function openConnectionDetails(settings: import("playwright").Locator): Promise<void> {
-  await settings.getByText("Settings", { exact: true }).click();
-  await settings.getByText("Connection details", { exact: true }).click();
 }
 
 async function installApiFixture(page: Page, state: FixtureState): Promise<void> {

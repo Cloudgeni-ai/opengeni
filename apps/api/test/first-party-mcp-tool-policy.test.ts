@@ -5,6 +5,7 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   Permission,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
@@ -173,6 +174,25 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
   });
 
+  test("sandbox file publication requires both read and upload authority", () => {
+    const readOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:read"], ["sandbox_file_publish"]),
+    );
+    const uploadOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:upload"], ["sandbox_file_publish"]),
+    );
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["files:read", "files:upload"], ["sandbox_file_publish"]),
+    );
+
+    expect(registeredToolNames(readOnly)).toEqual([]);
+    expect(registeredToolNames(uploadOnly)).toEqual([]);
+    expect(registeredToolNames(admitted)).toEqual(["sandbox_file_publish"]);
+  });
+
   test("trusted exhausted depth hides session_create while legacy and remaining-depth grants retain it", () => {
     const legacy = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
     const remaining = buildOpenGeniMcpServer(
@@ -232,6 +252,11 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
+      expect(tool?.inputSchema).toMatchObject({
+        properties: {
+          instructions: { maxLength: SESSION_INSTRUCTIONS_MAX_CHARACTERS },
+        },
+      });
       for (const arguments_ of [
         { initialMessage: "bad cwd", workingDir: "/tmp" },
         {

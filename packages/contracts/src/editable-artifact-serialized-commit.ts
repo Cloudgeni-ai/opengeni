@@ -22,8 +22,9 @@ import {
   type EditableArtifactMutationIntent,
 } from "./editable-artifacts";
 import { editableArtifactCodecFor } from "./editable-artifact-codec-registry";
+import { EDITABLE_ARTIFACT_SERIALIZED_COMMIT_VERSION } from "./editable-artifact-versions";
 
-export const EDITABLE_ARTIFACT_SERIALIZED_COMMIT_VERSION = 1 as const;
+export { EDITABLE_ARTIFACT_SERIALIZED_COMMIT_VERSION } from "./editable-artifact-versions";
 export const EDITABLE_ARTIFACT_SERIALIZED_COMMIT_MAX_BYTES = 8 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_NATIVE_RECEIPT_MAX_BYTES = 512 * 1024;
 

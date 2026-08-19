@@ -5,6 +5,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   evaluateOpenGeniSlackBotScopes,
+  hasOpenGeniSlackBotSearchScopes,
   type AccessGrant,
   type ConnectionMetadata,
   type OpenGeniSlackBotConnectionMetadata,
@@ -64,6 +65,12 @@ const MAX_REACTION_CONTEXT_CHECKPOINT_FILE_LABEL_CHARS = 1_500;
 const MAX_REACTION_CONTEXT_CHECKPOINT_FILES = 16;
 const SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION = 1;
 const MAX_USER_PAGE = 200;
+/** Slack caps `assistant.search.context` at 20 results per request. */
+const MAX_SEARCH_PAGE = 20;
+/** Bounded projection cap for one search result's content excerpt. */
+const MAX_SEARCH_CONTENT_CHARS = 2_000;
+/** Matches the MCP input schema's cap; Slack signals its own via query_too_long. */
+const MAX_SEARCH_QUERY_CHARS = 500;
 const MAX_FILE_PAGE = 200;
 const MAX_FILE_CURSOR_LENGTH = 1_024;
 const SLACK_FILE_CURSOR_VERSION = "files-v1";
@@ -227,6 +234,7 @@ export type SlackHomeBlock =
 
 type SlackBotOperation =
   | "channels.list"
+  | "search.context"
   | "channel_history.read"
   | "thread_replies.read"
   | "users.list"
@@ -245,6 +253,9 @@ type SlackBotContext = {
   sessionId?: string | null;
   scheduledTaskId?: string | null;
 };
+
+type SlackCallAuthority = Readonly<{ operation: SlackBotOperation }>;
+type SlackProviderAuthorization = () => Promise<boolean | void>;
 
 export type SlackReactionContextCheckpointBinding = {
   inboxId: string;
@@ -492,6 +503,7 @@ export class OpenGeniSlackBotClient {
     private readonly metadata: OpenGeniSlackBotConnectionMetadata,
     private readonly context: SlackBotContext,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly authorizeProviderRequest?: SlackProviderAuthorization,
   ) {
     this.resolveCredential = buildConnectionTokenResolver(db, settings);
   }
@@ -841,6 +853,69 @@ export class OpenGeniSlackBotClient {
         users: slackArray(payload.members)
           .map(projectUser)
           .filter((user): user is NonNullable<typeof user> => user !== null),
+        nextCursor: responseCursor(payload),
+      };
+    });
+  }
+
+  /**
+   * Workspace-wide public search through Slack's Real-time Search API
+   * (`assistant.search.context`) under the bot identity.
+   *
+   * The bot never carries private-search authority: `channel_types` is pinned
+   * to `public_channel` server-side regardless of caller input, so private
+   * channels, DMs, and MPIMs remain reachable only through a member's personal
+   * hosted-MCP grant. An install predating the search scopes fails closed with
+   * a reinstall hint instead of leaking Slack's `missing_scope` error.
+   */
+  async searchContext(input: {
+    query: string;
+    contentTypes?: readonly ("messages" | "files" | "channels")[];
+    includeBots?: boolean;
+    /** UNIX seconds bounds on message timestamps. */
+    before?: number;
+    after?: number;
+    sort?: "score" | "timestamp";
+    sortDir?: "asc" | "desc";
+    cursor?: string;
+    limit?: number;
+  }) {
+    const query = typeof input.query === "string" ? input.query.trim() : "";
+    if (!query || query.length > MAX_SEARCH_QUERY_CHARS) {
+      throw new SlackBotProviderError("invalid_query");
+    }
+    const contentTypes = input.contentTypes?.length
+      ? [...new Set(input.contentTypes)]
+      : ["messages"];
+    return await this.withAudit("search.context", async (headers) => {
+      // Inside the audit boundary so a fail-closed denial on a legacy install
+      // leaves the same `failed` evidence as a provider rejection.
+      if (!hasOpenGeniSlackBotSearchScopes(this.connection.grantedScopes)) {
+        throw new SlackBotProviderError("slack_bot_search_scopes_missing");
+      }
+      const payload = await this.call(headers, "assistant.search.context", {
+        query,
+        channel_types: "public_channel",
+        content_types: contentTypes.join(","),
+        ...(input.includeBots ? { include_bots: "true" } : {}),
+        ...(input.before !== undefined ? { before: String(Math.trunc(input.before)) } : {}),
+        ...(input.after !== undefined ? { after: String(Math.trunc(input.after)) } : {}),
+        ...(input.sort ? { sort: input.sort } : {}),
+        ...(input.sortDir ? { sort_dir: input.sortDir } : {}),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+        limit: String(boundedInt(input.limit, MAX_SEARCH_PAGE, MAX_SEARCH_PAGE)),
+      });
+      const results = slackRecord(payload.results);
+      return {
+        messages: slackArray(results?.messages)
+          .map(projectSearchMessage)
+          .filter((message): message is NonNullable<typeof message> => message !== null),
+        files: slackArray(results?.files)
+          .map(projectSearchFile)
+          .filter((file): file is NonNullable<typeof file> => file !== null),
+        channels: slackArray(results?.channels)
+          .map(projectSearchChannel)
+          .filter((channel): channel is NonNullable<typeof channel> => channel !== null),
         nextCursor: responseCursor(payload),
       };
     });
@@ -1309,10 +1384,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async slackMessageExists(channelId: string, timestamp: string): Promise<boolean> {
-    const headers = await this.headersForDestination(
-      "message.delete",
-      `${SLACK_API_BASE}chat.getPermalink`,
-    );
+    const headers = await this.headersFor("message.delete");
     try {
       await this.call(headers, "chat.getPermalink", {
         channel: channelId,
@@ -1334,7 +1406,7 @@ export class OpenGeniSlackBotClient {
     text: string;
   }): Promise<{ timestamp: string }> {
     const method = input.threadTimestamp ? "conversations.replies" : "conversations.history";
-    const headers = await this.headersForDestination("message.post", `${SLACK_API_BASE}${method}`);
+    const headers = await this.headersFor("message.post");
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
     let matchedTimestamp: string | null = null;
@@ -1382,7 +1454,7 @@ export class OpenGeniSlackBotClient {
     return { timestamp: matchedTimestamp };
   }
 
-  private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
+  private async requireMemberChannel(headers: SlackCallAuthority, channelId: string) {
     const payload = await this.call(headers, "conversations.info", {
       channel: channelId,
     });
@@ -1397,7 +1469,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async requireActiveNonSharedMemberChannel(
-    headers: Record<string, string>,
+    headers: SlackCallAuthority,
     channelId: string,
   ) {
     const projected = await this.requireMemberChannel(headers, channelId);
@@ -1411,7 +1483,7 @@ export class OpenGeniSlackBotClient {
   }
 
   private async requireFileForChannel(
-    headers: Record<string, string>,
+    headers: SlackCallAuthority,
     operation: "file.info" | "file.content.read",
     input: { channelId: string; fileId: string; parentFileId?: string },
   ) {
@@ -1488,11 +1560,15 @@ export class OpenGeniSlackBotClient {
   }
 
   private async call(
-    headers: Record<string, string>,
+    authority: SlackCallAuthority,
     method: string,
     params: Record<string, string>,
   ): Promise<SlackPayload> {
     try {
+      const headers = await this.headersForDestination(
+        authority.operation,
+        `${SLACK_API_BASE}${method}`,
+      );
       return (await slackApiFetchWithHeaders(this.fetchImpl, method, headers, params)).payload;
     } catch (error) {
       if (slackCredentialRejected(error)) {
@@ -1508,11 +1584,10 @@ export class OpenGeniSlackBotClient {
 
   private async withAudit<T extends Record<string, unknown>>(
     operation: SlackBotOperation,
-    run: (headers: Record<string, string>) => Promise<T>,
+    run: (authority: SlackCallAuthority) => Promise<T>,
   ): Promise<T & { receipt: SlackBotReceipt }> {
     try {
-      const headers = await this.headersFor(operation);
-      const result = await run(headers);
+      const result = await run(await this.headersFor(operation));
       await this.recordAudit(operation, "succeeded");
       return { ...result, receipt: this.receipt(operation) };
     } catch (error) {
@@ -1521,11 +1596,8 @@ export class OpenGeniSlackBotClient {
     }
   }
 
-  private async headersFor(operation: SlackBotOperation): Promise<Record<string, string>> {
-    return await this.headersForDestination(
-      operation,
-      `${SLACK_API_BASE}${slackMethodForOperation(operation)}`,
-    );
+  private async headersFor(operation: SlackBotOperation): Promise<SlackCallAuthority> {
+    return Object.freeze({ operation });
   }
 
   private async headersForDestination(
@@ -1547,6 +1619,31 @@ export class OpenGeniSlackBotClient {
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
       throw new Error("OpenGeni Slack bot connection needs to be reinstalled");
+    }
+    const current = await requireOpenGeniSlackBotConnection(
+      this.db,
+      this.context.workspaceId,
+      this.connection.id,
+    );
+    const currentMetadata = openGeniSlackBotMetadata(current.metadata);
+    if (
+      current.accountId !== this.context.accountId ||
+      current.version !== this.connection.version ||
+      result.connectionVersion !== this.connection.version ||
+      !currentMetadata ||
+      currentMetadata.slackTeamId !== this.metadata.slackTeamId ||
+      currentMetadata.botId !== this.metadata.botId ||
+      currentMetadata.botUserId !== this.metadata.botUserId
+    ) {
+      throw new Error("OpenGeni Slack bot connection authority changed");
+    }
+    // The adapter callback is a fallible preflight. The canonical credential
+    // callback must remain the final await before the physical fetch.
+    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
+    }
+    if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest())) {
+      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
     return result.headers;
   }
@@ -1590,8 +1687,8 @@ export class OpenGeniSlackBotClient {
     } catch {
       throw new SlackBotProviderError("invalid_file_url");
     }
-    const headers = await this.headersForDestination(operation, url.toString());
     await authorizeBeforeFetch?.();
+    const headers = await this.headersForDestination(operation, url.toString());
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -1802,7 +1899,12 @@ export class OpenGeniSlackBotClient {
 }
 
 export function createOpenGeniSlackBotClient(
-  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  deps: {
+    db: Database;
+    settings: Settings;
+    slackFetch?: typeof fetch;
+    authorizeProviderRequest?: SlackProviderAuthorization;
+  },
   resolved: Awaited<ReturnType<typeof resolveSlackBotConnectionForTool>>,
 ): OpenGeniSlackBotClient {
   return new OpenGeniSlackBotClient(
@@ -1812,11 +1914,17 @@ export function createOpenGeniSlackBotClient(
     resolved.metadata,
     resolved.context,
     deps.slackFetch,
+    deps.authorizeProviderRequest,
   );
 }
 
 export async function createOpenGeniSlackBotInteractionClient(
-  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  deps: {
+    db: Database;
+    settings: Settings;
+    slackFetch?: typeof fetch;
+    authorizeProviderRequest?: SlackProviderAuthorization;
+  },
   input: {
     accountId: string;
     workspaceId: string;
@@ -1848,6 +1956,7 @@ export async function createOpenGeniSlackBotInteractionClient(
       scheduledTaskId: null,
     },
     deps.slackFetch,
+    deps.authorizeProviderRequest,
   );
 }
 
@@ -1871,7 +1980,7 @@ async function slackApiFetchWithHeaders(
   credentialHeaders: Record<string, string>,
   params: Record<string, string>,
 ): Promise<{ response: Response; payload: SlackPayload }> {
-  if (!/^[a-z]+\.[a-z]+$/i.test(method)) {
+  if (!/^[a-z]+(?:\.[a-z]+){1,2}$/i.test(method)) {
     throw new Error("invalid Slack API method");
   }
   const url = new URL(method, SLACK_API_BASE);
@@ -2677,6 +2786,74 @@ function embeddedSlackFileIds(content: string): Set<string> {
   );
 }
 
+/**
+ * Bounded projections of `assistant.search.context` results. Content excerpts
+ * are capped, Slack's rich `blocks` and context messages are deliberately
+ * dropped, and permalinks are kept only when they are https URLs.
+ */
+function projectSearchMessage(value: unknown) {
+  const message = slackRecord(value);
+  const channelId = slackString(message?.channel_id);
+  const ts = slackString(message?.message_ts);
+  if (!message || !channelId || !ts) return null;
+  return {
+    channelId,
+    channelName: boundedSlackString(message.channel_name, 256),
+    ts,
+    authorUserId: boundedSlackString(message.author_user_id, 64),
+    authorName: boundedSlackString(message.author_name, 256),
+    isAuthorBot: message.is_author_bot === true,
+    content: boundedSlackString(message.content, MAX_SEARCH_CONTENT_CHARS),
+    permalink: safeSlackPermalink(message.permalink),
+  };
+}
+
+function projectSearchFile(value: unknown) {
+  const file = slackRecord(value);
+  const id = slackString(file?.file_id);
+  if (!file || !id) return null;
+  return {
+    id,
+    title: boundedSlackString(file.title, 512),
+    filetype: boundedSlackString(file.file_type, 128),
+    authorUserId: boundedSlackString(file.author_user_id, 64),
+    authorName: boundedSlackString(file.author_name, 256),
+    dateCreated: slackUnixSeconds(file.date_created),
+    dateUpdated: slackUnixSeconds(file.date_updated),
+    content: boundedSlackString(file.content, MAX_SEARCH_CONTENT_CHARS),
+    permalink: safeSlackPermalink(file.permalink),
+  };
+}
+
+function projectSearchChannel(value: unknown) {
+  const channel = slackRecord(value);
+  const name = slackString(channel?.name);
+  if (!channel || !name) return null;
+  return {
+    name: boundedSlackString(name, 256),
+    topic: boundedSlackString(channel.topic, 512),
+    purpose: boundedSlackString(channel.purpose, 512),
+    creatorUserId: boundedSlackString(channel.creator_user_id, 64),
+    dateCreated: slackUnixSeconds(channel.date_created),
+    permalink: safeSlackPermalink(channel.permalink),
+  };
+}
+
+function slackUnixSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safeSlackPermalink(value: unknown): string | null {
+  // An over-long URL is dropped, never truncated into a still-parseable one.
+  const raw = typeof value === "string" && value.length <= 1_024 ? value : "";
+  if (!raw) return null;
+  try {
+    return new URL(raw).protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 function projectUser(value: unknown) {
   const user = slackRecord(value);
   const id = slackString(user?.id);
@@ -2800,32 +2977,6 @@ export function nextSlackFilesListPage(
     throw new SlackBotProviderError("invalid_files_paging");
   }
   return nextPage;
-}
-
-function slackMethodForOperation(operation: SlackBotOperation): string {
-  switch (operation) {
-    case "channels.list":
-      return "conversations.list";
-    case "channel_history.read":
-      return "conversations.history";
-    case "thread_replies.read":
-      return "conversations.replies";
-    case "users.list":
-      return "users.list";
-    case "files.list":
-      return "files.list";
-    case "file.info":
-    case "file.content.read":
-      return "files.info";
-    case "home.publish":
-      return "views.publish";
-    case "message.post":
-      return "chat.postMessage";
-    case "message.update":
-      return "chat.update";
-    case "message.delete":
-      return "chat.delete";
-  }
 }
 
 function validateSlackMessageBlocks(

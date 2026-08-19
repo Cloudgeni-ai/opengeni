@@ -508,7 +508,10 @@ export const knowledgeClaimEvidence = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     ...tenantScopeColumns(),
     claimId: uuid("claim_id").notNull(),
-    documentVersionId: uuid("document_version_id").notNull(),
+    documentVersionId: uuid("document_version_id"),
+    taskNoteId: uuid("task_note_id"),
+    taskNoteRootSessionId: uuid("task_note_root_session_id"),
+    taskNoteVersion: integer("task_note_version"),
     polarity: text("polarity").notNull(),
     documentChunkId: uuid("document_chunk_id"),
     chunkIndex: integer("chunk_index"),
@@ -521,13 +524,18 @@ export const knowledgeClaimEvidence = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    naturalIdentity: uniqueIndex("knowledge_claim_evidence_natural_identity_uq").on(
-      table.claimId,
-      table.documentVersionId,
-      table.polarity,
-      sql`coalesce(${table.documentChunkId}::text, '')`,
-      sql`coalesce(${table.locator}, '')`,
-    ),
+    documentNaturalIdentity: uniqueIndex("knowledge_claim_evidence_document_natural_identity_uq")
+      .on(
+        table.claimId,
+        table.documentVersionId,
+        table.polarity,
+        sql`coalesce(${table.documentChunkId}::text, '')`,
+        sql`coalesce(${table.locator}, '')`,
+      )
+      .where(sql`${table.documentVersionId} is not null`),
+    taskNoteNaturalIdentity: uniqueIndex("knowledge_claim_evidence_task_note_natural_identity_uq")
+      .on(table.claimId, table.taskNoteId, table.polarity)
+      .where(sql`${table.taskNoteId} is not null`),
     operation: uniqueIndex("knowledge_claim_evidence_operation_uq").on(
       table.accountId,
       table.operationId,

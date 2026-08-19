@@ -4,11 +4,11 @@
 // scrot (screenshots), issued through the SAME externally-owned `session` the
 // human watches over Channel B. The agent and the human share ONE :0 display —
 // zero projection: ffmpeg reads exactly the pixels xdotool draws. Exposed to the
-// Agents SDK as a `computerTool` carried by `ComputerUseCapability`, pushed into
-// `buildAgentCapabilities` when `computerUseEnabled && desktopCapableBackend`.
+// Agents SDK as FUNCTION `computer_*` tools carried by `ComputerUseCapability`,
+// pushed into `buildAgentCapabilities` when `computerUseEnabled && desktopCapableBackend`.
 //
 // This file lives OUTSIDE the @opengeni/runtime/sandbox agent-loop-free leaf
-// (it imports `computerTool` from the @openai/agents root, which the leaf forbids)
+// (it imports `tool` / `Computer` from the @openai/agents root, which the leaf forbids)
 // and is wired into the agent-loop barrel (packages/runtime/src/index.ts).
 //
 // ── Adversarial-review fixes folded in (module 05 §Adversarial) ──────────────
@@ -25,13 +25,13 @@
 //   F3  exec/execCommand YIELDS (does not wait) — `sandboxCommandStillRunning` is
 //       treated as a retriable failure, and the input commands complete well under
 //       the yield window.
-//   F4  import paths: `computerTool`/`Computer` from `@openai/agents` (root, via
+//   F4  import paths: `tool`/`Computer` from `@openai/agents` (root, via
 //       the agents-core star re-export); `Capability`/`requireBoundSession` from
 //       `@openai/agents/sandbox`. `Button` is NOT exported — the union is inlined.
 //   F5  scroll deltas are model PIXELS (often hundreds) — divided by a notch step
 //       and clamped, NOT used as literal wheel-click `--repeat` counts.
 
-import { computerTool, tool, type Computer, type Tool } from "@openai/agents";
+import { tool, type Computer, type Tool } from "@openai/agents";
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
 import {
   KeyAction,
@@ -1280,11 +1280,9 @@ export class NativeDesktopComputer implements Computer {
 
   async screenshot(): Promise<string> {
     // CRITICAL CONTRACT (mirrors SandboxComputer.screenshot): NEVER return "". The
-    // Agents SDK builds the model image as `data:image/png;base64,${output}`; an
-    // empty output → `image_url: ''`. On the hosted computer_use_preview path the SDK
-    // catches a throw here, sets output='', and the wire-seam sanitizer rewrites the
-    // empty image_url to a BLANK 1×1 placeholder to dodge a 400 — so a capture MISS
-    // silently reaches the model as a "blank desktop" it then confidently reports.
+    // Agents SDK builds a model image as `data:image/png;base64,${output}`; an
+    // empty output → `image_url: ''`. Historical hosted `computer_call` items still
+    // hit that wire shape. A throw here must not become a silent blank desktop.
     //
     // Native capture (ScreenCaptureKit / x11) can hand back a null/empty FIRST frame
     // in the moments right after the agent connects (the capture stream warming) — the
@@ -1460,22 +1458,12 @@ export function isNativeDesktopSession(
   return typeof s.desktopInput === "function" && typeof s.screenshot === "function";
 }
 
-// ── Function-transport (codex / text backend) computer tools ─────────────────
+// ── Function `computer_*` tools ──────────────────────────────────────────────
 //
-// The SDK emits computer-use ONLY as the HOSTED `computer_use_preview` tool, which
-// the codex / ChatGPT backend rejects (it accepts only function/custom/web_search
-// tool types) — so on codex the hosted tool is unusable and the agent has nothing
-// to drive the desktop with. We mirror EXACTLY how the SDK's filesystem capability
-// degrades `view_image` for the text transport: when the bound model does NOT
-// support the structured tool-output transport, emit a set of FUNCTION tools that
-// route to the SAME bound `Computer`, and hand the model the screen by rendering
-// the screenshot image-output as a text-transport data URL — the identical two-step
-// `imageOutputFromBytes` → `renderImageForTextTransport` the SDK's text `view_image`
-// uses. Those three helpers are NOT public exports of `@openai/agents` /
-// `@openai/agents/sandbox` (they live in the SDK's private capabilities/transport +
-// shared/media modules, unreachable via the package `exports` map), so — mirroring
-// selfhosted/session.ts's local `sniffImageMediaType` — the three tiny pure helpers
-// are reimplemented here in lockstep with the SDK.
+// Computer-use is ordinary function tools bound to the live sandbox Computer
+// (click/type/screenshot on the same :0 the human watches). They are not MCP
+// and not Codemode. Screenshots use structured `{type:'image'}` output on
+// proven visual transports. Chat-wire and unproven routes get no computer tools.
 
 /** The SDK's tool-output image shape (@openai/agents-core shared/media `ToolOutputImage`). */
 type ToolOutputImage = { type: "image"; image: { data: Uint8Array; mediaType: string } };
@@ -1549,19 +1537,10 @@ function objectSchema(
 }
 
 /**
- * The FUNCTION-transport computer tools for the codex / text backend, each routing
- * to the SAME bound `Computer` the hosted `computer_use_preview` tool would drive.
- * `computer_screenshot` hands the model the desktop two ways, selected by
- * `imageFunctionResults`:
- *   • false (chat-completions providers, the default) → the text-transport
- *     `data:image/png;base64,…` URL (imageOutputFromBytes → renderImageForTextTransport,
- *     the SDK's text `view_image` path) — those backends can't read structured image
- *     tool results.
- *   • true (the codex/ChatGPT backend) → the structured `{type:'image'}` tool output,
- *     which agents-core normalizes into an `input_image` content item inside the
- *     function_call_output — the codex /responses backend accepts and SEES it (a text
- *     data-URL there is just unreadable text). See index.ts for why it's on there.
- * Write tools return a concise confirmation; when read-only they return
+ * The FUNCTION-transport computer tools, each routing to the bound `Computer`.
+ * `computer_screenshot` hands the model a structured `{type:'image'}` tool output
+ * when `imageFunctionResults` is true (Responses and Codex). Write tools return a
+ * concise confirmation; when read-only they return
  * {@link COMPUTER_READ_ONLY_MESSAGE} instead of throwing, and any action error is
  * returned as a string so a failed action never kills the turn. Exported so it can be
  * unit-tested against a fake `Computer`.
@@ -1765,17 +1744,15 @@ export function computerFunctionTools(
  * EXPLICIT tool-transport selection, decided by the caller that knows the
  * provider's true wire identity (the worker's model resolution — see agent-turn.ts),
  * never inferred from the bound model instance's constructor name:
- *   • "hosted"         → the single hosted `computer_use_preview` tool (Responses backends).
  *   • "function-image" → the FUNCTION `computer_*` tools with screenshots delivered as a
- *                        structured `{type:'image'}` output (the codex/ChatGPT backend,
- *                        which rejects hosted tool types but SEES structured image results).
+ *                        structured `{type:'image'}` output.
  *   • "disabled"       → no computer tools. Providers without a proven visual image
  *                        transport fail closed instead of receiving base64 as text.
  *   • "function-text"  → deprecated fail-closed alias retained for source compatibility.
  *   • omitted           → fail closed exactly like "disabled"; public runtime callers must
  *                        prove the transport explicitly before computer tools are exposed.
  */
-export type ComputerToolMode = "hosted" | "function-image" | "disabled" | "function-text";
+export type ComputerToolMode = "function-image" | "disabled" | "function-text";
 
 export type RetainableSessionImageToolName = "view_image" | "computer_screenshot";
 
@@ -1849,7 +1826,7 @@ export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
  *
  * `tools()` is transport-aware only through `ComputerUseArgs.toolMode`. The bound
  * model instance is intentionally ignored: a constructor name cannot prove whether
- * screenshots travel as hosted computer output or structured function images.
+ * screenshots travel as structured function images.
  */
 export class ComputerUseCapability extends Capability {
   readonly type = "computer-use";
@@ -1891,8 +1868,6 @@ export class ComputerUseCapability extends Capability {
     // Tool selection must not depend on the model instance's constructor name. The
     // worker supplies a proven explicit mode; public callers that omit it fail closed.
     switch (this.args.toolMode) {
-      case "hosted":
-        return [this.hostedComputerTool(computer)];
       case "function-image":
         return withRetainableSessionImageOutputHook(
           computerFunctionTools(
@@ -1911,19 +1886,10 @@ export class ComputerUseCapability extends Capability {
         // entire coordinate-dependent capability: action tools without a usable
         // screenshot would be blind and unsafe.
         return [];
+      default: {
+        const _exhaustive: never = this.args.toolMode;
+        return _exhaustive;
+      }
     }
-    // Runtime callers may bypass TypeScript or pass a value from a newer client.
-    // Unknown transport modes must remain fail-closed.
-    return [];
-  }
-
-  /** The single HOSTED `computer_use_preview` tool bound to `computer`. */
-  private hostedComputerTool(computer: Computer): Tool<unknown> {
-    return computerTool({
-      computer,
-      ...(this.args.needsApproval !== undefined
-        ? { needsApproval: this.args.needsApproval as never }
-        : {}),
-    }) as unknown as Tool<unknown>;
   }
 }

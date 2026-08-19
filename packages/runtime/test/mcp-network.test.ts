@@ -70,7 +70,10 @@ describe("MCP network and payload boundary", () => {
         jsonrpc: "2.0",
         id: 4,
         method: "tools/call",
-        params: { name: "create_issue" },
+        params: {
+          name: "create_issue",
+          _meta: { opengeniOperationId: "11111111-1111-4111-8111-111111111111" },
+        },
       }),
     );
     const toolCallBatch = await classify(
@@ -110,6 +113,7 @@ describe("MCP network and payload boundary", () => {
       method: "tools/call",
       responseIds: [4],
       toolName: "create_issue",
+      operationId: "11111111-1111-4111-8111-111111111111",
     });
     expect(toolCallBatch).toMatchObject({
       batch: true,

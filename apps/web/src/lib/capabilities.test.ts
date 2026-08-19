@@ -2,13 +2,17 @@ import { describe, expect, test } from "bun:test";
 
 import {
   apiKeyConnectionRef,
+  apiKeyCredential,
   capabilityAuthHint,
+  capabilityCategoryLabel,
   capabilityConnectPlan,
+  capabilityCuration,
   capabilityFilterLabel,
   capabilityFormError,
   capabilityItemKindLabel,
   capabilityKindLabel,
   capabilityMonogram,
+  capabilityQuickConnectPlan,
   capabilityReconnectPlan,
   capabilityRequiresPersonalConnection,
   capabilitySourceLabel,
@@ -16,6 +20,7 @@ import {
   connectionToReuseForApiKey,
   curatedSkillProvenance,
   domainFromUrl,
+  GENERIC_API_KEY_FIELD,
   emptyCapabilityForm,
   fikenWorkspaceConnection,
   filterCapabilityCatalogItems,
@@ -28,6 +33,7 @@ import {
   registryResultsForQuery,
   resolveSheetItem,
   socialConnectionsForOwnership,
+  sortFeaturedFirst,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -337,6 +343,32 @@ describe("capabilityConnectPlan", () => {
         item({ metadata: { connectionOwnership: "personal_only" } }),
       ),
     ).toBe(true);
+  });
+
+  test("Slack's hosted MCP is personal-only; shared Slack access is the workspace bot", () => {
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          providerDomain: "slack.com",
+          endpointUrl: "https://mcp.slack.com/mcp/",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({ providerDomain: "slack.com", mcpUrl: "https://slack.example.test/mcp" }),
+      ),
+    ).toBe(false);
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -1098,5 +1130,212 @@ describe("helpers", () => {
     expect(capabilityMonogram("Linear")).toBe("LI");
     expect(capabilityMonogram("Google Drive")).toBe("GD");
     expect(capabilityMonogram("")).toBe("?");
+  });
+});
+
+describe("capabilityCuration", () => {
+  test("reads featured and official from import curation metadata", () => {
+    expect(
+      capabilityCuration(item({ metadata: { curation: { featured: true, official: true } } })),
+    ).toEqual({ featured: true, official: true });
+  });
+
+  test("defaults both flags to false when curation is absent or malformed", () => {
+    expect(capabilityCuration(item({ metadata: {} }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: "yes" } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+    expect(capabilityCuration(item({ metadata: { curation: { featured: "true" } } }))).toEqual({
+      featured: false,
+      official: false,
+    });
+  });
+});
+
+describe("sortFeaturedFirst", () => {
+  test("moves featured rows to the front and preserves relative order otherwise", () => {
+    const a = item({ id: "a" });
+    const b = item({ id: "b", metadata: { curation: { featured: true } } });
+    const c = item({ id: "c" });
+    const d = item({ id: "d", metadata: { curation: { featured: true } } });
+    expect(sortFeaturedFirst([a, b, c, d]).map((entry) => entry.id)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  test("returns a new array and leaves the input untouched", () => {
+    const input = [
+      item({ id: "x" }),
+      item({ id: "y", metadata: { curation: { featured: true } } }),
+    ];
+    const sorted = sortFeaturedFirst(input);
+    expect(sorted).not.toBe(input);
+    expect(input.map((entry) => entry.id)).toEqual(["x", "y"]);
+  });
+});
+
+describe("capabilityCategoryLabel", () => {
+  test("maps known slugs to human labels and hides custom", () => {
+    expect(capabilityCategoryLabel("project-management")).toBe("Project management");
+    expect(capabilityCategoryLabel("developer-tools")).toBe("Developer tools");
+    expect(capabilityCategoryLabel("integrations")).toBe("Integrations");
+    expect(capabilityCategoryLabel("custom")).toBeNull();
+    expect(capabilityCategoryLabel(null)).toBeNull();
+  });
+
+  test("title-cases an unknown slug instead of leaking it raw", () => {
+    expect(capabilityCategoryLabel("knowledge-graphs")).toBe("Knowledge graphs");
+    expect(capabilityCategoryLabel("weird_thing")).toBe("Weird thing");
+  });
+});
+
+describe("filterCapabilityCatalogItems ignores curation flags", () => {
+  test("typing official does not match every curated connector", () => {
+    const curated = item({
+      id: "cur",
+      name: "Linear",
+      description: "Issues",
+      metadata: { curation: { featured: true, official: true } },
+    });
+    const plain = item({ id: "plain", name: "Official Widgets", description: "Widgets" });
+    const hits = filterCapabilityCatalogItems([curated, plain], "all", "official");
+    expect(hits.map((entry) => entry.id)).toEqual(["plain"]);
+  });
+});
+
+describe("capabilityQuickConnectPlan (row/tile icon fast path)", () => {
+  test("a credential-free MCP enables straight from the icon", () => {
+    expect(capabilityQuickConnectPlan(item({ kind: "mcp", authKind: "none" }))).toEqual({
+      mode: "enable",
+    });
+  });
+
+  test("an official OAuth connector redirects with no dialog; an unreviewed one confirms first", () => {
+    const official = item({
+      kind: "mcp",
+      authKind: "oauth2",
+      providerDomain: "linear.app",
+      mcpUrl: "https://mcp.linear.app/sse",
+      metadata: { curation: { official: true } },
+    });
+    expect(capabilityQuickConnectPlan(official)).toEqual({
+      mode: "oauth",
+      ownership: "workspace",
+      providerDomain: "linear.app",
+      mcpUrl: "https://mcp.linear.app/sse",
+      confirm: false,
+    });
+    expect(
+      capabilityQuickConnectPlan({ ...official, metadata: {} })?.mode === "oauth" &&
+        capabilityQuickConnectPlan({ ...official, metadata: {} }),
+    ).toMatchObject({ confirm: true });
+  });
+
+  test("a personal-only connector never quick-connects a workspace-owned binding", () => {
+    for (const mcpUrl of ["https://gmailmcp.googleapis.com/mcp/v1", "https://mcp.slack.com/mcp"]) {
+      const personalOnly = item({
+        kind: "mcp",
+        authKind: "oauth2",
+        providerDomain: "google.com",
+        mcpUrl,
+        metadata: { curation: { official: true } },
+      });
+      expect(capabilityRequiresPersonalConnection(personalOnly)).toBe(true);
+      expect(capabilityQuickConnectPlan(personalOnly)).toMatchObject({
+        mode: "oauth",
+        ownership: "personal",
+      });
+    }
+    expect(
+      capabilityQuickConnectPlan(
+        item({
+          kind: "mcp",
+          authKind: "api_key",
+          providerDomain: "example.test",
+          metadata: {
+            connectionOwnership: "personal_only",
+            requiredHeaders: ["X-Api-Key"],
+          },
+        }),
+      ),
+    ).toMatchObject({ mode: "api_key", ownership: "personal" });
+  });
+
+  test("the api-key field carries the WIRE header name, not the human label", () => {
+    expect(
+      capabilityQuickConnectPlan(
+        item({
+          kind: "mcp",
+          authKind: "api_key",
+          providerDomain: "datadog.com",
+          metadata: { requiredHeaders: ["DD-API-KEY"] },
+        }),
+      ),
+    ).toEqual({
+      mode: "api_key",
+      ownership: "workspace",
+      providerDomain: "datadog.com",
+      field: { name: "DD-API-KEY", label: "API key" },
+    });
+
+    // Drifted catalog rows with no declared headers fall back to the generic
+    // bearer header - still a legal wire name, never the label.
+    expect(
+      capabilityQuickConnectPlan(
+        item({ kind: "mcp", authKind: "api_key", providerDomain: "example.test" }),
+      ),
+    ).toMatchObject({ field: { name: "Authorization", label: "API key" } });
+  });
+
+  test("the stored credential is keyed by the wire header name", () => {
+    const plan = capabilityQuickConnectPlan(
+      item({
+        kind: "mcp",
+        authKind: "api_key",
+        providerDomain: "datadog.com",
+        metadata: { requiredHeaders: ["DD-API-KEY"] },
+      }),
+    );
+    expect(plan?.mode).toBe("api_key");
+    const credential = apiKeyCredential(
+      plan?.mode === "api_key" ? plan.field : GENERIC_API_KEY_FIELD,
+      "secret-token",
+    );
+    expect(credential).toEqual({ headers: { "DD-API-KEY": "secret-token" } });
+    expect(Object.keys(credential.headers)).not.toContain("API key");
+    expect(apiKeyCredential(GENERIC_API_KEY_FIELD, "t")).toEqual({
+      headers: { Authorization: "t" },
+    });
+  });
+
+  test("a connector needing more than one header has no fast path at all", () => {
+    expect(
+      capabilityQuickConnectPlan(
+        item({
+          kind: "mcp",
+          authKind: "api_key",
+          providerDomain: "datadog.com",
+          metadata: { requiredHeaders: ["DD-API-KEY", "DD-APPLICATION-KEY"] },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("dedicated and social lifecycles keep their own controls in the sheet", () => {
+    expect(capabilityQuickConnectPlan(item({ kind: "skill" }))).toBeNull();
+    expect(
+      capabilityQuickConnectPlan(item({ kind: "api", surfaceType: "first_party_fiken" })),
+    ).toBeNull();
+    expect(
+      capabilityQuickConnectPlan(
+        item({
+          kind: "api",
+          surfaceType: "provider_integration",
+          metadata: { providerAdapter: "social", provider: "x" },
+        }),
+      ),
+    ).toBeNull();
   });
 });

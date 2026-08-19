@@ -17,6 +17,7 @@ import {
   type InteractionPlacement,
 } from "@opengeni/contracts";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -846,7 +847,6 @@ export async function prepareComputerSessionEnd(
                 "suspended",
                 "restoring",
                 "repair_required",
-                "lost",
                 "ending",
               ]),
             ),
@@ -1037,6 +1037,15 @@ export async function touchComputerSessionController(
         )
         .limit(1);
       if (!observed) return false;
+      if (observed.placementKind === "attached_device") {
+        if (!observed.deviceId || !observed.placementInstanceId) return false;
+        const current = await attachedDeviceGenerationMatches(tx, {
+          workspaceId: input.workspaceId,
+          deviceId: observed.deviceId,
+          placementInstanceId: observed.placementInstanceId,
+        });
+        if (!current) return false;
+      }
       if (observed.placementKind === "sandbox_group") {
         const lease = await tx.execute<{ id: string }>(sql`
           select lease.id

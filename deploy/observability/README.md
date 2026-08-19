@@ -48,11 +48,16 @@ the live target mix with `bun run bench:observability-series -- --prometheus-url
 <url> --check`; the guard requires at least a 4x instantaneous series reduction
 and treats TSDB head series as diagnostic because they include stale data.
 
-`values.production.example.yaml` raises Prometheus to 50 GiB/15 days, Grafana
-to 5 GiB, Alertmanager to 5 GiB, and requires an existing
+`values.production.example.yaml` raises Prometheus to a 100 GiB volume with a
+30-day time limit and an 80 GB retention-size limit, Grafana to 5 GiB,
+Alertmanager to 5 GiB, and requires an existing
 `opengeni-grafana-admin` Secret. It is a capacity and credential example, not a
-complete production overlay. Review storage classes, volume reclaim policy,
-backups, replicas, resource limits, ingress, and alert routing for each cluster.
+complete production overlay. Prometheus applies whichever retention limit is
+reached first, so this example does not guarantee 30 days of local history.
+Measure the installation's actual series volume and ingestion rate, then size
+local storage or configure remote write before making a 30-day operational
+commitment. Review storage classes, volume reclaim policy, backups, replicas,
+resource limits, ingress, and alert routing for each cluster.
 
 ## Plan and install
 

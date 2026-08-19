@@ -63,8 +63,31 @@ async function session(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+  });
+}
+
+/** Removal now requires an explicit administering actor (migration 0278). */
+async function removeMemberAsAdmin(
+  handle: Database,
+  workspace: { accountId: string; workspaceId: string },
+  targetSubjectId: string,
+): Promise<boolean> {
+  const actorSubjectId = `user:remover-${crypto.randomUUID()}`;
+  await grantWorkspaceAccess(handle, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: actorSubjectId,
+    permissions: ["workspace:admin"],
+  });
+  return await removeWorkspaceMember(handle, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    actorSubjectId,
+    targetSubjectId,
   });
 }
 
@@ -251,12 +274,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sql`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id,
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+        parent_session_id, temporal_workflow_id,
         tool_policy
       )
       select
         node.id, ${workspace.accountId}, ${workspace.workspaceId}, 'running', node.message,
-        'test-model', 'none', node.id, node."parentId", 'tree-deep-' || node.id::text,
+        'test-model', 'medium', 'standard', 'none', node.id, node."parentId",
+        'tree-deep-' || node.id::text,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', node."parentId")
       from jsonb_to_recordset(${JSON.stringify(deepRows)}::jsonb)
         as node(id uuid, "parentId" uuid, message text)`,
@@ -271,12 +296,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       )
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, parent_session_id, temporal_workflow_id,
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+        parent_session_id, temporal_workflow_id,
         tool_policy
       )
       select
         id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
-        'wide-' || ordinal::text, 'test-model', 'none', id, ${wideRoot.id},
+        'wide-' || ordinal::text, 'test-model', 'medium', 'standard', 'none', id, ${wideRoot.id},
         'tree-wide-' || id::text,
         jsonb_build_object(
           'mode', 'explicit',
@@ -350,11 +376,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           )
           insert into sessions (
             id, account_id, workspace_id, status, initial_message, model,
-            sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+            reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+            temporal_workflow_id, tool_policy
           )
           select
             id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
-            'pinned-root-' || ordinal::text, 'test-model', 'none', id,
+            'pinned-root-' || ordinal::text, 'test-model', 'medium', 'standard', 'none', id,
             ${marker} || '-' || ordinal::text,
             jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
           from nodes`);
@@ -1031,7 +1058,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pinned: true,
     });
 
-    expect(await removeWorkspaceMember(db, workspace.workspaceId, subjectId)).toBe(true);
+    expect(await removeMemberAsAdmin(db, workspace, subjectId)).toBe(true);
     const [counts] = await admin<{ memberships: number; pins: number }[]>`
       select
         (select count(*)::int from workspace_memberships
@@ -1108,7 +1135,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sessionId: staleTarget.id,
       pinned: true,
     });
-    expect(await removeWorkspaceMember(db, workspace.workspaceId, staleSubject)).toBe(true);
+    expect(await removeMemberAsAdmin(db, workspace, staleSubject)).toBe(true);
     await expect(
       listSessionsForSubject(db, workspace.workspaceId, {
         subjectId: staleSubject,
@@ -1189,14 +1216,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       await waitForAdvisoryWait(admin, barrierClass, listingLock);
 
       let removalSettled = false;
-      removalPromise = removeWorkspaceMember(
-        removalClient.db,
-        workspace.workspaceId,
-        lockedSubject,
-      ).then((removed) => {
-        removalSettled = true;
-        return removed;
-      });
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, lockedSubject).then(
+        (removed) => {
+          removalSettled = true;
+          return removed;
+        },
+      );
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${listingLock})`;
       const listed = await listingPromise;
@@ -1318,7 +1343,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
       // Start listing while removal owns the personal-state fence. The list must
@@ -1489,12 +1514,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       workspace.workspaceId,
       sql`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
-        tool_policy
+        id, account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode,
+        sandbox_backend, sandbox_group_id, tool_policy
       )
       select generated.id, ${workspace.accountId}, ${workspace.workspaceId},
         'bounded concurrent session ' || generated.ordinality,
-        'test-model', 'none', generated.id,
+        'test-model', 'medium', 'standard', 'none', generated.id,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
@@ -1532,12 +1557,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       oversized.workspaceId,
       sql`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
-        tool_policy
+        id, account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode,
+        sandbox_backend, sandbox_group_id, tool_policy
       )
       select generated.id, ${oversized.accountId}, ${oversized.workspaceId},
         'oversized session ' || generated.ordinality,
-        'test-model', 'none', generated.id,
+        'test-model', 'medium', 'standard', 'none', generated.id,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
@@ -1567,12 +1592,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       quota.workspaceId,
       sql`
       insert into sessions (
-        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id,
-        tool_policy
+        id, account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode,
+        sandbox_backend, sandbox_group_id, tool_policy
       )
       select generated.id, ${quota.accountId}, ${quota.workspaceId},
         'snapshot query-' || lpad(((generated.ordinality - 1) / 2)::text, 2, '0'),
-        'test-model', 'none', generated.id,
+        'test-model', 'medium', 'standard', 'none', generated.id,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       from (
         select gen_random_uuid() as id, ordinality
@@ -1702,7 +1727,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       `);
       await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
 
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
       // The API grant is intentionally stale: the pin transaction must wait on
@@ -1810,7 +1835,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
       // Pin mutation owns membership first; removal waits, then cleans the
       // committed pin after the insert barrier is released.
-      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      removalPromise = removeMemberAsAdmin(removalClient.db, workspace, subjectId);
       await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${pinInsertLock})`;

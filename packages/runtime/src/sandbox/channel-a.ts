@@ -126,6 +126,21 @@ export type ChannelASession = {
     runAs?: string;
   }): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
+  /** Routing-only composite. Resolves one backend and keeps private staging,
+   * exact-byte import, and cleanup on that backend under one mutation fence. */
+  importWorkspaceFileOnResolvedBackend?(
+    input: ChannelARoutedWorkspaceImportRequest,
+  ): Promise<WorkspaceFileImportReceipt>;
+  /** Routing-only composite for one logical attachment envelope. Every exact
+   * import stays on one resolved backend under one mutation settlement. */
+  importWorkspaceFilesOnResolvedBackend?(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[]>;
+  /** Routing-only read-only composite. Exact replay inspection stays on one
+   * resolved backend and never crosses workspace mutation admission. */
+  inspectWorkspaceFilesOnResolvedBackend?(
+    input: ChannelARoutedWorkspaceImportBatchRequest,
+  ): Promise<readonly WorkspaceFileImportReceipt[] | null>;
   writeStdin?(args: {
     sessionId: number;
     chars?: string;
@@ -157,6 +172,8 @@ export type WorkspaceFileImportRequest = {
   overwrite: boolean;
   /** True only for the request that durably crossed the save dispatch fence. */
   mayReplaceExisting: boolean;
+  /** Build missing destination directories inside the exact import operation. */
+  createParents?: boolean;
   sizeBytes: number;
   sha256: string;
   source: {
@@ -171,6 +188,20 @@ export type WorkspaceFileImportReceipt = {
   sha256: string;
   replayed: boolean;
   revision: number;
+};
+
+export type ChannelARoutedWorkspaceImportRequest = {
+  request: WorkspaceFileImportRequest;
+  workspaceRoot: string;
+  revision: number;
+  runAs?: string;
+};
+
+export type ChannelARoutedWorkspaceImportBatchRequest = {
+  requests: readonly WorkspaceFileImportRequest[];
+  workspaceRoot: string;
+  revision: number;
+  runAs?: string;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
@@ -205,6 +236,18 @@ export class ChannelAUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ChannelAUnsupportedError";
+  }
+}
+
+/** A logical batch failed after at least one exact workspace mutation was
+ * already known to have committed. Callers must settle the physical mutation
+ * as applied and must not automatically retry the complete batch. */
+export class ChannelAPartialMutationError extends Error {
+  readonly retryable = false;
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ChannelAPartialMutationError";
   }
 }
 
@@ -843,15 +886,251 @@ export class SandboxChannelAService {
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
   }
 
+  /** Import one logical batch of exact signed objects. A routing session keeps
+   * the complete batch on one resolved backend and emits URL-free file events
+   * only after the enclosing mutation settlement succeeds. */
+  async importWorkspaceFiles(
+    requests: readonly WorkspaceFileImportRequest[],
+  ): Promise<readonly WorkspaceFileImportReceipt[]> {
+    if (requests.length === 0) return [];
+    const routedBatch = this.session.importWorkspaceFilesOnResolvedBackend?.bind(this.session);
+    if (
+      routedBatch &&
+      requests.every((request) => !request.overwrite && !request.mayReplaceExisting)
+    ) {
+      const receipts = await routedBatch({
+        requests,
+        workspaceRoot: this.workspaceRoot,
+        revision: this.revision,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+      if (receipts.length !== requests.length) {
+        throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+      }
+      let revision = this.revision;
+      const changes: FsChangedPayload["changes"] = [];
+      for (const [index, request] of requests.entries()) {
+        const receipt = receipts[index];
+        if (!receipt) {
+          throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+        }
+        const expectedRevision = revision + (receipt.replayed ? 0 : 1);
+        if (
+          receipt.destinationPath !== request.destinationPath ||
+          receipt.sizeBytes !== request.sizeBytes ||
+          receipt.sha256 !== request.sha256 ||
+          receipt.revision !== expectedRevision
+        ) {
+          throw new ChannelAUnavailableError("Workspace file imports returned invalid receipts.");
+        }
+        revision = receipt.revision;
+        if (!receipt.replayed) {
+          changes.push({
+            path: receipt.destinationPath,
+            kind: "created",
+            isDir: false,
+            sizeBytes: receipt.sizeBytes,
+          });
+        }
+      }
+      this.revision = revision;
+      if (changes.length > 0) await this.emitFsChanged(changes, "write");
+      return receipts;
+    }
+
+    const receipts: WorkspaceFileImportReceipt[] = [];
+    let mutated = false;
+    for (const request of requests) {
+      try {
+        const receipt = await this.importWorkspaceFile(request);
+        receipts.push(receipt);
+        if (!receipt.replayed) mutated = true;
+      } catch (error) {
+        if (mutated) {
+          throw new ChannelAPartialMutationError(
+            "Workspace file import batch failed after an earlier file was applied",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    }
+    return receipts;
+  }
+
+  /** Inspect whether every exact target in a logical batch already exists.
+   * This path validates the complete request but never stages source authority,
+   * creates parents, advances revision, or emits fs.changed. */
+  async inspectWorkspaceFiles(
+    requests: readonly WorkspaceFileImportRequest[],
+  ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
+    if (requests.length === 0) return [];
+    const routedInspect = this.session.inspectWorkspaceFilesOnResolvedBackend?.bind(this.session);
+    if (
+      routedInspect &&
+      requests.every((request) => !request.overwrite && !request.mayReplaceExisting)
+    ) {
+      const receipts = await routedInspect({
+        requests,
+        workspaceRoot: this.workspaceRoot,
+        revision: this.revision,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+      if (receipts === null) return null;
+      if (receipts.length !== requests.length) {
+        throw new ChannelAUnavailableError("Workspace file inspection returned invalid receipts.");
+      }
+      for (const [index, request] of requests.entries()) {
+        const receipt = receipts[index];
+        if (
+          !receipt ||
+          receipt.destinationPath !== request.destinationPath ||
+          receipt.sizeBytes !== request.sizeBytes ||
+          receipt.sha256 !== request.sha256 ||
+          !receipt.replayed ||
+          receipt.revision !== this.revision
+        ) {
+          throw new ChannelAUnavailableError(
+            "Workspace file inspection returned invalid receipts.",
+          );
+        }
+      }
+      return receipts;
+    }
+
+    const receipts: WorkspaceFileImportReceipt[] = [];
+    for (const request of requests) {
+      const receipt = await this.inspectWorkspaceFile(request);
+      if (receipt === null) return null;
+      receipts.push(receipt);
+    }
+    return receipts;
+  }
+
+  private async inspectWorkspaceFile(
+    req: WorkspaceFileImportRequest,
+  ): Promise<WorkspaceFileImportReceipt | null> {
+    workspaceImportOperationId(req.operationId);
+    const destinationPath = assertPortableWorkspaceFilePath(req.destinationPath);
+    if (typeof req.overwrite !== "boolean" || typeof req.mayReplaceExisting !== "boolean") {
+      throw new ChannelAValidationError("workspace import overwrite policy is invalid");
+    }
+    if (req.createParents !== undefined && typeof req.createParents !== "boolean") {
+      throw new ChannelAValidationError("workspace import parent policy is invalid");
+    }
+    if (req.mayReplaceExisting && !req.overwrite) {
+      throw new ChannelAValidationError("workspace import replacement authority is invalid");
+    }
+    if (
+      !Number.isSafeInteger(req.sizeBytes) ||
+      req.sizeBytes < 0 ||
+      req.sizeBytes > 5_000_000_000
+    ) {
+      throw new ChannelAValidationError("workspace import size is invalid");
+    }
+    const expectedSha256 = workspaceImportSha256(req.sha256);
+    workspaceImportSource(req.source);
+    const destination = this.workspaceRoot
+      ? this.joinRoot(destinationPath)
+      : `./${destinationPath}`;
+    const root = this.workspaceRoot || ".";
+    const frame = crypto.randomUUID().replaceAll("-", "");
+    const replayMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_REPLAY__`;
+    const absentMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_ABSENT__`;
+    const escapeMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_ESCAPE__`;
+    const unavailableMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_UNAVAILABLE__`;
+    const script = [
+      "set +e",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `destination=${shellQuote(destination)}`,
+      `if test ! -e "$destination" && test ! -L "$destination"; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
+      `test -f "$destination" && test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
+      `target=$(opengeni_realpath_existing "$destination") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `case "$target" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
+      `printf %s ${shellQuote(replayMarker)}`,
+    ].join("; ");
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError("Workspace file inspection did not settle; retry it.");
+    }
+    if (result.stdout.includes(escapeMarker) || result.exitCode === 67 || result.exitCode === 68) {
+      throw new ChannelAValidationError(
+        `destination resolves outside workspace: ${destinationPath}`,
+      );
+    }
+    if (result.stdout.includes(absentMarker)) return null;
+    if (
+      !result.stdout.includes(replayMarker) ||
+      (result.exitCode !== null && result.exitCode !== 0) ||
+      result.stdout.includes(unavailableMarker)
+    ) {
+      throw new ChannelAUnavailableError("Workspace file inspection is temporarily unavailable.");
+    }
+    return {
+      destinationPath,
+      sizeBytes: req.sizeBytes,
+      sha256: expectedSha256,
+      replayed: true,
+      revision: this.revision,
+    };
+  }
+
   /** Import one exact signed object into /workspace. The signed URL is staged
    * outside the workspace and never enters argv, environment, stdout, events,
    * or the public receipt. Exactly one routed exec crosses the workspace
    * mutation boundary; target hashing makes response-loss retries safe. */
   async importWorkspaceFile(req: WorkspaceFileImportRequest): Promise<WorkspaceFileImportReceipt> {
+    const routedImport = this.session.importWorkspaceFileOnResolvedBackend?.bind(this.session);
+    // The routed composite currently returns the existing public receipt, which
+    // distinguishes replay from mutation but not create from replace. Use it
+    // only for non-replacing imports so fs.changed remains exact; replacement
+    // callers retain the existing per-operation path until the receipt grows an
+    // internal outcome field.
+    if (routedImport && !req.overwrite && !req.mayReplaceExisting) {
+      const receipt = await routedImport({
+        request: req,
+        workspaceRoot: this.workspaceRoot,
+        revision: this.revision,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+      const expectedRevision = this.revision + (receipt.replayed ? 0 : 1);
+      if (
+        receipt.destinationPath !== req.destinationPath ||
+        receipt.sizeBytes !== req.sizeBytes ||
+        receipt.sha256 !== req.sha256 ||
+        receipt.revision !== expectedRevision
+      ) {
+        throw new ChannelAUnavailableError("Workspace file import returned an invalid receipt.");
+      }
+      this.revision = receipt.revision;
+      if (!receipt.replayed) {
+        await this.emitFsChanged(
+          [
+            {
+              path: receipt.destinationPath,
+              kind: "created",
+              isDir: false,
+              sizeBytes: receipt.sizeBytes,
+            },
+          ],
+          "write",
+        );
+      }
+      return receipt;
+    }
+
     const operationId = workspaceImportOperationId(req.operationId);
     const destinationPath = assertPortableWorkspaceFilePath(req.destinationPath);
     if (typeof req.overwrite !== "boolean" || typeof req.mayReplaceExisting !== "boolean") {
       throw new ChannelAValidationError("workspace import overwrite policy is invalid");
+    }
+    if (req.createParents !== undefined && typeof req.createParents !== "boolean") {
+      throw new ChannelAValidationError("workspace import parent policy is invalid");
     }
     if (req.mayReplaceExisting && !req.overwrite) {
       throw new ChannelAValidationError("workspace import replacement authority is invalid");
@@ -865,15 +1144,17 @@ export class SandboxChannelAService {
     }
     const expectedSha256 = workspaceImportSha256(req.sha256);
     const source = workspaceImportSource(req.source);
+    const destination = this.workspaceRoot
+      ? this.joinRoot(destinationPath)
+      : `./${destinationPath}`;
+    await this.assertConfinedMutationParent(destinationPath, {
+      allowMissingParents: req.createParents === true,
+      rejectFinalSymlink: true,
+    });
     const transferId = crypto.randomUUID();
     const privateDirectory = "/tmp/opengeni-private/workspace-imports";
     const configPath = `${privateDirectory}/${operationId}-${transferId}.curl`;
     const config = workspaceImportCurlConfig(source.url);
-    await this.writePlacementPrivate(configPath, config);
-
-    const destination = this.workspaceRoot
-      ? this.joinRoot(destinationPath)
-      : `./${destinationPath}`;
     const frame = transferId.replaceAll("-", "");
     const okMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_OK__`;
     const conflictMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_CONFLICT__`;
@@ -897,6 +1178,9 @@ export class SandboxChannelAService {
       'parent=$(dirname "$destination")',
       'name=$(basename "$destination")',
       'target="./$name"',
+      ...(req.createParents
+        ? [`mkdir -p -- "$parent" || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`]
+        : []),
       `test -d "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
       `test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `cd -P -- "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
@@ -922,13 +1206,14 @@ export class SandboxChannelAService {
 
     let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
     try {
+      await this.writePlacementPrivate(configPath, config);
       result = await this.run({
         cmd: internalBashCommand(script),
         yieldTimeMs: 20 * 60_000,
         maxOutputTokens: 2_048,
       });
     } finally {
-      await this.session.deletePlacementPrivate?.(configPath, this.runAs).catch(() => undefined);
+      await this.session.deletePlacementPrivate?.(configPath, this.runAs);
     }
     if (result.sessionId !== undefined) {
       throw new ChannelAUnavailableError("Workspace file import did not settle; retry it.");

@@ -254,6 +254,14 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       // migration boundary. Advance the populated database to the current
       // schema before opening current application connections so unrelated
       // future session columns cannot invalidate this compatibility test.
+      // This raw migration loop intentionally bypasses the canonical runner.
+      // Keep its exact application-role authority on the same max=1 admin
+      // session so maintenance migration 0257 retains its fail-closed contract.
+      await admin`select set_config(
+        'opengeni.migration_application_roles',
+        ${JSON.stringify(["opengeni_app"])},
+        false
+      )`;
       for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
         await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
         await admin`
@@ -464,11 +472,10 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         workspaceId: workspace!.id,
         sessionId,
         workflowId: `session-${sessionId}`,
-        noProgressLimit: 3,
         policy: {
           model: "test-model",
           reasoningEffort: "low",
-          latencyMode: "standard",
+          latencyMode: "standard" as const,
           tools: [],
           sandboxBackend: "none",
         },
@@ -478,7 +485,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       if (materialized.action !== "continue") {
         throw new Error(`goal continuation did not materialize: ${materialized.action}`);
       }
-      expect(materialized.update.summary).toBe(newUnsafePrompt);
+      expect(materialized.update.summary).toBe("Continue active session goal");
       if (materialized.update.payload.type !== "goal_continuation") {
         throw new Error("goal continuation materialized with the wrong payload kind");
       }
@@ -531,7 +538,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       expect(newStorage!.payloadVersion).toBe(1);
       expect(newStorage!.type).toBe("goal_continuation");
       expect(fromPostgresLosslessText(newStorage!.summary, newStorage!.summaryVersion)).toBe(
-        newUnsafePrompt,
+        "Continue active session goal",
       );
       expect(
         fromPostgresLosslessJson(newStorage!.payload, newStorage!.payloadVersion),
@@ -595,6 +602,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     expect(session.initialMessage).toBe(initialMessage);
@@ -781,6 +790,11 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       { type: "message", role: "user", content: initialMessage },
       historyItem,
     ]);
+    expect(
+      (await getActiveSessionHistoryItemsPaged(app.db, workspaceId, session.id)).map(
+        (entry) => entry.item,
+      ),
+    ).toEqual(pagedHistory.map((entry) => entry.item));
 
     const callId = "pending-synthetic-call";
     const callItem = {
@@ -1189,6 +1203,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const started = await initializeSessionStartAtomically(app.db, {

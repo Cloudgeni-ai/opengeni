@@ -58,10 +58,10 @@ const importRequest = (
         { replicaId: editableArtifactReplicaId("0000000000000009"), counter: 4 },
       ]),
       stateHash: editableArtifactStateHash(hash(803)),
-      modelSchemaVersion: 1,
-      operationProtocolVersion: 1,
+      modelSchemaVersion: 2,
+      operationProtocolVersion: 2,
       kernelVersion: "test-kernel/1",
-      crdtStateVersion: 1,
+      crdtStateVersion: 2,
     }),
   });
 

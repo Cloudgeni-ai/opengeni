@@ -145,21 +145,29 @@ The typed foundation still leaves these surfaces for later slices:
 
 Workspace Memory V1 continues to own the existing data, correction, export, and
 write surfaces until a later contract/runtime slice adopts typed selectors. The
-workspace setting `memoryPromptMode` controls a reversible model-context
-candidate:
+workspace setting `memoryPromptMode` controls how that store reaches the
+model:
 
-- absent or `legacy_standing` preserves the existing pinned/recency working-set
-  block and agent search behavior;
-- `retrieval_only` removes that broad standing block from every agent prompt;
-- in `retrieval_only`, first-party agent `memory_search` excludes legacy
-  `kind = preference` rows, while authorized human search, audit, correction,
-  export, and the canonical rows remain unchanged;
-- in `retrieval_only`, child sessions omit the company profile from governance
-  composition, but roots retain it and all children retain mandatory instruction
-  policy plus always-visible structured preference and Skill descriptors.
+- composition is always `retrieval_only`: no standing pinned/recency block is
+  injected into any agent prompt. An agent reads the store through
+  `memory_search` when it needs it, rather than receiving it unbidden;
+- durable agent writes go through `remember` (explicit user-directed) and
+  task-note promotion (the agent's own findings). The Memory V1 agent writes
+  `memory_save` and `memory_correct` are retired; `memory_search` remains;
+- first-party agent `memory_search` excludes legacy `kind = preference` rows,
+  while authorized human search, audit, correction, export, and the canonical
+  rows remain unchanged;
+- child sessions omit the company profile from governance composition, but
+  roots retain it and all children retain mandatory instruction policy plus
+  always-visible structured preference and Skill descriptors.
 
-This setting is stored in the existing workspace settings JSON, defaults to the
-legacy path, and can be rolled back without a database migration. It does not
+The setting remains in the workspace settings JSON with the single value
+`retrieval_only`. The former `legacy_standing` opt-out is retired: a workspace
+that stored it keeps the stored value in its passthrough settings bag, where it
+no longer means anything, and already accepted turns keep the mode they
+recorded because those snapshots are immutable facts about what was composed.
+Agent prompts no longer read `knowledge_memories` unbidden; the rows are
+unchanged and still reachable through search. It does not
 create session notes, select typed scopes, change memory writes, or activate
 observations as policy. The structured preference registry remains the only
 active preference authority, and workspace instruction policies remain the only
@@ -167,16 +175,42 @@ charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
 knowledge observation, not a preference-registry record or instruction-policy
 activation.
 
+Migration 0259 freezes `memoryEnabled`, `memoryPromptMode`, and legacy workspace
+instructions when a logical turn is accepted. Instructions live only in a
+bounded immutable turn-context snapshot, with original UTF-8 byte count and an
+explicit truncation marker when a legacy value exceeds the bound. A pre-migration
+turn receives an explicit `legacy_first_claim` snapshot because acceptance-time
+truth is no longer reconstructable.
+
+The first exact attempt then creates one content-free Company Brain selection
+receipt that binds the snapshot, root/child role, company-profile inclusion,
+existing governance hashes, and at most 50 legacy workspace-Memory candidate
+references in pinned/recency order. It separately freezes the whole-entry subset
+that fit the original prompt budget. References contain identity, version, and
+hashes, never memory or instruction text. A replacement attempt cannot admit a
+newer or originally budget-omitted row, and rechecks current scope, lifecycle,
+validity, version, pinned state, and exact content hashes before loading each
+rendered candidate. Revocation or drift can therefore only shrink recovery
+context. Normalized Knowledge and Task notes stay explicit tool reads and are not
+automatic prompt candidates.
+
+Human inspection is a separate read-only surface. Migration 0266 projects a
+bounded page of content-free receipt facts, or the receipt for a supplied
+attempt's already-accepted logical turn, only when the authenticated subject is
+that turn's frozen initiating human and both the session and root remain
+visible. It cannot call the 0259 get-or-create path, return memory identities or
+bodies, or grant direct table access. A recovery attempt therefore resolves the
+original logical-turn receipt without becoming authority to create or widen it.
+
 At ordinary and provider-backed compaction model-request boundaries, the worker
-emits content-free, exact-attempt contribution telemetry for mandatory rules,
-guide/Skill descriptors, company profile, and the legacy standing block when present. The
-structured log carries the exact attempt plus the already-durable policy,
-preference, and company-profile snapshot ids, root/child role, inclusion reason,
-authority class, UTF-8 bytes, and an estimated token count. Prometheus receives
-only bounded category/source/reason/scope/role/mode labels and token estimates.
-No memory or preference content enters telemetry. A new durable contribution
-receipt is intentionally deferred to the final selector architecture rather
-than introducing a competing ledger here.
+also emits content-free, exact-attempt contribution telemetry for mandatory
+rules, guide/Skill descriptors, company profile, and the legacy standing block
+when present. The structured log carries the selection receipt id, exact attempt,
+already-durable policy, preference, and company-profile snapshot ids, root/child
+role, inclusion reason, authority class, UTF-8 bytes, and an estimated token
+count. Prometheus receives only bounded category/source/reason/scope/role/mode
+labels and token estimates. No memory or preference content enters either
+receipt or telemetry.
 
 Canonical source anchors:
 
@@ -184,4 +218,7 @@ Canonical source anchors:
 - `packages/db/src/memory-domain.ts`
 - `packages/db/src/memory-governance.ts`
 - `packages/db/src/memory-governance-schema.ts`
+- `packages/db/src/company-brain-context-selection.ts`
+- `packages/db/drizzle/0259_company_brain_context_selection_receipts.sql`
+- `packages/db/drizzle/0266_company_brain_context_receipt_inspection.sql`
 - `packages/db/src/runtime-posture.ts`

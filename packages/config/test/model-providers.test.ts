@@ -81,7 +81,7 @@ const codexRegistry = JSON.stringify([
 describe("curated AI Gateway catalogue", () => {
   test("adds the two managed models with exact routes, capabilities, and prices", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -139,7 +139,11 @@ describe("curated AI Gateway catalogue", () => {
   });
 
   test("workspace overlay is externally billed and receives a key only at runtime", () => {
-    const base = { ...getSettings(), modelProvidersJson: "[]", vercelAiGatewayApiKey: undefined };
+    const base = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      vercelAiGatewayApiKey: undefined,
+    };
     const catalog = withWorkspaceGatewayCatalogProvider(base);
     const provider = configuredProviders(catalog).find(
       (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
@@ -162,7 +166,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit fallback uses the highest approved DeepSeek route", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -177,7 +181,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit fallback applies normal Kimi cache-read pricing", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -192,7 +196,7 @@ describe("curated AI Gateway catalogue", () => {
 
   test("managed debit converts exact Gateway cost before applying margin", () => {
     const settings = {
-      ...getSettings(),
+      ...withEnv({}, () => getSettings()),
       modelProvidersJson: "[]",
       vercelAiGatewayApiKey: "vck_test",
     };
@@ -692,6 +696,7 @@ describe("configuredModels", () => {
     expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.imageGeneration.runnable).toBe(true);
+    expect(resolved.model.capabilities.inputModalities).toEqual(["text", "image"]);
     expect(resolved.model.capabilities.reasoning).toMatchObject({
       efforts: ["low", "medium", "high", "xhigh"],
       defaultEffort: "high",

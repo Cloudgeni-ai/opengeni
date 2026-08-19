@@ -1,8 +1,18 @@
 # Agent Knowledge retrieval
 
-This document is the canonical contract for the workspace-local agent Knowledge
+This document is the canonical contract for the permission-first agent Knowledge
 read surface. It is a projection over authorized, ready Documents; it does not
 create another durable store, a prompt-injection path, or behavioral authority.
+
+The Company Brain inspector reuses these bounded records for authenticated
+human search, get, and browse. Its `documents:search` grant selects the human
+surface, so personal knowledge follows the exact signed-in subject. Agent reads
+still require `agent_access` and exact attempt grants for activated personal
+authority; the browser route does not reuse or relax that agent capability.
+Structural browse pages retain the same scope-bound opaque cursor and the UI
+appends later pages with stable-id deduplication. A workspace switch remounts
+the inspector and generation-fences every outstanding body/page request, so a
+response authorized for the prior workspace cannot render in the new one.
 
 Canonical implementation:
 
@@ -48,6 +58,58 @@ Agents search first and follow stable links; they do not need to crawl document
 bases or folders. `knowledge_browse` topic/source filters are discovery hints,
 not authority. Its opaque cursor is bound to the exact account, requesting
 workspace, immutable initiating subject, parent, topic, and source filters.
+Top-level cursors retain their v1 compatibility identity. Child-content cursors
+are v2 and additionally bind the Document's monotonic indexing-completion
+revision; a successful reindex invalidates an older cursor instead of silently
+mixing chunk versions.
+
+Document records expose an authorized `contents` link to their first chunk;
+chunks expose their `parent` plus authorized `previous`/`next` neighbors. These
+links contain only opaque stable ids. A linked title, source, quality fact, or
+body is never copied into the originating record, and following any link is a
+fresh `knowledge_get`/`knowledge_browse` authorization check. Revoking the
+document therefore removes both its records and its traversal surface.
+
+### Bounded search selection
+
+Search retrieves a bounded surplus from each already-authorized vector/keyword
+arm. The per-signal relevance floors are applied to that union before the final
+50-candidate window, preventing incidental vector neighbors from evicting valid
+keyword hits. SQL arms and the merged ranking use the opaque chunk id as their
+last tie-break, then one deterministic final selection runs after the exact-row
+recheck:
+
+1. a result must have vector score `>= 0.52` or normalized keyword score
+   `>= 0.01` (`any_signal`); incidental vector neighbors below the floor are
+   omitted;
+2. freshness is classified at response construction as `current` (at most 90
+   days), `aging` (at most 365 days), or `stale`; current/aging evidence receives
+   a small `0.02`/`0.01` ordering adjustment while stale evidence remains
+   retrievable with no boost;
+3. exact textual content (title, body, summary, and topics) is deduplicated,
+   retaining the highest-ranked authorized source and reporting the number of
+   duplicates; source/provenance metadata is not used to manufacture a second
+   copy of identical model-visible content;
+4. the caller limit is applied, then whole records are removed from the tail
+   until the complete serialized response is at most 64 KiB.
+
+Every response reports the bounded ranked and rechecked candidate counts,
+recheck/floor/dedupe/limit/response-budget omissions, exact serialized UTF-8
+bytes, and a deterministic byte-based token estimate (four bytes per estimated
+token). The token value is a budget fact, not a claim about a provider-specific
+tokenizer. Counts describe only candidates already inside the authorized
+bounded window, so they cannot reveal inaccessible rows. Trust remains
+`sourced` and conflict remains `not_evaluated`; those honest neutral quality
+facts do not receive a hidden score adjustment.
+
+Browse applies the same 64 KiB complete-serialized-response boundary. Whole
+tail records remain behind the returned cursor, so following the cursor cannot
+skip a budget-omitted record. If one complete record alone cannot fit because
+JSON escaping expands otherwise bounded fields, browse returns one explicit
+compact discovery projection and the agent may use `knowledge_get` for the full
+freshly authorized record. Browse reports exact response bytes, the same
+deterministic four-byte token estimate, budget omissions, and whether that one
+record was compacted.
 
 The compatibility tools (`search_documents`, `knowledge_fetch`,
 `fetch_document_chunk`, and `list_document_bases`) remain available for existing
@@ -55,20 +117,52 @@ callers, but new Knowledge navigation should use the three tools above.
 
 ## Permission-first reads
 
-The immutable initiating human is bound by the MCP server; no tool argument can
-replace it. Every path applies `account + requesting workspace + initiating
-subject + agent_access` before a row can be ranked or returned:
+The immutable initiating human and exact session attempt are bound by the MCP
+server; no tool argument can replace either. Every path applies `organization +
+requesting workspace + initiating subject + agent_access` before a row can be
+ranked or returned:
 
 1. search filters before vector/keyword ranking and limits;
 2. search re-fetches every selected chunk before projection, so a concurrent
    revocation removes it from the response;
 3. get performs a fresh exact-record authorization check;
 4. browse rechecks the parent before listing children and filters every child;
-5. following an internal link is an ordinary get/browse and rechecks authority.
+5. structural link ids are selected under the same RLS context as the visible
+   record, without linked titles or source metadata;
+6. following an internal link is an ordinary get/browse and rechecks authority.
 
 An inaccessible parent returns no children and no title, source, or relationship
 metadata. A cursor can only move within the already-authorized query; it never
 widens access.
+
+### Three-scope Document authority
+
+Organization Documents are available throughout their organization. Workspace
+Documents are available only in their authority workspace. New personal
+Documents use a common organization-user authority: their physical workspace is
+immutable ingestion/indexing provenance, while human retrieval follows the
+exact owner across that owner's currently accessible workspaces in the same
+organization. Losing access to the origin workspace removes its workspace
+knowledge but does not remove the owner's personal Document. Legacy personal
+Documents remain origin-workspace anchored and are never inferred into the new
+authority. Document-scoped original-file reads and downloads atomically resolve
+this same effective Document boundary, current owner authority, provider ACL,
+and only the immutable origin file; generic file access does not become portable.
+
+Personal ownership is not an agent grant. When an exact turn attempt is
+admitted, the database freezes only ready, agent-enabled personal Documents
+covered by a matching `document.read` once/session/always grant for the target
+workspace, session visibility, and authority epoch. Workspace-shared grants
+require the common explicit shared-output acknowledgement. Every later read
+rechecks the exact attempt and interruption state, current target-workspace
+access, organization membership revision, resource generation, grant generation
+and expiry, and Document status. Calls without an exact attempt omit personal
+Documents. Revoking any fence removes access immediately; a permission granted
+after admission cannot widen the already-running attempt.
+The sole compatibility lane is a legacy null-authority personal Document: an
+agent may read it only for the exact initiating subject in its origin workspace.
+It cannot follow that subject to another workspace, and common-authority
+personal Documents never bypass the admitted snapshot.
 
 ### Google Drive object authority
 
@@ -96,14 +190,18 @@ authorization timestamps. The citation function invokes the same current
 authorization predicate and exposes neither connection UUIDs nor principal
 identities; denial returns no record rather than a citation without authority.
 
-## Deliberately deferred
+## Explicit retrieval boundary
 
-This no-migration slice does not make normalized scoped claims model-visible,
-activate cross-workspace Personal authority, implement shared-session grants or
-revocation fencing, persist Task-tree notes, or write durable logical-turn
-selection receipts. Those require the staged tenancy/grant work and the
-separate governed write/promotion lane. Until then, the Knowledge tools remain
-explicit retrieval rather than automatic prompt composition.
+The three-scope Document authority makes authorized organization, workspace,
+and personal records available through explicit retrieval; it does not turn
+normalized scoped claims into standing prompt state, persist Task-tree notes,
+or enter the separate governed write/promotion lane. The accepted-logical-turn
+Company Brain receipt deliberately does not select or inject Document records:
+these tools authorize and fetch on demand, and completed tool results enter
+canonical session history. The receipt freezes only bounded legacy
+workspace-Memory candidates and composition facts. It cannot change
+`knowledge_memories`, structured preferences, company profile, instruction
+policy, or prompt composition.
 
 The runtime's existing Skills capability already gives selected Skills an
 always-visible bounded name/description index and lazily materializes the full

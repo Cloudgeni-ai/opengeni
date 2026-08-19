@@ -151,26 +151,27 @@ async function seedSessionTurn(
       await tx.execute(sql`
         insert into sessions (
           id, account_id, workspace_id, initial_message, model,
-          sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
-          tool_policy
+          reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+          status, temporal_workflow_id, tool_policy
         ) values (
           ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId},
-          'xAI persistence fixture', 'test-model', 'none', ${sessionId},
-          'running', ${workflowId},
+          'xAI persistence fixture', 'test-model', 'medium', 'standard', 'none',
+          ${sessionId}, 'running', ${workflowId},
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )`);
       await tx.execute(sql`
         insert into session_turns (
           id, account_id, workspace_id, session_id, trigger_event_id,
           temporal_workflow_id, status, source, position, prompt, model,
-          reasoning_effort, sandbox_backend, execution_generation,
+          reasoning_effort, latency_mode, sandbox_backend, execution_generation,
           active_attempt_id, xai_provider_account_authority_snapshot
         ) values (
           ${turnId}, ${fixture.accountId}, ${fixture.workspaceId}, ${sessionId},
           ${crypto.randomUUID()}, ${workflowId}, 'running', 'user', 1,
-          'xAI persistence fixture', 'test-model', 'medium', 'none',
+          'xAI persistence fixture', 'test-model', 'medium', 'standard', 'none',
           ${executionGeneration}, ${attemptId}, ${JSON.stringify(authoritySnapshot)}::jsonb
         )`);
+      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
       await tx.execute(sql`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id,
@@ -182,7 +183,6 @@ async function seedSessionTurn(
           ${executionGeneration}, 'running', ${workflowId}, ${`run-${attemptId}`},
           ${`activity-${attemptId}`}, 0, '{}'::jsonb
         )`);
-      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     },
   );
   return { sessionId, turnId, attemptId, workflowId };

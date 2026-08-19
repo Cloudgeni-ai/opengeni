@@ -42,15 +42,19 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
     }
     // Tool refs are tri-state for pack portability across deployments:
     //  - bare / optional:false is STRICT: the id must be configured here and
-    //    runtime connection failure fails the turn.
+    //    runtime connection failure fails closed when preparation is demanded.
+    //    Only an independent eager:true marker makes that a startup barrier.
     //  - optional:true + known id is preserved: runtime treats it like an
     //    auto-attached capability MCP and skips connect/list failures.
     //  - optional:true + unknown id is skipped above: the client explicitly
     //    opted into graceful degradation for MCPs (for example docs servers
     //    like context7) that only some deployments configure.
-    out.push(
-      optional ? { kind: "mcp", id: tool.id, optional: true } : { kind: "mcp", id: tool.id },
-    );
+    out.push({
+      kind: "mcp",
+      id: tool.id,
+      ...(optional ? { optional: true } : {}),
+      ...(tool.eager === true ? { eager: true } : {}),
+    });
   }
   return mergeToolRefs([], out);
 }

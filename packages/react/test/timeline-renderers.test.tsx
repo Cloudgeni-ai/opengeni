@@ -8,6 +8,7 @@ import type {
   MemoryItem,
   ToolCallItem,
   SandboxItem,
+  StartupPhaseItem,
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
@@ -2093,6 +2094,54 @@ describe("SandboxRow — failed chip", () => {
     await flush();
 
     expect(r.container.textContent ?? "").toContain("Sandbox reattached");
+
+    await r.unmount();
+  });
+});
+
+describe("StartupPhaseRow", () => {
+  test("shows the settled phase duration and truthful sandbox origin", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "startup-1",
+      turnId: "turn-1",
+      phase: "sandbox",
+      status: "complete",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(45_544).toISOString(),
+      durationMs: 45_544,
+      outcome: "restored",
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    expect(r.container.textContent ?? "").toContain("Sandbox restored");
+    expect(r.container.textContent ?? "").toContain("45.5s");
+
+    await r.unmount();
+  });
+
+  test("makes the overlapping model-preparation parent span explicit", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "startup-model-1",
+      turnId: "turn-1",
+      phase: "model_preparation",
+      status: "complete",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(27_500).toISOString(),
+      durationMs: 27_500,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Model request dispatched");
+    expect(text).toContain("Includes overlapping sandbox, rig, repository, and runtime setup");
+    expect(text).toContain("27.5s");
 
     await r.unmount();
   });

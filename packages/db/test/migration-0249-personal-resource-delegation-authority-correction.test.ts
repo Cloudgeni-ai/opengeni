@@ -7,6 +7,11 @@ import { createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
+const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
+const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
+const connectionAuthorityActivationMigrationName =
+  "0264_connection_authority_runtime_activation.sql";
+const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -103,14 +108,25 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       await migrate(databaseUrl);
       const nonRunningStatuses = ["requires_action", "recovering", "waiting_capacity"] as const;
 
-      for (const status of nonRunningStatuses) {
-        const ids = await createFixture(sql, databaseUrl, {
-          target: "ordinary",
-          workspaceMembership: true,
-        });
-        await expect(insertAttempt(sql, ids, ids.attemptId, status)).rejects.toThrow(
-          "personal-resource admission requires the exact current uninterrupted attempt",
-        );
+      await sql`
+        alter table session_turn_attempts
+        disable trigger session_attempt_personal_document_admission
+      `;
+      try {
+        for (const status of nonRunningStatuses) {
+          const ids = await createFixture(sql, databaseUrl, {
+            target: "ordinary",
+            workspaceMembership: true,
+          });
+          await expect(insertAttempt(sql, ids, ids.attemptId, status)).rejects.toThrow(
+            "personal-resource admission requires the exact current uninterrupted attempt",
+          );
+        }
+      } finally {
+        await sql`
+          alter table session_turn_attempts
+          enable trigger session_attempt_personal_document_admission
+        `;
       }
 
       const ids = await createFixture(sql, databaseUrl, {
@@ -143,9 +159,26 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           applied_at timestamptz not null default now()
         )
       `);
-      await sql`insert into schema_migrations (name) values (${migrationName})`;
+      await sql`
+        insert into schema_migrations (name)
+        values
+          (${migrationName}),
+          (${commonAuthorityMigrationName}),
+          (${connectionAuthorityMigrationName}),
+          (${connectionAuthorityActivationMigrationName}),
+          (${scheduledConnectionAuthorityMigrationName})
+      `;
       await migrate(databaseUrl);
-      await sql`delete from schema_migrations where name = ${migrationName}`;
+      await sql`
+        delete from schema_migrations
+        where name in (
+          ${migrationName},
+          ${commonAuthorityMigrationName},
+          ${connectionAuthorityMigrationName},
+          ${connectionAuthorityActivationMigrationName},
+          ${scheduledConnectionAuthorityMigrationName}
+        )
+      `;
 
       const ids = await createFixture(sql, databaseUrl, {
         target: "personal",
@@ -156,10 +189,25 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       );
 
       await migrate(databaseUrl);
-      const [receipt] = await sql<Array<{ count: number }>>`
-        select count(*)::int as count from schema_migrations where name = ${migrationName}
+      const receipts = await sql<Array<{ name: string }>>`
+        select name
+        from schema_migrations
+        where name in (
+          ${migrationName},
+          ${commonAuthorityMigrationName},
+          ${connectionAuthorityMigrationName},
+          ${connectionAuthorityActivationMigrationName},
+          ${scheduledConnectionAuthorityMigrationName}
+        )
+        order by name
       `;
-      expect(receipt?.count).toBe(1);
+      expect(receipts.map((receipt) => receipt.name)).toEqual([
+        migrationName,
+        commonAuthorityMigrationName,
+        connectionAuthorityMigrationName,
+        connectionAuthorityActivationMigrationName,
+        scheduledConnectionAuthorityMigrationName,
+      ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);
       await setRuntimeScope(sql, ids);
@@ -263,6 +311,8 @@ async function createFixture(
       createdBy: { kind: "subject", subjectId },
       subjectId,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
       variableSetId: variableSet!.id,
       firstPartyMcpTools: [],

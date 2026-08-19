@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   claimTemporalScheduleCleanups,
+  completeTemporalScheduleConnectorCleanup,
   settleTemporalScheduleCleanup,
   type Database,
   type TemporalScheduleCleanupClaim,
@@ -13,6 +14,7 @@ const CLEANUP_POLL_INTERVAL_MS = 1_000;
 
 type TemporalScheduleCleanupDependencies = {
   db: Database;
+  cleanupConnectorAuthorization?: (claim: TemporalScheduleCleanupClaim) => Promise<void>;
   deleteSchedule: (temporalScheduleId: string) => Promise<void>;
   observability?: Pick<Observability, "info" | "warn" | "error">;
 };
@@ -39,6 +41,17 @@ export async function processTemporalScheduleCleanupClaims(
   const results = await Promise.all(
     claims.map(async (claim): Promise<"deleted" | "failed" | "stale"> => {
       try {
+        if (claim.connectorCleanupSnapshot && !claim.connectorCleanupCompletedAt) {
+          if (!deps.cleanupConnectorAuthorization) {
+            throw new Error("scheduled connector cleanup dependency is unavailable");
+          }
+          await deps.cleanupConnectorAuthorization(claim);
+          const completed = await completeTemporalScheduleConnectorCleanup(deps.db, {
+            id: claim.id,
+            claimId: claim.claimId,
+          });
+          if (!completed) return "stale";
+        }
         await deps.deleteSchedule(claim.temporalScheduleId);
         const settled = await settleTemporalScheduleCleanup(deps.db, {
           id: claim.id,

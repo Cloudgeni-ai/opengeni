@@ -1929,6 +1929,8 @@ function session(patch: Partial<Session> = {}): Session {
     createdBy: { kind: "subject", subjectId: "user:test" },
     createdByContext: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     sandboxOs: "linux",
     sandboxGroupId: "session-1",
@@ -2005,6 +2007,8 @@ function scheduledTask(
     createdAt: "2026-05-12T00:00:00.000Z",
     updatedAt: "2026-05-12T00:00:00.000Z",
     ...patch,
+    authorityRevision: patch.authorityRevision ?? 1,
+    executionDigest: patch.executionDigest ?? "a".repeat(64),
   };
 }
 
@@ -2028,6 +2032,8 @@ function taskRun(patch: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
     createdAt: "2026-06-11T08:00:00.000Z",
     updatedAt: "2026-06-11T08:00:00.000Z",
     ...patch,
+    taskAuthorityRevision: patch.taskAuthorityRevision ?? null,
+    taskExecutionDigest: patch.taskExecutionDigest ?? null,
   };
 }
 

@@ -3,7 +3,7 @@ import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
-import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
@@ -94,7 +94,9 @@ import {
   providerRetryAfterMs,
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
+  objectStorageForSandboxDownloads,
   resolveActiveSandboxBackend,
+  runtimeResourcesForTurn,
   runMandatoryHistoryPersistenceStep,
   sandboxEstablishPolicyDecision,
   sandboxFileMaterializationOutcome,
@@ -102,9 +104,12 @@ import {
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldEstablishSandboxForTurn,
+  shouldPrefetchManagedSandbox,
+  shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
   structuredToolTransportForTurn,
   toolCallProducesRetainableSessionImage,
@@ -138,6 +143,24 @@ describe("approval RunState materialization boundary", () => {
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
   });
+
+  test("requires_action pause flushes paired history and attaches the open suffix", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    expect(source).toContain("attachOpenSuffixToPendingToolCalls");
+    expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
+    expect(source).toContain("reconcileConversationTruth({ requireDurable: true })");
+    expect(source).toContain("settleOpenSuffixResumeIfNeeded");
+  });
+
+  test("approval and human-input resume require open-suffix rows", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/run-input.ts", import.meta.url),
+    ).text();
+    expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+    expect(source).toContain("Open suffix resume has no interruption rows");
+  });
 });
 
 describe("workspace structured human-input policy", () => {
@@ -163,6 +186,28 @@ describe("workspace structured human-input policy", () => {
 
   // No-Claim: these pure boundary tests do not prove that a deployed worker has
   // reloaded a workspace setting or that an already-pending request was repaired.
+});
+
+describe("periodic workspace snapshot admission", () => {
+  const ready = {
+    firstProviderRequestStarted: true,
+    snapshotInFlight: false,
+    turnEndCaptureInProgress: false,
+  };
+
+  test("keeps checkpoint maintenance off the first-request critical path", () => {
+    expect(
+      shouldStartPeriodicWorkspaceSnapshot({ ...ready, firstProviderRequestStarted: false }),
+    ).toBe(false);
+    expect(shouldStartPeriodicWorkspaceSnapshot(ready)).toBe(true);
+  });
+
+  test("retains the existing single-flight and turn-end gates", () => {
+    expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, snapshotInFlight: true })).toBe(false);
+    expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, turnEndCaptureInProgress: true })).toBe(
+      false,
+    );
+  });
 });
 
 describe("Connected Machine durable stream finalization", () => {
@@ -2589,6 +2634,55 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("closes logical provision before fallible post-establish setup", async () => {
+    const order: string[] = [];
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        order.push("box-established");
+        return "ready";
+      },
+      {
+        beforeCompleted: async (_result, settlement) => {
+          order.push(`provision-completed:${settlement.internalAttempts}`);
+          await Promise.resolve();
+          order.push("rig-and-repository-setup");
+        },
+        onCompleted: () => {
+          order.push("operation-released");
+        },
+      },
+    );
+
+    await expect(provisioner.get()).resolves.toBe("ready");
+    expect(order).toEqual([
+      "box-established",
+      "provision-completed:1",
+      "rig-and-repository-setup",
+      "operation-released",
+    ]);
+  });
+
+  test("durably starts model preparation before native runStream and binds generic dispatch to fetch", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const runStreamOnceAt = source.indexOf("const runStreamOnce = async");
+    const modelPreparationStartedAt = source.indexOf(
+      'type: "turn.startup.phase.started"',
+      runStreamOnceAt,
+    );
+    const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const genericWireHookAt = source.indexOf(
+      "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
+      runtimeRunStreamAt,
+    );
+
+    expect(runStreamOnceAt).toBeGreaterThan(-1);
+    expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
+    expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
+  });
+
   test("file materialization metrics fail when any download fails softly", () => {
     expect(sandboxFileMaterializationOutcome([])).toBe("completed");
     expect(
@@ -2608,7 +2702,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       lazyEnabled: true,
       machinePrimary: false,
       sandboxBackend: "docker" as const,
-      hasInitialRunCredentialMaterial: false,
+      hasRunCredentialResolver: false,
       generatedVideoFileCount: 0,
       hasSignedFileResources: false,
     };
@@ -2629,9 +2723,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "backend_none",
     });
-    expect(
-      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
-    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasRunCredentialResolver: true })).toEqual({
+      policy: "on-demand",
+      reason: "initial_run_credentials_deferred",
+    });
     expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
       policy: "eager",
       reason: "generated_video_files",
@@ -2640,6 +2735,189 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "signed_file_resources",
     });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        generatedVideoFileCount: 1,
+      }),
+    ).toEqual({ policy: "eager", reason: "generated_video_files" });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        hasSignedFileResources: true,
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
+  test("managed-box prefetch is only for on-demand repository turns", () => {
+    const base = {
+      establishPolicy: "on-demand" as const,
+      machinePrimary: false,
+      groupBoxBackend: "modal" as const,
+      hasRepositoryResources: true,
+    };
+
+    expect(shouldPrefetchManagedSandbox(base)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "docker" })).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...base, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+  });
+
+  test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
+    const steps: string[] = [];
+    let resolves = 0;
+    let materializations = 0;
+    const initialMaterial = await (async () => {
+      resolves += 1;
+      steps.push("credential-resolved");
+      return { available: true };
+    })();
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      await Bun.sleep(5);
+      if (initialMaterial.available) {
+        materializations += 1;
+        steps.push("credential-materialized");
+      }
+      return {
+        exec: async () => {
+          steps.push("provider-operation");
+        },
+      };
+    });
+
+    // Model preparation resolves the exact attempt once so auth-needed state
+    // can be model-visible, but a model-only turn still owns no sandbox write,
+    // renewal loop, lease, box, or exact-generation cleanup.
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(0);
+    expect(steps).toEqual(["credential-resolved"]);
+
+    const boxes = await Promise.all(Array.from({ length: 8 }, () => provisioner.get()));
+    await boxes[0]!.exec();
+
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(1);
+    expect(steps).toEqual(["credential-resolved", "credential-materialized", "provider-operation"]);
+  });
+
+  test("activity prepares credential model context before turn input and reuses it lazily", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const resolutionAt = source.indexOf(
+      "const initialRunCredentialMaterial = runCredentialResolver",
+    );
+    const modelNoteAt = source.indexOf(
+      "const runCredentialsNote = initialRunCredentialMaterial",
+      resolutionAt,
+    );
+    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      modelNoteAt,
+    );
+    const lazyCredentialAttachAt = source.indexOf(
+      "await attachRunCredentialRenewal(",
+      provisionerAt,
+    );
+    const lazyProvisionerPrefix = source.slice(provisionerAt, lazyCredentialAttachAt + 500);
+
+    expect(resolutionAt).toBeGreaterThan(-1);
+    expect(modelNoteAt).toBeGreaterThan(resolutionAt);
+    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
+    expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
+    expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
+    expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
+  });
+
+  test("runtime preparation overlaps independent workspace reads after the personal-resource fence", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
+    const overlappedReads = source.indexOf(
+      "Independent workspace reads after the personal-resource fence",
+      authorize,
+    );
+    const packRead = source.indexOf(
+      "resolveWorkspacePackRuntime(db, input.workspaceId)",
+      overlappedReads,
+    );
+    const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", overlappedReads);
+    const policyRead = source.indexOf(
+      "getWorkspaceModelPolicy(db, input.workspaceId)",
+      overlappedReads,
+    );
+    const imageEnsure = source.indexOf(
+      "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
+    );
+    const gitAssert = source.indexOf(
+      "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
+    );
+    expect(authorize).toBeGreaterThan(0);
+    expect(overlappedReads).toBeGreaterThan(authorize);
+    expect(packRead).toBeGreaterThan(overlappedReads);
+    expect(rigRead).toBeGreaterThan(packRead);
+    expect(policyRead).toBeGreaterThan(rigRead);
+    expect(imageEnsure).toBeGreaterThan(policyRead);
+    expect(gitAssert).toBeGreaterThan(imageEnsure);
+    expect(source.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
+  });
+
+  test("lazy git token mint starts before the box establish returns", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+    );
+    const resumeAt = source.indexOf(
+      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      provisionerAt,
+    );
+    const mintStartAt = source.lastIndexOf("startRunGitCredentialsMint();", resumeAt);
+    const mintAwaitAt = source.indexOf("await startRunGitCredentialsMint()", resumeAt);
+    expect(provisionerAt).toBeGreaterThan(-1);
+    expect(resumeAt).toBeGreaterThan(provisionerAt);
+    expect(mintStartAt).toBeGreaterThan(provisionerAt);
+    expect(mintStartAt).toBeLessThan(resumeAt);
+    expect(mintAwaitAt).toBeGreaterThan(resumeAt);
+  });
+
+  test("repository on-demand turns prefetch managed-box create before tools", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const onDemandAt = source.indexOf('} else if (establishPolicy === "on-demand")');
+    const prefetchAt = source.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
+    const toolsAt = source.indexOf('phase: "tools"', prefetchAt);
+    const provisionerAt = source.indexOf(
+      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      toolsAt,
+    );
+    const joinAt = source.indexOf(
+      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      provisionerAt,
+    );
+    const prefetchMintAt = source.indexOf("startRunGitCredentialsMint();", prefetchAt);
+    const prefetchResumeAt = source.indexOf("resumeManagedGroupBox()", prefetchMintAt);
+
+    expect(onDemandAt).toBeGreaterThan(-1);
+    expect(prefetchAt).toBeGreaterThan(onDemandAt);
+    expect(toolsAt).toBeGreaterThan(prefetchAt);
+    expect(provisionerAt).toBeGreaterThan(toolsAt);
+    expect(joinAt).toBeGreaterThan(provisionerAt);
+    expect(prefetchMintAt).toBeGreaterThan(prefetchAt);
+    expect(prefetchMintAt).toBeLessThan(prefetchResumeAt);
+    expect(prefetchResumeAt).toBeLessThan(toolsAt);
+    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeManagedGroupBox()");
+    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeBoxForTurn(");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {
@@ -3605,6 +3883,30 @@ describe("Codex credential lease deadline fence", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("keeps repositories durable but admits only current-turn file attachments", () => {
+    const repository: ResourceRef = {
+      kind: "repository",
+      provider: "github",
+      repositoryId: "123",
+      uri: "https://github.com/cloudgeni-ai/opengeni",
+      ref: "main",
+      mountPath: "opengeni",
+    };
+    const historicalFile: ResourceRef = {
+      kind: "file",
+      fileId: "00000000-0000-4000-8000-000000000071",
+    };
+    const currentFile: ResourceRef = {
+      kind: "file",
+      fileId: "00000000-0000-4000-8000-000000000072",
+    };
+
+    expect(runtimeResourcesForTurn([repository, historicalFile], [currentFile])).toEqual([
+      repository,
+      currentFile,
+    ]);
+  });
+
   test("uses the active backend when deciding whether attachments need signed delivery", () => {
     const modalHome = testSettings({
       sandboxBackend: "modal",
@@ -4568,20 +4870,20 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
       configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
     }) as Parameters<typeof computerToolModeForTurn>[0];
 
-  test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
-    // api is irrelevant once kind is codex-subscription — codex wins.
+  test("codex-subscription → function-image", () => {
+    // api is irrelevant once kind is codex-subscription — image input wins.
     expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
       "function-image",
     );
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire provider without proven visual image transport → disabled", () => {
+  test("a chat-wire provider cannot receive screenshot tool results as images → disabled", () => {
     expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
-  test("a registry responses provider → hosted", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
+  test("a registry responses provider → function-image", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("function-image");
   });
 
   test("any text-only model → disabled before provider transport selection", () => {
@@ -4589,19 +4891,28 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
       "disabled",
     );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses", false))).toBe(
+      "disabled",
+    );
   });
 
-  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+  test("Gateway Responses vision models use computer_* function tools", () => {
     expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
-      "disabled",
+      "function-image",
     );
     expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
-      "disabled",
+      "function-image",
     );
   });
 
-  test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
-    expect(computerToolModeForTurn(null)).toBe("hosted");
+  test("SuperGrok Responses vision models use computer_* function tools", () => {
+    expect(computerToolModeForTurn(resolved("xai-subscription", "responses"))).toBe(
+      "function-image",
+    );
+  });
+
+  test("the LEGACY global-client fallback (resolveTurnModel → null) → function-image", () => {
+    expect(computerToolModeForTurn(null)).toBe("function-image");
   });
 });
 
@@ -4683,6 +4994,41 @@ describe("lazyToolTransportForTurn", () => {
       "generic_dispatch",
     );
     expect(lazyToolTransportForTurn(resolved("api-key", "chat"))).toBe("generic_dispatch");
+  });
+});
+
+describe("shouldDeferNonEagerToolPreparation", () => {
+  const eligible = {
+    lazyToolTransport: "codex_native" as const,
+    progressiveDisclosureEnabled: true,
+    artifactRuntimeAvailable: false,
+    triggerKind: "next" as const,
+    triggerType: "user.message" as const,
+  };
+
+  test("overlaps only a brand-new lazy-capable turn", () => {
+    expect(shouldDeferNonEagerToolPreparation(eligible)).toBe(true);
+    expect(
+      shouldDeferNonEagerToolPreparation({
+        ...eligible,
+        triggerType: "system.update.delivered",
+      }),
+    ).toBe(true);
+  });
+
+  test("keeps approval resumes, editable artifacts, and disabled disclosure eager", () => {
+    expect(shouldDeferNonEagerToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
+      false,
+    );
+    expect(
+      shouldDeferNonEagerToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
+    ).toBe(false);
+    expect(
+      shouldDeferNonEagerToolPreparation({
+        ...eligible,
+        progressiveDisclosureEnabled: false,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -4801,13 +5147,13 @@ describe("modelAttachmentInputPolicyForTurn", () => {
       },
     }) as Parameters<typeof modelAttachmentInputPolicyForTurn>[0];
 
-  test("keeps image and file capabilities independent on Responses", () => {
+  test("never inlines document bytes as input_file", () => {
     expect(
       modelAttachmentInputPolicyForTurn(resolved("responses", true, ["application/pdf"])),
-    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: ["application/pdf"] });
+    ).toEqual({ supportsImageInput: true, inputFileMediaTypes: [] });
     expect(
       modelAttachmentInputPolicyForTurn(resolved("responses", false, ["application/pdf"])),
-    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: ["application/pdf"] });
+    ).toEqual({ supportsImageInput: false, inputFileMediaTypes: [] });
   });
 
   test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
@@ -4815,6 +5161,26 @@ describe("modelAttachmentInputPolicyForTurn", () => {
       supportsImageInput: false,
       inputFileMediaTypes: [],
     });
+  });
+});
+
+describe("objectStorageForSandboxDownloads", () => {
+  const ambient = { kind: "ambient" } as const;
+  const settings = testSettings({
+    sandboxBackend: "docker",
+    objectStorageBackend: "s3-compatible",
+    objectStorageEndpoint: "http://127.0.0.1:9000",
+    objectStorageSandboxEndpoint: "http://minio:9000",
+    objectStorageAccessKeyId: "test",
+    objectStorageSecretAccessKey: "test",
+  });
+
+  test("active selfhosted keeps the public endpoint even when session home is docker", () => {
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "selfhosted")).toBe(ambient);
+  });
+
+  test("docker rewrites s3-compatible signatures onto the sandbox MinIO host", () => {
+    expect(objectStorageForSandboxDownloads(settings, ambient as never, "docker")).not.toBe(ambient);
   });
 });
 

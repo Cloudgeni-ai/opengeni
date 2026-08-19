@@ -1,5 +1,243 @@
 # @opengeni/db
 
+## 2.0.0
+
+### Major Changes
+
+- 2cb04e0: Retire Memory V1's standing prompt block and its agent writes. `memoryPromptMode` is now always `retrieval_only`: no pinned/recency working set is injected into any agent prompt, and the `legacy_standing` rollback opt-out can no longer be selected. The `memory_save` and `memory_correct` first-party tools are removed; durable agent writes go through `remember` (explicit user-directed) and task-note promotion (the agent's own findings), while `memory_search` remains so an agent can still read what a workspace knows.
+
+  Nothing is rewritten or deleted: `knowledge_memories` rows, human REST/UI audit, search, correction, export, and the Memory Slack publication path are unchanged. A workspace that stored `legacy_standing` keeps the stored value in its passthrough settings bag, where it simply stops meaning anything, and already accepted turns keep the mode they recorded because those snapshots are immutable facts about what was composed. Migration 0295 changes no data; it reports whether anything was still relying on the mode rather than assuming it was unused.
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+- 79ee99b: Preference descriptors now carry `activationAuthority` (`human_confirmed` | `automatic` | `null`) alongside `provenance.trust`. Trust stays the frozen creation-time fact - a revision an agent proposed reads `untrusted_proposal` forever, and both activation adapters still require that value - while the new field answers the separate question of whether a human explicitly confirmed the activation or policy activated it automatically, read from the governed-learning activation receipt at descriptor-build time. Descriptors built before this field existed parse as `null`, which keeps their immutable stored JSON and pinned descriptor hash valid.
+- 368ee6c: Add the explicit resource-classification assertion seam for Variable Sets, Rigs, and Connected Machines (migration 0291, rolling; organization-tenancy phase D slices 4-5), plus `bun run db:verify-resource-classification`. These three families need no data rewrite and none is performed: `authority_scope` is `NOT NULL DEFAULT 'workspace'` on all three tables and every `*_authority_shape_check` was `VALIDATE`d at creation, so a legacy unmigrated row and a deliberately workspace-scoped row are byte-identical and there is no discriminator to classify on. `connections` (0256) is the one sibling family with a genuine one (`subject_id` plus an active organization membership); none of these tables has it, and phase D forbids substituting `created_by`, connection attribution, a default workspace, a resource name, or current access.
+
+  The seam therefore asserts and receipts instead. It proves per row what no constraint enforces - that a row claiming user ownership points at an authority of the matching `resource_kind`/`resource_id`, that the authority and its owning organization membership are both live, and that the delegation still has an origin workspace - and records every failure as an unresolved obligation with a fixed reason code through the tenancy backfill ledger, never as a guess or a rewrite. Its report states `ledgerAvailable` plainly so a run that could not record its obligations is visible rather than silent.
+
+  It is a `SECURITY DEFINER` capability-claiming seam rather than migration SQL for a structural reason: all three tables are FORCE RLS behind `workspace_rls_visible`, which is false while the workspace GUC is unset, and the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`. A plain migration-time `UPDATE` on these tables matches zero rows and reports success on such a deployment, and only appears to work in a harness that migrates as superuser.
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- d581eef: Allow a connected Chrome profile to move from a revoked machine enrollment to its replacement enrollment.
+- a7df809: Harden the four `remember` instruction-policy edges.
+
+  A moved policy head is now one typed, actionable `RememberError` (`baseline_stale`) on both the propose and confirm sides instead of an untyped error or a raw SQLSTATE 40001. The activation baseline no longer contributes to operation identity, so an ordinary turn-recovery replay of the same `operationId` stays idempotent across a head change; staleness is still enforced by the compare-and-set and by the activation function. A governed write that fails now archives the evidence task note it created instead of stranding it.
+
+  A confirmation stranded by a head that moved after the human already answered now rebaselines onto the current head and completes, instead of hard-failing and forcing the human to answer again. Proposal uniqueness moves from one-per-source to one-per-source-per-baseline to admit that successor; the successor reuses the same knowledge proposal, so the human's confirmation stays bound to exactly the content they approved.
+
+  Two consequences worth stating plainly:
+
+  - Activating a rule replaces the whole active policy document, so confirming a second rule discards a first rule that a human also approved, without asking again. That is the existing whole-document-replacement design of this lane rather than something the rebaseline introduces - previously the stale baseline forced a round trip that would have clobbered anyway - and the audit trail stays exact, with the activation event naming the revision it replaced and `undo` restoring it. The rebaseline removes the round trip, which makes the behaviour easier to reach.
+  - Excluding the baseline from operation identity changes both the proposal request fingerprint and the governed-write input hash (which derives the service actor subject id). A `remember` operation that durably wrote rows under the previous release and is replayed under this one computes a different identity and fails as an operation-reuse conflict. This is bounded to operations in flight across the deploy and self-heals with a fresh operation id; no dual-identity compatibility path was added.
+
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- a99ef33: Test-only: add cross-organization isolation and revocation evidence coverage for the organization-tenancy authority tables. `packages/db/test/organization-isolation-evidence.test.ts` proves, against a real PostgreSQL instance, that a member of one organization cannot read or mutate another organization's workspaces, sessions, or resources, and that revoking a membership takes effect immediately for the exact revoked grant. No shipped runtime behavior changes; this releases the new coverage with the package.
+- 7bc1cd1: Correct the organization tenancy inventory seam (migration 0292, rolling): remove the untruthful `unclassified` counters for Variable Sets, Rigs, and Connected Machines. 0285 defined them as `authority_id IS NULL`, but the authority shape constraints _require_ a NULL `authority_id` for every organization- and workspace-scoped row, so the counter was structurally `total - userScoped` - every correctly classified row was reported as unmigrated and the number could never drain to zero as the documented backfill gate. No corrected predicate exists: `authority_scope` defaults to `'workspace'`, and `origin_workspace_id` means "predates the scoped lifecycle" for Variable Sets, is still produced NULL today by `createRig`'s non-scoped branch for Rigs, and has inverted polarity for Connected Machines (0262 backfilled it while the ordinary enroll path leaves it NULL). The population is unrepresentable in the current schema, so the key is removed rather than renamed - `byScope` already reports every authority distinction the schema can truthfully make. `schemaVersion` moves 1 -> 2; the seam stays read-only, integers-only, and exact-organization scoped, and `CREATE OR REPLACE` preserves its owner and `opengeni_app` EXECUTE grant. The documents gate is unchanged: its `authority_kind = 'personal' AND authority_id IS NULL` names a genuine invariant violation and remains truthful.
+- 6d22ab5: Widen the task-note expiry ceiling from 30 to 90 days. Task notes are pure agent-to-agent coordination within one root session tree; resuming a paused root session/task tree after a longer gap previously lost all coordination notes silently. `TASK_NOTE_MAX_LIFETIME_DAYS` is now the single source of truth, referenced by the application-layer bound checks and `remember`'s evidence note instead of a hardcoded literal. Fully backward compatible: every existing row and every caller supplying 1-30 days keeps working unchanged.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/config@0.17.0
+  - @opengeni/codemode@0.4.9
+
+## 1.5.0
+
+### Minor Changes
+
+- a03b86f: Read-only organization tenancy inventory (migration 0285, rolling): `bun run db:inventory-tenancy --organization-id <uuid>` reports content-free counts of every legacy-attribution population the tenancy backfill/parity program gates on - ownerless sessions, unclassified variable sets/rigs/machines, connections per authority lane, membership anchors, unattributed workspace writers, and the linked-input document/Codex gates. Integers only; the SECURITY DEFINER seam validates the exact organization context and returns no identities, keys, or values.
+
+## 1.4.0
+
+### Minor Changes
+
+- 6937eaf: The API-direct session-attach variable-set materialization lane (viewer attach and direct channel operations cold-creating a box) now records the accepted subject and a `variable_set.materialized` audit fact with the live session authority tuple (migration 0282, rolling; unchanged function signature). Attribution flows through the standard request-context GUCs; an old image that sets no subject records the explicit `service:session` sentinel. Denials keep their fail-closed raise-and-rollback semantics.
+- b05130a: Hard-cut editable spreadsheets to authored-only canonical state, deterministic formula projections, and explicit current compatibility protocols. Preserve React compatibility with artifact-tool 0.1 and 0.2 while adding the 0.3 line.
+
+### Patch Changes
+
+- f804057: Remove the arbitrary per-turn Codemode call cap. One turn may journal as many Codemode calls as the work needs; recovery still reuses that same journal rather than minting a new budget.
+- 418b531: Human-confirmed Knowledge approvals now record truthful review reasons: migration 0284 adds a reason-carrying overload of `governed_learning_apply_knowledge_review`, and both human-confirmed callers (`confirm_remember_knowledge_claim` and `activate_human_confirmed_learning_decision`) pass an explicit human-confirmed reason instead of the hard-coded "Automatic governed-learning activation." wording; the 9-arg signature keeps that legacy wording for the automatic path and remains the guard-resolved capability writer.
+- Updated dependencies [0a6c577]
+- Updated dependencies [f804057]
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codemode@0.4.8
+
+## 1.3.0
+
+### Minor Changes
+
+- 4c2d958: Google Drive publication freezes its exact output destination on the accepted delegation, so a later connection-settings change fails an already-accepted turn's publication closed instead of silently redirecting it. Every publication sits behind exactly one durable execute-once connector fence (the attempt connector-action wrapper for model callers, the tool's own registration for Codemode callers): a failure before the first mutating provider request settles not_executed with a retry-safe message, while a failure after it settles uncertain and surfaces the unknown outcome.
+- 4c2d958: Scoped stream tokens (`ogs_`, 120 s TTL unchanged) now carry the authenticated viewer subject and the session's live authority epoch (migration 0281). The viewer lease holder records the same pair monotonically, the API re-verifies a human viewer's current workspace membership at every mint and degrades the stream to `transport:null` when membership is gone, and the selfhosted relay fences an attach whose authority claim is below the channel's recorded floor. Pre-0281 tokens keep working during the rolling window and enforce nothing new.
+
+### Patch Changes
+
+- 4c2d958: `remember` with `lane: instruction_policy` no longer fails after a governed-learning rule activation: the onboarding-proposal insert now copies the head's `activated_at` baseline in SQL instead of round-tripping it through a millisecond JS `Date`, so the draft trigger's exact comparison holds against the microsecond `clock_timestamp()` value the governed-learning controller writes.
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@0.4.7
+  - @opengeni/config@0.16.7
+
+## 1.2.0
+
+### Minor Changes
+
+- a65505d: Connection-use audit facts record the frozen causal initiator and session authority epoch/visibility/owner of every authorized or denied use, and variable-set materialization/secret-read audit events carry the causal human, attempt authority triple, and owner authority identity (migration 0280). Variable-set authority denials are now recorded as metadata-only audit facts from a fresh transaction while the fail-closed rejection is preserved.
+
+## 1.1.0
+
+### Minor Changes
+
+- ca75ed9: Add the governed-learning activation controller with exact authority revalidation, destination-native workspace activation, immutable content-free receipts, and supersession-safe append-only undo.
+- c297fc0: Add permission-first Company Brain guidance, Knowledge, proposal, and content-free accepted-turn context inspection surfaces.
+- 02e21fa: Accept an optional curated `category` on registry capability catalog imports instead of forcing every imported connector into the registry-wide default.
+- c297fc0: Route derived Company Brain proposals through the immutable workspace learning-policy snapshot before destination admission.
+  Add exact rooted Task-note to proposed workspace Knowledge promotion with immutable value-free provenance and replay-safe MCP tools.
+  Add atomic Task-note correction/revert with immutable old/new lineage, strict attempt/version fencing, and replay-safe first-party tooling.
+- db758f3: Publish governed-learning activations and undos to the configured workspace Slack channel through the existing durable publication outbox. The dead durable-learning adapter (`publishDurableLearningOutcomeToSlack`) is replaced by `publishGovernedLearningEventToSlack`, which projects only content-free receipt facts, uses `governed-learning:<event>:<receiptId>` idempotency, and fails closed for Slack-derived evidence.
+- e9aabaa: Wire the governed-learning evaluator and activation controller into the Company Brain learning-policy router. Ways-of-working proposals now record a content-free decision receipt after they commit; under `automatic`, an eligible preference decision is activated through the destination lifecycle (instruction policy keeps a human activation boundary). The route receipt gains `learning`, `learningFailure`, and activation receipt/destination facts; `activation.activated` is no longer always `false`.
+- c297fc0: Add atomic rooted Task-note promotion into inactive instruction-policy and
+  preference proposals while preserving exact source evidence, replay identity,
+  and human-only activation.
+- 22c0c21: Add the managed-human organization invitation, role, suspension, offboarding,
+  and retention lifecycle with revision-fenced APIs and SDK methods. Self
+  invitation history is exposed only through bounded keyset pages, and acceptance
+  resolves one exact subject-bound invitation. Already-open session,
+  workspace-control, live, and interaction streams periodically recheck current
+  membership authority and close after revocation. A bounded operator command
+  commits expired offboarded personal database deletion together with a closed,
+  exact-key cleanup-obligation set before deleting external objects. Provider
+  failures retry only unfinished obligations, retained references abort before
+  external bytes are touched, File bucket identity stays frozen across retries,
+  and immutable lifecycle evidence survives cleanup.
+- 4eb7abd: `remember` with `lane: knowledge` now returns `confirmation_required` bound to the Knowledge claim, and `remember_confirm` (`claimId`) approves the claim through the Knowledge review lifecycle after the exact initiating human answered the bound canonical question with `save` (rolling migration 0274, `confirm_remember_knowledge_claim`, immutable `remember_knowledge_confirmation_receipts`). `remember_confirm` accepts either `proposalId` + `decisionReceiptId` (preference / instruction policy) or `claimId` (knowledge); the confirm receipt carries `claimId` and a `knowledge` activation summary with `undo: knowledge_review`.
+- 89d4ab3: Add the explicit user-directed `remember` / `remember_confirm` agent tools. Content becomes exact task-note evidence promoted through the learning-policy router; a preference activates immediately under `automatic`, Knowledge stays proposal-only, and everything else returns a bound `request_human_input` payload whose `save` answer authorizes activation through the new rolling migration 0272 `activate_human_confirmed_learning_decision` capability (`authority_kind = human_confirmed`, human-input request id recorded on the receipt).
+- 304462e: Workspace-membership removal is now one fenced SECURITY DEFINER teardown (migration 0278): the removed member's queued/live turns in that workspace are cancelled, live attempts interrupted, realtime modes ended, private-session authority epochs advanced, workflow wakes registered, and per-workspace personal rows plus the membership deleted in one transaction. Self-removal, last-admin removal, and non-administering actors fail closed in the database seam.
+- 16cbd7b: Make `retrieval_only` the default Company Brain memory prompt mode. An absent or unrecognized workspace `memoryPromptMode` now removes the broad Memory V1 standing block, excludes legacy preference-kind rows from agent search, and omits the company profile from child prompts; an explicit `legacy_standing` remains the per-workspace rollback opt-out. Rolling migration 0271 applies the same fallback at turn acceptance so frozen snapshots and the contracts resolver agree.
+- 30ba620: Make every accepted scheduled agent occurrence an immutable, credential-free
+  execution snapshot bound to one run, session, scheduled update, logical turn,
+  and attempt chain. Agent tasks accept explicit `connectionAuthorities`
+  (omitted preserves, `[]` clears, an array replaces), execution-affecting edits
+  require the same causal human, `once` grants are consumed exactly once per
+  run, cold reusable sessions converge on one revision-bound materialization
+  receipt, and task deletion becomes a one-way paused tombstone with durable
+  connector cleanup. Create/update requests are byte-bounded at ingress while
+  stored rows stay readable. Migration `0275` is a maintenance cutover.
+- f72563d: Slack now has exactly two authorities: the personal hosted Slack MCP grant and the OpenGeni workspace bot. The workspace-owned hosted Slack MCP connection is removed: OAuth start, reconnect, the callback fence, and capability enablement reject an explicit non-personal ownership for `https://mcp.slack.com/mcp`, an omitted ownership on that resource defaults to personal, and `listEnabledMcpCapabilityServers` no longer runs a workspace-scoped Slack MCP installation enabled by an earlier release. The bot manifest and canonical bot allowlist gain the bot-token Real-time Search scopes `search:read.public`, `search:read.files`, and `search:read.users` as requested-but-not-required extras; apply them to the Slack app before deploying, since the install URL requests every requested scope. The bot search tool itself is a separate change.
+- c297fc0: Add deterministic governed-learning evaluation over exact accepted policy and evidence authority, with immutable content-free decision receipts and no activation capability.
+- ea52ff2: Workspace-owned connections no longer bypass the accepted connection-use authority: resolve_accepted_connection_use gains a workspace lane (migration 0279) that revalidates the exact live workspace-owned connection inside the canonical lifecycle fences and records the same idempotent audit facts as personal delegations, and the worker routes workspace-scope MCP credential resolution and per-provider-request authorization through it. Only a pre-snapshot ref with no connection id keeps the bounded unprivileged legacy resolution.
+- cac85bc: Every persistable /workspace writer admission and retained process now freezes its exact authority tuple (causal initiator, initiating human, organization-membership grant identity with observed revision, and session tenancy epoch/visibility/owner). Direct and process actors are fenced like turns: a revoked or suspended grant, or an unattributed pre-0277 tenancy half, fails a new mutation closed before any workspace generation is consumed, and the running provider process is never terminated or re-owned.
+
+### Patch Changes
+
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- c297fc0: Add the permission-filtered Company Brain read and deterministic OKF export
+  surface, subject-scoped full guidance history, and the Company Brain discovery
+  and export experience.
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- 6a8954f: The `remember` and `memory_search` tool descriptions now state where saved facts actually live: a confirmed `lane: knowledge` fact enters the human-reviewed Knowledge claim lifecycle (not workspace memory), and indexed workspace documents are searched with `knowledge_search`/`knowledge_get` on the separate Document Search (docs) MCP server rather than through workspace `memory_search`.
+- 5cd7b46: `remember` with `lane: instruction_policy` now binds the draft to the target's current activation baseline (active head revision and CAS version, including a deactivated-to-null boundary) instead of assuming an empty workspace, so a user-directed rule can be proposed and confirmed in a workspace that already has an active policy.
+- d168b8f: Allow exact scheduled service turns to materialize organization- and workspace-scoped Variable Sets while preserving causal-human and personal-grant checks for user-scoped sets.
+- 6860c5f: Add organization, workspace, and owner-private scopes for Rigs and Connected Machines. Personal machine use and Rig materialization now revalidate exact-attempt grants, membership, workspace access, authority epochs, and generations before runtime access.
+- c297fc0: Freeze Company Brain mode and bounded legacy instructions when a turn is
+  accepted, then bind them to a content-free first-attempt selection receipt whose
+  candidate and rendered-budget subsets make replacement recovery shrink-only.
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codemode@0.4.6
+
+## 1.0.2
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+- 90c0c3e: Persist bounded, content-free Company Brain prompt contribution estimates on authoritative model-call facts and expose their source breakdown and coverage in Workspace Insights.
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ce3b370: Restore the MPL-2.0 license and notice for the curated HashiCorp Terraform Skills in the published runtime package, and forward-repair the persisted Terraform Stacks provenance URL.
+- b2af2df: Bind Integration facet idempotency receipts to the subject that created them so another workspace administrator cannot replay a personal facet result.
+- e9e1016: Allow agent `goal_set` to replace completed goals while continuing to protect
+  active and paused goal intent.
+- ffbbf4c: Add organization, workspace, and owner-private Variable Set scopes with independent metadata, plaintext-read, write, attachment, and runtime-use authority. Runtime secret materialization now revalidates the exact live attempt and personal grant immediately before ciphertext egress while audits remain value-free.
+- 3843825: Prevent workspace administrators from rebinding another subject's personal API Integration instance.
+- 1ab8023: Deduplicate scheduled alert deliveries onto one atomic responder session per scheduled task and canonical alert occurrence while preserving separate roots for distinct tasks and reopened occurrences.
+- 886682d: Fail closed when a persisted Terraform Stacks Pack component resolves to an unrelated, inactive, cross-tenant, or digest-mismatched Plugin installation.
+- 234a5e7: Replay exact completed Integration facet configure receipts before mutable instance, Connection, or provider validation while preserving request conflicts and exact-subject isolation.
+- d2f172c: Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.
+- 04b1a1f: Add exact-attempt, workspace-local governed Knowledge proposal/correction
+  routing and inactive instruction-policy and preference proposal adapters while
+  preserving human activation authority and immutable Knowledge provenance.
+- c056063: Project exact Integration Facet ownership so shared or externally managed bindings are read-only and direct removal reports retained owners truthfully.
+- Updated dependencies [79f57b5]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+
 ## 1.0.1
 
 ### Patch Changes

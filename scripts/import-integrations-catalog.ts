@@ -14,15 +14,33 @@ import {
   type RegistryCapabilityCatalogItemInput,
 } from "@opengeni/db";
 import { createObjectStorage, type ObjectStorage } from "../packages/storage/src/index";
+import {
+  CURATED_CATALOG,
+  canonicalMcpUrl,
+  curatedCatalogEntriesByMcpUrl,
+  curatedCatalogFingerprintInput,
+  type CuratedCatalog,
+} from "./catalog-curation";
+import {
+  VENDORED_LOGO_DIRECTORY,
+  VENDORED_LOGO_MANIFEST,
+  catalogLogoObjectKey,
+  fetchLogoAsset,
+  readVendoredLogoAsset,
+  vendoredLogoManifestFingerprintInput,
+  vendoredLogosByCapabilityId,
+  type LogoFetch,
+  type VendoredLogoEntry,
+  type VendoredLogoManifest,
+} from "./catalog-vendored-logos";
 
 const SOURCE = "integrations.sh";
 const MIT_ATTRIBUTION =
   "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
-const MAX_LOGO_BYTES = 512 * 1024;
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 1;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 2;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -77,6 +95,12 @@ export type CatalogIntegrationRow = {
   domain: string;
   name: string;
   description?: string;
+  /** Curated grouping; absent means the registry-wide default. */
+  category?: string;
+  /** Curated: promoted to the featured strip. Not a security review. */
+  featured?: boolean;
+  /** Curated: the provider publishes this server on its own domain. */
+  official?: boolean;
   mcpUrl: string;
   transport: "streamable-http";
   authKind: CatalogAuthKind;
@@ -84,6 +108,8 @@ export type CatalogIntegrationRow = {
   allowedTools?: string[];
   requireApproval?: boolean | string[];
   connectionOwnership?: "personal_only";
+  oauthProfile?: Record<string, unknown>;
+  presentation?: Record<string, unknown>;
   credentialFacts: Array<Record<string, unknown>>;
   tier: CatalogTier;
   provenance: string;
@@ -112,6 +138,12 @@ export type NormalizedCatalogSnapshot = {
     reason: string;
   }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
+  /**
+   * Curated overlay entries whose MCP URL matched no surviving snapshot row.
+   * A dead entry means a reviewed contract silently applies to nothing, so it
+   * is reported like a skip rather than dropped.
+   */
+  unmatchedCurated: string[];
   cleaning: {
     inputRows: number;
     outputRows: number;
@@ -123,154 +155,6 @@ export type NormalizedCatalogSnapshot = {
     controlCharacterFields: number;
   };
 };
-
-const brandedNamesByMcpUrl = new Map([["https://mcp.linear.app/mcp", "Linear"]]);
-
-/**
- * Reviewed first-party contracts override weaker registry metadata. Keep this
- * list deliberately small: each entry must be backed by the provider's own
- * current MCP documentation, not inferred from an aggregator.
- */
-const officialCatalogContractsByMcpUrl = new Map<
-  string,
-  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint"> &
-    Partial<
-      Pick<
-        CatalogIntegrationRow,
-        | "description"
-        | "allowedTools"
-        | "requireApproval"
-        | "connectionOwnership"
-        | "logoSourceUrl"
-        | "homepageUrl"
-        | "installUrl"
-        | "documentationUrl"
-        | "registryName"
-        | "registryVersion"
-        | "registryStatus"
-        | "registryIsLatest"
-        | "registryPublishedAt"
-        | "repositorySource"
-        | "repositoryUrl"
-        | "sourceCommit"
-      >
-    >
->([
-  [
-    "https://gmailmcp.googleapis.com/mcp/v1",
-    {
-      name: "Gmail",
-      description:
-        "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
-      tier: "verified",
-      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
-      authKind: "oauth2",
-      // Keep the consent surface to the union required by the reviewed tools
-      // instead of requesting every scope advertised by PRM.
-      scopesHint: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify",
-      ],
-      // Freeze the reviewed Developer Preview surface. Newly introduced
-      // remote tools remain unavailable until the catalog contract is reviewed.
-      allowedTools: [
-        "create_draft",
-        "get_message",
-        "get_thread",
-        "label_message",
-        "label_thread",
-        "list_drafts",
-        "list_labels",
-        "search_threads",
-        "unlabel_message",
-        "unlabel_thread",
-      ],
-      requireApproval: [
-        "create_draft",
-        "label_message",
-        "label_thread",
-        "unlabel_message",
-        "unlabel_thread",
-      ],
-      // A consumer Gmail account is never a workspace credential. Each member
-      // authorizes their own mailbox and receives only their own delegation.
-      connectionOwnership: "personal_only",
-      // Google has not published a reusable Gmail MCP logo asset. Keep the
-      // catalog's self-hosted monogram instead of hotlinking a brand asset.
-      logoSourceUrl: null,
-      homepageUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
-      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
-      documentationUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
-    },
-  ],
-  [
-    "https://mcp.slack.com/mcp",
-    {
-      name: "Slack",
-      tier: "verified",
-      provenance: "official:docs.slack.dev/ai/slack-mcp-server",
-      authKind: "oauth2",
-      // Slack's tools/list is grant-dependent. These are the complete scopes
-      // advertised by its official OAuth protected-resource metadata.
-      scopesHint: [
-        "search:read.public",
-        "search:read.private",
-        "search:read.mpim",
-        "search:read.im",
-        "search:read.files",
-        "search:read.users",
-        "chat:write",
-        "channels:history",
-        "groups:history",
-        "mpim:history",
-        "im:history",
-        "canvases:read",
-        "canvases:write",
-        "users:read",
-        "users:read.email",
-        "reactions:write",
-        "reactions:read",
-        "emoji:read",
-        "files:read",
-        "channels:write",
-        "groups:write",
-        "im:write",
-        "mpim:write",
-        "channels:read",
-        "groups:read",
-        "mpim:read",
-      ],
-    },
-  ],
-  [
-    "https://api.mobbin.com/mcp",
-    {
-      name: "Mobbin",
-      description:
-        "Search Mobbin’s library for real-world product screens, flows, and UI/UX references. Requires a paid Mobbin plan (Pro, Team, or Enterprise). Provider-managed usage credits apply.",
-      tier: "verified",
-      provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
-      authKind: "oauth2",
-      scopesHint: ["openid"],
-      // Mobbin has not published a reusable logo license with its MCP
-      // listing. Keep the catalog's calm monogram rather than copying an
-      // unlicensed vendor asset.
-      logoSourceUrl: null,
-      homepageUrl: "https://mobbin.com/mcp",
-      installUrl: "https://docs.mobbin.com/mcp/clients/overview",
-      documentationUrl: "https://docs.mobbin.com/mcp/introduction",
-      registryName: "com.mobbin/mobbin",
-      registryVersion: "1.0.1",
-      registryStatus: "active",
-      registryIsLatest: true,
-      registryPublishedAt: "2026-06-03T10:01:47.928592Z",
-      repositorySource: "github",
-      repositoryUrl: "https://github.com/mobbin/mobbin-mcp-server",
-      sourceCommit: "bbee2a6be34d251c580ba80bb8b407c87587aba7",
-    },
-  ],
-]);
 
 export type LogoStorageResult =
   | {
@@ -302,7 +186,44 @@ export type ImportCatalogResult = {
 export type LogoStorage = Pick<ObjectStorage, "putObject"> & {
   bucket?: string;
 };
-export type LogoFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+export type { LogoFetch } from "./catalog-vendored-logos";
+
+/**
+ * Where a row's rendered logo came from. `vendored` bytes are committed under
+ * `data/catalog/logos/`; `integrations.sh` bytes were fetched during this
+ * import; `generic_monogram` means no self-hosted asset exists for the row.
+ */
+export type CatalogLogoSource = "vendored" | "integrations.sh" | "generic_monogram";
+
+export type CatalogLogoResolution = {
+  logoAssetPath: string | null;
+  logoSource: CatalogLogoSource;
+  failure: { reason: string; sourceUrl: string | null } | null;
+};
+
+/**
+ * Constructs object storage for the importer, or null when it cannot be built.
+ *
+ * `createObjectStorage` returns null only for an unconfigured s3-compatible
+ * backend; azure-blob, aws-s3, and gcs throw on missing or malformed settings.
+ * Both outcomes mean the same thing here: no self-hosted logo bytes, so every
+ * row falls back to a monogram and the catalog still imports.
+ */
+export function resolveLogoObjectStorage(
+  settings: Parameters<typeof createObjectStorage>[0],
+): ObjectStorage | null {
+  try {
+    return createObjectStorage(settings);
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        warning: "object_storage_unavailable",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return null;
+  }
+}
 
 export async function readSnapshotFile(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
@@ -343,7 +264,7 @@ export function normalizeCatalogSnapshot(
   const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
   const root = asRecord(cleanedSnapshot);
   const generatedAt = stringValue(root?.generatedAt) ?? stringValue(root?.snapshotDate) ?? null;
-  const candidates = precomputedRows(root ?? cleanedSnapshot) ?? rawSurfaceRows(root);
+  const candidates = catalogCandidateRows(cleanedSnapshot);
   const skipped: NormalizedCatalogSnapshot["skipped"] = [];
   const quarantined: NormalizedCatalogSnapshot["quarantined"] = [];
   const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
@@ -402,7 +323,7 @@ export function normalizeCatalogSnapshot(
         continue;
       }
     }
-    const official = officialCatalogContractsByMcpUrl.get(mcpUrl);
+    const official = curatedCatalogEntriesByMcpUrl.get(mcpUrl);
     const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
       skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
@@ -422,19 +343,34 @@ export function normalizeCatalogSnapshot(
     const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
-      name:
-        official?.name ?? brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
+      name: official?.name ?? stringValue(candidate.name) ?? domain,
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
+      ...optionalString("category", official?.category),
+      ...(official?.featured ? { featured: true } : {}),
+      ...(official?.official ? { official: true } : {}),
       mcpUrl,
       transport: "streamable-http",
       authKind,
-      scopesHint: official?.scopesHint ?? stringArray(candidate.scopesHint),
-      ...(official?.allowedTools ? { allowedTools: official.allowedTools } : {}),
+      scopesHint: official?.scopesHint
+        ? [...official.scopesHint]
+        : stringArray(candidate.scopesHint),
+      ...(official?.allowedTools ? { allowedTools: [...official.allowedTools] } : {}),
       ...(official?.requireApproval !== undefined
-        ? { requireApproval: official.requireApproval }
+        ? {
+            requireApproval:
+              typeof official.requireApproval === "boolean"
+                ? official.requireApproval
+                : [...official.requireApproval],
+          }
         : {}),
       ...(official?.connectionOwnership
         ? { connectionOwnership: official.connectionOwnership }
+        : {}),
+      ...(official?.oauthProfile
+        ? { oauthProfile: official.oauthProfile as Record<string, unknown> }
+        : {}),
+      ...(official?.presentation
+        ? { presentation: official.presentation as Record<string, unknown> }
         : {}),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
@@ -547,9 +483,15 @@ export function normalizeCatalogSnapshot(
       left.mcpUrl.localeCompare(right.mcpUrl),
   );
 
+  const matchedCurated = new Set(rows.map((row) => row.mcpUrl));
+  const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
+    .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
+    .sort();
+
   return {
     generatedAt,
     rows,
+    unmatchedCurated,
     skipped,
     quarantined,
     cleaning: {
@@ -571,7 +513,11 @@ export async function importIntegrationsCatalog(input: {
   snapshotRef?: string | null;
   storage?: LogoStorage | null;
   fetchImpl?: LogoFetch;
+  /** `false` skips network logo fetches; vendored assets are still stored. */
   storeLogos?: boolean;
+  /** Test seam. Production always uses the committed manifest and directory. */
+  vendoredLogos?: VendoredLogoManifest | null;
+  vendoredLogoDirectory?: string;
 }): Promise<ImportCatalogResult> {
   const normalized = normalizeCatalogSnapshot(input.snapshot);
   if (normalized.rows.length === 0) {
@@ -596,30 +542,36 @@ export async function importIntegrationsCatalog(input: {
     },
   });
   const logoFailures: ImportCatalogResult["logoFailures"] = [];
+  const vendoredLogos = vendoredLogosByCapabilityId(
+    input.vendoredLogos === undefined
+      ? VENDORED_LOGO_MANIFEST
+      : (input.vendoredLogos ?? { version: 1, entries: [] }),
+  );
 
   for (const row of normalized.rows) {
-    let logoAssetPath: string | null = null;
-    if (input.storeLogos !== false && row.logoSourceUrl) {
-      const logo = await storeLogoForRow(row, {
-        storage: input.storage ?? null,
-        fetchImpl: input.fetchImpl ?? fetch,
+    const logo = await resolveCatalogRowLogo(row, {
+      storage: input.storage ?? null,
+      fetchImpl: input.fetchImpl ?? fetch,
+      storeLogos: input.storeLogos !== false,
+      vendoredLogos,
+      ...(input.vendoredLogoDirectory
+        ? { vendoredLogoDirectory: input.vendoredLogoDirectory }
+        : {}),
+    });
+    if (logo.failure) {
+      logoFailures.push({
+        domain: row.domain,
+        mcpUrl: row.mcpUrl,
+        reason: logo.failure.reason,
+        sourceUrl: logo.failure.sourceUrl,
       });
-      if (logo.ok) {
-        logoAssetPath = logo.path;
-      } else {
-        logoFailures.push({
-          domain: row.domain,
-          mcpUrl: row.mcpUrl,
-          reason: logo.reason,
-          sourceUrl: logo.sourceUrl,
-        });
-      }
     }
     await upsertRegistryCapabilityCatalogItem(
       input.db,
       catalogRowToDbInput(row, {
         importBatchId: batch.id,
-        logoAssetPath,
+        logoAssetPath: logo.logoAssetPath,
+        logoSource: logo.logoSource,
       }),
     );
   }
@@ -669,6 +621,8 @@ export function catalogRowToDbInput(
   input: {
     importBatchId: string;
     logoAssetPath?: string | null;
+    /** Defaults to the legacy derivation from `logoSourceUrl` when omitted. */
+    logoSource?: CatalogLogoSource;
   },
 ): RegistryCapabilityCatalogItemInput {
   return {
@@ -687,13 +641,24 @@ export function catalogRowToDbInput(
     scopesHint: row.scopesHint,
     homepageUrl: row.homepageUrl ?? `https://${row.domain}`,
     installUrl: row.installUrl ?? row.homepageUrl ?? `https://${row.domain}`,
+    ...(row.category ? { category: row.category } : {}),
     tags: ["mcp", "integration", row.tier, row.authKind],
     metadata: {
-      logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
+      logoSource: input.logoSource ?? (row.logoSourceUrl ? "integrations.sh" : "generic_monogram"),
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.featured || row.official
+        ? {
+            curation: {
+              ...(row.featured ? { featured: true } : {}),
+              ...(row.official ? { official: true } : {}),
+            },
+          }
+        : {}),
       ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
       ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
       ...(row.connectionOwnership ? { connectionOwnership: row.connectionOwnership } : {}),
+      ...(row.oauthProfile ? { oauthProfile: row.oauthProfile } : {}),
+      ...(row.presentation ? { presentation: row.presentation } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName
         ? {
@@ -721,6 +686,86 @@ export function catalogRowToDbInput(
   };
 }
 
+/**
+ * Resolves the self-hosted logo for one row.
+ *
+ * Order of authority: a curated `logoSourceUrl: null` always wins and yields the
+ * monogram with no fetch and no vendored copy, even if a vendored file exists.
+ * Otherwise a vendored asset whose recorded source matches the row's effective
+ * source is copied into object storage regardless of `storeLogos`, because it
+ * adds no third-party dependency. Only the uncurated remainder is fetched from
+ * the network, and only when `storeLogos` is true.
+ */
+export async function resolveCatalogRowLogo(
+  row: CatalogIntegrationRow,
+  input: {
+    storage: LogoStorage | null;
+    fetchImpl: LogoFetch;
+    storeLogos: boolean;
+    vendoredLogos: ReadonlyMap<string, VendoredLogoEntry>;
+    vendoredLogoDirectory?: string;
+  },
+): Promise<CatalogLogoResolution> {
+  const sourceUrl = row.logoSourceUrl;
+  if (!sourceUrl) {
+    return { logoAssetPath: null, logoSource: "generic_monogram", failure: null };
+  }
+  const vendored = input.vendoredLogos.get(catalogCapabilityId(row.domain, row.mcpUrl));
+  if (vendored) {
+    if (vendored.sourceUrl !== sourceUrl) {
+      // The overlay or snapshot moved the row's logo source after vendoring.
+      // Serving the stale bytes would misattribute them; regenerate instead.
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: "vendored_logo_source_mismatch", sourceUrl },
+      };
+    }
+    if (!input.storage) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: "object_storage_unavailable", sourceUrl },
+      };
+    }
+    const asset = await readVendoredLogoAsset(
+      vendored,
+      input.vendoredLogoDirectory ?? VENDORED_LOGO_DIRECTORY,
+    );
+    if (!asset.ok) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: asset.reason, sourceUrl },
+      };
+    }
+    const put = await putLogoObject(input.storage, row.domain, asset);
+    if (!put.ok) {
+      return {
+        logoAssetPath: null,
+        logoSource: "generic_monogram",
+        failure: { reason: put.reason, sourceUrl },
+      };
+    }
+    return { logoAssetPath: put.key, logoSource: "vendored", failure: null };
+  }
+  if (!input.storeLogos) {
+    return { logoAssetPath: null, logoSource: "generic_monogram", failure: null };
+  }
+  const stored = await storeLogoForRow(row, {
+    storage: input.storage,
+    fetchImpl: input.fetchImpl,
+  });
+  if (stored.ok) {
+    return { logoAssetPath: stored.path, logoSource: "integrations.sh", failure: null };
+  }
+  return {
+    logoAssetPath: null,
+    logoSource: "generic_monogram",
+    failure: { reason: stored.reason, sourceUrl: stored.sourceUrl },
+  };
+}
+
 export async function storeLogoForRow(
   row: CatalogIntegrationRow,
   input: {
@@ -735,54 +780,67 @@ export async function storeLogoForRow(
   if (!input.storage) {
     return { ok: false, sourceUrl, reason: "object_storage_unavailable" };
   }
-  let response: Response;
+  const asset = await fetchLogoAsset(sourceUrl, input.fetchImpl);
+  if (!asset.ok) {
+    return { ok: false, sourceUrl, reason: asset.reason };
+  }
+  const put = await putLogoObject(input.storage, row.domain, asset);
+  if (!put.ok) {
+    return { ok: false, sourceUrl, reason: put.reason };
+  }
+  return {
+    ok: true,
+    path: put.key,
+    sourceUrl,
+    contentType: asset.contentType,
+    sizeBytes: asset.bytes.byteLength,
+  };
+}
+
+/**
+ * Stores one validated logo asset.
+ *
+ * A logo is cosmetic: the catalog row is correct with a monogram. Object
+ * storage is a third-party service that can be transiently unavailable,
+ * misconfigured, or read-only, and the importer runs as the Helm
+ * `catalog-import` hook Job, so letting a rejected `putObject` escape would
+ * fail the whole deployment hook over an icon. Every storage outcome is
+ * therefore reported as a recorded logo failure, exactly like a rejected fetch
+ * or an invalid asset.
+ */
+async function putLogoObject(
+  storage: LogoStorage,
+  domain: string,
+  asset: { contentType: string; sha256: string; bytes: Uint8Array },
+): Promise<{ ok: true; key: string } | { ok: false; reason: string }> {
   try {
-    response = await input.fetchImpl(sourceUrl);
+    const key = catalogLogoObjectKey(domain, asset.sha256, asset.contentType);
+    await storage.putObject({
+      key,
+      contentType: asset.contentType,
+      body: asset.bytes,
+      sha256: asset.sha256,
+    });
+    return { ok: true, key };
   } catch (error) {
     return {
       ok: false,
-      sourceUrl,
-      reason: `fetch_failed:${error instanceof Error ? error.message : String(error)}`,
+      reason: `logo_store_failed:${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (!response.ok) {
-    return { ok: false, sourceUrl, reason: `http_status:${response.status}` };
-  }
-  const contentType = normalizedContentType(response.headers.get("content-type"));
-  if (!contentType?.startsWith("image/")) {
-    return {
-      ok: false,
-      sourceUrl,
-      reason: `invalid_content_type:${contentType ?? "missing"}`,
-    };
-  }
-  const contentLength = response.headers.get("content-length");
-  if (contentLength && Number(contentLength) > MAX_LOGO_BYTES) {
-    return { ok: false, sourceUrl, reason: "image_too_large" };
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_LOGO_BYTES) {
-    return { ok: false, sourceUrl, reason: "image_too_large" };
-  }
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  const key = `catalog-assets/integrations-sh/logos/${safePathSegment(row.domain)}/${digest.slice(0, 24)}.${extensionForContentType(contentType)}`;
-  await input.storage.putObject({
-    key,
-    contentType,
-    body: bytes,
-    sha256: digest,
-  });
-  return {
-    ok: true,
-    path: key,
-    sourceUrl,
-    contentType,
-    sizeBytes: bytes.byteLength,
-  };
 }
 
 export function catalogCapabilityId(domain: string, mcpUrl: string): string {
   return `mcp:integrations-sh:${slugify(domain)}-${shortHash(`${domain}:${mcpUrl}`)}`;
+}
+
+/**
+ * The pre-normalization candidate rows of any accepted snapshot shape: a
+ * precomputed `importRows`/`rows` list (or bare array), else the raw
+ * integrations.sh index plus per-domain surface documents.
+ */
+export function catalogCandidateRows(snapshot: unknown): UnknownRecord[] {
+  return precomputedRows(snapshot) ?? rawSurfaceRows(asRecord(snapshot));
 }
 
 function precomputedRows(snapshot: unknown): UnknownRecord[] | null {
@@ -1005,19 +1063,7 @@ function normalizeDomain(value: unknown): string | null {
   return raw || null;
 }
 
-export function canonicalMcpUrl(value: string): string {
-  const url = new URL(value);
-  url.hash = "";
-  url.hostname = url.hostname.toLowerCase();
-  if (
-    (url.protocol === "https:" && url.port === "443") ||
-    (url.protocol === "http:" && url.port === "80")
-  ) {
-    url.port = "";
-  }
-  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-  return url.toString();
-}
+export { canonicalMcpUrl };
 
 function normalizeAuthContract(value: unknown): Record<string, unknown> | null {
   const record = asRecord(value);
@@ -1096,41 +1142,6 @@ function catalogRowQualityScore(row: CatalogIntegrationRow): number {
 
 function stableRowSortKey(row: CatalogIntegrationRow): string {
   return `${row.domain}\n${row.name}\n${row.provenance}\n${row.logoSourceUrl ?? ""}\n${row.mcpUrl}`;
-}
-
-function normalizedContentType(value: string | null): string | null {
-  return value?.split(";")[0]?.trim().toLowerCase() || null;
-}
-
-function extensionForContentType(contentType: string): string {
-  if (contentType === "image/svg+xml") {
-    return "svg";
-  }
-  if (contentType === "image/jpeg") {
-    return "jpg";
-  }
-  if (contentType === "image/png") {
-    return "png";
-  }
-  if (contentType === "image/gif") {
-    return "gif";
-  }
-  if (contentType === "image/webp") {
-    return "webp";
-  }
-  if (contentType === "image/x-icon" || contentType === "image/vnd.microsoft.icon") {
-    return "ico";
-  }
-  return "img";
-}
-
-function safePathSegment(value: string): string {
-  return (
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9.-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "unknown"
-  );
 }
 
 function slugify(value: string): string {
@@ -1280,6 +1291,10 @@ export async function catalogImportFingerprint(input: {
   snapshotRef?: string;
   skipLogos?: boolean;
   semanticVersion?: number;
+  /** Test seam. Production always fingerprints the committed overlay. */
+  curatedCatalog?: CuratedCatalog;
+  /** Test seam. Production always fingerprints the committed vendored manifest. */
+  vendoredLogos?: VendoredLogoManifest;
 }): Promise<string> {
   const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
   if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
@@ -1288,6 +1303,17 @@ export async function catalogImportFingerprint(input: {
   const snapshotSha256 = createHash("sha256")
     .update(await readFile(input.snapshotPath))
     .digest("hex");
+  // The curated overlay is bundled into the importer, so it is part of the
+  // effective input. Hash its canonical parsed form: an overlay-only PR must
+  // invalidate `--if-changed`, while whitespace-only reformatting must not.
+  const curatedSha256 = createHash("sha256")
+    .update(curatedCatalogFingerprintInput(input.curatedCatalog ?? CURATED_CATALOG))
+    .digest("hex");
+  // Vendored logos are copied into object storage by every import, so a new or
+  // replaced asset must invalidate `--if-changed` exactly like the overlay.
+  const vendoredLogosSha256 = createHash("sha256")
+    .update(vendoredLogoManifestFingerprintInput(input.vendoredLogos ?? VENDORED_LOGO_MANIFEST))
+    .digest("hex");
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -1295,6 +1321,8 @@ export async function catalogImportFingerprint(input: {
         skipLogos: input.skipLogos === true,
         snapshotRef: input.snapshotRef ?? null,
         snapshotSha256,
+        curatedSha256,
+        vendoredLogosSha256,
       }),
     )
     .digest("hex");
@@ -1328,6 +1356,24 @@ if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const snapshot = await readSnapshotFile(args.snapshotPath);
   const normalized = normalizeCatalogSnapshot(snapshot);
+  if (normalized.unmatchedCurated.length > 0) {
+    // A reviewed contract that matches no row would silently apply to nothing.
+    // Fail the import so the mismatch is fixed at review time, not discovered
+    // when a user sees the raw aggregator name.
+    console.error(
+      JSON.stringify(
+        {
+          error: "curated_entries_unmatched",
+          detail:
+            "data/catalog/curated.json has entries whose mcpUrl matches no importable snapshot row",
+          unmatchedCurated: normalized.unmatchedCurated,
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
   if (args.dryRun) {
     console.log(
       JSON.stringify(
@@ -1384,7 +1430,13 @@ if (import.meta.main) {
       await dbClient.close();
       process.exit(0);
     }
-    const storage = args.skipLogos ? null : createObjectStorage(settings);
+    // Vendored curated logos are stored even with --skip-logos; the flag only
+    // suppresses network fetches for the uncurated long tail. Only the
+    // s3-compatible backend returns null when unconfigured; azure-blob, aws-s3,
+    // and gcs throw. A deployment without usable object storage must still
+    // import the catalog and fall back to monograms, so construction failure is
+    // reported and degraded rather than fatal.
+    const storage = resolveLogoObjectStorage(settings);
     const result = await importIntegrationsCatalog({
       db: dbClient.db,
       snapshot,

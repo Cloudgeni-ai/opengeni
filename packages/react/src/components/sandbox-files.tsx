@@ -32,6 +32,10 @@ export type SandboxFilesProps = {
    *  dock warms the box on this so the save lands fast; opening/reading never fires
    *  it. Browsing the tree/diff must not warm a box. */
   onEditIntent?: (() => void) | undefined;
+  /** Restore the file last viewed in this task. Invalid/missing paths still
+   * surface the ordinary file-view error instead of changing files silently. */
+  initialSelectedPath?: string | null | undefined;
+  onSelectedPathChange?: ((path: string | null) => void) | undefined;
   /** A guarded diff path routed here by the parent workspace. */
   requestedPath?: string | undefined;
   /** Identity for one guarded-file request. Increment this when the same path is
@@ -67,6 +71,8 @@ export function SandboxFiles({
   usePierre = true,
   editable = true,
   onEditIntent,
+  initialSelectedPath,
+  onSelectedPathChange,
   requestedPath,
   requestedPathRequestId,
   requestedPathReady = true,
@@ -77,7 +83,7 @@ export function SandboxFiles({
   themeType,
   className,
 }: SandboxFilesProps) {
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => initialSelectedPath ?? null);
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
@@ -103,8 +109,9 @@ export function SandboxFiles({
     handledRequestRef.current = requestKey;
     pendingRequestRef.current = null;
     setSelected(requestedPath);
+    onSelectedPathChange?.(requestedPath);
     setEditMode(false);
-  }, [requestKey, requestedPath, requestedPathReady]);
+  }, [onSelectedPathChange, requestKey, requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
   // stacked (tree over viewer) on a narrow dock. Tracked off the container so it
@@ -154,16 +161,20 @@ export function SandboxFiles({
   // an editor whose buffer belongs to the previously-selected path. Manual
   // navigation also consumes a pending guarded-file request: a late cold→warm
   // transition must never pull the user away from the file they chose meanwhile.
-  const selectFile = useCallback((path: string) => {
-    if (pendingRequestRef.current !== null) {
-      handledRequestRef.current = pendingRequestRef.current;
-      pendingRequestRef.current = null;
-    }
-    setSelected(path);
-    setEditMode(false);
-    setLiveRequestedPath(null);
-    setViewReloadRevision(0);
-  }, []);
+  const selectFile = useCallback(
+    (path: string) => {
+      if (pendingRequestRef.current !== null) {
+        handledRequestRef.current = pendingRequestRef.current;
+        pendingRequestRef.current = null;
+      }
+      setSelected(path);
+      onSelectedPathChange?.(path);
+      setEditMode(false);
+      setLiveRequestedPath(null);
+      setViewReloadRevision(0);
+    },
+    [onSelectedPathChange],
+  );
 
   // A tree file is editable only when it is a real, fully-loaded text file: not
   // binary (would corrupt on save) and not truncated (we only hold a PREFIX). The

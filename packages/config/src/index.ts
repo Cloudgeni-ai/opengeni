@@ -325,7 +325,7 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.14"),
+    .default("0.1.16"),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
@@ -333,6 +333,26 @@ const SettingsSchema = z.object({
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   productAccessMode: ProductAccessMode.default("local"),
+  // --- canonical organization-tenancy authority activation, default OFF ---
+  // The named PRE-ACTIVATION opt-out for the organization-tenancy program. FALSE (the
+  // default, and the value an operator leaves in place to decline or defer) means
+  // this deployment stays on the reversible legacy workspace-owned lane: no phase-F
+  // subsystem may switch its access decision to organization/membership authority
+  // ids. TRUE is an operator's explicit statement that the activation preconditions
+  // in docs/organization-tenancy.md have been proven for this deployment and that
+  // the one-way boundary is accepted.
+  //
+  // This is NOT a kill switch and NOT a rollback: once an activation migration has
+  // committed, setting it back to false does not restore the legacy authority - only
+  // forward recovery is available. It also grants and revokes nothing by itself;
+  // every individual authorization decision keeps its own fences.
+  //
+  // No runtime path reads it yet: canonical activation (phase F) is unshipped, so
+  // the flag exists to reserve the name, pin the safe default, and give every future
+  // activation slice one gate to consult. EnvBoolean (NOT z.coerce.boolean(), which
+  // coerces "false" -> true and would activate the moment an operator wrote the
+  // variable out to disable it).
+  organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
@@ -351,7 +371,6 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
-  codemodeMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -364,7 +383,6 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
-  gmailRestAdapterEnabled: EnvBoolean.default(false),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
@@ -418,12 +436,11 @@ const SettingsSchema = z.object({
   // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
   socialOauthClientsJson: z.string().default("{}"),
   // Session goal guard rails. Goals are designed for runs that legitimately
-  // span days, so length is bounded by pathology detection (no-progress
-  // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
-  // therefore UNSET by default (no cap); deployments may configure one, and
-  // it then acts as a hard ceiling that per-goal overrides can only lower.
+  // span days, so length is bounded by explicit completion/pause and budget
+  // exhaustion, never by count. goalMaxAutoContinuations is therefore UNSET
+  // by default (no cap); deployments may configure one, and it then acts as a
+  // hard ceiling that per-goal overrides can only lower.
   goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
-  goalNoProgressLimit: z.coerce.number().int().positive().default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -470,6 +487,10 @@ const SettingsSchema = z.object({
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
+  // Worker-side first-party MCP traffic stays on the deployment's internal
+  // network. OPENGENI_MCP_URL remains the sandbox/external route used by
+  // Codemode and remote placements.
+  opengeniMcpInternalUrl: z.string().url().optional(),
   opengeniMcpUrl: z.string().url().optional(),
   // Origins allowed to send browser cookies cross-origin. Other origins may
   // call the public API with bearer credentials, but never receive credentialed
@@ -618,12 +639,13 @@ const SettingsSchema = z.object({
   codexConnectedAppsEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_CONNECTED_APPS_ENABLED
   codexProductSku: z.string().optional(), // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
   // Progressive MCP disclosure (Codex-CLI-style tool_search): on a codex turn,
-  // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
+  // flag non-eager selected MCP tools `defer_loading:true` (dropping their
   // schemas from model context) and add one client-executed tool_search tool
-  // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
-  // eager. Default ON so selected connector catalogues do not consume every
-  // Codex turn's context. Operators may explicitly disable it for emergency
-  // compatibility diagnosis.
+  // that BM25-discloses bounded matches. Only an exact session tool ref with
+  // `eager:true` stays on the startup path; mandatory selection alone does not
+  // imply eagerness. Default ON so selected connector catalogues do not consume
+  // every Codex turn's context. Operators may explicitly disable it for
+  // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
@@ -2097,6 +2119,9 @@ export function getSettings(): Settings {
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
+    organizationTenancyCanonicalActivationEnabled: optional(
+      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+    ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
@@ -2107,7 +2132,6 @@ export function getSettings(): Settings {
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
-    codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
@@ -2116,7 +2140,6 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
-    gmailRestAdapterEnabled: optional("OPENGENI_GMAIL_REST_ADAPTER_ENABLED"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
@@ -2149,7 +2172,6 @@ export function getSettings(): Settings {
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
-    goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
@@ -2164,6 +2186,7 @@ export function getSettings(): Settings {
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
+    opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
@@ -3431,6 +3454,7 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
       const capabilities = legacyModelCapabilities(settings, {
         reasoningEffort: true,
         hostedWebSearch: true,
+        vision: true,
       });
       capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
       capabilities.reasoning.defaultEffort = "high";
@@ -4890,18 +4914,11 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
 }
 
 /**
- * The base URL of OpenGeni's own first-party MCP endpoint, as a `{workspaceId}`
- * template — the SINGLE source of truth for the `opengeniMcpUrl`-or-loopback
- * decision. Every site that needs the first-party MCP base (config's tool
- * registry here, and the worker-side `firstPartyMcpServerUrlForRun` /
- * `firstPartyMcpUrls` in @opengeni/runtime) MUST route through this so the
- * default lives in exactly one place.
+ * The sandbox/external base URL of OpenGeni's first-party MCP endpoint, as a
+ * `{workspaceId}` template. Codemode and remote placements use this route.
  *
  * BINDING CONTRACT (`opengeniMcpUrl`):
- *   - STANDALONE (unset): falls back to the loopback default
- *     `http://127.0.0.1:${apiPort}/v1/workspaces/{workspaceId}/mcp` — the worker
- *     and API are in/next to the same host:port, so loopback resolves the
- *     workspace-scoped MCP. Byte-for-byte today's behavior.
+ *   - STANDALONE (unset): falls back to the loopback default.
  *   - EMBEDDED / MOUNTED (must set): when OpenGeni's API is mounted as a host
  *     sub-app under a prefix (e.g. `https://host/og/v1/...`), the loopback
  *     default is WRONG — the worker runs in the host process and `127.0.0.1:
@@ -4917,8 +4934,19 @@ export function firstPartyMcpBaseUrl(settings: Settings): string {
   );
 }
 
-export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
-  const raw = firstPartyMcpBaseUrl(settings);
+/**
+ * Worker-side first-party MCP base. It never inherits the public/tunnel URL:
+ * an operator may intentionally expose that route to Modal or a Connected
+ * Machine, while the worker should still use loopback or cluster service DNS.
+ */
+export function firstPartyMcpInternalBaseUrl(settings: Settings): string {
+  return (
+    settings.opengeniMcpInternalUrl ??
+    `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`
+  );
+}
+
+function scopedFirstPartyMcpUrl(raw: string, workspaceId: string): string {
   if (raw.includes("{workspaceId}")) {
     return raw.replaceAll("{workspaceId}", workspaceId);
   }
@@ -4927,6 +4955,14 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  return scopedFirstPartyMcpUrl(firstPartyMcpBaseUrl(settings), workspaceId);
+}
+
+export function firstPartyMcpInternalWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  return scopedFirstPartyMcpUrl(firstPartyMcpInternalBaseUrl(settings), workspaceId);
 }
 
 export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {

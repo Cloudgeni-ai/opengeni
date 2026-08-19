@@ -111,6 +111,8 @@ async function createPolicySession(
     tools: [],
     metadata: input.metadata ?? {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     ...(input.policyRole ? { policyRole: input.policyRole } : {}),
   });
@@ -131,38 +133,39 @@ async function seedAttempt(
   const initiatorKind = options.initiatorKind ?? "subject";
   const initiatingHumanSubjectId =
     options.initiatingHumanSubjectId ?? (initiatorKind === "subject" ? subjectId : null);
-  await shared!.admin`
-    insert into session_turns (
-      id, account_id, workspace_id, session_id, trigger_event_id,
-      temporal_workflow_id, status, source, position, prompt, model,
-      reasoning_effort, sandbox_backend, execution_generation,
-      initiator_kind, initiator_subject_id, initiator_context,
-      initiating_human_subject_id, created_at
-    ) values (
-      ${turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${sessionId},
-      ${crypto.randomUUID()}, ${`policy-snapshot-${turnId}`}, 'running', 'user', 1,
-      'policy snapshot fixture', 'test-model', 'medium', 'none', 1,
-      ${initiatorKind}, ${subjectId}, ${shared!.admin.json({ source: "test" })},
-      ${initiatingHumanSubjectId}, ${options.acceptedAt ?? new Date()}
-    )
-  `;
-  await shared!.admin`
-    insert into session_turn_attempts (
-      id, account_id, workspace_id, session_id, turn_id, execution_generation,
-      state, temporal_workflow_id, temporal_workflow_run_id,
-      temporal_activity_id, verified_control_revision, mcp_approval_policies
-    ) values (
-      ${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${sessionId},
-      ${turnId}, 1, 'running', ${`policy-snapshot-${turnId}`},
-      ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
-    )
-  `;
-  await shared!.admin`
-    update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}
-  `;
-  await shared!.admin`
-    update sessions set active_turn_id = ${turnId}, status = 'running' where id = ${sessionId}
-  `;
+  await shared!.admin.begin(async (tx) => {
+    await tx`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, source, position, prompt, model,
+        reasoning_effort, sandbox_backend, execution_generation,
+        initiator_kind, initiator_subject_id, initiator_context,
+        initiating_human_subject_id, created_at
+      ) values (
+        ${turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${sessionId},
+        ${crypto.randomUUID()}, ${`policy-snapshot-${turnId}`}, 'running', 'user', 1,
+        'policy snapshot fixture', 'test-model', 'medium', 'none', 1,
+        ${initiatorKind}, ${subjectId}, ${shared!.admin.json({ source: "test" })},
+        ${initiatingHumanSubjectId}, ${options.acceptedAt ?? new Date()}
+      )
+    `;
+    await tx`
+      update sessions set active_turn_id = ${turnId}, status = 'running'
+      where id = ${sessionId}
+    `;
+    await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}`;
+    await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${sessionId},
+        ${turnId}, 1, 'running', ${`policy-snapshot-${turnId}`},
+        ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )
+    `;
+  });
   return {
     ...workspace,
     sessionId,
@@ -625,6 +628,12 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
         where id = ${attempt.attemptId}
       `;
       await tx`
+        update session_turns
+        set status = 'running', execution_generation = 2,
+            active_attempt_id = ${recoveryAttemptId}, updated_at = now()
+        where id = ${attempt.turnId}
+      `;
+      await tx`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id, execution_generation,
           state, temporal_workflow_id, temporal_workflow_run_id,
@@ -634,12 +643,6 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
           ${attempt.turnId}, 2, 'running', ${`policy-snapshot-${attempt.turnId}`},
           ${`run-${recoveryAttemptId}`}, ${`activity-${recoveryAttemptId}`}, 0, '{}'::jsonb
         )
-      `;
-      await tx`
-        update session_turns
-        set status = 'running', execution_generation = 2,
-            active_attempt_id = ${recoveryAttemptId}, updated_at = now()
-        where id = ${attempt.turnId}
       `;
     });
 
@@ -719,6 +722,8 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       metadata: {},
       createdBy: { kind: "subject", subjectId, label: "Claim snapshot human" },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const started = await initializeSessionStartAtomically(client.db, {

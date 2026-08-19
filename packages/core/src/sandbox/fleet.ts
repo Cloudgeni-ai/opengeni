@@ -13,12 +13,15 @@
 
 import type { Settings } from "@opengeni/config";
 import {
+  authorizePersonalMachineForAttempt,
   getEnrollment,
   getLiveEnrollmentConnection,
   getSandbox,
+  listEnrollments,
   listSandboxes,
   readActiveSandbox,
   readLease,
+  resolvePersonalMachineConnectionForAttempt,
   requireSession,
   setActiveSandbox,
   type Database,
@@ -37,6 +40,8 @@ import {
   type NatsRequestConnection,
   type SelfhostedRelayConfig,
   type SelfhostedOpStreamDeps,
+  type SelfhostedOperationAdmission,
+  type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
 
@@ -58,6 +63,13 @@ export type FleetReadinessHold = {
 export type FleetContext = {
   accountId: string;
   workspaceId: string;
+  subjectId?: string;
+  attemptAuthority?: {
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    initiatingHumanSubjectId: string;
+  };
   /** The calling session (the pointer the attach/swap mutates + whose group box
    *  is the default fleet member). */
   sessionId: string;
@@ -79,12 +91,20 @@ export type FleetContext = {
  */
 export async function buildFleetContextForSession(
   deps: { db: Database },
-  ctx: { accountId: string; workspaceId: string; sessionId: string },
+  ctx: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId?: string;
+    attemptAuthority?: FleetContext["attemptAuthority"];
+  },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
   return {
     accountId: ctx.accountId,
     workspaceId: ctx.workspaceId,
+    ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+    ...(ctx.attemptAuthority ? { attemptAuthority: ctx.attemptAuthority } : {}),
     sessionId: ctx.sessionId,
     sessionBackend: session.sandboxBackend,
     sessionGroupId: session.sandboxGroupId,
@@ -194,7 +214,11 @@ async function probeEnrollment(
   workspaceId: string,
   enrollment: EnrollmentRecord,
   liveConnection: EnrollmentRecord | null = enrollment,
-): Promise<{ liveness: FleetLiveness; consented: boolean; hasDisplay: boolean }> {
+): Promise<{
+  liveness: FleetLiveness;
+  consented: boolean;
+  hasDisplay: boolean;
+}> {
   const { settings, bus } = services;
   let probeResponded = false;
   if (liveConnection?.connectionInstanceId) {
@@ -224,7 +248,11 @@ async function probeEnrollment(
     },
     probeResponded,
   });
-  return { liveness: state.state, consented: state.consented, hasDisplay: state.hasDisplay };
+  return {
+    liveness: state.state,
+    consented: state.consented,
+    hasDisplay: state.hasDisplay,
+  };
 }
 
 /**
@@ -239,6 +267,13 @@ export async function listFleet(
   ctx: FleetContext,
 ): Promise<FleetListResult> {
   const { db } = services;
+  const resourceAccess = ctx.subjectId
+    ? {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        subjectId: ctx.subjectId,
+      }
+    : ctx.workspaceId;
   const pointer = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)) ?? {
     activeSandboxId: null,
     activeEpoch: 0,
@@ -311,12 +346,48 @@ export async function listFleet(
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
   // each for liveness; a missing enrollment is offline.
-  const sandboxes = await listSandboxes(db, ctx.workspaceId);
+  const legacySandboxes = await listSandboxes(db, ctx.workspaceId);
+  const enrollments = await listEnrollments(
+    db,
+    ctx.subjectId
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
+      : ctx.workspaceId,
+    { status: "active" },
+  );
+  const enrollmentById = new Map(enrollments.map((enrollment) => [enrollment.id, enrollment]));
+  const scopedSandboxes: SandboxRecord[] = enrollments.flatMap((enrollment) =>
+    enrollment.sandboxId
+      ? [
+          {
+            id: enrollment.sandboxId,
+            accountId: enrollment.accountId,
+            workspaceId: enrollment.workspaceId,
+            kind: "selfhosted" as const,
+            name: enrollment.sandboxName ?? `${enrollment.os} machine`,
+            enrollmentId: enrollment.id,
+            createdAt: enrollment.createdAt,
+            updatedAt: enrollment.updatedAt,
+          },
+        ]
+      : [],
+  );
+  const sandboxes = [
+    ...legacySandboxes.filter(
+      (sandbox) => !scopedSandboxes.some((scoped) => scoped.id === sandbox.id),
+    ),
+    ...scopedSandboxes,
+  ];
   for (const sandbox of sandboxes) {
     if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
       continue;
     }
-    const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
+    const enrollment =
+      enrollmentById.get(sandbox.enrollmentId) ??
+      (await getEnrollment(db, resourceAccess, sandbox.enrollmentId));
     if (!enrollment || enrollment.status !== "active") {
       // Revoked enrollments remain durable audit/history records, but they are
       // intentionally absent from the normal attach/run picker.
@@ -324,12 +395,16 @@ export async function listFleet(
     }
     const liveConnection = await getLiveEnrollmentConnection(
       db,
-      ctx.workspaceId,
+      resourceAccess,
       sandbox.enrollmentId,
     );
     const probe = enrollment
-      ? await probeEnrollment(services, ctx.workspaceId, enrollment, liveConnection)
-      : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
+      ? await probeEnrollment(services, sandbox.workspaceId, enrollment, liveConnection)
+      : {
+          liveness: "offline" as FleetLiveness,
+          consented: false,
+          hasDisplay: false,
+        };
     entries.push({
       id: sandbox.id,
       kind: "selfhosted",
@@ -396,7 +471,17 @@ async function resolveTarget(
     }
     return { ok: true, targetSandboxId: null };
   }
-  const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
+  const sandbox = await getSandbox(
+    services.db,
+    ctx.subjectId
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
+      : ctx.workspaceId,
+    target,
+  );
   if (!sandbox) {
     return {
       ok: false,
@@ -416,7 +501,11 @@ async function resolveTarget(
     isSessionGroup: false,
   });
   if (!establishable.ok) {
-    return { ok: false, reason: establishable.reason, code: establishable.code };
+    return {
+      ok: false,
+      reason: establishable.reason,
+      code: establishable.code,
+    };
   }
   if (sandbox.kind === "selfhosted") {
     if (!sandbox.enrollmentId) {
@@ -428,7 +517,13 @@ async function resolveTarget(
     }
     const enrollment = await getLiveEnrollmentConnection(
       services.db,
-      ctx.workspaceId,
+      ctx.subjectId
+        ? {
+            accountId: ctx.accountId,
+            workspaceId: ctx.workspaceId,
+            subjectId: ctx.subjectId,
+          }
+        : sandbox.workspaceId,
       sandbox.enrollmentId,
     );
     if (!enrollment) {
@@ -438,7 +533,7 @@ async function resolveTarget(
         code: "offline_enrollment",
       };
     }
-    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment, enrollment);
+    const probe = await probeEnrollment(services, sandbox.workspaceId, enrollment, enrollment);
     if (probe.liveness !== "online") {
       return {
         ok: false,
@@ -531,6 +626,8 @@ export async function swapActiveSandbox(
         sessionId: ctx.sessionId,
         targetSandboxId: resolved.targetSandboxId,
         expectedEpoch: pointer.activeEpoch,
+        ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+        ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
         ...(workingDir !== undefined ? { workingDir } : {}),
       });
       if (result.swapped && result.pointer) {
@@ -597,6 +694,12 @@ export type RunOnSelfhostedMachine = {
   execTimeoutMs: number;
   /** Streaming transport required when execTimeoutMs is 0 (unbounded). */
   opStream?: SelfhostedOpStreamDeps;
+  operationResourcePolicy?: SelfhostedOperationResourcePolicy;
+  operationResourcePolicySupported?: boolean;
+  operationCpuQuotaSupported?: boolean;
+  /** Last-boundary authority/connection resolver invoked before every physical
+   * provider operation. */
+  resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /**
    * Exact-attempt values for this one child process. Never persisted on the
    * enrollment or machine. The caller may supply these only after authenticating
@@ -608,6 +711,31 @@ export type RunOnSelfhostedMachine = {
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
 };
+
+function runOnOperationAdmission(
+  services: FleetServices,
+  enrollment: EnrollmentRecord | null,
+): SelfhostedOperationAdmission | null {
+  if (!enrollment?.connectionInstanceId) return null;
+  const opStream =
+    services.settings.agentOpStreamEnabled === true &&
+    enrollment.opStream === true &&
+    services.bus?.getOpStreamConnection
+      ? {
+          transport: new NatsOpStreamTransport(
+            async () => services.bus?.getOpStreamConnection?.() ?? null,
+          ),
+        }
+      : undefined;
+  return {
+    workspaceId: enrollment.workspaceId,
+    connectionInstanceId: enrollment.connectionInstanceId,
+    ...(opStream ? { opStream } : {}),
+    operationResourcePolicy: enrollment.operationPolicy,
+    operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+  };
+}
 
 /**
  * Execute the one-off machine operation once the workspace/enrollment lookup has
@@ -630,6 +758,20 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.operationResourcePolicy !== undefined
+      ? { operationResourcePolicy: machine.operationResourcePolicy }
+      : {}),
+    ...(machine.operationResourcePolicySupported !== undefined
+      ? {
+          operationResourcePolicySupported: machine.operationResourcePolicySupported,
+        }
+      : {}),
+    ...(machine.operationCpuQuotaSupported !== undefined
+      ? { operationCpuQuotaSupported: machine.operationCpuQuotaSupported }
+      : {}),
+    ...(machine.resolveOperationAdmission !== undefined
+      ? { resolveOperationAdmission: machine.resolveOperationAdmission }
+      : {}),
     ...(machine.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: () => machine.transientExecEnvironment! }
       : {}),
@@ -658,7 +800,9 @@ export async function executeRunOnSelfhostedMachine(
         timedOut,
         deadlineMs,
         ...(timedOut
-          ? { reason: `command exceeded the ${deadlineMs} ms execution deadline` }
+          ? {
+              reason: `command exceeded the ${deadlineMs} ms execution deadline`,
+            }
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
             : {}),
@@ -666,9 +810,17 @@ export async function executeRunOnSelfhostedMachine(
     }
     if (op.kind === "read") {
       const bytes = await session.readFile({ path: op.path });
-      return { target, kind: "read", ok: true, content: new TextDecoder().decode(bytes) };
+      return {
+        target,
+        kind: "read",
+        ok: true,
+        content: new TextDecoder().decode(bytes),
+      };
     }
-    const bytesWritten = await session.writeFile({ path: op.path, content: op.content });
+    const bytesWritten = await session.writeFile({
+      path: op.path,
+      content: op.content,
+    });
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -705,7 +857,17 @@ export async function runOnSandbox(
   op: RunOnOp,
   options: RunOnOptions = {},
 ): Promise<RunOnResult> {
-  const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
+  const sandbox = await getSandbox(
+    services.db,
+    ctx.subjectId
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
+      : ctx.workspaceId,
+    target,
+  );
   if (!sandbox) {
     return {
       target,
@@ -723,9 +885,56 @@ export async function runOnSandbox(
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
     };
   }
+  if (sandbox.scope === "user") {
+    if (!ctx.subjectId || !ctx.attemptAuthority) {
+      return {
+        target,
+        targetName: sandbox.name,
+        kind: op.kind,
+        ok: false,
+        reason: "personal Connected Machine use requires an exact admitted agent attempt",
+      };
+    }
+    try {
+      const authorized = await authorizePersonalMachineForAttempt(services.db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        subjectId: ctx.subjectId,
+        sessionId: ctx.sessionId,
+        turnId: ctx.attemptAuthority.turnId,
+        attemptId: ctx.attemptAuthority.attemptId,
+        executionGeneration: ctx.attemptAuthority.executionGeneration,
+        enrollmentId: sandbox.enrollmentId,
+        requireActiveSandbox: false,
+      });
+      if (!authorized) {
+        return {
+          target,
+          targetName: sandbox.name,
+          kind: op.kind,
+          ok: false,
+          reason: "personal Connected Machine authority was not admitted for this attempt",
+        };
+      }
+    } catch {
+      return {
+        target,
+        targetName: sandbox.name,
+        kind: op.kind,
+        ok: false,
+        reason: "personal Connected Machine authority is not live for this attempt",
+      };
+    }
+  }
   const enrollment = await getLiveEnrollmentConnection(
     services.db,
-    ctx.workspaceId,
+    ctx.subjectId
+      ? {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          subjectId: ctx.subjectId,
+        }
+      : sandbox.workspaceId,
     sandbox.enrollmentId,
   );
   if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
@@ -737,16 +946,52 @@ export async function runOnSandbox(
       reason: `sandbox ${target} is not enrolled/active`,
     };
   }
+  const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission | null> => {
+    try {
+      const current =
+        sandbox.scope === "user" && ctx.subjectId && ctx.attemptAuthority
+          ? await resolvePersonalMachineConnectionForAttempt(services.db, {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              subjectId: ctx.subjectId,
+              sessionId: ctx.sessionId,
+              turnId: ctx.attemptAuthority.turnId,
+              attemptId: ctx.attemptAuthority.attemptId,
+              executionGeneration: ctx.attemptAuthority.executionGeneration,
+              enrollmentId: sandbox.enrollmentId!,
+              requireActiveSandbox: false,
+            })
+          : await getLiveEnrollmentConnection(
+              services.db,
+              ctx.subjectId
+                ? {
+                    accountId: ctx.accountId,
+                    workspaceId: ctx.workspaceId,
+                    subjectId: ctx.subjectId,
+                  }
+                : sandbox.workspaceId,
+              sandbox.enrollmentId!,
+            );
+      return runOnOperationAdmission(services, current);
+    } catch {
+      return null;
+    }
+  };
 
   const result = await executeRunOnSelfhostedMachine(
     {
-      workspaceId: ctx.workspaceId,
+      workspaceId: sandbox.workspaceId,
       agentId: sandbox.enrollmentId,
       connectionInstanceId: enrollment.connectionInstanceId,
       controlRpc: controlRpc(services.bus),
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      operationResourcePolicy: enrollment.operationPolicy,
+      operationResourcePolicySupported:
+        enrollment.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+      resolveOperationAdmission,
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
@@ -794,17 +1039,19 @@ export async function provisionSandbox(
   input: { kind: "selfhosted" | "modal"; name?: string },
 ): Promise<ProvisionResult> {
   if (input.kind === "selfhosted") {
-    const base = (services.settings.publicBaseUrl ?? "https://get.opengeni.ai").replace(/\/+$/, "");
+    const base = (services.settings.publicBaseUrl ?? "https://app.opengeni.ai").replace(/\/+$/, "");
+    const unixEnvironment = `OPENGENI_API_URL=${base} OPENGENI_WORKSPACE_ID=${ctx.workspaceId}`;
+    const windowsEnvironment = `$env:OPENGENI_API_URL='${base}'; $env:OPENGENI_WORKSPACE_ID='${ctx.workspaceId}';`;
     return {
       kind: "selfhosted",
       instructions:
-        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent connect`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
+        "Share one of these deployment-specific commands with a human operator. It installs the OpenGeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
       // Install from THIS control plane's origin (not a hardcoded public CDN): the
       // served install script is rewritten to pull the per-SHA agent baked into
       // this exact deployment (see apps/api/src/routes/install.ts), so a deployed
       // env is self-contained and a private/air-gapped one works with no public DNS.
-      installCommandUnix: `curl -fsSL ${base}/install.sh | sh`,
-      installCommandWindows: `irm ${base}/install.ps1 | iex`,
+      installCommandUnix: `curl -fsSL ${base}/install.sh | ${unixEnvironment} sh`,
+      installCommandWindows: `${windowsEnvironment} irm ${base}/install.ps1 | iex`,
       verificationUri: `${base}/device`,
       note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
     };

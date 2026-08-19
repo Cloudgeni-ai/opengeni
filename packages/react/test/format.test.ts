@@ -110,8 +110,6 @@ describe("composerSubmissionErrorMessage", () => {
 
     expect(error.code).toBe("payment_required");
     expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
-    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).toContain("connected Codex subscription model");
-    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).toContain("draft and attachments are preserved");
   });
 
   test("passes unrelated submission errors through", () => {

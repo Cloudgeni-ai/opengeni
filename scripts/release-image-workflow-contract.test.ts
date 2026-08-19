@@ -182,6 +182,15 @@ describe("release image workflow contract", () => {
     expect(keepsStableSandboxToolchainBeforeArtifactRuntime(previousOrdering)).toBe(false);
   });
 
+  test("retries the Azure CLI bootstrap in both sandbox images", async () => {
+    for (const path of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
+      const dockerfile = await readFile(resolve(root, path), "utf8");
+      expect(dockerfile).toContain(
+        "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
+      );
+    }
+  });
+
   test("builds Checkov outside the serial sandbox toolchain", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
@@ -941,6 +950,32 @@ describe("release image workflow contract", () => {
     );
     expect(agentRelease).not.toContain(
       'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"',
+    );
+    const finalBundleArchive = agentRelease.lastIndexOf(
+      'ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"',
+    );
+    const finalBundleValidation = agentRelease.indexOf(
+      'ditto -x -k "OpenGeni-Agent.app.zip" "$VERIFY_DIR"',
+      finalBundleArchive,
+    );
+    expect(finalBundleArchive).toBeGreaterThan(-1);
+    expect(finalBundleValidation).toBeGreaterThan(finalBundleArchive);
+    for (const executable of [
+      "Contents/MacOS/opengeni-agent",
+      "Contents/Helpers/opengeni-browserd",
+      "Contents/Helpers/agent-browser",
+      "Contents/Helpers/opengeni-computer-native",
+    ]) {
+      expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
+    }
+    expect(agentRelease.slice(finalBundleValidation)).toContain(
+      "Contents/Resources/OpenGeni-Agent.icns",
+    );
+    expect(agentRelease).toContain(
+      "<key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>",
+    );
+    expect(agentRelease.slice(finalBundleValidation)).toContain(
+      'codesign --verify --deep --strict "$VERIFY_DIR/$APP"',
     );
     expect(agentRelease).not.toContain("manifest publish is wired via");
     expect(agentRelease).not.toContain("gh release delete");

@@ -71,7 +71,7 @@ code is 0 iff every verdict passed** (unless `--no-assert`).
 |----------|-------------------|----------------|
 | `milestone0` | one disposable agent online | heartbeats within 15s + a ping round-trip |
 | `baseline` | 1,000 pings, 200 small execs, 100 fs ops | reference latencies; zero errors; ping p99 < 100ms |
-| `flood` | 256 concurrent ops on 1 agent + 32×16 fleet | **control-liveness isolation** (ping p99 < 100ms while host work saturates); 8-slot saturation returns `DRAINING`; no heartbeat gap > 7.5s |
+| `flood` | 256 concurrent ops on 1 agent + 32×16 fleet | **control-liveness isolation** (ping p99 < 100ms while host work saturates); every issued op returns typed success with no timeout/error; no heartbeat gap > 7.5s |
 | `large` | exec/fs_read/fs_write at 256KB–8MB | the ~1MB payload wall is **typed** (`PAYLOAD_TOO_LARGE` reply-side, `REQUEST_TOO_LARGE` request-side), never a silent timeout |
 | `long` | `sleep 45` @ 30s deadline, `sleep 5` @ 30s | the 30s exec wall is a **typed** `timed_out`; a shorter exec succeeds; heartbeats keep 5s cadence throughout |
 | `chaos-nats` | server restart + SIGSTOP freeze under an in-flight exec | reconnect convergence < 15s; the in-flight op is killed by the reconnect; heartbeats resume after a freeze |
@@ -84,12 +84,12 @@ code is 0 iff every verdict passed** (unless `--no-assert`).
 {
   "scenario": "flood",
   "seed": 42,
-  "config": { "single_agent_ops": 256, "fleet_size": 32, "max_in_flight_control_rpcs": 8 },
+  "config": { "single_agent_ops": 256, "fleet_size": 32, "admission": "unbounded (derived breakers only)" },
   "started_at_unix_ms": 1783680704000,
   "agent_version": "opengeni-agent 0.1.7",
   "measurements": {
     "latency_us": { "ping": { "p50": 331, "p90": 600, "p95": 629, "p99": 763, "max": 1310, "count": 1000 } },
-    "errors": { "DRAINING": 177 },
+    "errors": {},
     "heartbeat_gaps_ms": { "hx-agent-0": [5000, 5001] },
     "resources": [ { "t_ms": 0, "rss_bytes": 17825792, "fds": 11, "threads": 22 } ]
   },
@@ -117,7 +117,10 @@ verdicts:
 overall: PASS
 ```
 
-## First baseline (agent 0.1.7, local nats-server 2.10.x, 8 slots, 1 MiB max_payload)
+## Historical first baseline (agent 0.1.7; obsolete 8-slot admission)
+
+This evidence predates unbounded admission and is retained only as historical
+comparison; its `DRAINING` results are not the current acceptance contract.
 
 - **baseline** — ping p50 331µs / p99 763µs; small exec p50 4.8ms; fs stat/list ~0.9ms; RSS flat ~17 MiB, fds 11–15; 0 errors across 1,300 ops.
 - **flood** — under 256 concurrent ops on one agent, a concurrent ping probe holds p99 ≈ 7.6–9.6ms (< 100ms): control liveness is isolated from host-work saturation. ~172–177 of the 256 ops are shed as `DRAINING` (8 slots, no queue). All 32 fleet agents keep heartbeating with zero > 7.5s gaps.

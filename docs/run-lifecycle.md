@@ -33,6 +33,18 @@ optimistic row disappears when the authoritative `user.message` arrives, so
 HTTP-first, SSE-first, reconnect, and remount paths cannot create duplicate
 visible messages.
 
+The outside and inside composers are separate authorities. Before a session
+exists, `new_session_drafts` owns the next session. Inside a session,
+`composer_drafts` owns the next message for that actor/session; navigation and
+workspace defaults do not copy policy between them. Send/Steer submits one exact
+inside draft revision and the server rotates that row to a blank next revision
+in the same transaction that freezes the queued turn. Every queued turn therefore
+retains its own text, resources, model, reasoning, and latency. Editing a queued
+turn checks that exact snapshot back into the inside composer atomically, and a
+nonempty composer is replaced only after explicit confirmation. An independent
+session fork copies the source session's exact typed reasoning and latency; it
+does not invent defaults or consult either composer.
+
 On the server, prompt acceptance remains one canonical Postgres transaction:
 the user event, queued turn, session/queue state, optional realtime mirror,
 audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
@@ -234,8 +246,9 @@ availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
 silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Approval `RunState` retains its distinct 3 MiB,
-65,536-node, and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
+sessions under the boundary. Pause stores only the open-suffix sentinel; the
+approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
+65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
 normalized into a fresh zero backlog. The release target remains at most
 50 MiB incremental RSS per active turn. A production read-only forensic
@@ -299,16 +312,23 @@ full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
 
-The workspace `memoryPromptMode` is resolved at each accepted attempt from the
-existing settings JSON. Its default `legacy_standing` keeps the prior prompt
-path. Opt-in `retrieval_only` removes the broad Memory V1 working-set block and
+Turn acceptance freezes `memoryEnabled`, `memoryPromptMode`, and a bounded
+projection of legacy workspace instructions in one immutable turn-context
+snapshot. The first exact attempt creates a content-free selection receipt that
+binds that snapshot to the accepted logical turn. Its default `retrieval_only`
+(migration 0271; absent settings resolve to it) removes
+the broad Memory V1 working-set block and
 legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. A root still receives the bounded company profile, while a child
+unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
 governance snapshot ids, inclusion reason, authority class, root/child role,
-UTF-8 size, and estimated tokens without recording content.
+UTF-8 size, and estimated tokens without recording content. Replacement
+attempts reuse the receipt, its bounded legacy Memory candidate identities, and
+the exact whole-entry subset that fit the original prompt budget. Current
+authorization, lifecycle, version, and content-hash revalidation may remove a
+rendered candidate but never add a newer or originally budget-omitted one.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
@@ -320,14 +340,14 @@ persists through recovery without accidentally becoming a permanent session
 default, while later policy or preference changes affect only later accepted
 turns.
 
-**Runs have no length limits, by design.** What the SDK calls "turns" are model
+**Runs have no default length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
 effectively unbounded. There is no continuation cap and the agent activity's
 Temporal timeout is measured in days, not hours. OpenGeni is built for agents
-that legitimately run for a very long time, so **run length is bounded by
-symptoms, never by counts**: the no-progress detector and budget exhaustion are
-the real guards. Do not reintroduce count- or duration-based caps on legitimate
-run length; if a run is misbehaving, detect the pathology, do not cap the clock.
+that legitimately run for a very long time. Budget/admission policy and
+explicit goal completion or pause bound execution; OpenGeni does not infer
+"no progress" from tool/event shape. Do not reintroduce default count- or
+duration-based caps on legitimate run length; fix the pathology instead.
 
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
@@ -349,6 +369,16 @@ successful tool output, conversation truth is checkpointed before the turn
 settles and the continuation is a new follow-up — the completed tool call/full
 turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
 rather than failing the session, so a top-up lets the same session continue.
+
+Fresh progressive-disclosure attempts complete only session-marked eager MCP
+connection and schema admission before inference. All non-eager MCPs—strict or
+optional—connect/list concurrently with the first provider request. A plain
+terminal model response does not join that background work. Search disclosure,
+deferred invocation, Codemode activation, catalog persistence, and cleanup join
+the one exact preparation promise, so no partial catalog grants authority.
+Approval/human-interaction resumes and editable-artifact turns retain the fully
+prepared catalog path because their continuation depends on exact prior tool or
+catalog identity.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
@@ -466,10 +496,13 @@ Request-time filters may normalize computer calls, normalize provider item
 identities, or bound tool output deterministically; they may not classify or
 rewrite arbitrary textual content and may not remove or reorder an
 earlier `view_image` call/result pair. Computer-use tools are likewise exposed
-only when the caller supplies a proven visual transport: responses routes
-use hosted computer tools, Codex subscription routes return structured image
-results, and chat-wire or omitted/unproven public runtime routes receive no
-computer tools rather than screenshot data URLs encoded as text.
+only when the caller supplies a proven visual transport: Responses wires
+(including Gateway Kimi and SuperGrok) and Codex use `computer_*` function
+tools with structured image results when the model catalog lists image input.
+Gateway DeepSeek stays text-only and therefore receives neither image input nor
+computer tools. Chat Completions receives no computer tools: tool results on
+that wire are text, so a screenshot would become a base64 string rather than an
+image the model sees.
 
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
@@ -497,6 +530,19 @@ and the exact `agent.toolCall.output` value used by the durable audit event.
 Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
+
+For MCP, the runtime reads the complete provider `CallToolResult` through the
+SDK's `callToolResult` seam and carries a private duplicate only until the exact
+audit projection is durable. An HTTP-successful result with `isError: true`
+therefore remains a failed tool outcome in live SDK state, model-facing history,
+the pending receipt, the durable event, recovery, and the timeline. The physical
+invocation boundary also records
+`opengeni_mcp_tool_calls_total{outcome}` and
+`opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural
+outcome: `success`, `provider_declared_error`, `auth_needed`,
+`outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
+`thrown_protocol_error`. Server, tool, tenant, request, error, and content values
+are deliberately absent from labels.
 
 First-party `session_create` and `session_send_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
@@ -526,6 +572,20 @@ their existing checkout available; runtime then indexes canonical
 sandbox session before the first model call. This performs no second clone,
 copy, or manifest materialization. With no repository resource, that workspace
 discovery capability is absent and cannot force provisioning.
+
+Host-owned rotating sandbox run credentials split resolution from sandbox
+materialization when lazy provisioning is enabled. The worker binds and resolves
+the exact accepted turn, attempt, shared sandbox group, initiator, and effective
+backend once before model preparation so partial `auth_needed` state is available
+as bounded model context and reconnect UI. Only the first actual sandbox
+operation enters the existing single-flight provisioner, writes that exact
+resolved material to the lease before the waiting operation, and starts renewal.
+A model-only turn therefore owns no credential write, renewal, lease, box, or
+exact-generation cleanup work. Signed file resources are eager only on the exact
+turn that attached them; historical attachment ids do not cause sandbox or
+object-storage work. This-turn generated-video files may still copy onto the
+box before dispatch; a copy miss is deferred like generated images (the
+durable File remains) and does not fail the turn.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -1052,8 +1112,8 @@ original attempt for audit. Receipt/result, goal version, session-sequenced
 event, and mutation commit atomically. A lost response can therefore be
 reconciled from a recovered attempt without double-applying the update, and an
 old replay returns its stored result rather than overwriting newer goal truth.
-Full detail in `docs/goals.md`; goals are bounded by progress/budget guards, not
-counts.
+Full detail in `docs/goals.md`; goals are bounded by budget/admission policy and
+explicit lifecycle control, not an inferred progress score.
 
 ## Memory — three stores, three jobs
 
@@ -1100,17 +1160,27 @@ audit reads may return it, so it is never a secret boundary.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
-2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
-   blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
-   job is resuming a turn that paused mid-flight for a human approval or
-   structured-input tool call (`requires_action`); neither a half-finished tool
-   approval nor an unanswered tool call can be represented as plain history
-   items. Before the blob is written, every copy of a retained screenshot tool
-   result and generated-image result inside the RunState is compacted to its
-   retry-stable receipt. On SDK resume, generated-image hosted items are
-   temporarily projected to the same provider-neutral artifact fact used by
-   ordinary history; the durable checkpoint stays compact.
-   The blob is written only for those cases.
+   User attachments use a separate one-turn delivery rule. The accepted user
+   row stores private stable file references beside the message. Only that
+   triggering turn resolves metadata, optionally inlines supported bytes, and
+   materializes the files into active compute. Later model requests project the
+   references as compact `fileId` receipts without file metadata reads,
+   object-storage reads, filesystem checks, remounts, or downloads. Compaction
+   preserves omitted references in one compact catalog. When old bytes are
+   actually needed, the model uses the existing dedicated Files MCP download
+   URL plus shell instead of startup rematerialization.
+2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
+   Pauses flush completed-pair history, then persist the bounded open suffix
+   on `session_pending_tool_calls` (the pending call item, tied reasoning the
+   sanitizer would drop, and interruption kind). Unpaired calls never enter
+   model-facing `session_history_items`. The same settlement writes the
+   open-suffix sentinel into `agent_run_states` with pending-approval /
+   human-input snapshots. Resume settles one suffix member
+   (human-input response, approval invoke through the existing MCP execute-once
+   fence, or rejection), promotes reasoning + call + bounded result as one pair,
+   and either stays `requires_action` without a model call or continues from
+   history. Missing suffix rows fail closed. It does not reconstruct SDK
+   `RunState`.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and
@@ -1159,14 +1229,17 @@ provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but
 must not repeat generation. Native hosted generation stays inside the ordinary
 model-call crash boundary. Successful bytes are validated and retained once,
-then materialized into the active sandbox from object storage. A sandbox-copy
-failure never invalidates the permanent artifact or replays paid work. Canonical:
+then materialized into the active sandbox for that turn. Historical receipts do
+not trigger later eager copies; an agent retrieves the workspace file explicitly
+when needed. A sandbox-copy failure never invalidates the permanent artifact or
+replays paid work. Canonical:
 [`image-generation.md`](image-generation.md).
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same
-transaction stores its request rows, the opaque `agent_run_states` checkpoint,
-the `requires_action` projection, and requested events. The request row is
+transaction stores its request rows, the open-suffix pending-tool receipts,
+the `agent_run_states` sentinel, the `requires_action` projection, and
+requested events. The request row is
 owned by the exact turn execution generation; its creation attempt is only
 provenance. Answer, allowed skip, expiry, or cancellation is first-writer-wins
 and becomes structured output for that same SDK tool call. It never becomes a
@@ -1318,6 +1391,62 @@ between supported providers; `remote_v2` sessions remain Codex-only.
 
 ## Agent-loop request lifecycle observability
 
+The user-visible startup critical path is also durable and phase-specific. The
+existing `turn.queued`/`turn.started`, `sandbox.operation.*`, `rig.setup.*`, and
+`agent.model.request` events reconstruct queueing, box establishment, rig,
+repository/file work, and provider first byte. Compact
+`turn.startup.phase.started|completed|failed` checkpoints fill the two gaps for
+tool connection and model-request preparation; terminal payloads contain only a
+closed phase name and non-negative `durationMs`. In particular, lazy
+`sandbox.provision` completes as soon as the box is established, before owned
+rig/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
+Model-request preparation is an enclosing span: it begins when control enters
+the runtime and ends at the provider transport boundary, so it may include the
+sandbox, rig, repository, and other setup rows whose starts appear below it.
+The timeline labels that overlap explicitly instead of presenting the parent as
+an additional sequential wait.
+
+The periodic warm-workspace snapshot is mid-session durability. The lease
+heartbeat must not start it until the first provider request has reached its
+transport boundary: before then there is no agent-produced work to protect, and
+the snapshot's workspace fence would make first-request sandbox preparation
+wait behind maintenance. Turn-end capture and the existing single-flight gate
+remain unchanged.
+
+Fleet metrics keep this drill-down identity-free:
+`opengeni_turn_worker_preparation_duration_seconds` measures the platform path,
+`opengeni_turn_startup_phase_duration_seconds` attributes its bounded phases,
+and `opengeni_turn_startup_milestone_duration_seconds` records real cumulative
+queue, provider-dispatch, and first-byte SLO samples from the durable turn queue
+timestamp. Their labels are limited to the closed provider/backend/outcome and,
+where applicable, phase/count/cache vocabularies; session, turn, request,
+credential, and content values remain only in authenticated durable events.
+The database returns a milestone receipt only when the current transaction
+inserted the first canonical current-association checkpoint, so ordinary
+attempt recovery and callback replay cannot deterministically double-count it.
+A terminal `turn.failed` after provider dispatch contributes one bounded failed
+first-byte sample only when the logical turn produced no canonical byte in any
+attempt. A recoverable pre-byte attempt and a later tool-loop failure after a
+byte therefore cannot downgrade the logical startup outcome; successful
+first-byte latency remains a separate completed series. Prometheus observation
+is still an in-process, at-most-once side effect after the database commit: a
+process crash in that COMMIT-to-observe window can lose a sample. It is not
+transactionally exactly-once; a replica-safe Postgres-backed metrics projector
+would be a separate observability architecture.
+
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
 
-The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A semantic terminal is latched before downstream stream cleanup; if the consumer cancels after parsing it, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out. SuperGrok persists only `started`, `headers`, `first_event`, and terminal checkpoints—not every streamed event—and the terminal checkpoint carries bounded event-count, last-event-type, last-progress-duration, and silence facts.
+Native diagnostic observers run before the existing awaited
+`agent.model.request` durable audit callback and cannot block or change it.
+Durable append/publish fencing and ordering therefore remain the source of audit
+truth. For generic providers, an attempt-local async context instead awaits the
+durable `started` checkpoint at the literal pre-fetch boundary; request bytes
+cannot reach the wire first. Model-preparation `started` is durable before
+`runStream` is invoked, including an immediately-calling native transport. A
+semantic terminal is latched before downstream stream cleanup; if the consumer
+cancels after parsing it, the audit remains `completed` rather than producing a
+misleading trailing `failed`. Actual provider failure/incomplete/error,
+transport failure, timeout, or caller abort remains failed/timed out. SuperGrok
+persists only `started`, `headers`, `first_event`, and terminal checkpoints—not
+every streamed event—and the terminal checkpoint carries bounded event-count,
+last-event-type, last-progress-duration, and silence facts.

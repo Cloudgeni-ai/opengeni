@@ -16,6 +16,11 @@ import {
   MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   boundModelToolOutputItem,
 } from "@opengeni/codex";
+import {
+  FileResourceRef,
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_REFS_FIELD,
+} from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 
@@ -1527,7 +1532,7 @@ export function buildCompactionReplacementHistory(
   let remaining = COMPACT_USER_MESSAGE_MAX_TOKENS;
   for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = items[index]!;
-    if (!isUserMessage(item) || isCompactionSummary(item)) {
+    if (!isUserMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
@@ -1539,6 +1544,8 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens;
   }
   const history = retainedReversed.reverse();
+  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
+  if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
   return history;
 }
@@ -1556,7 +1563,9 @@ export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
 
 /** Messages retained beside a remote v2 compaction blob (user + developer). */
 export function isRetainedRemoteV2Message(item: unknown): boolean {
-  if (isCompactionSummary(item) || itemType(item) === "compaction") return false;
+  if (isCompactionSummary(item) || isAttachmentCatalog(item) || itemType(item) === "compaction") {
+    return false;
+  }
   const role = itemRole(item);
   return itemType(item) === "message" && (role === "user" || role === "developer");
 }
@@ -1595,12 +1604,56 @@ export function buildRemoteV2ReplacementHistory(
     break;
   }
   const history = retainedReversed.reverse();
+  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
+  if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
     type: "compaction",
     encrypted_content: compactionItem.encrypted_content,
     ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
   });
   return history;
+}
+
+function isAttachmentCatalog(item: unknown): boolean {
+  return Boolean(
+    item &&
+    typeof item === "object" &&
+    (item as Record<string, unknown>)[MODEL_ATTACHMENT_CATALOG_MARKER] === true,
+  );
+}
+
+function attachmentRefsFromCompactionItems(items: readonly CompactionItem[]): FileResourceRef[] {
+  const refs: FileResourceRef[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const raw = item[MODEL_ATTACHMENT_REFS_FIELD];
+    if (!Array.isArray(raw)) continue;
+    for (const candidate of raw) {
+      const parsed = FileResourceRef.safeParse(candidate);
+      if (!parsed.success || seen.has(parsed.data.fileId)) continue;
+      seen.add(parsed.data.fileId);
+      refs.push(parsed.data);
+    }
+  }
+  return refs;
+}
+
+function buildAttachmentCatalogItem(
+  original: readonly CompactionItem[],
+  retained: readonly CompactionItem[],
+): CompactionItem | null {
+  const retainedIds = new Set(attachmentRefsFromCompactionItems(retained).map((ref) => ref.fileId));
+  const omittedRefs = attachmentRefsFromCompactionItems(original).filter(
+    (ref) => !retainedIds.has(ref.fileId),
+  );
+  if (omittedRefs.length === 0) return null;
+  return {
+    type: "message",
+    role: "user",
+    content: "[OpenGeni retained attachment references]",
+    [MODEL_ATTACHMENT_REFS_FIELD]: omittedRefs,
+    [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+  };
 }
 
 /**

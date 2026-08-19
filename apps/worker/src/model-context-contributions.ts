@@ -5,7 +5,7 @@ import type {
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
   SandboxBackend,
-  WorkspaceMemoryPromptMode,
+  HistoricalMemoryPromptMode,
 } from "@opengeni/contracts";
 import { composeRuntimeSkills, type RuntimeSkillActivation } from "@opengeni/runtime";
 
@@ -54,10 +54,11 @@ export function modelVisibleCompanyBrainSkillActivations(
 }
 
 export type CompanyBrainContributionReceipt = Readonly<{
+  contextSelectionReceiptId: string;
   attemptId: string;
   turnId: string;
   sessionRole: "root" | "child";
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   instructionPolicySnapshotId: string;
   preferenceSnapshotId: string | null;
   companyProfileSnapshotId: string;
@@ -71,10 +72,11 @@ export type CompanyBrainContributionReceipt = Readonly<{
  * of truth for billing and context pressure.
  */
 export function buildCompanyBrainContributionReceipt(input: {
+  contextSelectionReceiptId: string;
   attemptId: string;
   turnId: string;
   nestedAgentDepth: number;
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   instructionPolicy: ResolvedWorkspaceInstructionPolicySnapshot;
   workspaceAgentInstructions: string | null;
   preferences: PreferenceRegistrySnapshot | null;
@@ -151,6 +153,7 @@ export function buildCompanyBrainContributionReceipt(input: {
     );
   }
   return Object.freeze({
+    contextSelectionReceiptId: input.contextSelectionReceiptId,
     attemptId: input.attemptId,
     turnId: input.turnId,
     sessionRole: input.nestedAgentDepth === 0 ? "root" : "child",
