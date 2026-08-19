@@ -18,6 +18,7 @@ on:
   push:
     branches:
       - main
+      - production
     paths:
       - "agent/**"
       - ".github/workflows/agent-ci.yml"

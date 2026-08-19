@@ -187,27 +187,26 @@ the new runtime.
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
 the latest protected branch. Create the branch from current `main` initially,
-then keep the exact head frozen while CI, review, and merge admission run.
+then keep the exact head frozen while CI and review run. Ordinary PRs into
+`main` use focused impact CI; freeze-head source admission runs only for
+`hotfix/*` PRs into `production`.
 
 - A protected-branch advance alone is **not** a source revision, does not
   invalidate a head-bound review, and must not produce another candidate label.
-  “Current-main compatible” means that the frozen candidate's patch and
+  “Current-main compatible” means that the frozen head's patch and
   resulting merge tree have been checked against current `main`; it does not
   mean that current `main` must be an ancestor of the candidate head.
-- When `main` moves, leave the source branch untouched. Re-run the base-owned
-  Source Admission check when needed, inspect provider mergeability, and have
-  the merge authority prove the fresh latest-main conflict, patch-equivalence,
-  protected-path, migration/generated-file, and targeted compatibility checks.
-  The source admission contract deliberately accepts immutable stale-event
-  heads while protected `main` advances.
+- When `main` moves, leave the source branch untouched. Inspect provider
+  mergeability and have the merge authority prove the fresh latest-main
+  conflict, patch-equivalence, protected-path, migration/generated-file, and
+  targeted compatibility checks. Do not merge or rebase unrelated `main`
+  commits into the branch solely to make it look current.
 - Mutate the candidate only for a source defect, an actual merge conflict, or a
   material semantic incompatibility that requires source changes. Record that
-  reason explicitly. A conflict-free merge or rebase performed only to include
-  unrelated `main` commits is prohibited.
+  reason explicitly.
 - A structured release-review artifact that explicitly binds a reviewed base
   may need replacement evidence when that selected base identity changes. That
-  evidence refresh stays on the same candidate head; it is not permission to
-  merge or rebase `main` into the source branch.
+  evidence refresh stays on the same candidate head.
 - Watchers and continuation goals must say “verify compatibility without source
   mutation.” They must never direct a source owner to “reconcile again” merely
   because `main` advanced. Candidate/version numbers count substantive source
@@ -217,10 +216,14 @@ then keep the exact head frozen while CI, review, and merge admission run.
   repair revisions, pause for an explicit incident/scope review before creating
   another source revision.
 
-See the executable moving-main admission contract in
+Promote `main` → `production` with a merge-commit PR (never squash / never
+GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
+admission; see `CONTRIBUTING.md` § Release / Publishing.
+
+See the hotfix admission contract in
 `.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,
-and `scripts/check-source-admission.test.ts`. Do not weaken it by reintroducing
-an exact-current-main ancestry requirement in prompts, goals, documentation, or
+and `scripts/check-source-admission.test.ts`. Do not reintroduce an
+exact-current-tip ancestry requirement in prompts, goals, documentation, or
 operator procedure.
 
 ## Keeping these notes current

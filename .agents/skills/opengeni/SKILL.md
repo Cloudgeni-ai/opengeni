@@ -164,8 +164,10 @@ For pull-request delivery, preserve immutable candidates across a moving base:
   ordinary protected-branch movement.
 
 The executable contract is `.github/workflows/source-admission.yml` plus
-`scripts/check-source-admission.mjs`: immutable stale-event heads remain
-admissible while protected `main` advances. `AGENTS.md` owns the full repository
+`scripts/check-source-admission.mjs`: freeze-head admission applies only to
+`hotfix/*` PRs into `production`. Ordinary PRs into `main` use focused CI
+without that workflow. Immutable stale-event hotfix heads remain admissible
+while protected `production` advances. `AGENTS.md` owns the full repository
 delivery invariant.
 
 After edits, run the smallest relevant verification first, then broader checks if behavior crosses boundaries. Common checks are:

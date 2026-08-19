@@ -3504,7 +3504,10 @@ describe("workflow contracts", () => {
       (step: any) => step.name === "Dispatch exact-head Version PR CI",
     );
     expect(dispatch.run).toContain("dispatch-version-ci");
-    expect(ci.on.push.branches).toEqual(["main"]);
+    expect(release.jobs.version.if).toBe(
+      "${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}",
+    );
+    expect(ci.on.push.branches).toEqual(["main", "production"]);
     expect(ci.on.pull_request).not.toBeUndefined();
     expect(ci.on.schedule).toEqual([{ cron: "0 3 * * 1" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(
@@ -3521,7 +3524,7 @@ describe("workflow contracts", () => {
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(
-      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     const imageLeaves = [
       "api-image",
@@ -3539,7 +3542,7 @@ describe("workflow contracts", () => {
       expect(ci.jobs[jobName].if).toBe(ci.jobs.images.if);
     }
     for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
-      expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.mode == 'full'");
+      expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.bake_images == 'true'");
       expect(ci.jobs[jobName].if).toContain("needs.artifact-runtime.result == 'success'");
     }
     const imageSteps = imageLeaves.flatMap((jobName) =>
@@ -3555,7 +3558,9 @@ describe("workflow contracts", () => {
       "Build headless sandbox image",
     ]);
     for (const imageStep of imageSteps)
-      expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
+      expect(imageStep.with.push).toBe(
+        "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+      );
   });
 
   test("keeps admission least-privilege and candidate execution exact-head-bound", () => {
@@ -4045,6 +4050,7 @@ describe("workflow contracts", () => {
       E2E_COUNT: "${{ needs.plan.outputs.e2e_count }}",
       BROWSER_LANE_COUNT: "${{ needs.plan.outputs.browser_lane_count }}",
       ARTIFACT_RUNTIME_REQUIRED: "${{ needs.plan.outputs.artifact_runtime_required }}",
+      BAKE_IMAGES: "${{ needs.plan.outputs.bake_images }}",
       BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
     });
     expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
@@ -4129,7 +4135,7 @@ describe("workflow contracts", () => {
     expect(release.jobs.publish.needs).toBe("admission");
     expect(releasePublicationAdmissionText).toContain("ref: ${{ github.sha }}");
     expect(releasePublicationAdmissionText).toContain(
-      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main',
+      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/production',
     );
     expect(releasePublicationAdmissionText).toContain("--kind candidate");
     expect(releasePublicationAdmissionText).toContain("--kind acceptance");

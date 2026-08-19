@@ -1,10 +1,9 @@
 name: Release
 
-# A push to main may open/update the changesets Version PR, but it can NEVER
-# publish. Publication is a separate, explicit workflow_dispatch after the
-# exact source revision has passed staging, production, and the production
-# canary window described in docs/workbench-acceptance.md. The dispatch is bound
-# to the selected git ref and records the retained acceptance evidence.
+# A push to main does not open a Version PR unless VERSION_PR_ON_PUSH=true.
+# Cut official by opening a Version PR manually (or that variable), merging it,
+# promoting main to production, then workflow_dispatch publication. Publication
+# never happens on push. The 72-hour production soak is not a publish gate.
 #
 # Release images are built once by release-candidate.yml before staging. The
 # final OCI job only promotes the exact accepted manifests to release tags and
@@ -90,7 +89,7 @@ jobs:
     timeout-minutes: 15
     # Dormant until opted in: skips cleanly (no red) on pushes to main until the
     # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
-    if: ${{ github.event_name == 'push' && vars.RELEASE_ENABLED == 'true' }}
+    if: ${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}
     permissions:
       contents: write # changesets commits package versions to its release branch
       pull-requests: write # changesets opens/updates the Version PR
@@ -243,9 +242,9 @@ jobs:
             echo "release controller checkout differs from controller_sha" >&2
             exit 1
           }
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "source_sha must be reachable from origin/main" >&2
+          git fetch --no-tags origin production
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "source_sha must be reachable from origin/production; promote main first" >&2
             exit 1
           }
           [ "$CONFIRM_ZERO_GAPS" = "true" ] || {
