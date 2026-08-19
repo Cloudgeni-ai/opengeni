@@ -226,6 +226,8 @@ describe("migration 0298 tenancy parity", () => {
       metadata: {},
       model: "test-model",
       sandboxBackend: "none",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
     });
 
     const report = await checkOrganizationTenancyParity(db, {
@@ -265,6 +267,8 @@ describe("migration 0298 tenancy parity", () => {
       metadata: {},
       model: "test-model",
       sandboxBackend: "none",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
     });
     const [sessionRow] = await admin<{ sandboxGroupId: string }[]>`
       select sandbox_group_id as "sandboxGroupId" from sessions where id = ${session.id}`;
@@ -514,6 +518,8 @@ describe("migration 0298 tenancy parity", () => {
       metadata: {},
       model: "test-model",
       sandboxBackend: "none",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
     });
     // Deliberately corrupt one gate so the run takes the failure path too.
     await admin`
@@ -626,6 +632,8 @@ describe("migration 0298 tenancy parity", () => {
       metadata: {},
       model: "test-model",
       sandboxBackend: "none",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
     });
     let rejected: unknown;
     try {
