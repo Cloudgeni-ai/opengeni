@@ -385,6 +385,21 @@ not move (so an application-level `40P01` replay cannot mask a regression), and
 an exclusion probe that proves a held advisory key genuinely blocks a
 concurrent membership command.
 
+**Defence in depth, not the fix.** `updateOrganizationMember()` and
+`acceptOrganizationInvitation()` additionally replay their exact transaction a
+bounded number of times on `40P01`. Replay is exact rather than approximate:
+the whole lifecycle command runs in one transaction keyed by its
+caller-supplied operation id (`organization_membership_operation_receipts`)
+plus its CAS revisions, and a deadlock abort rolls back every durable effect,
+so re-running the identical command either applies it once or observes the
+newer authoritative state. `40001` remains the authoritative stale-revision /
+stale-epoch conflict and is never replayed. That wrapper is a caller-side
+safety net for a `40P01` raised by some *other* cycle; it is not the lock-order
+fix and must never be treated as a licence to reintroduce a conflicting
+organization row lock. The 0299 parallel-load probe reads
+`pg_stat_database.deadlocks` directly precisely so this replay cannot hide a
+lock-order regression.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,

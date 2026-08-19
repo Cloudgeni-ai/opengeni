@@ -30,9 +30,65 @@ import {
   withRestoredSessionActivityRlsContext,
   withRlsContext,
 } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import { lockSessionEventWriteRows } from "./session-control";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import * as schema from "./schema";
+
+/**
+ * Bounded replay of one exact organization-lifecycle transaction after a
+ * PostgreSQL deadlock abort.
+ *
+ * A lifecycle command spans an entire organization and therefore touches many
+ * rows that ordinary workspace writers touch too, so it can land in a lock
+ * cycle with one. PostgreSQL resolves a cycle by aborting one of the two
+ * transactions with `40P01`.
+ *
+ * Replay is exact rather than approximate: the whole lifecycle command runs in
+ * one transaction keyed by its caller-supplied operation id
+ * (`organization_membership_operation_receipts`) plus its CAS revisions, and a
+ * deadlock abort rolls back every durable effect, so re-running the identical
+ * command either applies it once or observes the newer authoritative state.
+ *
+ * Only `40P01` is replayed. `40001` is the lifecycle's own authoritative
+ * stale-revision / stale-epoch conflict and must reach the caller unchanged,
+ * and the original failure is rethrown untouched once the budget is spent.
+ *
+ * SCOPE - read this before assuming a deadlock cannot escape. PostgreSQL picks
+ * ONE of the two transactions in the cycle as the victim, and it may pick the
+ * ordinary workspace writer instead of the lifecycle command. That writer is a
+ * plain caller of an unrelated module (`transitionSessionVisibility`, a session
+ * event/goal/system-update insert, ...); nothing here can replay it. So this
+ * covers exactly the lifecycle side of a cycle: it is a caller-side safety net,
+ * NOT a lock-order fix. The known organization/workspace lock-order inversion
+ * was removed in SQL by migration
+ * `0299_organization_membership_lock_order.sql` (advisory-lock mutual exclusion
+ * plus a downgraded `managed_accounts FOR KEY SHARE` row lock), and its
+ * parallel-load probe reads `pg_stat_database.deadlocks` directly so this
+ * replay cannot mask a regression. Do not treat this wrapper as licence to
+ * reintroduce a conflicting organization row lock.
+ *
+ * Every lifecycle entry point whose command acquires workspace rows - and so
+ * can be inside the cycle at all - is wrapped: `accept` (it inserts the
+ * personal workspace) and `suspend`/`offboard` (they take the account's
+ * `workspaces` rows `FOR KEY SHARE`). The remaining actions never reach a
+ * workspace row, so they can block an ordinary writer but cannot close a cycle
+ * with one.
+ *
+ * The wrapper must stay OUTSIDE any transaction it replays: retrying inside an
+ * already-aborted transaction is not a retry.
+ */
+async function withOrganizationLifecycleDeadlockReplay<T>(operation: () => Promise<T>): Promise<T> {
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= maxAttempts || nestedPostgresSqlState(error) !== "40P01") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 20));
+    }
+  }
+}
 
 type CommandBase = {
   organizationId: string;
@@ -461,7 +517,12 @@ export async function acceptOrganizationInvitation(
   invitation: OrganizationInvitationType;
   membership: OrganizationMemberType;
 }> {
-  const result = await runCommand(db, { action: "accept", ...input });
+  // `accept` inserts the invited human's personal workspace, so like
+  // suspend/offboard it acquires workspace rows and can be inside a lock cycle
+  // with an ordinary workspace writer. It needs the identical replay.
+  const result = await withOrganizationLifecycleDeadlockReplay(async () =>
+    runCommand(db, { action: "accept", ...input }),
+  );
   return {
     invitation: OrganizationInvitation.parse((result as { invitation?: unknown }).invitation),
     membership: OrganizationMember.parse((result as { membership?: unknown }).membership),
@@ -492,16 +553,18 @@ export async function updateOrganizationMember(
     ...(transition.role === undefined ? {} : { role: transition.role }),
     ...(transition.reason === undefined ? {} : { reason: transition.reason }),
   };
-  return await db.transaction(async (tx) => {
-    if (transition.kind === "suspend" || transition.kind === "offboard") {
-      const settlements = await prepareOrganizationMembershipProtocolSettlements(
-        tx as unknown as Database,
-        command,
-      );
-      await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
-    }
-    return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
-  });
+  return await withOrganizationLifecycleDeadlockReplay(async () =>
+    db.transaction(async (tx) => {
+      if (transition.kind === "suspend" || transition.kind === "offboard") {
+        const settlements = await prepareOrganizationMembershipProtocolSettlements(
+          tx as unknown as Database,
+          command,
+        );
+        await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
+      }
+      return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+    }),
+  );
 }
 
 export async function getOrganizationRetentionPolicy(
