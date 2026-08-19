@@ -36,15 +36,37 @@ import { HTTPException } from "hono/http-exception";
  * The allow-list that actually decides is `principalKind === "human_session"`.
  * This list is defence-in-depth against exactly one residual threat: a holder
  * of the first-party delegation secret signing a human claim over an
- * OpenGeni-minted machine subject. `connection-ownership.test.ts` enumerates
- * every machine subject OpenGeni mints and asserts each is rejected, so a new
- * machine namespace fails the test rather than silently passing this list.
+ * OpenGeni-minted machine subject.
+ *
+ * `connection-ownership.test.ts` asserts that every machine subject named in
+ * its list is rejected. Note what that does and does not buy: it catches a
+ * namespace being *removed* from this constant, and it documents the known
+ * machine subjects, but it is a hand-maintained list on both sides, so it
+ * cannot fail when a genuinely new machine namespace is introduced elsewhere in
+ * the repo. Adding one here is a manual step. That residual gap is acceptable
+ * only because this check is not the deciding signal anywhere: a new machine
+ * namespace still arrives with a non-`human_session` `principalKind` and is
+ * refused on that basis.
  *
  * It is also no longer the sole signal on any OAuth callback: a callback that
  * persists a personal owner requires the HMAC-signed `personalOwnerVerified`
  * state claim minted by a start path that saw the live principal.
  */
-const RESERVED_MACHINE_SUBJECT_NAMESPACES = ["api_key", "configured", "worker"] as const;
+const RESERVED_MACHINE_SUBJECT_NAMESPACES = [
+  // packages/core/src/access/index.ts
+  "api_key",
+  "configured",
+  // packages/runtime/src/index.ts (signFirstPartyDelegatedBearer default)
+  "worker",
+  // packages/runtime/src/sandbox/codemode-authority.ts
+  "sandbox",
+  // apps/worker/src/activities/scheduled-tasks.ts
+  "scheduled_task",
+  // packages/db/src/session-queue-commands.ts
+  "attempt",
+  // Service principals (e.g. governed-learning activation).
+  "service",
+] as const;
 
 /** True only for an exact authenticated managed human. Unknown provenance fails closed. */
 export function isPersonalConnectionOwnerPrincipal(access: AccessGrantAuthorization): boolean {

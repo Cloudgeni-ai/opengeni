@@ -30,9 +30,20 @@ function access(overrides: Partial<AccessGrantAuthorization> = {}): AccessGrantA
   } as AccessGrantAuthorization;
 }
 
+/**
+ * Overrides fields on the grant. When the override changes `subjectId` it also
+ * moves `authenticatedSubjectId` to match, so the anti-substitution term does
+ * NOT fire and whatever else is under test (notably the reserved-namespace
+ * check) is the term that actually decides. Substitution is exercised
+ * separately by passing a mismatched `authenticatedSubjectId` explicitly.
+ */
 function withGrant(overrides: Record<string, unknown>): AccessGrantAuthorization {
   const base = access();
-  return access({ grant: { ...base.grant, ...overrides } as never });
+  const subjectId = overrides.subjectId;
+  return access({
+    grant: { ...base.grant, ...overrides } as never,
+    ...(typeof subjectId === "string" ? { authenticatedSubjectId: subjectId } : {}),
+  });
 }
 
 describe("personal Connection owner principal", () => {
@@ -80,7 +91,9 @@ describe("personal Connection owner principal", () => {
   });
 
   test("refuses a machine subject even under a forged human claim, and any substitution", () => {
+    // Reserved namespace alone, with the substitution term deliberately satisfied.
     expect(isPersonalConnectionOwnerPrincipal(withGrant({ subjectId: "api_key:abc" }))).toBe(false);
+    // Substitution alone, with a perfectly ordinary human subject.
     expect(
       isPersonalConnectionOwnerPrincipal(access({ authenticatedSubjectId: "user:mallory" })),
     ).toBe(false);
@@ -118,8 +131,18 @@ describe("personal Connection owner principal", () => {
       "configured:some-operator-supplied-header",
       // packages/runtime/src/index.ts — signFirstPartyDelegatedBearer default
       "worker:first-party-mcp",
+      // packages/runtime/src/sandbox/codemode-authority.ts
+      `sandbox:${id("a")}`,
+      // apps/worker/src/activities/scheduled-tasks.ts
+      `scheduled_task:${id("b")}`,
+      // packages/db/src/session-queue-commands.ts
+      `attempt:${id("c")}`,
+      // Service principals, e.g. governed-learning activation.
+      "service:governed-learning-activation:abc123",
     ];
     for (const subjectId of openGeniMintedMachineSubjects) {
+      // `withGrant` moves authenticatedSubjectId with the subject, so the
+      // anti-substitution term passes and the namespace check is what refuses.
       const hint =
         `"${subjectId}" is treated as a human-ownable subject. If OpenGeni now mints this ` +
         "subject for a machine, add its namespace to RESERVED_MACHINE_SUBJECT_NAMESPACES in " +

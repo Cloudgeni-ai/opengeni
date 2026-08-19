@@ -88,15 +88,34 @@ its `contextIntegrity` anti-substitution invariant; only the status differs
 (422 rejects an unavailable *ownership value*, 403 rejects a caller claiming to
 *be* the owner).
 
-A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`)
-is defence-in-depth against a delegation-secret holder signing a human claim
-over an OpenGeni-minted machine subject. It is deliberately **not** an
-allow-list of human subjects: `docs/embedding.md` states that `subjectId`
-"remains opaque to OpenGeni" and that hosts must not have the kind inferred from
-a subject-id prefix, so a trusted embedding host legitimately signs
-`human_session` over a non-`user:` subject. `connection-ownership.test.ts`
-enumerates every machine subject OpenGeni mints and asserts each is rejected, so
-a new machine namespace fails that test rather than silently passing the list.
+A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
+`sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
+against a delegation-secret holder signing a human claim over an
+OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
+human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
+OpenGeni" and that hosts must not have the kind inferred from a subject-id
+prefix, so a trusted embedding host legitimately signs `human_session` over a
+non-`user:` subject.
+
+`connection-ownership.test.ts` asserts that every machine subject in its list is
+rejected. Be precise about what that buys: the list is hand-maintained on both
+sides, so the test catches a namespace being *removed* from the constant and
+documents the known machine subjects, but it **cannot** fail when a genuinely
+new machine namespace is introduced elsewhere in the repo — adding one there is
+a manual step. That residual gap is acceptable only because this check decides
+nothing on its own: a new machine namespace still arrives with a
+non-`human_session` `principalKind` and is refused on that basis.
+
+**Personal-only connector states are bound to their flow.** The Google Drive and
+Atlassian OAuth states carry no `ownership` field and no provider identity (both
+connectors are personal-only by construction), and their return path is
+byte-identical to `/workspaces/<id>/capabilities` — a path the MCP OAuth start
+signs from caller input. Before the flow-kind discriminator, a caller's own MCP
+state therefore reached those callbacks and passed their personal-owner fence.
+That was never an escalation (same subject, and the callback independently
+rechecks `connections:write`), but the state was not bound to the flow that
+minted it. Both states now carry an exact `kind`, checked before anything else
+in their parsers.
 
 **OAuth callbacks enforce a signed claim, not a subject shape.** A callback
 carries signed state and no live principal, so it cannot re-evaluate

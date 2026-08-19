@@ -193,6 +193,12 @@ export async function startApiIntegrationProviderOAuth(
         'or "personal" to connect only for yourself',
     });
   }
+  // Inert by construction today, and deliberately kept: no curated Definition
+  // resolves to a personal-only profile (all five are Google Workspace and
+  // Microsoft Graph APIs, so `providerOAuthProfile` returns the default), which
+  // is why disabling this line reddens nothing. It is the fence that keeps a
+  // future Definition targeting slack.com or Gmail from minting an ownership
+  // its profile forbids - read it as pre-wiring, not as an untested gap.
   assertOwnershipAllowed(profile, ownership);
   assertConnectionOwnershipAllowedForPrincipal(ownership, input.personalOwnershipAllowed);
   const authorizeScopes = uniqueStrings([

@@ -591,6 +591,7 @@ describe("connections routes", () => {
     // reach it. `subject-a` is host-opaque and passes the subject-shape check,
     // so only the missing claim can produce the refusal.
     const legacyState = createSignedState(STATE_SECRET, {
+      kind: "atlassian_oauth",
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: "subject-a",
@@ -606,6 +607,82 @@ describe("connections routes", () => {
     expect(refused.status).toBe(302);
     expect(refused.headers.get("location")).toContain("atlassian=error");
     expect(refused.headers.get("location")).toContain("reason=http_422");
+    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
+      [],
+    );
+  });
+
+  test("the social start stamps the claim from the live principal, not a constant", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const socialApp = app({
+      socialOauthClientsJson: JSON.stringify({ x: { clientId: "x-client", clientSecret: "s" } }),
+    });
+    const start = async (principalKind: "human_session" | "service") => {
+      const response = await socialApp.request(
+        `/v1/workspaces/${workspace.workspaceId}/social/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(
+              workspace,
+              "subject-a",
+              // Workspace ownership needs workspace:admin on this route.
+              ["connections:write", "workspace:read", "workspace:admin"],
+              principalKind,
+            ),
+            "content-type": "application/json",
+          },
+          // Workspace ownership, which BOTH principals may request - so the
+          // route's personal fence never fires and the only thing under test is
+          // whether the signed claim tracks the principal.
+          body: JSON.stringify({ provider: "x", ownership: "workspace" }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { state: string };
+      return readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+    };
+
+    expect((await start("human_session")).personalOwnerVerified).toBe(true);
+    // A constant `true` here would silently pre-authorize personal ownership on
+    // any future state this machine principal mints.
+    expect((await start("service")).personalOwnerVerified).toBe(false);
+  });
+
+  test("an MCP state cannot be presented to the Atlassian callback", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // The Atlassian and Google Drive states carry no ownership field and no
+    // provider identity, and their return path is byte-identical to one the MCP
+    // start signs from caller input - so before the flow-kind discriminator, a
+    // caller's own MCP state reached the Atlassian callback and got past its
+    // personal-owner fence. Same subject and the callback rechecks
+    // connections:write, so it was never an escalation, but the state was not
+    // bound to the flow that minted it.
+    const mcpShapedState = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      ownership: "workspace",
+      personalOwnerVerified: true,
+      providerDomain: "mcp.example.com",
+      mcpUrl: "https://mcp.example.com/mcp",
+      resource: "https://mcp.example.com/mcp",
+      // The MCP start accepts any relative returnPath from the caller.
+      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
+    });
+    const refused = await publicApp(client.db, {
+      webBaseUrl: "http://127.0.0.1:3000",
+    }).request(
+      `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(mcpShapedState)}`,
+      { headers: { "x-opengeni-access-key": "deployment-key" } },
+    );
+    expect(refused.status).toBe(302);
+    expect(refused.headers.get("location")).toContain("atlassian=error");
+    // http_400 is the state parser refusing a foreign flow kind, before any
+    // provider settings are consulted (which previously surfaced as http_503).
+    expect(refused.headers.get("location")).toContain("reason=http_400");
     expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
       [],
     );

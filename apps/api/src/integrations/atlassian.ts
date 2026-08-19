@@ -71,6 +71,13 @@ import {
   requireIntegrationsStateSecret,
 } from "./oauth-client";
 
+/**
+ * Flow discriminator for this connector's signed OAuth state. See the matching
+ * constant in `google-drive.ts`: this state carries no `ownership` field and no
+ * provider identity, and its return path is byte-identical to one the MCP OAuth
+ * start signs from caller input, so the flow kind is what binds a state here.
+ */
+const ATLASSIAN_OAUTH_STATE_KIND = "atlassian_oauth";
 const ATLASSIAN_AUTHORIZATION_URL = "https://auth.atlassian.com/authorize";
 const ATLASSIAN_TOKEN_URL = "https://auth.atlassian.com/oauth/token";
 const ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources";
@@ -130,6 +137,7 @@ export async function startAtlassianOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    kind: ATLASSIAN_OAUTH_STATE_KIND,
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
@@ -1489,6 +1497,12 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
   const now = Math.floor(Date.now() / 1000);
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1_000) {
     throw new HTTPException(400, { message: "expired Atlassian OAuth state" });
+  }
+  // Reject a state minted by any other flow before reading anything else. A
+  // pre-cutover state carries no kind and is refused; that is the same bounded
+  // `oauthStateTtlMs` window the personal-owner claim already fails closed on.
+  if (payload.kind !== ATLASSIAN_OAUTH_STATE_KIND) {
+    throw new HTTPException(400, { message: "invalid Atlassian OAuth state" });
   }
   const accountId = requiredString(payload.accountId, "state.accountId");
   const workspaceId = requiredString(payload.workspaceId, "state.workspaceId");

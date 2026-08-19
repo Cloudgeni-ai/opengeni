@@ -108,6 +108,17 @@ const GOOGLE_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const GOOGLE_REQUEST_TIMEOUT_MS = 10_000;
 const GOOGLE_DRIVE_PAGE_SIZE = 100;
 const GOOGLE_DRIVE_RETURN_PATH = (workspaceId: string) => `/workspaces/${workspaceId}/capabilities`;
+/**
+ * Flow discriminator for this connector's signed OAuth state.
+ *
+ * This state carries no `ownership` field and no provider identity - it is
+ * personal-only by construction - so the `personalOwnerVerified` claim would
+ * otherwise be its sole ownership gate. Its return path is also byte-identical
+ * to the MCP OAuth start's, which signs that path from caller input, so a
+ * caller's own MCP state could be presented here. Requiring an exact flow kind
+ * binds a state to the flow that minted it.
+ */
+const GOOGLE_DRIVE_OAUTH_STATE_KIND = "google_drive_oauth";
 const GOOGLE_DRIVE_RECONSENT_ERROR_CODES = new Set([
   "appNotAuthorizedToFile",
   "authError",
@@ -258,6 +269,7 @@ export async function startGoogleDriveOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    kind: GOOGLE_DRIVE_OAUTH_STATE_KIND,
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
@@ -1972,6 +1984,13 @@ function readGoogleDriveOAuthState(
   const now = Math.floor(Date.now() / 1000);
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
     throw new HTTPException(400, { message: "invalid or expired Google Drive OAuth state" });
+  }
+  // Reject a state minted by any other flow before reading anything else. A
+  // pre-cutover state carries no kind and is refused; that is the same bounded
+  // `oauthStateTtlMs` window the personal-owner claim already fails closed on,
+  // so this adds no new breakage.
+  if (payload.kind !== GOOGLE_DRIVE_OAUTH_STATE_KIND) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth state" });
   }
   const accountId = requiredString(payload.accountId, "state.accountId");
   const workspaceId = requiredString(payload.workspaceId, "state.workspaceId");
