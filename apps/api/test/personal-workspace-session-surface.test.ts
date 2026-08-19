@@ -9,6 +9,7 @@ import {
   createOrganizationInvitation,
   createSession,
   listSessionsForSubject,
+  managedPersonalWorkspacePermissions,
   NewSessionDraftAccessError,
   saveNewSessionDraftInTransaction,
   SessionListAccessError,
@@ -26,6 +27,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
@@ -98,6 +100,7 @@ function buildApp(): Hono {
   } as unknown as ApiRouteDeps;
   registerWorkspaceRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
+  registerApiKeyRoutes(hono, deps);
   return hono;
 }
 
@@ -450,6 +453,44 @@ describe("the personal-workspace exception stays owner-only", () => {
     expect(own.status).toBe(200);
   }, 180_000);
 
+  test("the organization OWNER never reaches a member's personal workspace", async () => {
+    if (!shared || !client) return;
+    // `owner` bootstraps the organization, so their membership role is `owner`.
+    const organizationOwner = await provisionManagedHuman();
+    const member = await inviteIntoOrganization(organizationOwner, "member");
+    const [role] = await shared.admin<Array<{ role: string }>>`
+      select role from organization_memberships
+      where account_id = ${organizationOwner.accountId}
+        and subject_id = ${organizationOwner.subjectId}`;
+    expect(role).toEqual({ role: "owner" });
+
+    // Denied at the route on all three seams ...
+    await expectAllThreeSeamsDenied(member, { cookie: organizationOwner.cookie });
+
+    // ... and still denied below the route with the exception forced on, so
+    // owning the organization is not authority over a member's private
+    // workspace at either layer.
+    const sessionId = await seedSession(member, member.personalWorkspaceId);
+    await expect(
+      listSessionsForSubject(client.db, member.personalWorkspaceId, {
+        subjectId: organizationOwner.subjectId,
+        personalWorkspaceOwnerException: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+    await expect(
+      setSessionPin(client.db, {
+        workspaceId: member.personalWorkspaceId,
+        subjectId: organizationOwner.subjectId,
+        sessionId,
+        pinned: true,
+        personalWorkspaceOwnerException: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionPinAccessError);
+    await expect(
+      saveDraftDirectly(member.personalWorkspaceId, member.accountId, organizationOwner.subjectId),
+    ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
+  }, 180_000);
+
   test("a SAME-organization ADMIN never reaches another member's personal workspace", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
@@ -489,20 +530,62 @@ describe("the personal-workspace exception stays owner-only", () => {
   }, 180_000);
 
   /**
-   * A workspace-scoped API key minted ON the personal workspace is NOT the
-   * personal-workspace exception — it is the ordinary API-key grant, which reads
-   * its own credential row. The owner can mint one because
-   * `managedPersonalWorkspacePermissions` includes `api_keys:manage`, so this is
-   * the owner delegating to their own key.
+   * A workspace-scoped API key minted ON the personal workspace returns
+   * 200 / 403 / 200 on pristine `origin/main`, and this change does not alter
+   * that. What makes it SAFE is not those statuses — it is that **the principal
+   * cannot be constructed in production at all**.
    *
-   * What must be true is that it gains NOTHING from this change. The statuses
-   * below were captured on pristine `origin/main` (6f61d6ee) before the fix and
-   * are asserted verbatim: list 200, pin 403 (non-`user:` subjects short-circuit
-   * to the plain membership answer, and there is no membership row), draft 200
-   * (`requireWorkspaceMembership` is false for non-`user:` subjects, so the
-   * fence never runs). Any drift here is a behaviour change, not a fix.
+   * `POST /v1/workspaces/:id/api-keys` (the only production caller of
+   * `createApiKey`) requires `api_keys:manage`, and
+   * `managedPersonalWorkspacePermissions` does NOT include it. So the owner's own
+   * cookie session cannot mint a key on their personal workspace. The test below
+   * mints one BELOW the route, via `createApiKey` directly — something no
+   * production path does.
+   *
+   * The unreachability is therefore the property worth pinning, and it is
+   * asserted first. If the route ever grants `api_keys:manage` there, that
+   * assertion fails and this comment becomes the explanation, instead of a green
+   * 200 quietly becoming a real hole.
    */
-  test("a workspace-scoped API key behaves exactly as it did before the fix", async () => {
+  test("the route REFUSES to mint an API key on a personal workspace (the property that makes the next case safe)", async () => {
+    if (!shared || !client) return;
+    const owner = await provisionManagedHuman();
+
+    const minted = await owner.app.request(
+      `http://x/v1/workspaces/${owner.personalWorkspaceId}/api-keys`,
+      {
+        method: "PUT",
+        headers: { cookie: owner.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ name: "k", permissions: ["sessions:read"] }),
+      },
+    );
+    // PUT is not registered; the real verb is POST. Assert the real one.
+    expect([404, 405]).toContain(minted.status);
+
+    const posted = await owner.app.request(
+      `http://x/v1/workspaces/${owner.personalWorkspaceId}/api-keys`,
+      {
+        method: "POST",
+        headers: { cookie: owner.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ name: "k", permissions: ["sessions:read"] }),
+      },
+    );
+    expect(posted.status).toBe(403);
+    expect(await posted.text()).toContain("api_keys:manage");
+    expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
+  }, 180_000);
+
+  /**
+   * Reachable only BELOW the route (see above). Pinned so any drift in the
+   * seams' treatment of an `api_key:` subject is visible, NOT as an endorsement
+   * of the 200s: those are safe only because the route denies minting.
+   *
+   * Recorded while pinning this: such a key also OUTLIVES the authority that
+   * would have created it — suspending the organization membership takes the
+   * owner's cookie to 403 while the key keeps working. One more reason the
+   * unreachability above is the real guard.
+   */
+  test("a DB-layer-minted workspace API key behaves exactly as it did before the fix, and outlives the membership", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -517,24 +600,25 @@ describe("the personal-workspace exception stays owner-only", () => {
     const sessionId = await seedSession(owner, owner.personalWorkspaceId);
     const headers = { authorization: `Bearer ${token}` };
     const json = { ...headers, "content-type": "application/json" };
+    const listUrl = `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`;
 
-    const list = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
-      { headers },
-    );
-    expect(list.status).toBe(200);
-
-    const pin = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
-      { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
-    );
-    expect(pin.status).toBe(403);
-
-    const draft = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
-      { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
-    );
-    expect(draft.status).toBe(200);
+    expect((await owner.app.request(listUrl, { headers })).status).toBe(200);
+    expect(
+      (
+        await owner.app.request(
+          `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
+          { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await owner.app.request(
+          `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
+          { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
+        )
+      ).status,
+    ).toBe(200);
 
     // The key is an `api_key:` subject, so the exception's resolver can never
     // answer for it: it short-circuits to the plain membership answer, which is
@@ -552,6 +636,24 @@ describe("the personal-workspace exception stays owner-only", () => {
           }),
       ),
     ).toBe(false);
+
+    // Outlives the authority: the owner loses access, the key does not.
+    //
+    // The owner's cookie surfaces suspension as a 500, not a clean 403 — the
+    // lifecycle seam raises `assert_active_managed_human_organization_membership`
+    // and nothing converts it. Verified pre-existing on pristine `origin/main`
+    // (6f61d6ee) with the same probe, so it is recorded here rather than fixed;
+    // it fails closed either way. The point of this assertion is the contrast:
+    // whatever the owner gets, the key still gets 200.
+    await shared.admin`
+      update organization_memberships set status = 'suspended'
+      where account_id = ${owner.accountId} and subject_id = ${owner.subjectId}`;
+    const ownerAfterSuspension = await owner.app.request(listUrl, {
+      headers: { cookie: owner.cookie },
+    });
+    expect(ownerAfterSuspension.status).toBe(500);
+    expect(ownerAfterSuspension.status).not.toBe(200);
+    expect((await owner.app.request(listUrl, { headers })).status).toBe(200);
   }, 180_000);
 
   test("an account-admin API key never reaches a personal workspace's session surface", async () => {
