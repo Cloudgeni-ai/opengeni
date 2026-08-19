@@ -1,5 +1,55 @@
 # @opengeni/db
 
+## 2.0.0
+
+### Major Changes
+
+- 2cb04e0: Retire Memory V1's standing prompt block and its agent writes. `memoryPromptMode` is now always `retrieval_only`: no pinned/recency working set is injected into any agent prompt, and the `legacy_standing` rollback opt-out can no longer be selected. The `memory_save` and `memory_correct` first-party tools are removed; durable agent writes go through `remember` (explicit user-directed) and task-note promotion (the agent's own findings), while `memory_search` remains so an agent can still read what a workspace knows.
+
+  Nothing is rewritten or deleted: `knowledge_memories` rows, human REST/UI audit, search, correction, export, and the Memory Slack publication path are unchanged. A workspace that stored `legacy_standing` keeps the stored value in its passthrough settings bag, where it simply stops meaning anything, and already accepted turns keep the mode they recorded because those snapshots are immutable facts about what was composed. Migration 0295 changes no data; it reports whether anything was still relying on the mode rather than assuming it was unused.
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+- 79ee99b: Preference descriptors now carry `activationAuthority` (`human_confirmed` | `automatic` | `null`) alongside `provenance.trust`. Trust stays the frozen creation-time fact - a revision an agent proposed reads `untrusted_proposal` forever, and both activation adapters still require that value - while the new field answers the separate question of whether a human explicitly confirmed the activation or policy activated it automatically, read from the governed-learning activation receipt at descriptor-build time. Descriptors built before this field existed parse as `null`, which keeps their immutable stored JSON and pinned descriptor hash valid.
+- 368ee6c: Add the explicit resource-classification assertion seam for Variable Sets, Rigs, and Connected Machines (migration 0291, rolling; organization-tenancy phase D slices 4-5), plus `bun run db:verify-resource-classification`. These three families need no data rewrite and none is performed: `authority_scope` is `NOT NULL DEFAULT 'workspace'` on all three tables and every `*_authority_shape_check` was `VALIDATE`d at creation, so a legacy unmigrated row and a deliberately workspace-scoped row are byte-identical and there is no discriminator to classify on. `connections` (0256) is the one sibling family with a genuine one (`subject_id` plus an active organization membership); none of these tables has it, and phase D forbids substituting `created_by`, connection attribution, a default workspace, a resource name, or current access.
+
+  The seam therefore asserts and receipts instead. It proves per row what no constraint enforces - that a row claiming user ownership points at an authority of the matching `resource_kind`/`resource_id`, that the authority and its owning organization membership are both live, and that the delegation still has an origin workspace - and records every failure as an unresolved obligation with a fixed reason code through the tenancy backfill ledger, never as a guess or a rewrite. Its report states `ledgerAvailable` plainly so a run that could not record its obligations is visible rather than silent.
+
+  It is a `SECURITY DEFINER` capability-claiming seam rather than migration SQL for a structural reason: all three tables are FORCE RLS behind `workspace_rls_visible`, which is false while the workspace GUC is unset, and the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`. A plain migration-time `UPDATE` on these tables matches zero rows and reports success on such a deployment, and only appears to work in a harness that migrates as superuser.
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- d581eef: Allow a connected Chrome profile to move from a revoked machine enrollment to its replacement enrollment.
+- a7df809: Harden the four `remember` instruction-policy edges.
+
+  A moved policy head is now one typed, actionable `RememberError` (`baseline_stale`) on both the propose and confirm sides instead of an untyped error or a raw SQLSTATE 40001. The activation baseline no longer contributes to operation identity, so an ordinary turn-recovery replay of the same `operationId` stays idempotent across a head change; staleness is still enforced by the compare-and-set and by the activation function. A governed write that fails now archives the evidence task note it created instead of stranding it.
+
+  A confirmation stranded by a head that moved after the human already answered now rebaselines onto the current head and completes, instead of hard-failing and forcing the human to answer again. Proposal uniqueness moves from one-per-source to one-per-source-per-baseline to admit that successor; the successor reuses the same knowledge proposal, so the human's confirmation stays bound to exactly the content they approved.
+
+  Two consequences worth stating plainly:
+
+  - Activating a rule replaces the whole active policy document, so confirming a second rule discards a first rule that a human also approved, without asking again. That is the existing whole-document-replacement design of this lane rather than something the rebaseline introduces - previously the stale baseline forced a round trip that would have clobbered anyway - and the audit trail stays exact, with the activation event naming the revision it replaced and `undo` restoring it. The rebaseline removes the round trip, which makes the behaviour easier to reach.
+  - Excluding the baseline from operation identity changes both the proposal request fingerprint and the governed-write input hash (which derives the service actor subject id). A `remember` operation that durably wrote rows under the previous release and is replayed under this one computes a different identity and fails as an operation-reuse conflict. This is bounded to operations in flight across the deploy and self-heals with a fresh operation id; no dual-identity compatibility path was added.
+
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- a99ef33: Test-only: add cross-organization isolation and revocation evidence coverage for the organization-tenancy authority tables. `packages/db/test/organization-isolation-evidence.test.ts` proves, against a real PostgreSQL instance, that a member of one organization cannot read or mutate another organization's workspaces, sessions, or resources, and that revoking a membership takes effect immediately for the exact revoked grant. No shipped runtime behavior changes; this releases the new coverage with the package.
+- 7bc1cd1: Correct the organization tenancy inventory seam (migration 0292, rolling): remove the untruthful `unclassified` counters for Variable Sets, Rigs, and Connected Machines. 0285 defined them as `authority_id IS NULL`, but the authority shape constraints _require_ a NULL `authority_id` for every organization- and workspace-scoped row, so the counter was structurally `total - userScoped` - every correctly classified row was reported as unmigrated and the number could never drain to zero as the documented backfill gate. No corrected predicate exists: `authority_scope` defaults to `'workspace'`, and `origin_workspace_id` means "predates the scoped lifecycle" for Variable Sets, is still produced NULL today by `createRig`'s non-scoped branch for Rigs, and has inverted polarity for Connected Machines (0262 backfilled it while the ordinary enroll path leaves it NULL). The population is unrepresentable in the current schema, so the key is removed rather than renamed - `byScope` already reports every authority distinction the schema can truthfully make. `schemaVersion` moves 1 -> 2; the seam stays read-only, integers-only, and exact-organization scoped, and `CREATE OR REPLACE` preserves its owner and `opengeni_app` EXECUTE grant. The documents gate is unchanged: its `authority_kind = 'personal' AND authority_id IS NULL` names a genuine invariant violation and remains truthful.
+- 6d22ab5: Widen the task-note expiry ceiling from 30 to 90 days. Task notes are pure agent-to-agent coordination within one root session tree; resuming a paused root session/task tree after a longer gap previously lost all coordination notes silently. `TASK_NOTE_MAX_LIFETIME_DAYS` is now the single source of truth, referenced by the application-layer bound checks and `remember`'s evidence note instead of a hardcoded literal. Fully backward compatible: every existing row and every caller supplying 1-30 days keeps working unchanged.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/config@0.17.0
+  - @opengeni/codemode@0.4.9
+
 ## 1.5.0
 
 ### Minor Changes

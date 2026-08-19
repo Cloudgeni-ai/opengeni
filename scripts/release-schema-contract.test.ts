@@ -521,10 +521,18 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0296_force_rls_backfill_noop_repair.sql")) {
+      if (
+        migrations.has("0296_force_rls_backfill_noop_repair.sql") &&
+        migrations.has("0299_organization_membership_lock_order.sql")
+      ) {
         return includesActivation
-          ? "a5b537ecee5c9411aa019513f7e8b45a7f9b32b5f607536e49aabf31576d3567"
-          : "896bfd78feb0c82651066bbf93e20bb38a723e162ecdb608b1214ef38947f256";
+          ? "24fb6b4938a573dc516315b6e1d893fa44647f56cdc277157fb0bc07b21dbd30"
+          : "7d5b83e7a150b8c3fae51129c0fd0d727f48428bc207b2ac0202dce6b3203a71";
+      }
+      if (migrations.has("0299_organization_membership_lock_order.sql")) {
+        return includesActivation
+          ? "c2b79a82f91fcae25012f4cea86a4fda5953290173974161a8b9fcb74219f25d"
+          : "6ef9798a9820add11c3c378fa3c3519f14debd0df67ffa10e10d7b64c21791f7";
       }
       if (migrations.has("0295_retire_legacy_standing_memory_mode.sql")) {
         return includesActivation
@@ -1093,6 +1101,7 @@ describe("release schema contract", () => {
         (migrations.has("0279_workspace_connection_use_lane.sql") ? 1 : 0) +
         (migrations.has("0280_connection_and_variable_set_audit_attribution.sql") ? 1 : 0) +
         (migrations.has("0291_resource_authority_classification_assertion.sql") ? 1 : 0) +
+        (migrations.has("0299_organization_membership_lock_order.sql") ? 1 : 0) +
         (migrations.has("0281_viewer_holder_authority_claims.sql") ? 1 : 0) +
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +
         (migrations.has("0283_editable_spreadsheet_authored_state.sql") ? 1 : 0) +
@@ -1141,8 +1150,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0296_force_rls_backfill_noop_repair.sql")
-        ? "0296_force_rls_backfill_noop_repair.sql"
+      migrations.has("0299_organization_membership_lock_order.sql")
+        ? "0299_organization_membership_lock_order.sql"
         : migrations.has("0295_retire_legacy_standing_memory_mode.sql")
           ? "0295_retire_legacy_standing_memory_mode.sql"
           : migrations.has("0294_preference_activation_authority.sql")

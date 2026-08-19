@@ -312,6 +312,79 @@ memberships for the subject and derives role-bounded account plus owner-only
 personal-workspace grants; inactive organizations disappear on the next
 request.
 
+### Lock order: organization fence before the canonical workspace prefix (0299)
+
+The membership lifecycle spans an entire organization, so it must agree with
+every ordinary workspace writer about lock order. Migration
+`0299_organization_membership_lock_order.sql` fixes the one place
+where it did not.
+
+**What was wrong.** `prepare_organization_membership_protocol_settlements`, the
+wrapped `organization_membership_command_0263`, and the 0275
+`organization_membership_command` wrapper each opened with `managed_accounts
+... FOR UPDATE` and took the canonical per-workspace prefix
+(`workspace_inference_controls FOR SHARE` -> `workspaces FOR KEY SHARE`) only
+afterwards. An ordinary workspace writer is forced into the opposite order and
+cannot avoid it: it locks its own `workspaces` row first - AGENTS.md's canonical
+event-write prefix, and `transition_session_visibility` (0225) takes that row
+`FOR UPDATE` - and only then reaches `managed_accounts` *implicitly*, through
+the account foreign-key check of a row it inserts. `sessions`,
+`session_events`, `session_turns`, `session_goals`, and
+`session_system_updates` all reference `managed_accounts`, and an FK check takes
+`FOR KEY SHARE` on the referenced row, which conflicts with `FOR UPDATE`:
+
+```
+transition_session_visibility    holds workspaces       waits managed_accounts
+prepare_organization_membership  holds managed_accounts waits workspaces
+```
+
+An administrator suspending or offboarding a member concurrently with any
+ordinary workspace write in the same organization therefore deadlocked (40P01).
+
+**What replaced it.** The organization row lock was doing two unrelated jobs.
+Mutual exclusion between concurrent membership commands for one organization is
+now a transaction-scoped advisory lock,
+`pg_advisory_xact_lock(hashtextextended('organization-membership:<organization
+id>', 0))`, taken by all three entry points. It is re-grantable within one
+transaction, so the wrapper, the preparation seam, and the wrapped 0263 body all
+take it reentrantly inside the single `updateOrganizationMember` transaction,
+and it lives in a lock space no ordinary workspace writer touches, so it can
+never appear in a cycle with a `workspaces`/`managed_accounts` row lock. Proving
+the organization exists and cannot be deleted underneath the command stays a row
+lock, downgraded to `managed_accounts FOR KEY SHARE`, which still blocks DELETE
+and primary-key UPDATE while being compatible with every ordinary writer's FK
+check. This is the same shape migration 0278 already used for the workspace
+membership removal seam.
+
+The lifecycle's first *row* lock is therefore the canonical prefix, and the full
+order is:
+
+```
+advisory 'organization-membership:<organization id>'
+  -> managed_accounts FOR KEY SHARE
+  -> per workspace, in UUID order:
+       workspace_inference_controls FOR SHARE
+       workspaces FOR KEY SHARE
+  -> organization_memberships FOR UPDATE (UUID ordered)
+  -> sessions FOR NO KEY UPDATE -> session_turns FOR UPDATE
+  -> session_turn_attempts FOR UPDATE
+```
+
+**Do not reintroduce a conflicting organization row lock.** Any new
+organization-wide seam that both locks `managed_accounts` more strongly than
+`FOR KEY SHARE` and afterwards touches `workspaces` (directly or through an FK)
+recreates this deadlock. Serialize on the advisory key instead. CAS on
+`organization_memberships.authorization_revision`, the operation-receipt
+idempotency, and every fail-closed authorization check are unchanged by 0299 -
+only lock strength and lock class moved.
+
+`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+holds the regression evidence: a deterministic cycle probe, a parallel-load
+probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
+not move (so an application-level `40P01` replay cannot mask a regression), and
+an exclusion probe that proves a held advisory key genuinely blocks a
+concurrent membership command.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
