@@ -7,6 +7,7 @@ import {
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
 import {
+  isXaiSubscriptionRateLimitDiagnostic,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
 } from "./errors";
@@ -538,7 +539,12 @@ function xaiSseTerminalError(
     progress.eventType,
     MAX_TERMINAL_ERROR_FIELD_BYTES,
   );
-  const codeField = boundedTerminalErrorField(record.code, MAX_TERMINAL_ERROR_FIELD_BYTES);
+  const rawCode =
+    record.code ??
+    (typeof record.type === "string" && record.type !== eventTypeField.value && record.type !== "error"
+      ? record.type
+      : undefined);
+  const codeField = boundedTerminalErrorField(rawCode, MAX_TERMINAL_ERROR_FIELD_BYTES);
   const messageField = boundedTerminalErrorField(
     record.message ?? (typeof rawError === "string" ? rawError : undefined),
     MAX_TERMINAL_ERROR_MESSAGE_BYTES,
@@ -550,19 +556,21 @@ function xaiSseTerminalError(
       : eventType === "response.incomplete"
         ? "response_incomplete"
         : "response_error";
-  const code = codeField.value?.length ? codeField.value : fallbackCode;
   const fallbackMessage =
     eventType === "response.incomplete"
       ? "The SuperGrok response was incomplete"
       : eventType === "response.failed"
         ? "The SuperGrok response failed"
         : "The SuperGrok response stream reported an error";
-  const status =
-    code === "rate_limit_exceeded" || code === "too_many_requests"
-      ? 429
-      : NON_RETRYABLE_SSE_ERROR_CODES.has(code)
-        ? 400
-        : 502;
+  const message = messageField.value?.length ? messageField.value : fallbackMessage;
+  let code = codeField.value?.length ? codeField.value : fallbackCode;
+  const rateLimited =
+    !NON_RETRYABLE_SSE_ERROR_CODES.has(code) &&
+    isXaiSubscriptionRateLimitDiagnostic({ code, message });
+  if (rateLimited && (code === fallbackCode || code === "response_error")) {
+    code = "rate_limit_exceeded";
+  }
+  const status = rateLimited ? 429 : NON_RETRYABLE_SSE_ERROR_CODES.has(code) ? 400 : 502;
   const headers = new Headers(source.headers);
   headers.set("content-type", "application/json");
   headers.set(XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER, "1");
@@ -570,7 +578,7 @@ function xaiSseTerminalError(
   headers.delete("content-length");
   headers.delete("content-encoding");
   return new XaiSubscriptionStreamingTerminalError({
-    message: messageField.value?.length ? messageField.value : fallbackMessage,
+    message,
     code,
     eventType,
     requestId: audit.requestId,
@@ -707,6 +715,7 @@ function emitContextUsage(
 export function isXaiSubscriptionTransportError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof XaiSubscriptionStreamingTerminalError) return true;
     const value = current as Record<string, unknown>;
     const headers = value.headers;
     if (
