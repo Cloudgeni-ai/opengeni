@@ -53,7 +53,7 @@ describe("pull-request delivery process contract", () => {
 
     expect(workflow).toContain("verify_immutable_pr_head");
     expect(workflow).toContain("without requiring continuously moving main");
-    expect(verifier).toContain("current main no longer retains the base-owned workflow SHA");
+    expect(verifier).toContain("admission base no longer retains the base-owned workflow SHA");
     expect(verifierTests).toContain(
       "admits many stale-event heads concurrently while protected main advances",
     );

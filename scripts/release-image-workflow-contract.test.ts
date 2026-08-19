@@ -394,8 +394,8 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
     expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
-    expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
-    expect(candidate).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
+    expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
+    expect(candidate).not.toContain('[ "$(git rev-parse origin/production)" = "$SOURCE_SHA" ]');
     expect(parsed.on.workflow_dispatch.inputs.controller_sha?.required).toBe(true);
     expect(parsed.jobs.admission?.uses).toBe("./.github/workflows/release-source-admission.yml");
     expect(parsed.jobs.admission?.with).toEqual({
@@ -436,7 +436,7 @@ describe("release image workflow contract", () => {
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
-  test("main CI publishes exact-SHA dogfood images without granting PR publication", async () => {
+  test("main CI publishes exact-SHA canary images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
     const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
     const parsed = Bun.YAML.parse(ci) as {
@@ -511,16 +511,16 @@ describe("release image workflow contract", () => {
       });
     }
     const apiSteps = parsed.jobs["api-image"]?.steps ?? [];
-    const bake = apiSteps.find((step) => step.name === "Bake and sign exact-SHA dogfood agent");
-    expect(bake?.if).toBe("${{ github.event_name == 'push' }}");
+    const bake = apiSteps.find((step) => step.name === "Bake and sign exact-SHA canary agent");
+    expect(bake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
     expect(bake?.env).toEqual({
       OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}",
     });
     expect(bake?.run).toBe("scripts/bake-agent.sh");
     const requireBake = apiSteps.find(
-      (step) => step.name === "Require complete exact-SHA dogfood agent bake",
+      (step) => step.name === "Require complete exact-SHA canary agent bake",
     );
-    expect(requireBake?.if).toBe("${{ github.event_name == 'push' }}");
+    expect(requireBake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
     expect(requireBake?.run).toContain("x86_64-unknown-linux-musl aarch64-unknown-linux-musl");
     expect(requireBake?.run).toContain('test -s "$asset.minisig"');
     expect(apiSteps.indexOf(bake!)).toBeLessThan(
@@ -574,13 +574,13 @@ describe("release image workflow contract", () => {
         expect(aggregateResult(...results)).not.toBe(0);
       }
     }
-    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(7);
-    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
+    expect(images.match(/push: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/g)).toHaveLength(7);
+    expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
-    expect(images).toContain("Write exact-main-SHA dogfood receipt");
-    expect(images).toContain("Upload exact-main-SHA dogfood receipt");
+    expect(images).toContain("Write exact-main-SHA canary receipt");
+    expect(images).toContain("Upload exact-main-SHA canary receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
     expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}");
     expect(images).toContain("WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}");
@@ -592,10 +592,10 @@ describe("release image workflow contract", () => {
     expect(images).toContain(
       "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}",
     );
-    expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
+    expect(images).toContain('--arg tag "canary-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
-    expect(images).toContain("dogfood-images-${{ github.sha }}");
-    expect(images).toContain("dogfood-images.sha256");
+    expect(images).toContain("canary-images-${{ github.sha }}");
+    expect(images).toContain("canary-images.sha256");
     expect(images).toContain("'^sha256:[0-9a-f]{64}$'");
     expect(images).not.toMatch(/:latest(?:['"}\s]|$)/);
   });
@@ -612,7 +612,7 @@ describe("release image workflow contract", () => {
       'expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"',
     );
     expect(publicationAdmission).toContain(
-      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main',
+      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/production',
     );
     expect(publicationAdmission).toContain("--kind candidate");
     expect(publicationAdmission).toContain("--kind acceptance");
@@ -710,8 +710,8 @@ describe("release image workflow contract", () => {
     expect(acceptance).toContain("verify-operator-acceptance-provenance.ts");
     expect(acceptance).toContain("assemble-release-acceptance.ts");
     expect(acceptance).toContain("OPERATOR_ARTIFACT_DIGEST#sha256:");
-    expect(acceptance).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
-    expect(acceptance).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
+    expect(acceptance).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
+    expect(acceptance).not.toContain('[ "$(git rev-parse origin/production)" = "$SOURCE_SHA" ]');
     expect(acceptance).not.toContain("operator_artifact_url:");
     expect(acceptance).not.toContain("operator_artifact_sha256:");
     expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
@@ -865,8 +865,8 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("checks: read");
     expect(publish).toContain("filter=latest&per_page=100");
     expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
-    expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
-    expect(publish).not.toContain('test "$(git rev-parse origin/main)" = "$SOURCE_SHA"');
+    expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
+    expect(publish).not.toContain('test "$(git rev-parse origin/production)" = "$SOURCE_SHA"');
     expect(publish).toContain("else max_by(.id)");
     expect(publish).toContain('.status == "completed" and .conclusion == "success"');
     expect(publish).not.toContain("| length == 1");
@@ -1069,37 +1069,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "791b6b1d1ea3bbb12a893b2056b2db1c343c2972f6202fe1be6276eed30f66f1",
+        fingerprint: "ff721f475726ef45a1773b40b1132ee3789ad3a67a6bdd58064c86f9de93d86f",
       },
       {
         jobName: "worker-web-images",
         name: "Build worker image",
-        fingerprint: "18b96f7cc2e97584967f580b6e678f20c96022ca77db76fea49753df8e82641a",
+        fingerprint: "202cdfa7dcdb4824d205b25f6e4fcf28c35f41af9c9d1888eb30af761526483d",
       },
       {
         jobName: "worker-web-images",
         name: "Build web image",
-        fingerprint: "1689497eac266bd4b700ddea4e1f4d7ced2316657a2be37062d6ee064bf2d8e8",
+        fingerprint: "9125d43f534c6574db87755be185c22bd923910c5d25c6f015e0e6f5c521c9b9",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "932536d47211c1a8b5e77d2d5eda9aed64df87f6d3297f29c2a0a2f86c84528d",
+        fingerprint: "8ce52cc968f445d0c83b3ee89cc47cfa1c290646599c137a47fe868e2d784728",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "ea59c9c57d6e0ccc97b05d34d9f13c2cd7531faf791d00cb248a893a0bb77635",
+        fingerprint: "6e4fa54094e7d208f8f1f9e58ae7c3f1d3601765493cb9f8a86128a861b86693",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "1464aec087ebbbd792371ceb86f67c41ecd75ba500b824a784ed94affb8e6a9f",
+        fingerprint: "f1728ec3218f2d0d2c3ac1697277eaf7f231c30ed11fdfb9d0513db194d319ad",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "a336e75d1ba14e166a4ae30a53d0a6aa4a4bec663f4b14ec2b2607015d1cd6c1",
+        fingerprint: "05a2dc33ab504335251581afec4aca6282ca11e11c72612722a5a48e256e314d",
       },
     ]);
 
@@ -1121,7 +1121,7 @@ ${parser}`,
           scope !== undefined &&
           step.with["cache-from"] === `type=gha,scope=${scope}` &&
           step.with["cache-to"] ===
-            `\${{ github.event_name == 'push' && 'type=gha,mode=min,scope=${scope},ignore-error=true' || '' }}`
+            `\${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=${scope},ignore-error=true' || '' }}`
         );
       });
 

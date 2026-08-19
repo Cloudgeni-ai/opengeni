@@ -1,15 +1,14 @@
 name: Source Admission
 
-# This required PR check executes only base-owned workflow/helper bytes. It never
-# checks out, executes, or grants credentials to candidate content. The helper
-# reads provider metadata and Git objects, reconciles the immutable candidate
-# against its provider merge-base tree, and fences the head plus canonical
-# base-owned workflow ancestry without requiring continuously moving main to
-# equal the pull-request event base.
+# Freeze-head admission for hotfix PRs into production only. Ordinary PRs into
+# main no longer run this check. Promote PRs (head main → base production) are
+# exempt because the head is the live default branch. The required check name
+# stays on the always-running report job so GitHub rulesets can require it
+# without requiring continuously moving main.
 on:
   pull_request_target:
     branches:
-      - main
+      - production
     types: [opened, ready_for_review, reopened, synchronize]
 
 concurrency:
@@ -22,13 +21,14 @@ permissions:
 
 jobs:
   verify:
-    name: Current-base source admission
+    name: Verify hotfix freeze-head
+    if: ${{ startsWith(github.event.pull_request.head.ref, 'hotfix/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_SOURCE_ADMISSION_ACTION: verify_immutable_pr_head
-      ADMISSION_HELPER_SHA256: f9d769efe7e36b68b5c20d874ea4d3c6f5a0b92bb11d535c7d3cd0d0debe6370
+      ADMISSION_HELPER_SHA256: cc5d1bc6bed92a09e61c12270d5bab6ec4406a07a1fa8ec727b98c3badc3e804
     steps:
       - name: Execute the exact base-owned admission verifier
         shell: bash
@@ -38,8 +38,8 @@ jobs:
           [[ "$GITHUB_API_URL" == "https://api.github.com" ]]
           [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
           [[ "$GITHUB_EVENT_NAME" == "pull_request_target" ]]
-          [[ "$GITHUB_REF" == "refs/heads/main" ]]
-          [[ "$GITHUB_BASE_REF" == "main" ]]
+          [[ "$GITHUB_REF" == "refs/heads/production" ]]
+          [[ "$GITHUB_BASE_REF" == "production" ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
 
@@ -55,3 +55,31 @@ jobs:
           actual_sha256="$(sha256sum "$helper" | awk '{print $1}')"
           [[ "$actual_sha256" == "$ADMISSION_HELPER_SHA256" ]]
           node "$helper"
+
+  report:
+    name: Current-base source admission
+    if: ${{ always() }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish skip-success or require hotfix verify
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REF" = "main" ]; then
+            [ "$VERIFY_RESULT" = "skipped" ]
+            echo "Promote PR from live main; freeze-head admission is not required."
+            exit 0
+          fi
+          case "$HEAD_REF" in
+            hotfix/*)
+              [ "$VERIFY_RESULT" = "success" ]
+              echo "Hotfix freeze-head admission succeeded."
+              exit 0
+              ;;
+          esac
+          echo "::error::PRs into production must use head main (promote) or hotfix/*."
+          exit 1

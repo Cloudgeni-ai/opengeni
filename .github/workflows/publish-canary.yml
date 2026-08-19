@@ -1,0 +1,49 @@
+name: Publish canary packages
+
+# Custom per-package {version}-canary.N to dist-tag canary. Does not consume
+# changeset files, does not commit, never moves latest.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character main SHA to publish as canary (default: this ref).
+        required: false
+        type: string
+
+concurrency:
+  group: publish-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish canary.N
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish canary versions
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: bun scripts/publish-canary.ts

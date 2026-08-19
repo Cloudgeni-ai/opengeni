@@ -8,6 +8,8 @@ export const CONTRACT = Object.freeze({
   repository: "Cloudgeni-ai/opengeni",
   owner: "Cloudgeni-ai",
   defaultBranch: "main",
+  admissionBaseBranch: "production",
+  admissionBaseBranches: Object.freeze(["main", "production"]),
   workflowPath: ".github/workflows/source-admission.yml",
   helperPath: "scripts/check-source-admission.mjs",
   testPath: "scripts/check-source-admission.test.ts",
@@ -97,11 +99,15 @@ function expectedContext(env, suppliedEvent) {
   invariant(env.GITHUB_SERVER_URL === CONTRACT.serverUrl, "unexpected GitHub server origin");
   invariant(env.GITHUB_EVENT_NAME === "pull_request_target", "unexpected workflow event");
   invariant(env.GITHUB_REPOSITORY === CONTRACT.repository, "unexpected repository");
-  invariant(env.GITHUB_BASE_REF === CONTRACT.defaultBranch, "unexpected base branch");
-  invariant(env.GITHUB_REF === `refs/heads/${CONTRACT.defaultBranch}`, "unexpected workflow ref");
+  const baseRef = assertString(env.GITHUB_BASE_REF, "GITHUB_BASE_REF");
+  invariant(
+    CONTRACT.admissionBaseBranches.includes(baseRef),
+    "unexpected base branch",
+  );
+  invariant(env.GITHUB_REF === `refs/heads/${baseRef}`, "unexpected workflow ref");
   invariant(
     env.GITHUB_WORKFLOW_REF ===
-      `${CONTRACT.repository}/${CONTRACT.workflowPath}@refs/heads/${CONTRACT.defaultBranch}`,
+      `${CONTRACT.repository}/${CONTRACT.workflowPath}@refs/heads/${baseRef}`,
     "unexpected workflow source ref",
   );
 
@@ -128,7 +134,13 @@ function expectedContext(env, suppliedEvent) {
 
   const base = record(pull.base, "event pull-request base");
   const head = record(pull.head, "event pull-request head");
-  invariant(base.ref === CONTRACT.defaultBranch, "event pull-request base branch changed");
+  invariant(base.ref === baseRef, "event pull-request base branch changed");
+  if (baseRef === "production") {
+    invariant(
+      typeof head.ref === "string" && head.ref.startsWith("hotfix/"),
+      "admission only admits hotfix branches into production",
+    );
+  }
   invariant(
     record(base.repo, "event base repository").full_name === CONTRACT.repository,
     "event base repository changed",
@@ -145,6 +157,7 @@ function expectedContext(env, suppliedEvent) {
     number: event.number,
     eventBaseSha: assertSha(base.sha, "event base SHA"),
     eventHeadSha: assertSha(head.sha, "event head SHA"),
+    baseRef,
     headRepository,
     token: env.GITHUB_TOKEN,
     workflowSha,
@@ -210,7 +223,11 @@ function assertPullRequest(value, expected) {
   );
   if (expected.merged !== undefined)
     invariant(value?.merged === expected.merged, "pull-request merged state changed");
-  invariant(value?.base?.ref === CONTRACT.defaultBranch, "pull-request base branch changed");
+  invariant(
+    CONTRACT.admissionBaseBranches.includes(expected.baseRef),
+    "pull-request base branch is not admitted",
+  );
+  invariant(value?.base?.ref === expected.baseRef, "pull-request base branch changed");
   invariant(
     value?.base?.repo?.full_name === CONTRACT.repository,
     "pull-request base repository changed",
@@ -364,10 +381,10 @@ function assertComparison(value, eventBaseSha, headSha) {
   return mergeBaseSha;
 }
 
-async function assertWorkflowRetainedByCurrentMain(api, workflowSha, currentMainSha) {
-  if (currentMainSha === workflowSha) return;
+async function assertWorkflowRetainedByAdmissionBase(api, workflowSha, currentBaseSha) {
+  if (currentBaseSha === workflowSha) return;
   const value = await api(
-    `/repos/${CONTRACT.repository}/compare/${workflowSha}...${currentMainSha}`,
+    `/repos/${CONTRACT.repository}/compare/${workflowSha}...${currentBaseSha}`,
   );
   invariant(
     value?.status === "ahead" &&
@@ -377,7 +394,7 @@ async function assertWorkflowRetainedByCurrentMain(api, workflowSha, currentMain
       value.ahead_by > 0 &&
       value?.behind_by === 0 &&
       value?.total_commits === value.ahead_by,
-    "current main no longer retains the base-owned workflow SHA",
+    "admission base no longer retains the base-owned workflow SHA",
   );
 }
 
@@ -386,7 +403,7 @@ export async function verifySourceAdmission(options = {}) {
   const logger = options.logger ?? console;
   const context = expectedContext(env, options.event);
   const api = apiClient(options.fetchImpl ?? globalThis.fetch, context.token);
-  const expectedRef = `refs/heads/${CONTRACT.defaultBranch}`;
+  const expectedRef = `refs/heads/${context.baseRef}`;
 
   const [repository, initialPull] = await Promise.all([
     api(`/repos/${CONTRACT.repository}`),
@@ -396,6 +413,7 @@ export async function verifySourceAdmission(options = {}) {
   const headRef = assertString(context.event.pull_request.head.ref, "event head ref");
   assertPullRequest(initialPull, {
     number: context.number,
+    baseRef: context.baseRef,
     baseSha: context.eventBaseSha,
     headRef,
     headRepository: context.headRepository,
@@ -431,14 +449,15 @@ export async function verifySourceAdmission(options = {}) {
   invariant(manifest.length > 0, "candidate tree does not differ from its merge base");
   assertFileProjection(files, manifest, initialPull.changed_files);
 
-  const [terminalMainRef, terminalPull] = await Promise.all([
-    api(`/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.defaultBranch}`),
+  const [terminalBaseRef, terminalPull] = await Promise.all([
+    api(`/repos/${CONTRACT.repository}/git/ref/heads/${context.baseRef}`),
     api(`/repos/${CONTRACT.repository}/pulls/${context.number}`),
   ]);
-  const currentMainSha = assertRef(terminalMainRef, expectedRef, "terminal default branch");
-  await assertWorkflowRetainedByCurrentMain(api, context.workflowSha, currentMainSha);
+  const currentBaseSha = assertRef(terminalBaseRef, expectedRef, "terminal admission base");
+  await assertWorkflowRetainedByAdmissionBase(api, context.workflowSha, currentBaseSha);
   assertPullRequest(terminalPull, {
     number: context.number,
+    baseRef: context.baseRef,
     baseSha: context.eventBaseSha,
     headRef,
     headRepository: context.headRepository,
@@ -454,7 +473,7 @@ export async function verifySourceAdmission(options = {}) {
   logger.log(
     `Source admission verified ${context.eventHeadSha} from event base ${context.eventBaseSha} ` +
       `at patch merge base ${patchBaseSha}; base-owned workflow ${context.workflowSha} ` +
-      `remains retained by current main ${currentMainSha}: ` +
+      `remains retained by admission base ${currentBaseSha}: ` +
       `${manifest.length} direct tree paths, manifest sha256 ${manifestSha256}.`,
   );
   return {
@@ -463,7 +482,7 @@ export async function verifySourceAdmission(options = {}) {
     baseTreeSha,
     headTreeSha,
     workflowSha: context.workflowSha,
-    currentMainSha,
+    currentMainSha: currentBaseSha,
     patchBaseSha,
     manifest,
     manifestSha256,
@@ -491,8 +510,14 @@ export async function verifyHistoricalSourceAdmission(options = {}) {
     api(`/repos/${CONTRACT.repository}/pulls/${input.number}`),
   ]);
   assertRepository(repository);
+  const baseRef = assertString(initialPull?.base?.ref, "historical pull-request base branch");
+  invariant(
+    CONTRACT.admissionBaseBranches.includes(baseRef),
+    "historical pull-request base branch is not admitted",
+  );
   const expectedPull = {
     ...input,
+    baseRef,
     state: "closed",
     merged: true,
   };

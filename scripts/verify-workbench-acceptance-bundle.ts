@@ -113,7 +113,7 @@ export type WorkbenchAcceptanceBundle = {
     deploymentUrl: string;
     evidenceUrl: string;
   };
-  productionCanary: {
+  productionCanary?: {
     sourceSha: string;
     sourceTreeSha: string;
     imageDigests: ImageDigests;
@@ -270,15 +270,17 @@ export function validateWorkbenchAcceptanceBundle(
     errors.push("knownDefects must be an empty array");
   }
 
-  validateCanary(
-    bundle.productionCanary,
-    expected.sourceSha,
-    expectedCandidateReceipt.sourceTreeSha,
-    expectedCandidateImages,
-    expectedCandidateReceipt.chart,
-    expected.productionCanaryEvidenceUrl,
-    errors,
-  );
+  if (bundle.productionCanary !== undefined && bundle.productionCanary !== null) {
+    validateCanary(
+      bundle.productionCanary,
+      expected.sourceSha,
+      expectedCandidateReceipt.sourceTreeSha,
+      expectedCandidateImages,
+      expectedCandidateReceipt.chart,
+      expected.productionCanaryEvidenceUrl,
+      errors,
+    );
+  }
   validateResults(bundle.results, errors);
 
   if (errors.length > 0) {
@@ -740,7 +742,7 @@ async function main(): Promise<void> {
       ok: true,
       sourceSha: bundle.candidate.sourceSha,
       resultCount: bundle.results.length,
-      productionCanaryCycles: bundle.productionCanary.passedCycles,
+      productionCanaryCycles: bundle.productionCanary?.passedCycles ?? null,
     }),
   );
 }

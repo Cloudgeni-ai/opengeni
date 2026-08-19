@@ -689,6 +689,28 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 
 ## Verified public release
 
+`main` is the daily integration branch and remains GitHub's default branch.
+`production` is the official source pointer in this repository; it is not a
+live-cluster deploy. Staging is a manual pin of already-baked
+`canary-sha-<commit>` images from any `main` SHA
+(`.github/workflows/staging-canary-dispatch.yml`). Merging `main` does not
+auto-deploy staging. Promote with a GitHub PR base `production` / compare
+`main` and **Create a merge commit** (never squash, never GitHub
+rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
+`production` → `main`. Official cuts: dispatch `open-version-pr.yml` on `main`
+(or `VERSION_PR_ON_PUSH=true`), merge that Version PR, promote, then
+`workflow_dispatch` candidate/acceptance/publication. Official source ancestry
+is `origin/production`. Bootstrap the pointer once with
+`git push origin origin/main:refs/heads/production` before the first official
+cut.
+
+Protect `production`: no force-push; merge commits only (disable squash and
+rebase-and-merge); required checks `Admit production PR head` and
+`Current-base source admission` (skip-success aggregate so promote PRs from
+live `main` stay mergeable). Drop `Current-base source admission` from the
+`main` ruleset; Version PRs still receive that named check from trusted
+`ci.yml` dispatch.
+
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
@@ -891,11 +913,14 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The legacy context name is retained for
-the repository ruleset, but the check admits the immutable provider event head
-against the PR's provider merge-base tree; it does not require the event base
-to equal continuously moving `main`. The base-owned workflow/helper SHA must
-remain in protected `main` ancestry, and the provider base/head/repository,
+`Current-base source admission` check. Version PRs receive that named check
+from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
+hotfix-into-production only; its required-check name stays on a skip-success
+report job so promote PRs from live `main` remain mergeable. The check admits
+the immutable provider event head against the PR's provider merge-base tree; it
+does not require the event base to equal continuously moving `main`. The
+base-owned workflow/helper SHA must remain in protected `production` ancestry
+for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
 and terminal head identity remain fail-closed. Exact-head review stays bound to
 the candidate. The merge authority separately performs the fresh latest-main
@@ -946,8 +971,8 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest.
-Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
-SHA-configured images and records that tag in the dogfood receipt. The
+Protected main CI uses the separate `canary-sha-<source>` namespace for its
+SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
 produce different digests from the same source tree.
@@ -1033,7 +1058,7 @@ application/chart/image bytes to pair with a newer coherent package publication
 without floating to registry `latest`, inventing source ownership, or attempting
 to publish superseded package versions.
 
-After staging, production, and the 72-hour canary have consumed those exact
+After staging and production have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
@@ -1048,13 +1073,14 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. The canary row is bound to the same
-source tree, exact chart bytes, and complete API/migration/worker/web/relay/
-sandbox digest map as candidate, staging, and production; a source-only canary
-claim fails closed. Acceptance requires the accepted source to remain an
-ancestor of current `main`, but does not require it to remain the current tip:
-compatible reviewed work can continue to merge during the canary window without
-freezing `main` or invalidating an otherwise unchanged proven train. No
+before validating every schema-v2 row. A 72-hour production soak row is
+optional evidence, not a publish gate; when present it is still bound to the
+same source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production. Acceptance requires
+the accepted source to remain an ancestor of current `production`, but does not
+require it to remain the current tip: compatible reviewed work can continue to
+merge to `main` during an official train without freezing daily integration or
+invalidating an otherwise unchanged proven train. No
 dispatcher can select an evidence URL, hash, repository, workflow path, or
 artifact name.
 
