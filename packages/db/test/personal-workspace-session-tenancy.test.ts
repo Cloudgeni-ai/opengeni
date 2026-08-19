@@ -67,10 +67,18 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
 }
 
 /**
- * Mint a session owned by the human. The owner-resolution half of this defect
- * lives in `guard_session_authority_write` and is repaired separately, so the
- * owner column is stamped directly here: this file is about the workspace-access
- * predicate inside `transition_session_visibility` / `fork_session_content`.
+ * Mint a session owned by the human.
+ *
+ * Migration 0302 (#1631, now on `main`) repaired the owner-resolution half of
+ * this defect: `guard_session_authority_write` accepts an active membership's
+ * own `personal_workspace_id` pointer, so a session minted in the owner's
+ * personal workspace is now attributed automatically. This fixture therefore
+ * asserts that rather than hand-stamping the owner behind the lifecycle
+ * capability, which is what it had to do before 0302 landed.
+ *
+ * That leaves the workspace-ACCESS predicate inside
+ * `transition_session_visibility` / `fork_session_content` as the only
+ * remaining half — which is exactly what this file pins.
  */
 async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<string> {
   if (!client || !shared) throw new Error("test database unavailable");
@@ -86,19 +94,9 @@ async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<s
     latencyMode: "standard",
     sandboxBackend: "none",
   });
-  await shared.admin.begin(async (tx) => {
-    // `guard_session_authority_write` fences every owner mutation behind the
-    // per-transaction lifecycle capability. Mint one for this fixture stamp so
-    // the assertions below can be about the workspace-access predicate alone.
-    const capabilityId = crypto.randomUUID();
-    await tx`select set_config('opengeni.session_visibility_write_capability', ${capabilityId}, true)`;
-    await tx`insert into session_visibility_write_capabilities (backend_pid, transaction_id, capability_id)
-             values (pg_backend_pid(), pg_current_xact_id(), ${capabilityId})`;
-    await tx`update sessions
-                set owner_organization_membership_id = ${human.organizationMembershipId},
-                    owner_subject_id = ${human.subjectId}
-              where id = ${session.id}`;
-  });
+  const [owned] = await shared.admin<Array<{ owner: string | null }>>`
+    select owner_organization_membership_id as "owner" from sessions where id = ${session.id}`;
+  expect(owned?.owner).toBe(human.organizationMembershipId);
   return session.id;
 }
 
