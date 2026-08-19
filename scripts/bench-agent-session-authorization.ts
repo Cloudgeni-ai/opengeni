@@ -17,7 +17,7 @@ import postgres from "postgres";
 
 const sessionCount = integerArgument("--sessions", 10_000);
 const sampleCount = integerArgument("--samples", 100);
-const expectedLateral = stringArgument("--expect-lateral") ?? "denied";
+const expectedLateral = stringArgument("--expect-lateral") ?? "allowed";
 if (sessionCount < 1_000 || sessionCount > 50_000) {
   throw new Error("--sessions must be between 1000 and 50000");
 }

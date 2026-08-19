@@ -67,52 +67,16 @@ function grantHasAgentAttemptAuthority(grant: AccessGrant): boolean {
 }
 
 /**
- * Read-only access an immediate child may use against its parent. Upstream
- * mutation is deliberately limited to `session.append`: letting a child Pause,
- * Steer, or otherwise mutate its parent would let it influence siblings through
- * the parent's recursive control and shared state.
+ * Live agent attempts may address any workspace session that later private,
+ * Slack-owner, and optional host checks still allow. Parent/child lineage is
+ * not an access deny. Cross-session projections stay exact-target so a peer
+ * read does not receive another session's derived metadata.
  */
-const AGENT_PARENT_READ_OPERATIONS = new Set<SessionAuthorizationOperation>([
-  "session.read",
-  "session.events.read",
-  "session.stream.read",
-  "session.turns.read",
-  "session.queue.read",
-  "session.composer.read",
-  "session.lineage.read",
-  "session.capture.read",
-  "session.files.read",
-  "session.git.read",
-  "session.terminal.read",
-  "session.viewer.read",
-  "session.goal.read",
-  "session.human_input.read",
-]);
-
-function enforceAgentSessionHierarchy(
+function relatedSessionAccessForAgentAttempt(
   actor: Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>,
-  callerParentSessionId: string | null,
-  target: ResolvedSessionAuthorizationTarget,
-  operation: SessionAuthorizationOperation,
+  targetSessionId: string,
 ): "target" | "root" {
-  if (target.target.sessionId === actor.callerSessionId) return "root";
-
-  // A manager may inspect and operate an immediate child. Existing permission
-  // and host-policy checks still apply; lineage never grants a capability.
-  if (target.parentSessionId === actor.callerSessionId) return "target";
-
-  // A child may report to and inspect its immediate parent, but cannot mutate
-  // the parent except through the canonical machine-input message boundary.
-  if (callerParentSessionId === target.target.sessionId) {
-    if (operation === "session.append" || AGENT_PARENT_READ_OPERATIONS.has(operation)) {
-      return "target";
-    }
-    throw new SessionAuthorizationDeniedError("forbidden");
-  }
-
-  // Siblings, skipped generations, other branches, and unrelated roots are
-  // never cross-session authority for a live agent attempt.
-  throw new SessionAuthorizationDeniedError("forbidden");
+  return targetSessionId === actor.callerSessionId ? "root" : "target";
 }
 
 export function sessionRlsActorForAuthorization(
@@ -201,12 +165,7 @@ export async function requireSessionAuthorization(
   const target = resolvedTarget.target;
   const agentRelatedSessionAccess =
     actor.kind === "agent_attempt"
-      ? enforceAgentSessionHierarchy(
-          actor,
-          resolvedActor.callerParentSessionId,
-          resolvedTarget,
-          input.operation,
-        )
+      ? relatedSessionAccessForAgentAttempt(actor, target.sessionId)
       : null;
 
   if (authority.visibility === "user_private") {

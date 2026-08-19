@@ -3870,24 +3870,30 @@ describe("workflow contracts", () => {
     ).if = "${{ matrix.lane == 'knowledge' }}";
     expect(hasCompleteBrowserLaneContract(misroutedWorkbenchGate)).toBe(false);
 
+    // Browser runtimes install through the shared composite action so the
+    // download is cached and every attempt is bounded by a hard wall clock. An
+    // unbounded install can wedge for the 360-minute job default while holding
+    // a runner, which starves every other pull request in the account.
     const browserInstalls = browser.steps.filter((step: any) =>
-      String(step.run ?? "").includes("playwright install"),
+      String(step.uses ?? "").includes("playwright-browsers"),
     );
     expect(browserInstalls).toEqual([
       {
         name: "Install pinned Chromium runtime",
         if: "${{ matrix.lane != 'workbench' }}",
-        run: "bun x playwright install --with-deps chromium",
+        uses: "./.github/actions/playwright-browsers",
+        with: { browsers: "chromium" },
       },
       {
         name: "Install pinned cross-browser runtimes",
         if: "${{ matrix.lane == 'workbench' }}",
-        run: "bun x playwright install --with-deps chromium firefox webkit",
+        uses: "./.github/actions/playwright-browsers",
+        with: { browsers: "chromium firefox webkit" },
       },
     ]);
     expect(
       browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
-    ).toEqual(browserInstalls);
+    ).toEqual([]);
     for (const stepName of [
       "Editable artifact browser acceptance",
       "Install pinned artifact native toolchain",
@@ -3903,6 +3909,10 @@ describe("workflow contracts", () => {
     ).toBe(
       "${{ always() && matrix.lane == 'workbench' && (steps.editable_artifact_browser.outcome == 'success' || steps.editable_artifact_browser.outcome == 'failure') }}",
     );
+    // Supersedes the former "browser lanes never cache ms-playwright" lock.
+    // The browser cache now lives one level down in the shared composite
+    // action, so assert it there rather than asserting its absence here - an
+    // absence check against this job would silently guard nothing.
     expect(
       browser.steps.some(
         (step: any) =>
@@ -3910,6 +3920,11 @@ describe("workflow contracts", () => {
           JSON.stringify(step.with ?? {}).includes("ms-playwright"),
       ),
     ).toBe(false);
+    const browserAction = readFileSync(
+      join(root, ".github/actions/playwright-browsers/action.yml"),
+      "utf8",
+    );
+    expect(browserAction).toContain("path: ~/.cache/ms-playwright");
     expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota and entitlement browser acceptance",

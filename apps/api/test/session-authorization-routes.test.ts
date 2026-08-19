@@ -1018,7 +1018,7 @@ describe("embedding host session authorization routes", () => {
     ]);
   });
 
-  test("enforces vertical agent authority before an optional host policy can widen it", async () => {
+  test("lets a live agent address peer sessions while host policy can only narrow", async () => {
     if (!available) return;
     const value = await fixture();
     const sibling = await createSession(client.db, {
@@ -1117,15 +1117,14 @@ describe("embedding host session authorization routes", () => {
     await expect(authorize(grandchild.id, "session.control")).resolves.toMatchObject({
       relatedSessionAccess: "target",
     });
-
-    await expect(authorize(value.root.id, "session.control")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(value.root.id, "session.control")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
-    await expect(authorize(sibling.id, "session.read")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(sibling.id, "session.read")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
-    await expect(authorize(value.hidden.id, "session.append")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(value.hidden.id, "session.append")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
 
     let hostCalls = 0;
@@ -1136,10 +1135,23 @@ describe("embedding host session authorization routes", () => {
       },
       resolveListScope: async () => ({ kind: "all" }),
     };
-    await expect(authorize(sibling.id, "session.append", allowEverything)).rejects.toMatchObject({
+    await expect(authorize(sibling.id, "session.append", allowEverything)).resolves.toMatchObject({
+      relatedSessionAccess: "target",
+    });
+    expect(hostCalls).toBe(1);
+
+    let deniedCalls = 0;
+    const denyPeer: SessionAuthorizationPort = {
+      authorizeSession: async () => {
+        deniedCalls += 1;
+        return { allowed: false, reason: "forbidden" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    await expect(authorize(sibling.id, "session.append", denyPeer)).rejects.toMatchObject({
       reason: "forbidden",
     });
-    expect(hostCalls).toBe(0);
+    expect(deniedCalls).toBe(1);
 
     const grandchildGrant = await claimGrant(grandchild.id);
     await expect(
@@ -1148,7 +1160,7 @@ describe("embedding host session authorization routes", () => {
         operation: "session.append",
         surface: "first_party_mcp",
       }),
-    ).rejects.toMatchObject({ reason: "forbidden" });
+    ).resolves.toMatchObject({ relatedSessionAccess: "target" });
   });
 
   test("reconstructs live agent-attempt authority and rejects the same token after settlement", async () => {

@@ -87,6 +87,7 @@ jobs:
   version:
     name: Open or update Version PR
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Dormant until opted in: skips cleanly (no red) on pushes to main until the
     # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
     if: ${{ github.event_name == 'push' && vars.RELEASE_ENABLED == 'true' }}
@@ -161,6 +162,7 @@ jobs:
     name: Publish verified release
     needs: admission
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: ${{ github.event_name == 'workflow_dispatch' && vars.RELEASE_ENABLED == 'true' }}
     env:
       OPENGENI_RELEASE_OCI_PREFIX: ${{ vars.OPENGENI_RELEASE_OCI_PREFIX || 'ghcr.io/cloudgeni-ai' }}
@@ -540,6 +542,7 @@ jobs:
   images:
     name: Promote accepted OCI images
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Image bytes were already built and accepted through release-candidate.yml.
     # This job creates release aliases for those exact manifests, verifies every
     # alias resolves to the accepted digest, and writes the final BOM.

@@ -5,11 +5,10 @@ PostgreSQL session-creation boundary. The policy limits new descendants without
 changing the lifecycle or control state of sessions that already exist.
 
 Depth admission is separate from runtime communication authority. Once a child
-exists, a live agent may address only itself, its immediate parent, and its
-immediate children; see [`agent-session-authority.md`](agent-session-authority.md).
-Siblings, skipped generations, other branches, and unrelated roots are not
-agent authority even when workspace permissions or an embedding-host policy are
-broader.
+exists, a live agent may address peer workspace sessions; see
+[`agent-session-authority.md`](agent-session-authority.md). Slack-private stays
+same-root for agents, and `user_private` still requires the initiating human as
+owner. Nested-agent depth does not restore a parent/child access lock.
 
 ## Depth and precedence
 

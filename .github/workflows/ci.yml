@@ -255,6 +255,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -383,7 +384,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -443,7 +444,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: true
       matrix:
@@ -494,7 +495,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: true
       matrix:
@@ -551,14 +552,16 @@ jobs:
       # launch Firefox; a Chromium-only install fails those shards on any
       # web-broad candidate.
       - name: Install pinned browser runtimes
-        run: bun x playwright install --with-deps chromium firefox
+        uses: ./.github/actions/playwright-browsers
+        with:
+          browsers: chromium firefox
 
       - name: Run exactly the impacted E2E tests
         run: >-
           bun scripts/ci/profile-command.ts
           --name e2e-${{ matrix.number }}
           --output ci-profile/e2e-${{ matrix.number }}.json
-          --timeout-seconds 1800
+          --timeout-seconds 720
           -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
           --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
@@ -579,6 +582,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -633,6 +637,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -682,11 +687,15 @@ jobs:
 
       - name: Install pinned Chromium runtime
         if: ${{ matrix.lane != 'workbench' }}
-        run: bun x playwright install --with-deps chromium
+        uses: ./.github/actions/playwright-browsers
+        with:
+          browsers: chromium
 
       - name: Install pinned cross-browser runtimes
         if: ${{ matrix.lane == 'workbench' }}
-        run: bun x playwright install --with-deps chromium firefox webkit
+        uses: ./.github/actions/playwright-browsers
+        with:
+          browsers: chromium firefox webkit
 
       - name: Editable artifact browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
@@ -864,6 +873,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -946,7 +956,10 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       - name: Install Chromium for packed WASM package proof
-        run: bun x playwright install --with-deps --only-shell chromium
+        uses: ./.github/actions/playwright-browsers
+        with:
+          browsers: chromium
+          only-shell: "true"
 
       - name: Packed SDK Worker and modality WASM packages
         run: bun run test:artifact-kernel-wasm-consumer
@@ -985,6 +998,7 @@ jobs:
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, package-contracts, deployment, artifact-runtime, images]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require successful impact planning before candidate execution
         env:
@@ -1032,6 +1046,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -1211,6 +1226,7 @@ jobs:
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1289,6 +1305,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1351,6 +1368,7 @@ jobs:
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1402,6 +1420,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1447,6 +1466,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1488,6 +1508,7 @@ jobs:
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
@@ -1543,6 +1564,7 @@ jobs:
       - sandbox-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1651,6 +1673,7 @@ jobs:
     needs: [automation-admission, test, deployment, images]
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       checks: write
       contents: read
