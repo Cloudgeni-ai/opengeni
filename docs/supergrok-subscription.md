@@ -115,7 +115,9 @@ there is no model-call or run-duration deadline. HTTP 200 SSE terminals
 (`type: "error"`, `response.failed`, `response.error`, `response.incomplete`)
 are intercepted before the OpenAI Agents SDK: the transport does not enqueue
 them, throws a typed error whose message is the exact bounded provider
-diagnostic, and the worker persists that text on `turn.failed`. Request
+diagnostic, and the worker persists that text on `turn.failed` unless the
+diagnostic is a rate-limit/capacity refusal. Those refusals are marked 429 and
+enter the durable same-turn capacity waiter instead of failing the turn. Request
 lifecycle audit records request identity, attempt, headers, first event, event
 count/type, last-progress duration, and terminal outcome, but never request
 bodies, credentials, output, or the provider error text. Worker stdout/OTEL
@@ -128,8 +130,14 @@ Only definitive account refusal may walk the pool:
 - a typed permanent refresh failure or marked 401 sets the exact leased
   credential to `needs_relogin`;
 - a marked 403 sets that credential to `error`;
-- a marked 429 installs an exact-account cooldown using `Retry-After`, falling
-  back to one minute.
+- a marked HTTP 429, or an HTTP 200 SSE terminal whose bounded provider
+  diagnostic is a rate-limit/capacity refusal (`rate_limit_exceeded`,
+  `too_many_requests`, overload/capacity codes, or the observed Grok sentence
+  "The model is currently at capacity due to high demand..."), installs an
+  exact-account cooldown using `Retry-After`, falling back to one minute.
+  Isolated "high demand" / "overloaded" / "rate limit" wording is not enough.
+  That path arms the same durable `waiting_capacity` waiter; it must not
+  settle `turn.failed` as a permanent non-retryable error.
 
 The credential mutation, exact lease fence, exact attempt close, pending-tool
 closure, audit events, turn/session `waiting_capacity` transition, lease
