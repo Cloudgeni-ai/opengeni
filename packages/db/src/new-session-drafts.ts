@@ -10,7 +10,10 @@ import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
-import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
+import {
+  accountIdInRlsScope,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
 
@@ -150,7 +153,11 @@ export async function saveNewSessionDraftInTransaction(
       !(
         input.personalWorkspaceOwnerException === true &&
         (await subjectHasLiveWorkspaceAuthorityInScope(db, {
-          accountId: input.accountId,
+          // Scope-derived, NOT `input.accountId`: the applied RLS GUC is the
+          // tenant this transaction actually runs under, so an authority
+          // decision never reads a caller-supplied account. Matches
+          // listSessionsForSubject and setSessionPin.
+          accountId: await accountIdInRlsScope(db),
           workspaceId: input.workspaceId,
           subjectId: input.subjectId,
         }))

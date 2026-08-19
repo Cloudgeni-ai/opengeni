@@ -394,7 +394,14 @@ export * from "./integration-facets";
 export * from "./insights";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
-export * from "./workspace-authority";
+// Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
+// for seams already inside an RLS scope, and publishing it would put a helper
+// that trivially satisfies the in-scope resolver's consistency check on the
+// public surface of a non-private package.
+export {
+  rlsSubjectIdOrEmpty,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 import {
   accountIdInRlsScope,
   rlsSubjectIdOrEmpty,
