@@ -48,6 +48,7 @@ describe("single-node secret bootstrap", () => {
       expect(garage.GARAGE_RPC_SECRET).toMatch(/^[0-9a-f]{64}$/);
       expect(garageToml).toContain(`rpc_secret = "${garage.GARAGE_RPC_SECRET}"`);
       expect(garageToml).toContain('s3_region = "us-east-1"');
+      expect(garageToml).toContain('api_bind_addr = "[::]:3900"');
 
       const accountSeed = runtime.OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED;
       expect(accountSeed).toBeDefined();

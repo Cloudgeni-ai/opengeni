@@ -658,7 +658,7 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure

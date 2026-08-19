@@ -20,6 +20,7 @@ describe("in-cluster object-storage fixtures", () => {
     expect(helpers).toContain(
       'value: {{ include "opengeni.objectStorageS3Provider" $root | quote }}',
     );
+    expect(helpers).toContain('api_bind_addr = "[::]:{{ .Values.garage.service.apiPort | int }}"');
     expect(garage).toContain("opengeni.assertExclusiveObjectStorageFixture");
     expect(minio).toContain("opengeni.assertExclusiveObjectStorageFixture");
     expect(garage).not.toContain("opengeni.image");

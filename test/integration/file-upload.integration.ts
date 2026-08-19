@@ -118,7 +118,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     const app = fileApp(fixture.settings);
     const image = pngBytes();
 
-    // Both requests complete their real MinIO HEAD, enter completeFileUpload,
+    // Both requests complete their real object-storage HEAD, enter completeFileUpload,
     // and then WAIT on this independently held file_uploads row lock.
     const checksum = await sha256Hex(image);
     const concurrent = await beginAndPut(app, fixture, image, "locked-finalize.png", {

@@ -116,6 +116,10 @@ describe("deployment contract", () => {
     expect(plan.requiredSecretKeys).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
     expect(plan.requiredSecretKeys).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
     expect(plan.requiredSecretKeys).toContain("opengeni-postgres/POSTGRES_PASSWORD");
+    expect(plan.requiredSecretKeys).toContain("opengeni-garage/GARAGE_ACCESS_KEY_ID");
+    expect(plan.requiredSecretKeys).toContain("opengeni-garage/GARAGE_SECRET_ACCESS_KEY");
+    expect(plan.requiredSecretKeys).toContain("opengeni-garage/GARAGE_RPC_SECRET");
+    expect(plan.requiredSecretKeys).toContain("opengeni-garage/garage.toml");
     expect(plan.requiredSecretKeys).toContain(
       "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
     );

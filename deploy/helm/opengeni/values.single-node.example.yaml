@@ -2,7 +2,7 @@
 # shares the host dynamically: no HPA, topology spreading, PDB, CPU quota, or
 # per-pod memory partition. Excess turns remain durable in Temporal.
 #
-# Bootstrap in two phases so Postgres/Temporal/NATS/MinIO are healthy before the
+# Bootstrap in two phases so Postgres/Temporal/NATS/Garage are healthy before the
 # pre-upgrade migration/role/posture gate runs. See docs/deployment.md.
 
 priorityClasses:

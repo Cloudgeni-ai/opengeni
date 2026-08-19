@@ -15,7 +15,11 @@
 // Run: bun test test/integration/workspace-capture.integration.ts
 import { afterAll, describe, expect, test } from "bun:test";
 import { createObjectStorage } from "../../packages/storage/src/index";
-import { testSettings, GARAGE_FIXTURE_ACCESS_KEY_ID, GARAGE_FIXTURE_SECRET_ACCESS_KEY } from "@opengeni/testing";
+import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
+  testSettings,
+} from "@opengeni/testing";
 import { WorkspaceCaptureManifest } from "@opengeni/contracts";
 import {
   computeWorkspaceCaptureGcPlan,

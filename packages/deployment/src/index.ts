@@ -1950,7 +1950,7 @@ function planNotes(contract: DeploymentContract): string[] {
     notes.push(
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
-      "Create the runtime, migration, Postgres, and Garage Secrets before the two-phase Helm bootstrap.",
+      "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
     );
   }
   return notes;
@@ -1984,6 +1984,8 @@ function profileRequiredSecretKeys(contract: DeploymentContract): string[] {
     "opengeni-postgres/POSTGRES_PASSWORD",
     "opengeni-garage/GARAGE_ACCESS_KEY_ID",
     "opengeni-garage/GARAGE_SECRET_ACCESS_KEY",
+    "opengeni-garage/GARAGE_RPC_SECRET",
+    "opengeni-garage/garage.toml",
     "opengeni-runtime/OPENGENI_DATABASE_URL",
     "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
     "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",

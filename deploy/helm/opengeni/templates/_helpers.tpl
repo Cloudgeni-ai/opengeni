@@ -245,7 +245,7 @@ rpc_secret = {{ .Values.garage.auth.rpcSecret | quote }}
 
 [s3_api]
 s3_region = "us-east-1"
-api_bind_addr = "[::]:3900"
+api_bind_addr = "[::]:{{ .Values.garage.service.apiPort | int }}"
 root_domain = ".s3.garage.localhost"
 
 [s3_web]
