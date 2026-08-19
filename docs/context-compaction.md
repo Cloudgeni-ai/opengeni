@@ -48,7 +48,8 @@ If a model has no explicit automatic limit, OpenGeni uses
 window, matching Codex core.
 
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
-has:
+has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
+triple instead of the 1.05M deployment fallback:
 
 | quantity | tokens |
 | --- | ---: |

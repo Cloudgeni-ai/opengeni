@@ -446,13 +446,15 @@ const SettingsSchema = z.object({
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
-  // The model family's real context window in tokens. OpenGeni always performs
-  // one durable, portable plaintext compaction transition; there is no
-  // provider/server/off mode ladder.
+  // Deployment fallback for models that do not declare their own window.
+  // Built-in billed GPT-5.6 Sol/Terra/Luna pin Codex's 272k catalog instead.
+  // OpenGeni always performs one durable, portable plaintext compaction
+  // transition; there is no provider/server/off mode ladder.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
-  // Optional model-catalog effective input ceiling. Codex models expose this as
-  // raw context_window * effective_context_window_percent; when absent, retain
-  // the deployment-level window-minus-reserved-output behavior.
+  // Optional model-catalog effective input ceiling. Codex and billed GPT-5.6
+  // models expose this as raw context_window * effective_context_window_percent;
+  // when absent, retain the deployment-level window-minus-reserved-output
+  // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
@@ -2999,18 +3001,37 @@ export function productShortLabelForModelId(modelId: string): string | null {
   }
 }
 
+const BUILTIN_GPT56_MODEL_IDS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
+
+function isBuiltinGpt56ModelId(modelId: string): boolean {
+  return (BUILTIN_GPT56_MODEL_IDS as readonly string[]).includes(modelId);
+}
+
+/** Billed GPT-5.6 uses the same raw/effective/auto-compact catalog as Codex. */
+function builtinContextLimitsForModel(
+  settings: Settings,
+  modelId: string,
+): Pick<
+  ConfiguredModel,
+  "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
+> {
+  if (isBuiltinGpt56ModelId(modelId)) {
+    return {
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    };
+  }
+  return { contextWindowTokens: settings.contextWindowTokens };
+}
+
 function builtinLatencyModesForModel(modelId: string): Array<{
   id: z.infer<typeof ModelLatencyModeV1>;
   upstream: "supported" | "unsupported" | "unknown";
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (
-    modelId === "gpt-5.6-sol" ||
-    modelId === "gpt-5.6-terra" ||
-    modelId === "gpt-5.6-luna" ||
-    modelId.startsWith("codex/gpt-5.6-")
-  ) {
+  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -3040,7 +3061,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(modelId)
+    isBuiltinGpt56ModelId(modelId)
   );
 }
 
@@ -3589,7 +3610,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         billing: builtinProvider.billing,
         capabilities,
         ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
-        contextWindowTokens: settings.contextWindowTokens,
+        ...builtinContextLimitsForModel(settings, id),
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
         reasoningEffort: capabilities.reasoning.runnable,
         hostedWebSearch: capabilities.hostedTools.webSearch.runnable,

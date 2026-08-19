@@ -253,7 +253,10 @@ The catalog describes:
 GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
-or downgrades that tier; OpenGeni never silently falls back to Standard.
+or downgrades that tier; OpenGeni never silently falls back to Standard. The
+same billed GPT-5.6 family pins Codex's 272,000 / 258,400 / 244,800
+raw / effective / auto-compact catalog rather than the 1.05M deployment
+fallback.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
