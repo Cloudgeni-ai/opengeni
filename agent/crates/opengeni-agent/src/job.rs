@@ -1310,7 +1310,7 @@ mod tests {
     #[tokio::test]
     async fn exhausted_window_throttles_the_child_end_to_end() {
         // The child reports its own write progress to a FILE (not a pipe), so
-        // a stalled file proves the child is blocked in write(2) on stdout.
+        // a plateaued file proves the child is blocked in write(2) on stdout.
         let mut job = job("i=0; while [ $i -lt 200 ]; do head -c 4096 /dev/zero; \
              echo $i >> progress.txt; i=$((i+1)); done")
         .frame_bytes(4096)
@@ -1324,26 +1324,31 @@ mod tests {
         assert_eq!(data_total(&frames), 8192, "exactly one window was emitted");
         job.no_frame_for(Duration::from_millis(200)).await;
 
-        // Same shape as the overshoot test: assert against the pump's own
-        // watermark rather than the producer's fork rate. An 8192-byte window
-        // with <=4096-byte frames admits two in-window frames plus one
-        // overshoot. This test has ~3.7x more timing margin than the overshoot
-        // one (18 iterations to park rather than 66), so it has not flaked in
-        // CI - but the defect is identical and it does fail under heavier load.
+        // Same shape as the overshoot test, but a different gate conjunct.
+        // There is NO overshoot frame here: an 8192-byte window with 4096-byte
+        // frames admits exactly two, and the gate then closes because the
+        // allowance is 0, not because the pump is behind. The assertion above
+        // pins that - data_total == 8192 forces both frames to be full size -
+        // so the ceiling is 2. A third frame appears only if the allowance
+        // conjunct is dropped, which is precisely what a ceiling of 2 catches
+        // and a `<= 3` bound would not.
+        // Bounded for the same reason as the overshoot test. Two `next_frame`
+        // awaits above already force the watermark to at least 2, so equality
+        // would be safe here - but the upper bound is what detects the defect,
+        // and keeping both tests the same shape keeps the reasoning one-sided.
         let gated_at = job.watermark.load(Ordering::Relaxed);
-        assert!(gated_at <= 3, "the pump read past the window: {gated_at}");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            job.watermark.load(Ordering::Relaxed),
-            gated_at,
-            "the pump must stop reading while credit is withheld"
+        assert!(
+            gated_at <= 2,
+            "the pump must stop reading while credit is withheld: {gated_at}"
         );
 
-        // End-to-end: the producer is blocked in write(2), not finished.
+        // End-to-end: the producer is blocked in write(2) at the pipe plateau
+        // (64 KiB / 4 KiB + 2 drained = 18 lines), not merely unfinished. Same
+        // one-sided reasoning as the overshoot test.
         let parked_at = lines(&progress_path);
         assert!(
-            parked_at < 200,
-            "producer must be far from done: {parked_at}"
+            parked_at <= 30,
+            "producer must be parked at the pipe plateau, not running: {parked_at}"
         );
 
         // Credit returns: the child un-blocks and finishes all 200 writes.
@@ -1622,9 +1627,9 @@ mod tests {
     async fn overshoot_frame_closes_the_read_gate_end_to_end() {
         // Window 1536, frames <= 1024: frame 1 (1024) sends; frame 2 cannot
         // (allowance 512) and is retained UNSENT — the pump is now behind.
-        // The read gate must CLOSE (caught-up requirement): the producer's
-        // progress file plateaus, and retention never grows past the
-        // overshoot frame. Credit + catch-up then resume everything.
+        // The read gate must CLOSE (caught-up requirement): the pump stops
+        // reading, so retention never grows past the overshoot frame and the
+        // producer parks at the pipe plateau. Credit + catch-up then resume.
         let mut job = job(
             "i=0; while [ $i -lt 200 ]; do head -c 1024 /dev/zero;              echo $i >> progress.txt; i=$((i+1)); done",
         )
@@ -1639,36 +1644,53 @@ mod tests {
         assert_eq!(first.body.payload_len(), 1024);
         job.no_frame_for(Duration::from_millis(200)).await;
 
-        // The gate's own witness. The watermark is the highest seq the pump has
-        // ever appended, so it counts reads off the pipe directly. A 1536-byte
-        // window with <=1024-byte frames admits at most two in-window frames
-        // plus the one overshoot, so a closed gate pins the watermark at or
-        // below 3 no matter how fast the producer can fork.
+        // The gate's own witness. `watermark` is the highest seq the pump has
+        // appended - every frame body, so Progress ticks and the Exit frame
+        // move it too, not only pipe reads. Here neither can have fired: the
+        // 5 s progress interval resets on each data read and the child is
+        // still running, so the value is exactly the frames read off the pipe.
+        //
+        // The ceiling is 2, not 3. A 1536-byte window with
+        // 1024-byte frames admits exactly ONE in-window frame - the second
+        // needs 1024 against a 512 allowance - plus the one retained overshoot.
+        // The assertions above already pin it: payload_len == 1024 forbids a
+        // short read, and no_frame_for proves frame 2 never went out. Tightening
+        // the ceiling from 3 to 2 is what catches a one-frame leak and a dropped
+        // allowance check, both of which sit inside a `<= 3` slack.
         //
         // This is deliberately not a line-count comparison. `progress.txt`
         // measures the PRODUCER, which does not park when the gate closes - it
-        // keeps running until it has filled the 64 KiB pipe, roughly 64 more
-        // fork+exec of `head`. Latching a line count at a fixed delay and
-        // requiring it to be final assumes those spawns finish inside that
-        // delay, which is false on a contended runner. Worse, a full E3
-        // regression makes the producer run to completion BEFORE the first
-        // sample, so both samples read 200 and the equality passes: the old
-        // check was simultaneously flaky and blind to the regression it named.
+        // keeps running until it has filled the 64 KiB pipe, 64 more fork+exec
+        // of `head`. Latching a line count at a fixed delay and requiring it to
+        // be final assumes those spawns finish inside that delay, which is
+        // false on a contended runner. Worse, a full E3 regression makes the
+        // producer run to completion BEFORE the first sample, so both samples
+        // read 200 and the equality passes: the old check was simultaneously
+        // flaky and blind to the regression it named.
+        // Bounded, not equality. A gate defect can only make this too HIGH, so
+        // the upper bound carries all the detection power: 3 catches a
+        // one-frame leak, more catches a dropped conjunct. Requiring exactly 2
+        // additionally asserts the PRODUCER got 2048 bytes out before we
+        // looked, which is a fork-rate claim - the very thing this rewrite
+        // exists to stop asserting. Measured: it fails `left: 1, right: 2`
+        // under fork pressure, because the producer is still on iteration 1.
         let gated_at = job.watermark.load(Ordering::Relaxed);
-        assert!(gated_at <= 3, "the pump read past the window: {gated_at}");
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            job.watermark.load(Ordering::Relaxed),
-            gated_at,
-            "the overshoot frame must close the read gate (E3 regression)"
+        assert!(
+            gated_at <= 2,
+            "the overshoot frame must close the read gate (E3 regression): {gated_at}"
         );
 
-        // End-to-end: the producer is throttled, not finished. Slowness only
-        // makes this more true, so it cannot flake.
+        // End-to-end: the producer is parked at the pipe plateau rather than
+        // running away. A closed gate plateaus at 64 KiB / 1 KiB + 2 drained =
+        // 66 lines; a leaking gate drains continuously and reaches 200. The
+        // bound is one-sided ON PURPOSE: the original flake undersampled, and
+        // undersampling can only push this count DOWN, so an upper bound cannot
+        // reproduce it. A platform with a smaller pipe plateaus lower and still
+        // passes; both supported unix platforms use 64 KiB.
         let parked_at = lines(&progress_path);
         assert!(
-            parked_at < 200,
-            "producer must be far from done: {parked_at}"
+            parked_at <= 100,
+            "producer must be parked at the pipe plateau, not running: {parked_at}"
         );
 
         // Credit resumes: catch-up sends the retained overshoot frame first,
