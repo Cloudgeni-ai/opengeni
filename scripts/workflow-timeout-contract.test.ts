@@ -20,7 +20,7 @@ type Job = Readonly<{
   "timeout-minutes"?: number;
 }>;
 
-type Step = Readonly<{ run?: string; uses?: string }>;
+type Step = Readonly<{ run?: string; uses?: string; "timeout-minutes"?: number }>;
 
 async function workflowFiles(): Promise<readonly string[]> {
   const entries = await readdir(workflowDir);
@@ -84,6 +84,9 @@ describe("workflow timeout contract", () => {
     // timed-out install genuinely re-runnable.
     expect(action).toContain("actions/cache/restore@");
     expect(action).toContain("actions/cache/save@");
+    // Cache entries are immutable, so a __dirlock baked in by a SIGKILLed
+    // install is permanent for that key. Cheap to drop, impossible to undo.
+    expect(action).toContain("rm -rf ~/.cache/ms-playwright/__dirlock");
     expect(action).toMatch(
       /if: \$\{\{ always\(\) && steps\.restore\.outputs\.cache-hit != 'true' \}\}/u,
     );
@@ -121,8 +124,29 @@ describe("workflow timeout contract", () => {
         let usesBoundedInstall = false;
         for (const step of job.steps ?? []) {
           const run = String(step.run ?? "");
-          for (const m of run.matchAll(/--timeout-seconds\s+(\d+)/gu)) inner += Number(m[1]) / 60;
-          for (const m of run.matchAll(/--timeout\s+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
+          // Both `--flag N` and `--flag=N` spellings.
+          for (const m of run.matchAll(/--timeout-seconds[\s=]+(\d+)/gu))
+            inner += Number(m[1]) / 60;
+          for (const m of run.matchAll(/--timeout[\s=]+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
+          // A bare coreutils `timeout 3600 ...` bounds the step just as much as
+          // a test-runner flag does.
+          for (const m of run.matchAll(/(?:^|[\s;&|(])timeout\s+(?:-\S+\s+)*(\d+)(?![\w.])/gu)) {
+            inner += Number(m[1]) / 60;
+          }
+          for (const m of run.matchAll(/(?:^|[\s;&|(])timeout\s+(?:-\S+\s+)*(\d+)m(?![\w.])/gu)) {
+            inner += Number(m[1]);
+          }
+          // A step-level timeout-minutes is an upper bound on that step and
+          // must fit inside the job cap exactly like any other declared budget.
+          const stepCap = step["timeout-minutes"];
+          if (typeof stepCap === "number") inner += stepCap;
+          // An expression-valued budget cannot be checked statically. Fail
+          // closed rather than silently treating it as zero.
+          if (/--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(run)) {
+            violations.push(
+              `${file}:${name} declares an expression-valued timeout that cannot be verified statically`,
+            );
+          }
           if (String(step.uses ?? "").includes("playwright-browsers")) usesBoundedInstall = true;
         }
         // A job using the bounded install must be checked even with no declared
