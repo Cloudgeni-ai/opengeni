@@ -10,7 +10,7 @@ import {
 } from "@opengeni/contracts";
 import { recordWorkspaceUsage, requireLimit, type ApiRouteDeps } from "@opengeni/core";
 import { completeFileUpload, getFile, prepareGeneratedWorkspaceFile } from "@opengeni/db";
-import type { ObjectHead } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { HTTPException } from "hono/http-exception";
 
 import { withChannelARead } from "./sandbox/channel-a";
@@ -146,15 +146,15 @@ export async function publishSandboxFileArtifact(
         sha256,
       };
       if (storage.putObjectIfAbsent) {
-        await storage.putObjectIfAbsent(put);
+        const created = await storage.putObjectIfAbsent(put);
+        if (!created) await assertVisibleSandboxArtifact(storage, file);
       } else {
         await storage.putObject(put);
       }
-      assertStoredSandboxArtifact(await storage.headObject(file.objectKey), file);
     }
     file = await completeFileUpload(deps.db, input.grant.workspaceId, identity.uploadId);
   } else {
-    assertStoredSandboxArtifact(await storage.headObject(file.objectKey), file);
+    await assertVisibleSandboxArtifact(storage, file);
   }
 
   await recordWorkspaceUsage(deps, {
@@ -302,6 +302,14 @@ function assertSandboxArtifactFile(
   ) {
     throw new HTTPException(409, { message: "sandbox artifact identity is unavailable" });
   }
+}
+
+async function assertVisibleSandboxArtifact(
+  storage: ObjectStorage,
+  file: NonNullable<Awaited<ReturnType<typeof getFile>>>,
+): Promise<void> {
+  const head = await retryWhileMissing(async () => await storage.headObject!(file.objectKey));
+  assertStoredSandboxArtifact(head, file);
 }
 
 function assertStoredSandboxArtifact(

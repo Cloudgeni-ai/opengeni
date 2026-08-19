@@ -15,6 +15,7 @@ import {
   type ImmutableContentAddressedWriteSession,
 } from "./bounded-object-write";
 import type { ObjectStorage } from "./index";
+import { retryWhileMissing } from "./retry-while-missing";
 
 const SNAPSHOT_KEY_PREFIX = "editable-artifacts/snapshots/sha256/";
 
@@ -169,7 +170,7 @@ function immutableWriteBackend(
             if (existing) {
               assertStoredObject(existing, byteSize, contentHash, input.contentType);
             } else {
-              await storage.putObjectStreamIfAbsent!({
+              const created = await storage.putObjectStreamIfAbsent!({
                 key: opaqueReference,
                 contentType: input.contentType,
                 chunks: fileChunks(stagingPath, byteSize, commit.signal),
@@ -177,9 +178,14 @@ function immutableWriteBackend(
                 sha256: contentHash,
                 ...(commit.signal ? { signal: commit.signal } : {}),
               });
-              const stored = await storage.headObject!(opaqueReference);
-              if (!stored) throw new Error("Immutable object was not visible after write");
-              assertStoredObject(stored, byteSize, contentHash, input.contentType);
+              if (!created) {
+                const stored = await retryWhileMissing(
+                  async () => await storage.headObject!(opaqueReference),
+                  commit.signal ? { signal: commit.signal } : {},
+                );
+                if (!stored) throw new Error("Immutable content-addressed object is missing");
+                assertStoredObject(stored, byteSize, contentHash, input.contentType);
+              }
             }
             throwIfAborted(commit.signal);
             return Object.freeze({ opaqueReference });

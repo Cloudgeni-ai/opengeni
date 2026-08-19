@@ -483,7 +483,7 @@ import {
   SandboxChannelAService,
   type ChannelASession,
 } from "@opengeni/runtime/sandbox";
-import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
+import { createObjectStorage, retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
   sandboxRunAs,
@@ -6041,7 +6041,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
         modelInputPolicy,
-        objectStorage ? async (file) => await objectStorage.getFileBytes(file) : undefined,
+        objectStorage
+          ? async (file) => {
+              const object = await retryWhileMissing(async () =>
+                objectStorage.getObjectBytes(file.objectKey),
+              );
+              if (!object) throw new Error("attachment object is missing");
+              return object.bytes;
+            }
+          : undefined,
       );
       const modelHistoryProjector = async (
         items: Array<Record<string, unknown>>,

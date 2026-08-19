@@ -34,7 +34,7 @@ import {
   type PersistedEditableArtifactMaterializationJob,
 } from "@opengeni/db/editable-artifact-durable-export";
 import { readResponseJsonBounded, undiciFetch, type FetchLike } from "@opengeni/network";
-import type { ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -463,7 +463,11 @@ export async function executeGoogleDrivePublication(
   ) {
     throw new Error("Editable artifact export file differs from its canonical receipt");
   }
-  const bytes = await input.objectStorage.getFileBytes(sourceFile);
+  const object = await retryWhileMissing(async () =>
+    input.objectStorage.getObjectBytes(sourceFile.objectKey),
+  );
+  if (!object) throw new Error("Editable artifact export object is missing");
+  const bytes = object.bytes;
   if (
     bytes.byteLength !== request.file.sizeBytes ||
     createHash("sha256").update(bytes).digest("hex") !== request.file.sha256

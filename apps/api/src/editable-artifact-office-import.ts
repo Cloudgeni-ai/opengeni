@@ -22,6 +22,7 @@ import { getFilesForSubject } from "@opengeni/db";
 import {
   MAX_BOUNDED_OBJECT_CHUNK_BYTES,
   type BoundedImmutableObjectWritePort,
+  retryWhileMissing,
   type ObjectStorage,
 } from "@opengeni/storage";
 import type { Database } from "@opengeni/db";
@@ -200,7 +201,19 @@ async function readVerifiedWorkspaceFile(
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
   throwIfAborted(signal);
-  const before = await storage.headFile(file);
+  const before = await retryWhileMissing(async () => {
+    try {
+      return await storage.headFile(file);
+    } catch (error) {
+      if (typeof storage.fileExists === "function" && !(await storage.fileExists(file))) {
+        return null;
+      }
+      throw error;
+    }
+  });
+  if (!before) {
+    throw new EditableArtifactOfficeImportError("source_changed");
+  }
   if (
     before.ContentLength !== file.sizeBytes ||
     before.ContentType !== file.contentType ||
@@ -215,14 +228,28 @@ async function readVerifiedWorkspaceFile(
   for (let start = 0; start < file.sizeBytes; start += MAX_BOUNDED_OBJECT_CHUNK_BYTES) {
     throwIfAborted(signal);
     const end = Math.min(file.sizeBytes, start + MAX_BOUNDED_OBJECT_CHUNK_BYTES) - 1;
-    const chunk = await storage.getFileRange(file, { start, end });
+    const chunk = await retryWhileMissing(async () =>
+      storage.getFileRange(file, { start, end }),
+    );
     if (!chunk || chunk.byteLength !== end - start + 1) {
       throw new EditableArtifactOfficeImportError("source_changed");
     }
     bytes.set(chunk, start);
     digest.update(chunk);
   }
-  const after = await storage.headFile(file);
+  const after = await retryWhileMissing(async () => {
+    try {
+      return await storage.headFile(file);
+    } catch (error) {
+      if (typeof storage.fileExists === "function" && !(await storage.fileExists(file))) {
+        return null;
+      }
+      throw error;
+    }
+  });
+  if (!after) {
+    throw new EditableArtifactOfficeImportError("source_changed");
+  }
   const sha256 = digest.digest("hex");
   if (
     after.ContentLength !== before.ContentLength ||

@@ -34,7 +34,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import type { ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
@@ -1624,7 +1624,9 @@ export async function indexDocumentNow(
       );
   });
   try {
-    const bytes = await objectStorage.getFileBytes(file);
+    const object = await retryWhileMissing(async () => objectStorage.getObjectBytes(file.objectKey));
+    if (!object) throw new Error("document source object is missing");
+    const bytes = object.bytes;
     const parsed = await services.parser.parse(bytes, file);
     // Knowledge drops (curationStatus 'pending') are curated between parse and
     // chunking when a provider is enabled, so chunk metadata and base placement

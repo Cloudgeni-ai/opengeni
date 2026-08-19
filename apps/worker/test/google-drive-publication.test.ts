@@ -205,6 +205,9 @@ function objectStorage(): ObjectStorage {
     async getFileBytes() {
       return sourceBytes.slice();
     },
+    async getObjectBytes() {
+      return { bytes: sourceBytes.slice() };
+    },
   } as ObjectStorage;
 }
 

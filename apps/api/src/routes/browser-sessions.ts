@@ -171,6 +171,7 @@ import {
   type PlacementBrowserTransport,
   type RestorePlacementBrowserStateInput,
 } from "@opengeni/runtime/sandbox";
+import { retryWhileMissing } from "@opengeni/storage";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -4499,9 +4500,14 @@ async function finalizeBrowserDownloadFile(
   if (upload.expiresAt.getTime() <= Date.now()) {
     throw new InteractionResourceStateError("Browser download file upload authority expired");
   }
-  const head = await objectStorage.headFile(upload.file).catch(() => {
-    throw new HTTPException(503, { message: "browser download object is not available" });
+  const pendingFile = upload.file;
+  const head = await retryWhileMissing(async () => {
+    if (!(await objectStorage.fileExists(pendingFile))) return null;
+    return await objectStorage.headFile(pendingFile);
   });
+  if (!head) {
+    throw new HTTPException(503, { message: "browser download object is not available" });
+  }
   if (
     Number(head.ContentLength ?? -1) !== upload.file.sizeBytes ||
     (head.ContentType !== undefined && head.ContentType !== upload.file.contentType) ||

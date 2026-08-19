@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FileResourceRef } from "@opengeni/contracts";
 import { completeFileUpload, prepareGeneratedWorkspaceFile, type Database } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import type { DownloadedSlackReactionImage } from "./integrations/slack-bot";
 
 const IMPORT_IDENTITY_VERSION = "slack-reaction-image-v1";
@@ -77,13 +77,15 @@ export async function importSlackReactionImage(
     if (existing) {
       assertStoredSlackImage(existing, image, sha256);
     } else if (storage.putObjectIfAbsent) {
-      await storage.putObjectIfAbsent({
+      const created = await storage.putObjectIfAbsent({
         key: objectKey,
         contentType: image.contentType,
         body: image.bytes,
         sha256,
       });
-      assertStoredSlackImage(await storage.headObject(objectKey), image, sha256);
+      if (!created) {
+        await assertVisibleSlackImage(storage, objectKey, image, sha256);
+      }
     } else {
       await storage.putObject({
         key: objectKey,
@@ -91,7 +93,6 @@ export async function importSlackReactionImage(
         body: image.bytes,
         sha256,
       });
-      assertStoredSlackImage(await storage.headObject(objectKey), image, sha256);
     }
     file = await (dependencies.completeFile ?? completeFileUpload)(
       dependencies.db,
@@ -99,7 +100,7 @@ export async function importSlackReactionImage(
       uploadId,
     );
   } else {
-    assertStoredSlackImage(await storage.headObject(objectKey), image, sha256);
+    await assertVisibleSlackImage(storage, objectKey, image, sha256);
   }
 
   if (
@@ -151,6 +152,16 @@ export function safeSlackImageFilename(
   const withoutKnownExtension = normalized.replace(/\.(?:png|jpe?g|webp)$/iu, "");
   const stem = withoutKnownExtension.replace(/^[. -]+|[. ]+$/gu, "").slice(0, 180) || "slack-image";
   return `${stem}${extension}`;
+}
+
+async function assertVisibleSlackImage(
+  storage: ObjectStorage,
+  objectKey: string,
+  image: DownloadedSlackReactionImage,
+  sha256: string,
+): Promise<void> {
+  const head = await retryWhileMissing(async () => await storage.headObject!(objectKey));
+  assertStoredSlackImage(head, image, sha256);
 }
 
 function assertStoredSlackImage(

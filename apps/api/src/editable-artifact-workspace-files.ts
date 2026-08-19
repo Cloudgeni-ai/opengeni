@@ -5,7 +5,7 @@ import {
   type EditableArtifactDurableExportService,
 } from "@opengeni/core/editable-artifacts";
 import { completeFileUpload, prepareGeneratedWorkspaceFile, type Database } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -81,7 +81,7 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
         if (existing) {
           assertStoredExport(existing, download.byteSize, download.mimeType, sha256);
         } else {
-          await storage.putObjectStreamIfAbsent({
+          const created = await storage.putObjectStreamIfAbsent({
             key: objectKey,
             contentType: download.mimeType,
             chunks: download.chunks(input.signal ? { signal: input.signal } : {}),
@@ -89,18 +89,28 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
             sha256,
             ...(input.signal ? { signal: input.signal } : {}),
           });
-          const stored = await storage.headObject(objectKey);
-          assertStoredExport(stored, download.byteSize, download.mimeType, sha256);
+          if (!created) {
+            await assertVisibleExport(
+              storage,
+              objectKey,
+              download.byteSize,
+              download.mimeType,
+              sha256,
+              input.signal,
+            );
+          }
         }
         await download.assertUnchanged(input.signal);
         throwIfAborted(input.signal);
         file = await this.completeFile(this.dependencies.db, input.scope.workspaceId, uploadId);
       } else {
-        assertStoredExport(
-          await storage.headObject(objectKey),
+        await assertVisibleExport(
+          storage,
+          objectKey,
           download.byteSize,
           download.mimeType,
           sha256,
+          input.signal,
         );
         await download.assertUnchanged(input.signal);
       }
@@ -131,6 +141,21 @@ export class EditableArtifactWorkspaceFileAdapter implements EditableArtifactAge
       await download.close();
     }
   }
+}
+
+async function assertVisibleExport(
+  storage: ObjectStorage,
+  objectKey: string,
+  byteSize: number,
+  contentType: string,
+  sha256: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const head = await retryWhileMissing(
+    async () => await storage.headObject!(objectKey),
+    signal ? { signal } : {},
+  );
+  assertStoredExport(head, byteSize, contentType, sha256);
 }
 
 function assertStoredExport(

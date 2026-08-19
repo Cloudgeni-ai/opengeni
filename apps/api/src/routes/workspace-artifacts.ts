@@ -11,6 +11,7 @@ import {
   normalizeWorkspaceArtifactSlug,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import {
   createWorkspaceArtifact,
   getWorkspaceArtifact,
@@ -197,7 +198,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         artifactId(context),
         parsedVersion,
       );
-      const object = await deps.objectStorage.getObjectBytes(ref.contentKey);
+      const object = await retryWhileMissing(async () =>
+        deps.objectStorage!.getObjectBytes(ref.contentKey),
+      );
       if (!object) throw new HTTPException(503, { message: "Artifact content is unavailable" });
       const actualHash = createHash("sha256").update(object.bytes).digest("hex");
       if (actualHash !== ref.version.contentSha256) {
