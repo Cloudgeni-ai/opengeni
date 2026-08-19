@@ -215,6 +215,49 @@ async function backfill(
   })) as unknown as BackfillReport;
 }
 
+// The three tenancy-backfill-ledger signatures migration 0297's own
+// `opengeni_private.tenancy_backfill_ledger_available()` resolves through
+// `to_regprocedure`. Kept byte-identical to that guard on purpose, but resolved
+// here directly rather than by calling it, so the probe below is an independent
+// witness of the ledger's presence instead of a tautology over the seam.
+const LEDGER_OPEN_SIGNATURE = "open_tenancy_backfill_receipt(uuid, text, text)";
+const LEDGER_UNRESOLVED_SIGNATURE = "record_tenancy_backfill_unresolved(uuid, uuid, text)";
+const LEDGER_COMPLETE_SIGNATURE = "complete_tenancy_backfill_receipt(uuid, bigint, bigint, text)";
+
+type LedgerRoutineDefinitions = { open: string; unresolved: string; complete: string };
+
+/**
+ * Detect whether THIS checkout carries the real ledger, which lives in its own
+ * migration (0300) that 0297 is deliberately order-independent with respect to.
+ *
+ * Returns the routines' current definitions when it is installed - so the
+ * contract-stub half of the ledger test, which necessarily replaces them in
+ * place, can put the originals back byte-for-byte - or `null` when it is not.
+ * A partial install is neither world and throws rather than being papered over.
+ */
+async function realLedgerDefinitions(): Promise<LedgerRoutineDefinitions | null> {
+  const [resolved] = await admin<
+    { open: string | null; unresolved: string | null; complete: string | null }[]
+  >`
+    select to_regprocedure(${LEDGER_OPEN_SIGNATURE})::text as open,
+           to_regprocedure(${LEDGER_UNRESOLVED_SIGNATURE})::text as unresolved,
+           to_regprocedure(${LEDGER_COMPLETE_SIGNATURE})::text as complete
+  `;
+  const oids = [resolved!.open, resolved!.unresolved, resolved!.complete];
+  if (oids.every((entry) => entry === null)) {
+    return null;
+  }
+  if (oids.some((entry) => entry === null)) {
+    throw new Error(`partially installed tenancy backfill ledger: ${JSON.stringify(resolved)}`);
+  }
+  const [definitions] = await admin<LedgerRoutineDefinitions[]>`
+    select pg_get_functiondef(to_regprocedure(${LEDGER_OPEN_SIGNATURE})) as open,
+           pg_get_functiondef(to_regprocedure(${LEDGER_UNRESOLVED_SIGNATURE})) as unresolved,
+           pg_get_functiondef(to_regprocedure(${LEDGER_COMPLETE_SIGNATURE})) as complete
+  `;
+  return definitions!;
+}
+
 describe("migration 0297 session ownership", () => {
   test("measured population: which shapes migration 0225 actually attributes", async () => {
     if (!shared) return;
@@ -529,18 +572,85 @@ describe("migration 0297 session ownership", () => {
 
   test("the ledger is optional and its calls are exact when present", async () => {
     if (!shared) return;
+    // The ledger lives in its own migration (0300), which this checkout may or
+    // may not carry - both are legitimate, and the seam has a distinct honest
+    // contract in each. So DETECT which world this is instead of assuming one:
+    // hard-coding "the ledger is unmerged" is exactly the assumption that goes
+    // false the moment the ledger migration lands.
+    const installedLedger = await realLedgerDefinitions();
     const fixture = await seedOrganization("ledger");
-    await insertSession(fixture, fixture.sharedWorkspaceId, {});
+    const session = await insertSession(fixture, fixture.sharedWorkspaceId, {});
 
-    // The ledger lives in its own (unmerged) migration. Without it the seam
-    // must report `ledgerAvailable: false` and still answer.
-    const withoutLedger = await classify(fixture.organizationId, "run-1");
-    expect(withoutLedger.ledgerAvailable).toBe(false);
-    expect(withoutLedger.sessions.unresolved).toBe(1);
+    const firstRun = await classify(fixture.organizationId, "run-1");
+    expect(firstRun.ledgerAvailable).toBe(installedLedger !== null);
+    // The ANSWER is ledger-independent either way: the seam still classifies,
+    // and still refuses to attribute the one unattributable row.
+    expect(firstRun.sessions.unresolved).toBe(1);
+    expect(firstRun.sessions.unresolvedRows).toEqual([
+      { sessionId: session.id, reasonCode: "legacy_shape_unrecognized" },
+    ]);
+
+    if (installedLedger === null) {
+      // Degraded honestly: no ledger, so no receipt - and the seam must not
+      // invent one rather than report the absence.
+      expect(firstRun.sessions.receiptId).toBeUndefined();
+    } else {
+      // The real ledger is present, so the run must be recorded exactly: one
+      // settled `sessions` receipt under this run key whose counts match the
+      // summary, plus one append-only unresolved row naming the exact session
+      // and its fixed reason code.
+      const receipts = await admin<
+        {
+          id: string;
+          account_id: string;
+          resource_family: string;
+          run_key: string;
+          status: string;
+          classified_count: number;
+          skipped_count: number;
+          unresolved_count: number;
+        }[]
+      >`
+          select id::text as id, account_id::text as account_id, resource_family,
+                 run_key, status, classified_count::int as classified_count,
+                 skipped_count::int as skipped_count,
+                 unresolved_count::int as unresolved_count
+          from tenancy_backfill_receipts
+          where account_id = ${fixture.organizationId}::uuid
+        `;
+      expect(receipts).toHaveLength(1);
+      const receipt = receipts[0]!;
+      expect(firstRun.sessions.receiptId).toBe(receipt.id);
+      expect(receipt.resource_family).toBe("sessions");
+      expect(receipt.run_key).toBe("run-1");
+      expect(receipt.status).toBe("completed");
+      expect(receipt.classified_count).toBe(firstRun.sessions.ownerAttributed);
+      expect(receipt.skipped_count).toBe(
+        firstRun.sessions.repairablePersonalWorkspace +
+          firstRun.sessions.repairableParentInheritance,
+      );
+      expect(receipt.unresolved_count).toBe(firstRun.sessions.unresolved);
+      const unresolvedRows = await admin<
+        { resource_family: string; resource_id: string; reason_code: string }[]
+      >`
+          select resource_family, resource_id::text as resource_id, reason_code
+          from tenancy_backfill_unresolved_rows
+          where receipt_id = ${receipt.id}::uuid
+        `;
+      expect(unresolvedRows).toHaveLength(1);
+      expect(unresolvedRows[0]!.resource_family).toBe("sessions");
+      expect(unresolvedRows[0]!.resource_id).toBe(session.id);
+      expect(unresolvedRows[0]!.reason_code).toBe("legacy_shape_unrecognized");
+    }
 
     // Contract stubs with the ledger's exact signatures prove the seam calls
     // it correctly and that `to_regprocedure` flips `ledgerAvailable`. These
     // are stand-ins for the real ledger, not a copy of its tables.
+    //
+    // Same names, same argument types/names, same schema, so when the real
+    // ledger IS installed these REPLACE it in place for the duration of the
+    // block. That is why `installedLedger` captured the originals: the cleanup
+    // below must restore them, never drop them.
     await admin.unsafe(`
         create table if not exists ledger_probe_calls (
           call_order bigserial primary key,
@@ -583,13 +693,27 @@ describe("migration 0297 session ownership", () => {
       expect(calls[1]!.detail.endsWith("/legacy_shape_unrecognized")).toBe(true);
       expect(calls[2]!.detail).toBe("0/0/completed");
     } finally {
-      await admin.unsafe(`
-          drop function if exists open_tenancy_backfill_receipt(uuid, text, text);
-          drop function if exists record_tenancy_backfill_unresolved(uuid, uuid, text);
-          drop function if exists complete_tenancy_backfill_receipt(uuid, bigint, bigint, text);
-          drop table if exists ledger_probe_calls;
-        `);
+      if (installedLedger === null) {
+        await admin.unsafe(`
+            drop function if exists open_tenancy_backfill_receipt(uuid, text, text);
+            drop function if exists record_tenancy_backfill_unresolved(uuid, uuid, text);
+            drop function if exists complete_tenancy_backfill_receipt(uuid, bigint, bigint, text);
+          `);
+      } else {
+        // Dropping here would delete the REAL ledger from this file's database
+        // and corrupt every later reader of it. The stubs replaced the real
+        // routines in place, so put the exact prior definitions back.
+        await admin.unsafe(
+          `${installedLedger.open};\n${installedLedger.unresolved};\n${installedLedger.complete};`,
+        );
+      }
+      await admin.unsafe(`drop table if exists ledger_probe_calls;`);
     }
+
+    // Whichever world this is, the database must be left in it - and when the
+    // real ledger was replaced in place, restored byte-for-byte rather than
+    // left as a stub for every later reader in this file's database.
+    expect(await realLedgerDefinitions()).toEqual(installedLedger);
   }, 300_000);
 
   test("attributes a non-zero count under a NOSUPERUSER NOBYPASSRLS owner", async () => {
