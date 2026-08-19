@@ -989,6 +989,20 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("releases/download/agent-latest");
   });
 
+  test("linux agent release embeds a glibc browserd sidecar", async () => {
+    const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
+    expect(agentRelease).toContain("bun_target=bun-linux-x64;");
+    expect(agentRelease).toContain("bun_target=bun-linux-arm64;");
+    expect(agentRelease).toContain("OPENGENI_BROWSERD_TARGET_MUSL=false");
+    expect(agentRelease).toContain("linux browserd must use the glibc dynamic linker");
+    expect(agentRelease).not.toContain("bun-linux-x64-musl");
+    expect(agentRelease).not.toContain("bun-linux-arm64-musl");
+    expect(agentRelease).not.toContain("OPENGENI_BROWSERD_TARGET_MUSL=true");
+    expect(agentRelease).not.toContain("Build interaction helpers (Linux musl)");
+  });
+
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
