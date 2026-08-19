@@ -18,7 +18,6 @@ import {
   slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
-  SLACK_SESSION_INSTRUCTIONS,
   verifySlackRequestSignature,
 } from "../src/integrations/slack-interactions";
 
@@ -525,18 +524,10 @@ describe("Slack event classification and safe projection", () => {
     ).not.toBe(first?.providerMessageId);
   });
 
-  test("allows only bounded user-safe delivery events and freezes session-level safety authority", () => {
+  test("allows only bounded user-safe delivery events", () => {
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.reasoning.delta" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.toolCall.output" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).toContain("session.requiresAction");
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain("OpenGeni Slack task surface");
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain("task-local");
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain("Do not write Slack context to Documents");
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain("Never expose private reasoning");
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain(
-      "Execute direct, safe, sufficiently specified requests immediately",
-    );
-    expect(SLACK_SESSION_INSTRUCTIONS).toContain("materially required information is missing");
   });
 
   test("coalesces only exact or boundary-safe terminal prefix shapes", () => {

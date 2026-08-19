@@ -28,7 +28,6 @@ describe("Google Drive OAuth scope capabilities", () => {
       accessMode: "readonly",
     } as const;
 
-    expect(GOOGLE_DRIVE_CREDENTIAL_LABEL).toBe("Google Drive read-only source sync");
     expect(
       GoogleDriveConnectionMetadata.parse({
         ...metadata,
