@@ -185,6 +185,44 @@ UPDATE "widgets" SET "origin_workspace_id" = "workspace_id";
     });
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
   });
+
+  test("a DO block that only defines a trigger function is not a migration-time write", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_define.sql": `
+DO $session_visibility_cache_stripping$
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I.strip_private_session_list_snapshots()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $body$
+    BEGIN
+      UPDATE widgets SET id = id;
+      RETURN NULL;
+    END;
+    $body$;
+  $ddl$, current_schema());
+END
+$session_visibility_cache_stripping$;
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
+  });
+
+  test("a DO block that executes DML still counts as a write", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_backfill.sql": `
+DO $backfill$
+BEGIN
+  UPDATE widgets SET id = id;
+END
+$backfill$;
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(1);
+  });
 });
 
 describe("the shipped migration ledger", () => {
