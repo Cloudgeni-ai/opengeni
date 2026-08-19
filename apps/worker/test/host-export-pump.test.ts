@@ -56,6 +56,8 @@ async function fixture(label: string) {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     createdBy: { kind: "subject", subjectId },
   });

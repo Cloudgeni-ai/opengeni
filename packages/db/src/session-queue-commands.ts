@@ -122,6 +122,8 @@ export type SubmitHumanPromptResult = {
   accepted: SessionEvent;
   events: SessionEvent[];
   turn: SessionTurn;
+  /** Current actor/session composer after an exact draft-bound submission. */
+  draft: ComposerDraftRow | null;
   /** Backward-compatible row identities for lower-level callers. */
   acceptedEventId: string;
   eventIds: string[];
@@ -171,7 +173,7 @@ function mapSubmittedPromptTurn(row: typeof schema.sessionTurns.$inferSelect): S
     toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
-    latencyMode: (row.latencyMode as LatencyMode | null | undefined) ?? "standard",
+    latencyMode: row.latencyMode as LatencyMode,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: (row.sandboxOs as SandboxOs | null) ?? null,
     metadata: row.metadata,
@@ -702,7 +704,7 @@ export async function saveComposerDraftInTransaction(
     resources: ResourceRef[];
     model: string;
     reasoningEffort: ReasoningEffort;
-    latencyMode?: LatencyMode;
+    latencyMode: LatencyMode;
   },
 ): Promise<ComposerDraftRow> {
   await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
@@ -736,7 +738,7 @@ export async function saveComposerDraftInTransaction(
     toolsProvided: false,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode ?? "standard",
+    latencyMode: input.latencyMode,
     // A queue edit is still the same accepted work item. Preserve its frozen
     // initiator through arbitrary draft saves; only a genuinely new compose or
     // Steer captures the submitting actor.
@@ -1570,12 +1572,21 @@ export async function submitHumanPromptInTransaction(
     if (!accepted || !replayTurn || events.length !== eventIds.length) {
       throw new SessionControlInvariantError("Replayed prompt rows are incomplete");
     }
+    const replayDraft =
+      input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
+        ? null
+        : await getComposerDraftInTransaction(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            subjectId: input.subjectId,
+          });
     return {
       receipt: reserved.receipt,
       queueVersion: Number(reserved.receipt.appliedQueueVersion),
       accepted,
       events,
       turn: mapSubmittedPromptTurn(replayTurn),
+      draft: replayDraft,
       acceptedEventId,
       eventIds,
       turnId,
@@ -2051,8 +2062,25 @@ export async function submitHumanPromptInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.sessionId));
-  if (draft) {
-    await db.delete(schema.composerDrafts).where(eq(schema.composerDrafts.id, draft.id));
+  const [nextDraft] = draft
+    ? await db
+        .update(schema.composerDrafts)
+        .set({
+          revision: draft.revision + 1,
+          text: "",
+          annotations: [],
+          resources: [],
+          tools: [],
+          toolsProvided: false,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: now,
+        })
+        .where(eq(schema.composerDrafts.id, draft.id))
+        .returning()
+    : [undefined];
+  if (draft && !nextDraft) {
+    throw new SessionControlInvariantError("Accepted composer draft did not rotate");
   }
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
@@ -2113,7 +2141,7 @@ export async function submitHumanPromptInTransaction(
     controlRevision: resumed.revision,
     queueVersion,
     turnVersion: turn.version,
-    ...(draft ? { draftRevision: draft.revision } : {}),
+    ...(nextDraft ? { draftRevision: nextDraft.revision } : {}),
     result: {
       turnId,
       acceptedEventId,
@@ -2140,6 +2168,7 @@ export async function submitHumanPromptInTransaction(
     accepted,
     events,
     turn: mapSubmittedPromptTurn(committedTurn),
+    draft: nextDraft ?? null,
     acceptedEventId,
     eventIds,
     turnId,

@@ -34,6 +34,7 @@ export type SessionClientLike = Pick<
   | "deleteQueueItem"
   | "getComposerDraft"
   | "saveComposerDraft"
+  | "submitComposerDraft"
   | "listTurns"
   // Goal
   | "getGoal"
@@ -205,6 +206,7 @@ export type EmbeddedSessionClientLike = Pick<
   | "streamEvents"
   | "getComposerDraft"
   | "saveComposerDraft"
+  | "submitComposerDraft"
   | "sendMessage"
   | "steerMessage"
   | "getQueue"

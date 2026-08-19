@@ -1,13 +1,10 @@
 import type { MemorySlackPublicationDistribution } from "@opengeni/contracts";
 import {
-  correctWorkspaceMemory,
   enqueueMemorySlackPublication,
   getCurrentMemorySlackPublicationConfiguration,
   getWorkspaceMemorySlackPublicationSnapshot,
   saveWorkspaceMemory,
   withWorkspaceRls,
-  type CorrectWorkspaceMemoryInput,
-  type CorrectWorkspaceMemoryResult,
   type Database,
   type EnqueueMemorySlackPublicationResult,
   type MemoryEmbedder,
@@ -45,33 +42,6 @@ export async function saveWorkspaceMemoryWithSlackPublication(
     const slackPublication = publication
       ? await publishSavedMemoryMutation(scopedDb, input, result, publication)
       : { decision: null, enqueue: null };
-    return { ...result, slackPublication };
-  });
-}
-
-export async function correctWorkspaceMemoryWithSlackPublication(
-  db: Database,
-  input: CorrectWorkspaceMemoryInput,
-  publication: MemorySlackPublicationCommitRequest | null,
-  embedder?: MemoryEmbedder,
-): Promise<
-  CorrectWorkspaceMemoryResult & { slackPublication: MemorySlackPublicationCommitResult }
-> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const result = await correctWorkspaceMemory(scopedDb, input, embedder);
-    if (!publication || result.action !== "superseded" || !result.replacement) {
-      return { ...result, slackPublication: { decision: null, enqueue: null } };
-    }
-    const replacement = await requiredSnapshot(scopedDb, input.workspaceId, result.replacement.id);
-    const slackPublication = await evaluateAndEnqueue(scopedDb, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      snapshot: replacement,
-      changeKind: "corrected",
-      relatedMemoryId: result.memory.id,
-      occurredAt: result.replacement.updatedAt,
-      publication,
-    });
     return { ...result, slackPublication };
   });
 }

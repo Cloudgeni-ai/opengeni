@@ -498,6 +498,8 @@ async function freezeScenario(
       seedTitle: scenario.title,
     },
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     createdBy: { kind: "subject", subjectId: identity.subjectId, label: "Human input gallery" },
   });

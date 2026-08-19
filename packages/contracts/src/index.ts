@@ -985,10 +985,15 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
+// Names kept so previously written data still parses - immutable scheduled-task
+// execution snapshots recorded the tool set that was default at the time, and
+// they are strictly re-parsed on replay. Retiring a tool must not strand an
+// accepted occurrence. These are never registered, never default, and never
+// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
-  // Memory V1 write: registered only under the legacy_standing rollback mode.
   "memory_save",
+  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1021,10 +1026,10 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
-    // Memory V1 writes are retired from the default surface; `remember` and
-    // task-note promotion own durable agent writes. Explicit selection under
-    // the legacy_standing rollback mode still registers memory_save.
+    // Memory V1 writes are retired entirely; `remember` and task-note
+    // promotion own durable agent writes.
     name !== "memory_save" &&
+    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -1808,13 +1813,30 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+// Memory V1's standing prompt block is retired, but the enum deliberately still
+// ACCEPTS `legacy_standing`. `.passthrough()` only preserves unknown keys - it
+// does not rescue a known key holding a value the enum rejects - so collapsing
+// this to one value would fail the whole settings parse for any workspace that
+// opted in. Every resolver here is "parse the bag, fall back on failure", so
+// that single rejection would silently revert memoryEnabled,
+// agentHumanInputEnabled, codexCompactionDefault, voiceInput and Slack summon
+// to their defaults. The value is accepted and then ignored: see
+// resolveWorkspaceMemoryPromptMode.
 export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
 export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
 
+/**
+ * What an already-accepted turn recorded. Snapshots and receipts are immutable,
+ * so turns accepted before the standing block was retired still read back
+ * `legacy_standing`. That is a fact about history, not a mode anyone can pick -
+ * keep the two apart so retiring the setting never rewrites the record.
+ */
+export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off and the
-// Memory V1 prompt mode defaults to retrieval-only composition
-// (`legacy_standing` remains an explicit per-workspace opt-out);
+// Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
@@ -1850,14 +1872,14 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 }
 
 /**
- * Memory V1 prompt mode. Absent or unrecognized resolves to `retrieval_only`
- * (the default); only an explicit `legacy_standing` restores the
- * old standing pinned/recency block. Migration 0271 applies the same fallback
- * at turn acceptance, so this resolver and the frozen SQL snapshot agree.
+ * Memory V1 prompt mode. Always `retrieval_only`: the standing pinned/recency
+ * block is retired, so an absent, unrecognized, or stored-`legacy_standing`
+ * setting all resolve the same way. Kept as a function so the call sites and
+ * the frozen SQL snapshot keep agreeing without each one having to learn that
+ * the choice is gone.
  */
-export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? (parsed.data.memoryPromptMode ?? "retrieval_only") : "retrieval_only";
+export function resolveWorkspaceMemoryPromptMode(): "retrieval_only" {
+  return "retrieval_only";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
@@ -6042,7 +6064,7 @@ export const SessionTurn = z
     toolsProvided: z.boolean().optional(),
     model: z.string().min(1),
     reasoningEffort: ReasoningEffort,
-    latencyMode: LatencyMode.default("standard"),
+    latencyMode: LatencyMode,
     sandboxBackend: SandboxBackend,
     // Per-turn OS override. NULL = inherit the session's sandboxOs.
     sandboxOs: SandboxOs.nullable(),
@@ -6143,7 +6165,7 @@ export const ComposerDraft = z.object({
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   sourceTurnId: z.string().uuid().nullable(),
   sourceTurnVersion: z.number().int().positive().nullable(),
   updatedAt: z.string().nullable(),
@@ -6190,6 +6212,29 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 /**
+ * Submit one exact established-session draft. Content is repeated only as an
+ * integrity fence for outcome-unknown idempotent replay; the matching durable
+ * draft revision remains authoritative and is atomically rotated on acceptance.
+ */
+export const SubmitComposerDraftRequest = ComposerDraft.pick({
+  text: true,
+  annotations: true,
+  resources: true,
+  model: true,
+  reasoningEffort: true,
+  latencyMode: true,
+}).extend({
+  expectedDraftRevision: z.number().int().positive(),
+  clientEventId: SessionOperationKey,
+  delivery: z.enum(["send", "steer"]),
+  controlEtag: z.string().min(1).optional(),
+  modelContext: z.string().trim().min(1).max(32768).optional(),
+  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+});
+export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
+
+/**
  * Create-only options saved with an actor's private pre-session draft. This is
  * deliberately narrower than CreateSessionRequest: idempotency/event keys and
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
@@ -6216,7 +6261,7 @@ export const NewSessionDraft = z.object({
   toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
+  latencyMode: LatencyMode,
   options: NewSessionDraftOptions,
   updatedAt: z.string().nullable(),
 });
@@ -9799,6 +9844,8 @@ export const Session = z.object({
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
   model: z.string(),
+  reasoningEffort: ReasoningEffort,
+  latencyMode: LatencyMode,
   sandboxBackend: SandboxBackend,
   // The OS the session's box runs. Defaults to 'linux' (today's only OS).
   sandboxOs: SandboxOs,
@@ -12606,6 +12653,15 @@ export const SteerSessionMessageResponse = z.object({
   turn: SessionTurn,
 });
 export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
+
+export const SubmitComposerDraftResponse = z.object({
+  accepted: SessionEvent,
+  turn: SessionTurn,
+  draft: ComposerDraft,
+  interruptionCount: z.number().int().nonnegative(),
+  replay: z.boolean(),
+});
+export type SubmitComposerDraftResponse = z.infer<typeof SubmitComposerDraftResponse>;
 
 export const SessionBusMessage = z.object({
   workspaceId: z.string().uuid(),

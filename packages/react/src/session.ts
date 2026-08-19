@@ -38,7 +38,13 @@ export {
   shouldSubmitOnKey,
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
-export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export type {
+  ComposerControllerState,
+  ComposerPolicy,
+  ComposerSendExtras,
+  ComposerState,
+  UseComposerOptions,
+} from "./hooks/use-composer";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,

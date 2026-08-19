@@ -521,6 +521,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
         resources: [],
         metadata: {},
         model: "gpt",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
       });
     const point = async (sessionId: string, sandboxId: string) =>
@@ -640,6 +642,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     expect(session.activeSandboxId).toBeNull();
@@ -728,6 +732,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     const target = await createSandbox(db, {

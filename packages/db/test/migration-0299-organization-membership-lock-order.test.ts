@@ -150,6 +150,8 @@ async function createOwnedSession(input: {
     initialMessage: "lock order probe",
     resources: [],
     metadata: {},
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     createdBy: { kind: "subject", subjectId: input.ownerSubject },
     subjectId: input.ownerSubject,
     model: "test-model",

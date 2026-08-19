@@ -165,6 +165,8 @@ async function prepareClaimableScreenshot(
     resources: [],
     metadata: {},
     model: "dedicated-schema-test",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(targetDb, {
@@ -1186,6 +1188,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         resources: [],
         metadata: {},
         model: "dedicated-schema-test",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         createdBy: { kind: "subject", subjectId },
         createdByContext: {},

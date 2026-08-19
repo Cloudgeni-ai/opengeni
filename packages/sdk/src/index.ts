@@ -703,6 +703,8 @@ export type {
   NewSessionDraft,
   NewSessionDraftOptions,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
+  SubmitComposerDraftResponse,
   SaveNewSessionDraftRequest,
   SessionCommandReceipt,
   SteerSessionQueueItemRequest,

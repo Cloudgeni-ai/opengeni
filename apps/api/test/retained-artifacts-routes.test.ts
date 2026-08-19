@@ -202,6 +202,8 @@ async function createScreenshotArtifact(
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(client.db, {
@@ -269,6 +271,8 @@ async function createGeneratedImageArtifact(
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(client.db, {
@@ -345,6 +349,8 @@ async function createGeneratedVideoArtifact(
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(client.db, {

@@ -45,6 +45,8 @@ async function fixture() {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: ownerSubjectId },
       createdByContext: {},
