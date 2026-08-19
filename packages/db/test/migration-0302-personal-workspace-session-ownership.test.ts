@@ -264,6 +264,65 @@ describe("migration 0302 personal-workspace session ownership", () => {
     expect(await ownerOf(session.id)).toEqual({ membershipId: null, subjectId: null });
   });
 
+  test("does not raise when the personal workspace's own member is no longer active", async () => {
+    if (!shared || !client) return;
+    // The classifier's short-circuit on `creator_has_active_membership` covers
+    // the case where the SUSPENDED human is the creator (above). It can never
+    // reach the `personal_owner.status = 'active'` predicate, because that
+    // creator has no active membership at all. Reaching it needs TWO distinct
+    // memberships: an ACTIVE creator, and a NON-ACTIVE member whose
+    // `personal_workspace_id` names the target workspace.
+    //
+    // That state is what 0263's real `suspend` action produces: it sets
+    // `status = 'suspended'` and deliberately RETAINS `personal_workspace_id`
+    // (only the offboard retention purge nulls the pointer), and 0218's
+    // `organization_memberships_active_personal_workspace_check` is one-way -
+    // it requires the pointer while ACTIVE and says nothing afterwards, so a
+    // non-active membership legitimately keeps naming its personal workspace.
+    const suspendedOwner = await provisionManagedHuman("pw-suspended-owner");
+    await shared.admin`
+      update organization_memberships set status = 'suspended', revoked_at = null
+      where account_id = ${suspendedOwner.accountId}
+        and subject_id = ${suspendedOwner.subjectId}
+    `;
+    // The pointer survives suspension - otherwise this fixture would not even
+    // describe the state the predicate guards.
+    const [pointer] = await shared.admin<Array<{ personalWorkspaceId: string | null }>>`
+      select personal_workspace_id as "personalWorkspaceId"
+      from organization_memberships
+      where account_id = ${suspendedOwner.accountId}
+        and subject_id = ${suspendedOwner.subjectId}
+    `;
+    expect(pointer?.personalWorkspaceId).toBe(suspendedOwner.personalWorkspaceId);
+
+    const activeSubjectId = `user:pw-suspended-other-${crypto.randomUUID()}`;
+    const activePersonalWorkspaceId = await createOrdinaryWorkspace(
+      suspendedOwner.accountId,
+      "suspended-owner-peer-personal",
+    );
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id
+      ) values (
+        ${suspendedOwner.accountId}, ${activeSubjectId}, 'active',
+        ${activePersonalWorkspaceId}
+      )
+    `;
+
+    // Same insert shape as the loud case below, differing ONLY in the personal
+    // workspace member's status. 0302's header states the rule: a suspended or
+    // revoked member "is excluded from both the resolver and the classifier by
+    // the same `status = 'active'` predicate, so their personal-workspace
+    // sessions stay ownerless without raising, exactly as before". Drop that
+    // predicate from the classifier and this insert raises 55000 instead.
+    const session = await newSession({
+      accountId: suspendedOwner.accountId,
+      workspaceId: suspendedOwner.personalWorkspaceId,
+      createdBy: { kind: "subject", subjectId: activeSubjectId },
+    });
+    expect(await ownerOf(session.id)).toEqual({ membershipId: null, subjectId: null });
+  });
+
   test("raises 55000 instead of silently writing NULL for an unresolved personal workspace", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman("pw-loud-owner");
