@@ -31,11 +31,11 @@ import {
   XAI_CLIENT_VERSION,
   XaiSubscriptionError,
   fetchXaiSubscriptionModels,
-  fetchXaiVerifiedIdentity,
   pollXaiDeviceCode,
   refreshXaiToken,
   requestXaiDeviceCode,
   xaiAccessTokenExpiry,
+  xaiIdentityFromDeviceTokens,
   type XaiFetch,
   type XaiProxyAuthContext,
 } from "@opengeni/xai-subscription";
@@ -392,6 +392,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (Math.floor(Date.now() / 1_000) >= state.expiresAt) {
       return c.json({ status: "expired" as const });
     }
+    let phase = "device_token_exchange";
     try {
       const poll = await pollXaiDeviceCode(
         {
@@ -401,9 +402,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         { fetch: (deps.xaiFetch ?? fetch) as XaiFetch },
       );
       if (poll.status !== "authorized") return c.json(poll);
-      const identity = await fetchXaiVerifiedIdentity(poll.tokens.accessToken, {
-        fetch: (deps.xaiFetch ?? fetch) as XaiFetch,
-      });
+      phase = "token_identity";
+      const identity = xaiIdentityFromDeviceTokens(poll.tokens);
+      phase = "credential_persist";
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
       if (!encryptionKey) {
         throw new HTTPException(500, {
@@ -458,6 +459,24 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         email: identity.email,
       });
     } catch (error) {
+      deps.observability?.warn("SuperGrok connection operation failed", {
+        provider: "xai",
+        providerApi: "oauth",
+        op: phase,
+        outcome: "failed",
+        reason:
+          error instanceof XaiSubscriptionError
+            ? error.kind
+            : error instanceof HTTPException
+              ? "http_exception"
+              : "unexpected",
+        status:
+          error instanceof XaiSubscriptionError
+            ? error.status
+            : error instanceof HTTPException
+              ? error.status
+              : undefined,
+      });
       throw xaiHttpError(error, "SuperGrok device login failed");
     }
   });
