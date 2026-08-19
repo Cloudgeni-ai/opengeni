@@ -45,6 +45,71 @@ export class XaiSubscriptionHostedToolContinuationError extends XaiSubscriptionE
   }
 }
 
+export class XaiSubscriptionStreamingTerminalError extends XaiSubscriptionError {
+  readonly code: string;
+  readonly eventType: string;
+  readonly requestId: string | null;
+  readonly diagnosticTruncated: boolean;
+  readonly headers: Headers;
+
+  constructor(input: {
+    message: string;
+    code: string;
+    eventType: string;
+    requestId?: string | null;
+    status?: number;
+    diagnosticTruncated?: boolean;
+    headers?: Headers;
+  }) {
+    super("provider_rejected", input.message, input.status);
+    this.name = "XaiSubscriptionStreamingTerminalError";
+    this.code = input.code;
+    this.eventType = input.eventType;
+    this.requestId = input.requestId ?? null;
+    this.diagnosticTruncated = input.diagnosticTruncated === true;
+    this.headers = input.headers ?? new Headers();
+  }
+}
+
+export type XaiSubscriptionStreamingTerminalInfo = {
+  message: string;
+  code: string;
+  eventType: string;
+  requestId: string | null;
+  status?: number;
+  diagnosticTruncated: boolean;
+};
+
+export function classifyXaiSubscriptionStreamingTerminalError(
+  error: unknown,
+): XaiSubscriptionStreamingTerminalInfo | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    if (
+      current instanceof XaiSubscriptionStreamingTerminalError ||
+      value.name === "XaiSubscriptionStreamingTerminalError"
+    ) {
+      const code = typeof value.code === "string" && value.code.length > 0 ? value.code : null;
+      const eventType =
+        typeof value.eventType === "string" && value.eventType.length > 0 ? value.eventType : null;
+      const message = typeof value.message === "string" ? value.message : "";
+      if (!code || !eventType || message.length === 0) return null;
+      const status = Number(value.status);
+      return {
+        message,
+        code,
+        eventType,
+        requestId: typeof value.requestId === "string" ? value.requestId : null,
+        ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}),
+        diagnosticTruncated: value.diagnosticTruncated === true,
+      };
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
 export class XaiSubscriptionStreamIdleTimeoutError extends XaiSubscriptionError {
   readonly code = "xai_response_stream_idle_timeout";
 
