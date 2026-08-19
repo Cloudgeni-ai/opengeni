@@ -99,7 +99,12 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   capability-fenced direct-write trigger, and visibility-aware reads, but its
   `transition_session_visibility` and `fork_session_content` lifecycle functions
   are deliberately uncalled outside the `packages/db` test lane, so every
-  production session stays `workspace_shared`. Do not add the first caller
+  production session stays `workspace_shared`. Owner derivation reads STATED
+  authority only: an active membership's own `personal_workspace_id` pointer or
+  an explicit `workspace_memberships` row (migration 0302). Never widen it to a
+  default workspace, `created_by`, or current access, and never let an
+  unresolved owner inside an active membership's personal workspace fall back to
+  a silent NULL. Do not add the first caller
   without the activation prerequisites (cache/pin stripping, cancellation,
   owner-only grants) and an update to
   `test/session-visibility-contract-surface.test.ts`. An organization-wide
