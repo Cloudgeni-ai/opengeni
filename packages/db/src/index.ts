@@ -17462,34 +17462,22 @@ export async function getSessionAuthorityEpoch(
 }
 
 /**
- * Live-authority recheck for one exact subject, resolving its own RLS scope
- * (originally the 0281 stream-token mint recheck). See
- * {@link subjectHasLiveWorkspaceAuthorityInScope} for the authority rule itself.
+ * ORACLE, NOT AN AUTHORIZATION. It sets `opengeni.subject_id` from its own
+ * argument, so `list_self_organization_memberships`' `42501` guard is satisfied
+ * for whatever subject the caller names: it answers for ANY subject and cannot
+ * establish who the caller is. Passing it a request-derived subject is a
+ * vulnerability. Call it only about a subject you are already entitled to ask
+ * about — one authenticated out of band, or the frozen owner of a delegation
+ * you already hold.
  *
- * # DANGER: this function is an ARBITRARY-SUBJECT ORACLE. Read before calling.
+ * When the subject IS the caller, use {@link subjectHasLiveWorkspaceAuthorityInScope}
+ * instead: it refuses to set the subject GUC and raises unless the subject
+ * matches the transaction's authenticated scope. Both exist on purpose — some
+ * callers legitimately ask about a non-caller subject, which the in-scope
+ * variant cannot express.
  *
- * It sets `opengeni.subject_id` **from its own `subjectId` argument** and then
- * answers the personal-workspace question under that scope. The SECURITY
- * DEFINER seam it consults (`list_self_organization_memberships`) compares the
- * requested subject against that GUC — which this function just set to the
- * caller's parameter — so the seam's `42501` guard is satisfied for **whatever
- * subject the caller names**. It is therefore NOT "owner-only by construction";
- * it is owner-only only if the caller can prove the subject is its own.
- *
- * **Passing a request-derived subject here is a vulnerability.** A delegated
- * bearer token, an embedding host, or any other caller that chooses its own
- * `subjectId` claim can use this function to resolve a different human's
- * personal workspace and be told `true`.
- *
- * Call it ONLY with a subject the caller is already entitled to ask about:
- * a subject authenticated out of band, or the frozen owner of a delegation the
- * caller already holds. If the subject reached you from a request, you want
- * {@link subjectHasLiveWorkspaceAuthorityInScope} instead — it refuses to set
- * the subject GUC and asserts that the subject matches the transaction's
- * already-applied, authenticated scope, so it cannot name a third party.
- *
- * A follow-up will migrate this function's remaining call sites to the in-scope
- * variant and then lock this one down or delete it.
+ * The authority rule itself lives in that in-scope variant; this is a scope
+ * wrapper over it, so there is one implementation.
  */
 export async function subjectHasLiveWorkspaceAuthority(
   db: Database,
@@ -26774,7 +26762,9 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
  * account or organization administrators receive no personal-workspace access
  * through that exception" — but a host-signed delegated bearer chooses its own
  * `subjectId` claim and could name the owner. So the API layer must state this
- * positively, from `grantIsCanonicalManagedHumanSession` (`@opengeni/core`).
+ * positively, from `AccessGrantAuthorization.canonicalManagedHumanSession`
+ * (`@opengeni/core`), which reflects HOW the request authenticated rather than
+ * the shape of a grant value the caller may control.
  * Omitted/false keeps the historical bare-membership fence exactly.
  */
 export type PersonalWorkspaceOwnerException = boolean;

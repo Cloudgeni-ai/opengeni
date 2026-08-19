@@ -9,7 +9,11 @@ import {
   createOrganizationInvitation,
   createSession,
   listSessionsForSubject,
+  NewSessionDraftAccessError,
+  saveNewSessionDraftInTransaction,
   SessionListAccessError,
+  SessionPinAccessError,
+  setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
   withWorkspaceSubjectRls,
   type DbClient,
@@ -176,6 +180,37 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
 }
 
 /**
+ * Assert that a principal reaches NONE of the three seams inside `owner`'s
+ * personal workspace. Applied to every non-owner principal so a widening at one
+ * seam cannot hide behind another seam's denial.
+ */
+async function expectAllThreeSeamsDenied(
+  owner: ManagedHuman,
+  headers: Record<string, string>,
+): Promise<void> {
+  const sessionId = await seedSession(owner, owner.personalWorkspaceId);
+  const json = { ...headers, "content-type": "application/json" };
+
+  const list = await owner.app.request(
+    `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
+    { headers },
+  );
+  expect(list.status).toBe(403);
+
+  const pin = await owner.app.request(
+    `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
+    { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
+  );
+  expect(pin.status).toBe(403);
+
+  const draft = await owner.app.request(
+    `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
+    { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
+  );
+  expect(draft.status).toBe(403);
+}
+
+/**
  * Place a brand-new human inside an EXISTING organization through the real 0263
  * invitation lifecycle, so they are a genuine same-organization co-member with
  * their own personal workspace under the same account.
@@ -203,6 +238,38 @@ async function inviteIntoOrganization(
     expectedRevision: invitation.revision,
   });
   return await resolveManagedHuman(auth, owner.accountId);
+}
+
+/**
+ * Drive the composer-draft seam directly, below the route, with the exception
+ * asserted — the same shape `saveActorNewSessionDraft` uses.
+ */
+async function saveDraftDirectly(
+  workspaceId: string,
+  accountId: string,
+  subjectId: string,
+): Promise<{ revision: number }> {
+  if (!client) throw new Error("test database unavailable");
+  return await withWorkspaceSubjectRls(client.db, workspaceId, subjectId, async (scoped) =>
+    scoped.transaction(async (tx) =>
+      saveNewSessionDraftInTransaction(tx as unknown as typeof scoped, {
+        accountId,
+        workspaceId,
+        subjectId,
+        expectedRevision: 0,
+        text: "direct seam draft",
+        resources: [],
+        tools: [],
+        toolsProvided: true,
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        options: {},
+        requireWorkspaceMembership: true,
+        personalWorkspaceOwnerException: true,
+      }),
+    ),
+  );
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -337,11 +404,7 @@ describe("the personal-workspace exception stays owner-only", () => {
     const intruder = await provisionManagedHuman();
     await seedSession(owner, owner.personalWorkspaceId);
 
-    const response = await intruder.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
-      { headers: { cookie: intruder.cookie } },
-    );
-    expect(response.status).toBe(403);
+    await expectAllThreeSeamsDenied(owner, { cookie: intruder.cookie });
   }, 180_000);
 
   test("a SAME-organization co-member never reaches another member's personal workspace", async () => {
@@ -425,7 +488,21 @@ describe("the personal-workspace exception stays owner-only", () => {
     expect(draft.status).toBe(403);
   }, 180_000);
 
-  test("a workspace-scoped API key never reaches a personal workspace's session surface", async () => {
+  /**
+   * A workspace-scoped API key minted ON the personal workspace is NOT the
+   * personal-workspace exception — it is the ordinary API-key grant, which reads
+   * its own credential row. The owner can mint one because
+   * `managedPersonalWorkspacePermissions` includes `api_keys:manage`, so this is
+   * the owner delegating to their own key.
+   *
+   * What must be true is that it gains NOTHING from this change. The statuses
+   * below were captured on pristine `origin/main` (6f61d6ee) before the fix and
+   * are asserted verbatim: list 200, pin 403 (non-`user:` subjects short-circuit
+   * to the plain membership answer, and there is no membership row), draft 200
+   * (`requireWorkspaceMembership` is false for non-`user:` subjects, so the
+   * fence never runs). Any drift here is a behaviour change, not a fix.
+   */
+  test("a workspace-scoped API key behaves exactly as it did before the fix", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -435,19 +512,46 @@ describe("the personal-workspace exception stays owner-only", () => {
       name: "personal workspace api key",
       prefix: token.slice(0, 14),
       keyHash: await sha256Hex(token),
-      permissions: ["sessions:read", "sessions:control"],
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
     });
     const sessionId = await seedSession(owner, owner.personalWorkspaceId);
+    const headers = { authorization: `Bearer ${token}` };
+    const json = { ...headers, "content-type": "application/json" };
+
+    const list = await owner.app.request(
+      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
+      { headers },
+    );
+    expect(list.status).toBe(200);
 
     const pin = await owner.app.request(
       `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
-      {
-        method: "PUT",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ pinned: true }),
-      },
+      { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
     );
     expect(pin.status).toBe(403);
+
+    const draft = await owner.app.request(
+      `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
+      { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
+    );
+    expect(draft.status).toBe(200);
+
+    // The key is an `api_key:` subject, so the exception's resolver can never
+    // answer for it: it short-circuits to the plain membership answer, which is
+    // false in a workspace that has no membership rows at all.
+    expect(
+      await withWorkspaceSubjectRls(
+        client.db,
+        owner.personalWorkspaceId,
+        "api_key:probe",
+        async (scoped) =>
+          await subjectHasLiveWorkspaceAuthorityInScope(scoped, {
+            accountId: owner.accountId,
+            workspaceId: owner.personalWorkspaceId,
+            subjectId: "api_key:probe",
+          }),
+      ),
+    ).toBe(false);
   }, 180_000);
 
   test("an account-admin API key never reaches a personal workspace's session surface", async () => {
@@ -463,11 +567,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       permissions: ["account:read", "account:admin"],
     });
 
-    const list = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
-      { headers: { authorization: `Bearer ${token}` } },
-    );
-    expect(list.status).toBe(403);
+    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("a delegated service initiator never reaches the personal workspace", async () => {
@@ -484,11 +584,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
 
-    const list = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
-      { headers: { authorization: `Bearer ${token}` } },
-    );
-    expect(list.status).toBe(403);
+    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("a delegated bearer with a substituted user: subject never reaches the personal workspace", async () => {
@@ -505,11 +601,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
 
-    const list = await owner.app.request(
-      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
-      { headers: { authorization: `Bearer ${token}` } },
-    );
-    expect(list.status).toBe(403);
+    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("an unauthenticated request fails closed rather than defaulting to the exception", async () => {
@@ -534,40 +626,96 @@ describe("the personal-workspace exception stays owner-only", () => {
  * still owner-scoped if that outer layer is widened later.
  */
 describe("the exception is owner-scoped at the database seam, not only at the route", () => {
-  test("a same-organization ADMIN is denied even when the caller asserts the exception", async () => {
+  for (const role of ["admin", "member"] as const) {
+    test(`a same-organization ${role.toUpperCase()} is denied at all three seams even when the caller asserts the exception`, async () => {
+      if (!shared || !client) return;
+      const owner = await provisionManagedHuman();
+      const other = await inviteIntoOrganization(owner, role);
+      const sessionId = await seedSession(owner, owner.personalWorkspaceId);
+
+      await expect(
+        listSessionsForSubject(client.db, owner.personalWorkspaceId, {
+          subjectId: other.subjectId,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).rejects.toBeInstanceOf(SessionListAccessError);
+
+      await expect(
+        setSessionPin(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: other.subjectId,
+          sessionId,
+          pinned: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).rejects.toBeInstanceOf(SessionPinAccessError);
+
+      await expect(
+        saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, other.subjectId),
+      ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
+
+      // The same assertions for the OWNER resolve, so each denial is about whose
+      // pointer names this workspace, not about the flag being inert.
+      const ownerPage = await listSessionsForSubject(client.db, owner.personalWorkspaceId, {
+        subjectId: owner.subjectId,
+        personalWorkspaceOwnerException: true,
+      });
+      expect(ownerPage.sessions).toHaveLength(1);
+      expect(
+        await setSessionPin(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: owner.subjectId,
+          sessionId,
+          pinned: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).toMatchObject({ id: sessionId, pinned: true });
+      expect(
+        await saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, owner.subjectId),
+      ).toMatchObject({ revision: 1 });
+    }, 180_000);
+  }
+
+  test("a SUSPENDED organization membership loses the exception at every seam", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
-    const administrator = await inviteIntoOrganization(owner, "admin");
-    await seedSession(owner, owner.personalWorkspaceId);
+    const suspended = await inviteIntoOrganization(owner, "member");
+    const sessionId = await seedSession(suspended, suspended.personalWorkspaceId);
 
+    // Their own personal workspace works while the membership is active ...
+    expect(
+      (
+        await listSessionsForSubject(client.db, suspended.personalWorkspaceId, {
+          subjectId: suspended.subjectId,
+          personalWorkspaceOwnerException: true,
+        })
+      ).sessions,
+    ).toHaveLength(1);
+
+    await shared.admin`
+      update organization_memberships set status = 'suspended'
+      where account_id = ${owner.accountId} and subject_id = ${suspended.subjectId}`;
+
+    // ... and stops the moment the membership is no longer active. The pointer
+    // alone is not authority; the membership carrying it must be live.
     await expect(
-      listSessionsForSubject(client.db, owner.personalWorkspaceId, {
-        subjectId: administrator.subjectId,
+      listSessionsForSubject(client.db, suspended.personalWorkspaceId, {
+        subjectId: suspended.subjectId,
         personalWorkspaceOwnerException: true,
       }),
     ).rejects.toBeInstanceOf(SessionListAccessError);
-
-    // The same assertion for the owner themselves resolves, so the denial is
-    // about whose pointer names this workspace, not about the flag being inert.
-    const ownerPage = await listSessionsForSubject(client.db, owner.personalWorkspaceId, {
-      subjectId: owner.subjectId,
-      personalWorkspaceOwnerException: true,
-    });
-    expect(ownerPage.sessions).toHaveLength(1);
-  }, 180_000);
-
-  test("a same-organization co-member is denied even when the caller asserts the exception", async () => {
-    if (!shared || !client) return;
-    const owner = await provisionManagedHuman();
-    const coMember = await inviteIntoOrganization(owner, "member");
-    await seedSession(owner, owner.personalWorkspaceId);
-
     await expect(
-      listSessionsForSubject(client.db, owner.personalWorkspaceId, {
-        subjectId: coMember.subjectId,
+      setSessionPin(client.db, {
+        workspaceId: suspended.personalWorkspaceId,
+        subjectId: suspended.subjectId,
+        sessionId,
+        pinned: true,
         personalWorkspaceOwnerException: true,
       }),
-    ).rejects.toBeInstanceOf(SessionListAccessError);
+    ).rejects.toBeInstanceOf(SessionPinAccessError);
+    await expect(
+      saveDraftDirectly(suspended.personalWorkspaceId, suspended.accountId, suspended.subjectId),
+    ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
   }, 180_000);
 });
 
