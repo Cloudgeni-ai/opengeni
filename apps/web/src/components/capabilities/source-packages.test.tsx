@@ -4,18 +4,8 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { PluginReview } from "./source-import-dialog";
-import {
-  initialSourceImportState,
-  sourceImportReducer,
-  type InstalledSourceSkill,
-} from "./source-import-flow";
-import { SourcePackagesView } from "./source-packages-view";
-import type {
-  ConnectionMetadata,
-  InstalledSkillSummary,
-  PluginInstallationSummary,
-  PluginPreview,
-} from "@/types";
+import { initialSourceImportState, sourceImportReducer } from "./source-import-flow";
+import type { ConnectionMetadata, PluginPreview } from "@/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -26,77 +16,7 @@ beforeAll(() => {
 
 afterAll(() => GlobalRegistrator.unregister());
 
-describe("source package components", () => {
-  test("renders installed Skills and Plugins as distinct managed packages", async () => {
-    const onUpdateSkill = mock(() => {});
-    const onUpdatePlugin = mock(() => {});
-    const rendered = await render(
-      <SourcePackagesView
-        skills={[installedSkill()]}
-        plugins={[installedPlugin()]}
-        loading={false}
-        loadError={null}
-        canManage
-        filter="all"
-        query=""
-        busyKey={null}
-        onRetry={() => {}}
-        onImportSkill={() => {}}
-        onInstallPlugin={() => {}}
-        onUpdateSkill={onUpdateSkill}
-        onUpdatePlugin={onUpdatePlugin}
-        onRemoveSkill={() => {}}
-        onRemovePlugin={() => {}}
-      />,
-    );
-    try {
-      expect(rendered.container.textContent).toContain("release-operator");
-      expect(rendered.container.textContent).toContain("Research suite");
-      expect(rendered.container.textContent).toContain("2 components");
-      expect(rendered.container.textContent).toContain("Immutable source");
-
-      const checkSkill = button(rendered.container, "Check for update");
-      const reviewPlugin = button(rendered.container, "Review update");
-      await act(async () => checkSkill.click());
-      await act(async () => reviewPlugin.click());
-      expect(onUpdateSkill).toHaveBeenCalledTimes(1);
-      expect(onUpdatePlugin).toHaveBeenCalledTimes(1);
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("keeps mutation actions disabled without workspace administrator authority", async () => {
-    const rendered = await render(
-      <SourcePackagesView
-        skills={[installedSkill()]}
-        plugins={[installedPlugin()]}
-        loading={false}
-        loadError={null}
-        canManage={false}
-        filter="all"
-        query=""
-        busyKey={null}
-        onRetry={() => {}}
-        onImportSkill={() => {}}
-        onInstallPlugin={() => {}}
-        onUpdateSkill={() => {}}
-        onUpdatePlugin={() => {}}
-        onRemoveSkill={() => {}}
-        onRemovePlugin={() => {}}
-      />,
-    );
-    try {
-      expect(rendered.container.textContent).toContain("Workspace administrators can install");
-      expect(button(rendered.container, "Import Skill").disabled).toBe(true);
-      expect(button(rendered.container, "Install Plugin").disabled).toBe(true);
-      expect(button(rendered.container, "Check for update").disabled).toBe(true);
-      expect(button(rendered.container, "Review update").disabled).toBe(true);
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
+describe("source import review", () => {
   test("shows immutable Plugin facts and exact compatible Connection choices before install", async () => {
     let state = sourceImportReducer(initialSourceImportState(), {
       type: "new",
@@ -167,51 +87,6 @@ function button(container: ParentNode, label: string): HTMLButtonElement {
   );
   if (!match) throw new Error(`Missing button: ${label}`);
   return match;
-}
-
-function installedSkill(): InstalledSourceSkill {
-  const skill: InstalledSkillSummary = {
-    capabilityId: "skill:release-operator-abc123",
-    pluginKey: "skill/github/acme/skills/release-operator",
-    installationVersion: 2,
-    name: "release-operator",
-    description: "Release safely",
-    category: "skills",
-    tags: ["skill", "imported"],
-    provenance: "workspace_import",
-    source: "github",
-    version: "a".repeat(40),
-    sourceUrl: "https://github.com/acme/skills/tree/aaaaaaaa/release-operator",
-    repositoryUrl: "https://github.com/acme/skills",
-    sourceCommit: "a".repeat(40),
-    sourcePath: "release-operator",
-    contentSha256: "b".repeat(64),
-    fileCount: 1,
-    totalBytes: 128,
-    license: null,
-    installedAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-    owners: [{ kind: "direct", id: "skill:release-operator-abc123", removable: true }],
-  };
-  return skill;
-}
-
-function installedPlugin(): PluginInstallationSummary {
-  return {
-    pluginKey: "example/research",
-    version: "2.0.0",
-    name: "Research suite",
-    description: "Research tools",
-    category: "plugins",
-    tags: ["research"],
-    sourceUrl: "https://plugins.example.test/research.json",
-    manifestDigest: "c".repeat(64),
-    installationVersion: 2,
-    componentCount: 2,
-    status: "active",
-    installedAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-  };
 }
 
 function pluginPreview(): PluginPreview {

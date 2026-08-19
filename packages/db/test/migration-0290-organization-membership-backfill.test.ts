@@ -571,8 +571,14 @@ describe("migration 0290 organization membership backfill", () => {
     }
     expect(cursor).toBeNull();
     expect(seen.map((entry) => entry.subjectId)).toEqual(
-      [`user:${tag}aaa00`, `user:${tag}aaa01`, `user:${tag}aaa02`, `user:${tag}aaa03`,
-        pendingSubject, legacy.subjectId].sort(),
+      [
+        `user:${tag}aaa00`,
+        `user:${tag}aaa01`,
+        `user:${tag}aaa02`,
+        `user:${tag}aaa03`,
+        pendingSubject,
+        legacy.subjectId,
+      ].sort(),
     );
     expect(seen.find((entry) => entry.subjectId === pendingSubject)).toEqual({
       subjectId: pendingSubject,
@@ -752,7 +758,9 @@ describe("migration 0290 organization membership backfill", () => {
     }
     expect(seamFailure).not.toBeNull();
     const cause = (seamFailure as { cause?: { message?: string } }).cause;
-    expect(cause?.message ?? String(seamFailure)).toContain("membership backfill cursor is invalid");
+    expect(cause?.message ?? String(seamFailure)).toContain(
+      "membership backfill cursor is invalid",
+    );
   }, 180_000);
 
   test("the enumeration seam rejects a cross-organization scope", async () => {

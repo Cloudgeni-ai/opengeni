@@ -39,6 +39,8 @@ function session(patch: Partial<Session> = {}): Session {
     createdBy: { kind: "subject", subjectId: "user:test" },
     createdByContext: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     workingDir: null,
     sandboxOs: "linux",

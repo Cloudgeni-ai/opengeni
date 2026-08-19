@@ -95,6 +95,8 @@ describe("rig MCP tools", () => {
       tools: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId },
       subjectId,

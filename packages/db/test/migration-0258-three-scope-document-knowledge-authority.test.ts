@@ -290,6 +290,8 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
         createdBy: { kind: "subject", subjectId: ownerSubject },
         subjectId: ownerSubject,
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
         firstPartyMcpTools: [],
       });

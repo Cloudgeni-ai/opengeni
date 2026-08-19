@@ -75,6 +75,8 @@ describe("0178 permissioned secret reads migration", () => {
       tools: [],
       metadata: {},
       model: "migration-test",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       firstPartyMcpPermissions: [...legacyPermissions],
       subjectId,

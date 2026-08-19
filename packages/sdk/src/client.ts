@@ -263,6 +263,7 @@ import type {
   PackInstallation,
   PackUninstallPreview,
   LatencyMode,
+  McpConnectionAuthoritySelection,
   ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
@@ -320,6 +321,8 @@ import type {
   MoveSessionQueueItemRequest,
   NewSessionDraft,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
+  SubmitComposerDraftResponse,
   SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
@@ -542,6 +545,7 @@ export type SendMessageInput = {
   controlEtag?: string;
   expectedDraftRevision?: number;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
+  connectionAuthorities?: McpConnectionAuthoritySelection[];
 };
 
 export type SteerMessageResult = {
@@ -1794,6 +1798,18 @@ export class OpenGeniClient {
     return await this.requestJson<ComposerDraft>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+      request,
+    );
+  }
+
+  async submitComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    request: SubmitComposerDraftRequest,
+  ): Promise<SubmitComposerDraftResponse> {
+    return await this.requestJson<SubmitComposerDraftResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
       request,
     );
   }

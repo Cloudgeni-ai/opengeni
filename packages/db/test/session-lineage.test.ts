@@ -67,6 +67,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const child = await createSession(db, {
@@ -76,6 +78,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -86,6 +90,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: child.id,
     });
@@ -112,6 +118,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const child = await createSession(db, {
@@ -121,6 +129,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -131,6 +141,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -141,6 +153,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: child.id,
     });
@@ -151,6 +165,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     }).catch(() => null);
@@ -184,6 +200,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       maxNestedAgentDepthOverride: 64,
       allowNestedAgentDepthIncrease: true,
@@ -198,6 +216,8 @@ describe("session lineage", () => {
           resources: [],
           metadata: {},
           model: "gpt",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
           sandboxBackend: "none",
           parentSessionId: chain.at(-1)!.id,
         }),
@@ -223,6 +243,8 @@ describe("session lineage", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     for (let i = 0; i < 201; i += 1) {
@@ -233,6 +255,8 @@ describe("session lineage", () => {
         resources: [],
         metadata: {},
         model: "gpt",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         parentSessionId: root.id,
       });

@@ -176,6 +176,8 @@ describe("migration 0256 connection authority delegation", () => {
         metadata: {},
         createdBy: { kind: "subject", subjectId: ownerSubjectId },
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId: ownerSubjectId,
       });

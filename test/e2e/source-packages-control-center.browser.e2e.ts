@@ -19,6 +19,8 @@ const skillCapabilityId = "skill:release-operator-browser";
 const pluginKey = "example/research";
 const skillUrl = "https://github.com/acme/skills/tree/main/release-operator";
 const pluginUrl = "https://plugins.example.test/research.json";
+const packId = "infra-ops-browser";
+const packManifestDigest = "e".repeat(64);
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
@@ -33,9 +35,11 @@ type UiState = {
   pluginInstallRequests: Record<string, unknown>[];
   skillRemoveRequests: Record<string, unknown>[];
   pluginRemoveRequests: Record<string, unknown>[];
+  packInstalled: boolean;
+  packUninstallRequests: Record<string, unknown>[];
 };
 
-describe("Skill and Plugin control center browser acceptance", () => {
+describe("Bundles section browser acceptance", () => {
   let browser: Browser;
   let web: StartedProcess;
 
@@ -96,9 +100,10 @@ describe("Skill and Plugin control center browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install this Skill" }).click();
 
-      const skillCard = page.locator('[data-source-package-kind="skill"]');
-      await expectVisible(skillCard);
-      await expectText(skillCard, "release-operator");
+      const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
+      await expectVisible(skillRow);
+      await expectText(skillRow, "release-operator");
+      await expectText(skillRow, "Skill · Imported from source");
       expect(state.skillInstallRequests).toHaveLength(1);
       expect(state.skillInstallRequests[0]).toMatchObject({
         url: skillUrl,
@@ -124,16 +129,25 @@ describe("Skill and Plugin control center browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install this Plugin" }).click();
 
-      const pluginCard = page.locator('[data-source-package-kind="plugin"]');
-      await expectVisible(pluginCard);
-      await expectText(pluginCard, "Research suite");
+      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      await expectVisible(pluginRow);
+      await expectText(pluginRow, "Research suite");
+      await expectText(pluginRow, "Plugin · Imported from source");
       expect(state.pluginPreviewRequests).toHaveLength(2);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests[0]).toMatchObject({
         url: pluginUrl,
         bindings: { linear: { connectionId: financeConnectionId } },
       });
-      await assertAccessibleAndBounded(page, '[aria-labelledby="source-packages-heading"]');
+      // One Bundles section, one search, and a row for every kind in it.
+      await expectVisible(page.getByRole("heading", { name: "Bundles" }));
+      const search = page.getByLabel("Search bundles");
+      await search.fill("research");
+      await expectVisible(pluginRow);
+      await expectHidden(skillRow);
+      await search.fill("");
+      await expectVisible(skillRow);
+      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
       await page.screenshot({
         path: `${evidenceDir}install-desktop-light.png`,
         fullPage: true,
@@ -152,8 +166,12 @@ describe("Skill and Plugin control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      let pluginCard = page.locator('[data-source-package-kind="plugin"]');
-      await pluginCard.getByRole("button", { name: "Review update" }).click();
+      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      await openBundleSheet(page, `plugin:${pluginKey}`);
+      await page
+        .locator('[data-integration-sheet="bundle-plugin-example/research"]')
+        .getByRole("button", { name: "Review update" })
+        .click();
       let dialog = page.getByRole("dialog");
       await dialog.getByRole("button", { name: "Detect and preview" }).click();
       await expectText(dialog, "Update impact");
@@ -167,28 +185,35 @@ describe("Skill and Plugin control center browser acceptance", () => {
         expectedInstallationVersion: 2,
       });
 
-      pluginCard = page.locator('[data-source-package-kind="plugin"]');
-      await expectVisible(pluginCard);
-      await pluginCard.getByRole("button", { name: "Remove" }).click();
+      await expectVisible(pluginRow);
+      await openBundleSheet(page, `plugin:${pluginKey}`);
+      await page
+        .locator('[data-integration-sheet="bundle-plugin-example/research"]')
+        .getByRole("button", { name: "Remove" })
+        .click();
       dialog = page.getByRole("dialog");
       await expectText(dialog, "3 components are in this Plugin. 1 will remain");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.screenshot({ path: `${evidenceDir}remove-impact-dialog-dark.png` });
       await dialog.getByRole("button", { name: "Remove Plugin" }).click();
-      await expectHidden(page.locator('[data-source-package-kind="plugin"]'));
+      await expectHidden(pluginRow);
       expect(state.pluginRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
       });
 
-      const skillCard = page.locator('[data-source-package-kind="skill"]');
-      await skillCard.getByRole("button", { name: "Remove" }).click();
+      const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
+      await openBundleSheet(page, `imported:${skillCapabilityId}`);
+      await page
+        .locator(`[data-integration-sheet="bundle-skill-${skillCapabilityId}"]`)
+        .getByRole("button", { name: "Remove" })
+        .click();
       dialog = page.getByRole("dialog");
       await expectText(
         dialog,
         "The runtime Skill will be removed because no other owner retains it",
       );
       await dialog.getByRole("button", { name: "Remove direct Skill" }).click();
-      await expectHidden(page.locator('[data-source-package-kind="skill"]'));
+      await expectHidden(skillRow);
       expect(state.skillRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
       });
@@ -215,26 +240,25 @@ describe("Skill and Plugin control center browser acceptance", () => {
       await installApi(page, state);
       await openCapabilities(page);
       await expectText(
-        page.locator('[aria-labelledby="source-packages-heading"]'),
-        "Workspace administrators can install, update, and remove source packages",
+        page.locator('[aria-labelledby="bundles-heading"]'),
+        "Workspace administrators can install, update, and remove Bundles",
       );
       expect(await page.getByRole("button", { name: "Import Skill" }).first().isDisabled()).toBe(
         true,
       );
-      expect(
-        await page
-          .locator('[data-source-package-kind="plugin"]')
-          .getByRole("button", { name: "Review update" })
-          .isDisabled(),
-      ).toBe(true);
-      expect(
-        await page
-          .locator('[data-source-package-kind="skill"]')
-          .getByRole("button", { name: "Remove" })
-          .isDisabled(),
-      ).toBe(true);
-      await assertAccessibleAndBounded(page, '[aria-labelledby="source-packages-heading"]');
-      await page.locator('[aria-labelledby="source-packages-heading"]').scrollIntoViewIfNeeded();
+      // A viewer who cannot act is told so, rather than shown buttons that do
+      // nothing when pressed.
+      await openBundleSheet(page, `plugin:${pluginKey}`);
+      const pluginSheet = page.locator('[data-integration-sheet="bundle-plugin-example/research"]');
+      await expectText(
+        pluginSheet,
+        "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+      );
+      expect(await pluginSheet.getByRole("button", { name: "Review update" }).count()).toBe(0);
+      await page.keyboard.press("Escape");
+      await expectHidden(pluginSheet);
+      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
+      await page.locator('[aria-labelledby="bundles-heading"]').scrollIntoViewIfNeeded();
       await page.screenshot({
         path: `${evidenceDir}permission-mobile-dark.png`,
         fullPage: true,
@@ -243,10 +267,65 @@ describe("Skill and Plugin control center browser acceptance", () => {
       await context.close();
     }
   }, 60_000);
+
+  // A Pack lists through the same uniform row as every other Bundle, and its
+  // two destructive verbs release ownership, so the whole chain - open the row,
+  // read the installed identity, uninstall, confirm - is exercised for real.
+  test("a Pack row opens its plan, names the installed identity, and uninstalls", async () => {
+    const state = readyState({ packInstalled: true });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const page = await context.newPage();
+    try {
+      await installApi(page, state);
+      await openCapabilities(page);
+      await setTheme(page, "light");
+
+      const packRow = page.locator(`[data-integration-row="pack:${packId}"]`);
+      await expectVisible(packRow);
+      await expectText(packRow, "Pack · Registered in this workspace");
+      // Provenance is read from the catalog row, never assumed to be OpenGeni's.
+      expect((await packRow.textContent()) ?? "").not.toContain("Curated by OpenGeni");
+      expect(await packRow.locator("> button").getAttribute("aria-label")).toBe(
+        "Infrastructure operations. Pack, registered in this workspace. Installed",
+      );
+
+      await openBundleSheet(page, `pack:${packId}`);
+      const dialog = page.locator(`[data-pack-dialog="${packId}"]`);
+      await expectVisible(dialog);
+      // The version, role, category, and installed digest a repair turns on.
+      const identity = dialog.locator(`[data-pack-identity="${packId}"]`);
+      await expectText(identity, "v1.4.0");
+      await expectText(identity, "infrastructure");
+      await expectText(identity, "operations");
+      await expectText(identity, packManifestDigest.slice(0, 12));
+      await expectText(identity, "Pinned infrastructure automation capabilities.");
+      await expectText(dialog, "Ready to install");
+      await assertAccessibleAndBounded(page, `[data-pack-dialog="${packId}"]`);
+      await dialog.screenshot({ path: `${evidenceDir}pack-detail-dialog-light.png` });
+
+      // Unregistering a live installation is the one order that cannot work.
+      expect(await dialog.getByRole("button", { name: "Unregister" }).isDisabled()).toBe(true);
+
+      await dialog.getByRole("button", { name: "Uninstall" }).click();
+      // Two dialogs are mounted now; the confirmation is the one that names it.
+      const confirm = page
+        .getByRole("dialog")
+        .filter({ hasText: "Uninstall Infrastructure operations?" });
+      await expectText(confirm, "Retained by another Pack");
+      await confirm.getByRole("button", { name: "Uninstall Pack" }).click();
+      expect(state.packUninstallRequests).toHaveLength(1);
+      expect(state.packUninstallRequests[0]).toMatchObject({ expectedInstallationVersion: 4 });
+      await expectText(packRow, "Not installed");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
 });
 
 function readyState(
-  patch: Partial<Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled">> = {},
+  patch: Partial<
+    Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled" | "packInstalled">
+  > = {},
 ): UiState {
   return {
     canManage: true,
@@ -259,6 +338,8 @@ function readyState(
     pluginInstallRequests: [],
     skillRemoveRequests: [],
     pluginRemoveRequests: [],
+    packInstalled: false,
+    packUninstallRequests: [],
     ...patch,
   };
 }
@@ -267,7 +348,11 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
-  await expectVisible(page.getByRole("heading", { name: "Skills and Plugins" }));
+  await expectVisible(page.getByRole("heading", { name: "Bundles" }));
+}
+
+async function openBundleSheet(page: Page, rowId: string): Promise<void> {
+  await page.locator(`[data-integration-row="${rowId}"] > button`).first().click();
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
@@ -293,7 +378,33 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ connections: connections() });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
+      return json({
+        packs: [capabilityPack()],
+        installations: state.packInstalled ? [packInstallation()] : [],
+      });
+    }
+    if (
+      request.method() === "POST" &&
+      decodeURIComponent(url.pathname) ===
+        `/v1/workspaces/${workspaceId}/packs/${packId}/installation-preview`
+    ) {
+      return json(packInstallationPreview(state));
+    }
+    if (
+      request.method() === "GET" &&
+      decodeURIComponent(url.pathname) ===
+        `/v1/workspaces/${workspaceId}/packs/${packId}/uninstall-preview`
+    ) {
+      return json(packUninstallPreview());
+    }
+    if (
+      request.method() === "DELETE" &&
+      decodeURIComponent(url.pathname) ===
+        `/v1/workspaces/${workspaceId}/packs/${packId}/installation`
+    ) {
+      state.packUninstallRequests.push(request.postDataJSON() as Record<string, unknown>);
+      state.packInstalled = false;
+      return json({ packId, status: "uninstalled", retainedComponents: [skillCapabilityId] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
@@ -461,9 +572,9 @@ function workspace() {
 }
 
 function capabilityCatalog(state: UiState) {
-  if (!state.skillInstalled) return { items: [], installations: [] };
+  if (!state.skillInstalled) return { items: [packCatalogItem()], installations: [] };
   return {
-    items: [installedSkillItem()],
+    items: [installedSkillItem(), packCatalogItem()],
     installations: [
       {
         id: "00000000-0000-4000-8000-000000000721",
@@ -524,7 +635,150 @@ function installedSkillItem() {
       sourceUrl: skillUrl,
       sourceCommit: "a".repeat(40),
       contentSha256: "b".repeat(64),
+      installedSkill: { source: "github" },
     },
+  };
+}
+
+/**
+ * The Pack's catalog row. Its `source` is the fact the Bundles row reads for
+ * provenance, so an admin-registered Pack must not be projected as built in.
+ */
+function packCatalogItem() {
+  return {
+    id: `pack:${packId}`,
+    kind: "pack",
+    source: "manual",
+    name: "Infrastructure operations",
+    description: "Pinned infrastructure automation capabilities.",
+    category: "operations",
+    tags: ["infrastructure", "operations", "pack"],
+    homepageUrl: null,
+    endpointUrl: null,
+    installUrl: null,
+    authModel: null,
+    providerDomain: null,
+    surfaceType: null,
+    transport: null,
+    mcpUrl: null,
+    authKind: null,
+    credentialFacts: [],
+    tier: "community",
+    provenance: null,
+    logoAssetPath: null,
+    importBatchId: null,
+    stale: false,
+    staleAt: null,
+    tools: [],
+    runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "available",
+      readiness: "ready",
+      detail: "available",
+      managedBy: "workspace",
+    },
+    actions: ["inspect"],
+    enabled: false,
+    enabledReason: null,
+    connectionRef: null,
+    metadata: { packId, version: "1.4.0" },
+  };
+}
+
+function capabilityPack() {
+  return {
+    id: packId,
+    name: "Infrastructure operations",
+    description: "Pinned infrastructure automation capabilities.",
+    role: "infrastructure",
+    category: "operations",
+    version: "1.4.0",
+    skills: [],
+    components: [
+      {
+        key: "skills/release-operator",
+        kind: "skill",
+        capabilityId: skillCapabilityId,
+        contentSha256: "b".repeat(64),
+        required: true,
+      },
+    ],
+    tools: [],
+    connectors: [],
+    knowledge: [],
+    scheduledTaskTemplates: [],
+    metadata: {},
+  };
+}
+
+function packInstallation() {
+  return {
+    id: "00000000-0000-4000-8000-000000000731",
+    accountId,
+    workspaceId,
+    packId,
+    status: "active",
+    version: 4,
+    manifestSnapshot: capabilityPack(),
+    manifestDigest: packManifestDigest,
+    selectedRigId: null,
+    installedBySubjectId: subjectId,
+    metadata: {},
+    enabledAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+  };
+}
+
+function packInstallationPreview(state: UiState) {
+  return {
+    packId,
+    packVersion: "1.4.0",
+    manifestDigest: packManifestDigest,
+    installationVersion: state.packInstalled ? 4 : null,
+    action: state.packInstalled ? "update" : "install",
+    ready: true,
+    blockers: [],
+    components: [
+      {
+        key: "skills/release-operator",
+        kind: "skill",
+        capabilityId: skillCapabilityId,
+        required: true,
+        status: "ready",
+        expectedDigest: "b".repeat(64),
+        actualDigest: "b".repeat(64),
+        resolvedId: skillCapabilityId,
+        label: "release-operator",
+      },
+    ],
+    rig: {
+      required: false,
+      status: "not_required",
+      requestedRigId: null,
+      rigId: null,
+      rigVersionId: null,
+      name: null,
+      image: null,
+    },
+    variableSetId: null,
+    legacyInlineSkillCount: 0,
+    legacySandboxImage: null,
+  };
+}
+
+function packUninstallPreview() {
+  return {
+    packId,
+    installed: true,
+    installationVersion: 4,
+    components: [
+      {
+        key: "skills/release-operator",
+        kind: "skill",
+        capabilityId: skillCapabilityId,
+        retainedByOtherOwners: true,
+      },
+    ],
   };
 }
 

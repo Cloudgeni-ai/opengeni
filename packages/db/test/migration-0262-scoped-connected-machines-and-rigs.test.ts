@@ -227,6 +227,8 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         createdBy: { kind: "subject", subjectId: ownerSubject },
         subjectId: ownerSubject,
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "selfhosted",
         firstPartyMcpTools: [],
       });

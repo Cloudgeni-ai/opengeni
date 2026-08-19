@@ -189,7 +189,7 @@ function textArray(values: readonly string[]) {
  */
 function compareSubjectIds(left: string, right: string): number {
   const length = Math.min(left.length, right.length);
-  for (let index = 0; index < length; ) {
+  for (let index = 0; index < length;) {
     const leftPoint = left.codePointAt(index)!;
     const rightPoint = right.codePointAt(index)!;
     if (leftPoint !== rightPoint) return leftPoint < rightPoint ? -1 : 1;

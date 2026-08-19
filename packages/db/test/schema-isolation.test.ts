@@ -200,6 +200,8 @@ describe("embedded dedicated-schema isolation", () => {
             resources: [],
             metadata: {},
             model: "gpt-4.1",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
             sandboxBackend: "none",
           })
         ).id;

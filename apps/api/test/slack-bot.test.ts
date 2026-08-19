@@ -2578,6 +2578,8 @@ describe("OpenGeni Slack bot connection", () => {
       },
       createdBy: { kind: "subject", subjectId: "subject-a" },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await expect(

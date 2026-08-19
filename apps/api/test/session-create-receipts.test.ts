@@ -188,6 +188,8 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       tools: [],
       metadata: { model: "scripted-model", reasoningEffort: "high" },
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createIdempotencyKey: idempotencyKey,
     });

@@ -264,7 +264,10 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
-import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
+import {
+  seedNewSessionDraftInTransaction,
+  type NewSessionDraftSnapshot,
+} from "./new-session-drafts";
 import {
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
@@ -13236,7 +13239,7 @@ export async function resolveWorkspaceMemoryBlock(
   if (
     !workspace ||
     !resolveWorkspaceMemoryEnabled(workspace.settings) ||
-    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+    resolveWorkspaceMemoryPromptMode() === "retrieval_only"
   ) {
     return null;
   }
@@ -17520,6 +17523,36 @@ export async function inventoryOrganizationTenancy(
       const [row] = await rawRows<{ result: unknown }>(
         scopedDb,
         sql`select inventory_organization_tenancy(${input.organizationId}) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
+/**
+ * Organization-tenancy phase D classification assertion (0291) for Variable Sets, Rigs, and
+ * Connected Machines. Read-only over every resource table: it proves each row
+ * already carries an explicit terminal authority classification and never
+ * rewrites one. Supplying `runKey` additionally records the verdicts durably
+ * through the 0286 tenancy backfill ledger (one receipt per family plus one
+ * append-only unresolved row per resource that could not be proven); the
+ * result reports `ledgerAvailable` so a run that could not record its
+ * obligations is visible rather than silent. A run key may be used once - the
+ * ledger refuses to re-open a settled receipt.
+ */
+export async function verifyOrganizationResourceClassification(
+  db: Database,
+  input: { organizationId: string; runKey?: string | null },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select verify_organization_resource_classification(
+          ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
       );
       return (row?.result ?? {}) as Record<string, unknown>;
     },
@@ -25154,6 +25187,8 @@ export type SessionCreateInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   variableSetId?: string | null;
   rigId?: string | null;
@@ -25648,6 +25683,8 @@ async function createSessionInTransaction(
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
+            reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
             sandboxGroupId: input.sandboxGroupId ?? id,
@@ -50243,6 +50280,7 @@ export type InitializeSessionStartInput = {
   consumeNewSessionDraft?: {
     subjectId: string;
     expectedRevision: number;
+    expectedSnapshot?: NewSessionDraftSnapshot;
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
@@ -50443,6 +50481,9 @@ export async function initializeSessionStartAtomically(
               workspaceId: input.workspaceId,
               subjectId: input.consumeNewSessionDraft.subjectId,
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+              ...(input.consumeNewSessionDraft.expectedSnapshot
+                ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+                : {}),
             });
           }
           return {
@@ -50637,13 +50678,8 @@ export async function initializeSessionStartAtomically(
                   tools: session.tools,
                   toolsProvided: session.toolPolicy?.mode === "explicit",
                   model: session.model,
-                  reasoningEffort: reasoningEffortForMetadata(
-                    session.metadata,
-                    input.reasoningEffortFallback,
-                  ),
-                  latencyMode:
-                    input.turnExecutionPolicy?.latencyMode ??
-                    latencyModeForMetadata(session.metadata, "standard"),
+                  reasoningEffort: session.reasoningEffort,
+                  latencyMode: input.turnExecutionPolicy?.latencyMode ?? session.latencyMode,
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
@@ -50759,6 +50795,9 @@ export async function initializeSessionStartAtomically(
             workspaceId: input.workspaceId,
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+            ...(input.consumeNewSessionDraft.expectedSnapshot
+              ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+              : {}),
           });
         }
         const changed =
@@ -52387,11 +52426,11 @@ export async function claimSessionWorkForAttempt(
                     model: latestStarted?.model ?? session.model,
                     reasoningEffort: reasoningEffortForMetadata(
                       { reasoningEffort: latestStarted?.reasoningEffort },
-                      reasoningEffortForMetadata(session.metadata, "medium"),
+                      session.reasoningEffort as ReasoningEffort,
                     ),
                     latencyMode: latencyModeForMetadata(
                       { latencyMode: latestStarted?.latencyMode },
-                      latencyModeForMetadata(session.metadata, "standard"),
+                      session.latencyMode as LatencyMode,
                     ),
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                     sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
@@ -52705,13 +52744,13 @@ export async function claimSessionWorkForAttempt(
             {
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
-            reasoningEffortForMetadata(session.metadata, "medium"),
+            session.reasoningEffort as ReasoningEffort,
           );
           let latencyMode = latencyModeForMetadata(
             {
               latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
             },
-            latencyModeForMetadata(session.metadata, "standard"),
+            session.latencyMode as LatencyMode,
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
@@ -55693,10 +55732,9 @@ export type ApplySessionTurnSettlementInput = {
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
    * interventions are public protocol; ordinary approvals remain in
-   * pendingApprovals. Pause also attaches the bounded open suffix on
-   * `session_pending_tool_calls`. Expand-era leftover SDK blobs still write
-   * here when they fit the 3 MiB envelope; oversized heaps store the open-suffix
-   * sentinel instead. Resume prefers the suffix and must not require
+   * pendingApprovals. Pause attaches the bounded open suffix on
+   * `session_pending_tool_calls` and stores the open-suffix sentinel here.
+   * Resume uses the suffix plus paired history and must not call
    * `RunState.fromString`.
    */
   runState?: {
@@ -58000,6 +58038,8 @@ export async function getScheduledTargetSessionExecution(
         visibility: schema.sessions.visibility,
         authorityEpoch: schema.sessions.authorityEpoch,
         model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
         metadata: schema.sessions.metadata,
         tools: schema.sessions.tools,
         sandboxBackend: schema.sessions.sandboxBackend,
@@ -58088,11 +58128,11 @@ export async function getScheduledTargetSessionExecution(
       model: latestStarted?.model ?? session.model,
       reasoningEffort: reasoningEffortForMetadata(
         { reasoningEffort: latestStarted?.reasoningEffort },
-        reasoningEffortForMetadata(session.metadata, "medium"),
+        session.reasoningEffort as ReasoningEffort,
       ),
       latencyMode: latencyModeForMetadata(
         { latencyMode: latestStarted?.latencyMode },
-        latencyModeForMetadata(session.metadata, "standard"),
+        session.latencyMode as LatencyMode,
       ),
       tools: (latestStarted?.tools ?? session.tools) as ToolRef[],
       sandboxBackend: (latestStarted?.sandboxBackend ?? session.sandboxBackend) as SandboxBackend,
@@ -60756,6 +60796,8 @@ function mapSession(
     ),
     createdByContext: row.createdByContext ?? {},
     model: row.model,
+    reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: row.latencyMode as LatencyMode,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
     sandboxGroupId: row.sandboxGroupId,

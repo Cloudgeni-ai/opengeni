@@ -274,6 +274,8 @@ describe("migration 0218 organization tenancy foundation", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const [tenancy] = await shared.admin<

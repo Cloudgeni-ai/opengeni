@@ -312,6 +312,79 @@ memberships for the subject and derives role-bounded account plus owner-only
 personal-workspace grants; inactive organizations disappear on the next
 request.
 
+### Lock order: organization fence before the canonical workspace prefix (0299)
+
+The membership lifecycle spans an entire organization, so it must agree with
+every ordinary workspace writer about lock order. Migration
+`0299_organization_membership_lock_order.sql` fixes the one place
+where it did not.
+
+**What was wrong.** `prepare_organization_membership_protocol_settlements`, the
+wrapped `organization_membership_command_0263`, and the 0275
+`organization_membership_command` wrapper each opened with `managed_accounts
+... FOR UPDATE` and took the canonical per-workspace prefix
+(`workspace_inference_controls FOR SHARE` -> `workspaces FOR KEY SHARE`) only
+afterwards. An ordinary workspace writer is forced into the opposite order and
+cannot avoid it: it locks its own `workspaces` row first - AGENTS.md's canonical
+event-write prefix, and `transition_session_visibility` (0225) takes that row
+`FOR UPDATE` - and only then reaches `managed_accounts` *implicitly*, through
+the account foreign-key check of a row it inserts. `sessions`,
+`session_events`, `session_turns`, `session_goals`, and
+`session_system_updates` all reference `managed_accounts`, and an FK check takes
+`FOR KEY SHARE` on the referenced row, which conflicts with `FOR UPDATE`:
+
+```
+transition_session_visibility    holds workspaces       waits managed_accounts
+prepare_organization_membership  holds managed_accounts waits workspaces
+```
+
+An administrator suspending or offboarding a member concurrently with any
+ordinary workspace write in the same organization therefore deadlocked (40P01).
+
+**What replaced it.** The organization row lock was doing two unrelated jobs.
+Mutual exclusion between concurrent membership commands for one organization is
+now a transaction-scoped advisory lock,
+`pg_advisory_xact_lock(hashtextextended('organization-membership:<organization
+id>', 0))`, taken by all three entry points. It is re-grantable within one
+transaction, so the wrapper, the preparation seam, and the wrapped 0263 body all
+take it reentrantly inside the single `updateOrganizationMember` transaction,
+and it lives in a lock space no ordinary workspace writer touches, so it can
+never appear in a cycle with a `workspaces`/`managed_accounts` row lock. Proving
+the organization exists and cannot be deleted underneath the command stays a row
+lock, downgraded to `managed_accounts FOR KEY SHARE`, which still blocks DELETE
+and primary-key UPDATE while being compatible with every ordinary writer's FK
+check. This is the same shape migration 0278 already used for the workspace
+membership removal seam.
+
+The lifecycle's first *row* lock is therefore the canonical prefix, and the full
+order is:
+
+```
+advisory 'organization-membership:<organization id>'
+  -> managed_accounts FOR KEY SHARE
+  -> per workspace, in UUID order:
+       workspace_inference_controls FOR SHARE
+       workspaces FOR KEY SHARE
+  -> organization_memberships FOR UPDATE (UUID ordered)
+  -> sessions FOR NO KEY UPDATE -> session_turns FOR UPDATE
+  -> session_turn_attempts FOR UPDATE
+```
+
+**Do not reintroduce a conflicting organization row lock.** Any new
+organization-wide seam that both locks `managed_accounts` more strongly than
+`FOR KEY SHARE` and afterwards touches `workspaces` (directly or through an FK)
+recreates this deadlock. Serialize on the advisory key instead. CAS on
+`organization_memberships.authorization_revision`, the operation-receipt
+idempotency, and every fail-closed authorization check are unchanged by 0299 -
+only lock strength and lock class moved.
+
+`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+holds the regression evidence: a deterministic cycle probe, a parallel-load
+probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
+not move (so an application-level `40P01` replay cannot mask a regression), and
+an exclusion probe that proves a held advisory key genuinely blocks a
+concurrent membership command.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
@@ -441,7 +514,9 @@ user-facing private toggle is not yet safe:
 `test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
 if any product package starts naming either entry point or authorizing either
 operation. The first real caller must land together with an update to this
-section and to that test.
+section and to that test. Later migrations may replace `fork_session_content`
+only to copy newly required session columns (0289 copies typed reasoning and
+latency); they still must not wire a product caller.
 
 ## Referential integrity
 
@@ -508,10 +583,10 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
-The phase's data source is the read-only inventory seam (migration 0285):
-`bun run db:inventory-tenancy --organization-id <uuid>` reports content-free
-counts of every legacy-attribution population - ownerless sessions, resources
-without an explicit authority classification (variable sets, rigs, machines),
+The phase's data source is the read-only inventory seam (migration 0285,
+corrected by 0292): `bun run db:inventory-tenancy --organization-id <uuid>`
+reports content-free counts of every legacy-attribution population - ownerless
+sessions, Variable Sets / Rigs / Connected Machines **per authority lane**,
 connections per authority lane, humans with workspace access but no
 organization-membership anchor, active memberships per lifecycle status,
 unattributed workspace writers, and the two linked-input gates (documents
@@ -580,6 +655,96 @@ over an organization with more than `n` `user:`-kind subjects would return the
 same first `n` rows on every pass and never reach subject `n + 1` at all. Durable receipt/unresolved-ledger persistence is the separate backfill
 ledger slice; today the command's structured JSON report is the operator record.
 
+#### Variable Sets, Rigs, and Connected Machines need no data rewrite
+
+These three families are already terminally classified, and the phase D
+deliverable for them is an assertion plus a receipt rather than an `UPDATE`.
+`authority_scope` is `text NOT NULL DEFAULT 'workspace'` on all three tables
+(0230 for `workspace_variable_sets` and `rigs`, 0262 for `enrollments`), so
+every pre-existing row already carries an explicit workspace classification.
+Each `*_authority_shape_check` requires `authority_id IS NULL` and
+`owner_organization_membership_id IS NULL` for organization/workspace scope and
+was `VALIDATE`d at creation, so PostgreSQL has already proven the shape of every
+row. A legacy unmigrated row and a deliberately workspace-scoped row are
+therefore byte-identical, and 0262 records the reviewed decision in its own
+header: "Existing rows remain workspace-owned."
+
+`origin_workspace_id` is provenance, not classification, and does not supply a
+missing discriminator: no shape check constrains it for these three families
+(unlike `connections`, whose 0256 workspace branch requires
+`origin_workspace_id = workspace_id`), and every read of it is gated behind
+`authority_scope = 'user'`, which the lifecycle functions always populate. Its
+NULL polarity is also inconsistent across the families, so it means different
+things in each. Do not backfill it as if it were a classification, and never
+resurrect a NULL origin on a user-scoped row - the `ON DELETE SET NULL` foreign
+key erased that origin deliberately.
+
+Migration 0256 remains the one sibling family with a genuine discriminator:
+`connections.subject_id` plus an active `organization_memberships` row. None of
+these three tables has a `subject_id`, so the same shape does not transfer.
+
+Migration 0291 is the resulting assertion seam:
+`bun run db:verify-resource-classification --organization-id <uuid>
+[--run-key <key>]` proves per row that each Variable Set, Rig, and Connected
+Machine already carries an explicit terminal authority classification, and
+records what it cannot prove. It covers the only genuinely unenforced parts of
+the classification, which no constraint catches: that a row claiming user
+ownership points at an authority row of the matching `resource_kind` and
+`resource_id`, that the authority and its owning organization membership are
+both live, and that the delegation still has an origin workspace. Every failure
+becomes an unresolved obligation with a fixed reason code - never a guess, and
+never a rewrite. Supplying `--run-key` records the verdicts durably through the
+backfill ledger as one receipt per family; the report's `ledgerAvailable` field
+states plainly whether that happened.
+
+The seam is `SECURITY DEFINER` and claims a transaction-scoped capability
+rather than running as plain migration SQL, and this is structural rather than
+stylistic. All three tables are FORCE ROW LEVEL SECURITY behind
+`workspace_rls_visible(account_id, workspace_id)`, which is false while the
+`opengeni.workspace_id` GUC is unset - as it is during migration. FORCE RLS
+applies to the table owner, and the documented deployment posture
+([`deployment.md`](deployment.md)) is a non-superuser migration principal
+without `BYPASSRLS`. A bare `UPDATE ... WHERE ...` in a migration body therefore
+matches zero rows and reports success on such a deployment, and only appears to
+work in the test harness, which migrates as a superuser for whom FORCE RLS never
+engages. Any future classification work on these tables must run behind the same
+kind of capability-claiming seam.
+
+**There is no "unclassified" count for Variable Sets, Rigs, or Connected
+Machines, and one must not be reintroduced without new schema.** 0285 reported
+one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
+constraints (`workspace_variable_sets_authority_shape_check`,
+`rigs_authority_shape_check`, `enrollments_authority_shape_check`) *require* a
+NULL `authority_id` for every organization- and workspace-scoped row, so that
+predicate was structurally `total - userScoped`: every correctly classified row
+was reported as unmigrated and the number could never drain to zero. No
+corrected predicate exists either, because `authority_scope` **defaults to
+`'workspace'`** (0230 for Variable Sets and Rigs, 0262 for Connected Machines),
+making an unmigrated legacy row indistinguishable from a deliberately
+workspace-scoped one, and nothing else separates them:
+
+- **Variable Sets** - `origin_workspace_id` (added 0230, never backfilled) is
+  NULL for every pre-0254 row and non-NULL for every row `create_scoped_variable_set`
+  writes. That is a real fact, but it means "predates the scoped lifecycle", not
+  "lacks an explicit authority classification": this phase classifies a reviewed
+  legacy row explicitly *as* workspace-owned, which writes nothing, so a fully
+  reviewed row still reads NULL.
+- **Rigs** - `origin_workspace_id` is not even a legacy marker. `createRig`
+  retains a live non-scoped branch that inserts through Drizzle without it, so
+  new rows keep arriving with a NULL origin today.
+- **Connected Machines** - 0262 added `origin_workspace_id` and backfilled it
+  from `workspace_id` in the same statement, while the ordinary
+  `createEnrollment` upsert still leaves it NULL. The polarity is inverted: NULL
+  marks a *post*-0262 ordinary row.
+
+`byScope` reports every authority distinction the schema can truthfully make,
+and any non-user-scoped total is derivable from it. Restoring a classification
+counter requires first adding a durable classification-decision fact to these
+tables - contrast the documents gate, whose
+`authority_kind = 'personal' AND authority_id IS NULL` names a genuine
+post-migration invariant violation (`documents_authority_chk`, 0258) and is
+therefore truthful and drainable.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace
@@ -587,6 +752,27 @@ per active membership, stable authority uniqueness, provider-account collision
 rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
+
+`packages/db/test/organization-isolation-evidence.test.ts` is the executed
+cross-organization evidence suite for this phase. Against a real PostgreSQL
+database, driven as the genuine non-superuser `NOBYPASSRLS` `opengeni_app`
+login, it proves - each denial paired with a positive control under the owning
+organization - that no seeded resource family (session, session event, Variable
+Set, Rig, Connected Machine, enrollment, connection, file, Document base,
+Document, knowledge memory, scheduled task, API key) crosses an organization
+boundary by read, forged workspace id, sibling workspace, insert, update, or
+delete; that a missing account or workspace context denies rather than widens;
+that forging `opengeni.organization_tenancy_lifecycle` opens no authority table
+because the runtime role holds no privilege on any table gated only by a
+caller-settable GUC; that every account-carrying table the runtime role can
+touch enforces FORCE RLS apart from the reviewed `workspaces` /
+`workspace_memberships` / `auth_identities` directory exceptions whose boundary
+is enforced in `@opengeni/core`; that an active membership in another
+organization is not authority in this one and revoking one membership stops
+access on the very next transaction while leaving the other organization and
+the retained rows intact; and that FORCE RLS still binds a non-superuser
+`SECURITY DEFINER` owner, which is the property every capability seam here
+depends on.
 
 #### Compatibility-lane telemetry
 

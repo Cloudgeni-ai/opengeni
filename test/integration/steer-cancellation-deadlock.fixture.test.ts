@@ -96,6 +96,8 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         tools: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await submitTestHumanPrompt(dbClient.db, {
@@ -137,6 +139,8 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         tools: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await submitTestHumanPrompt(dbClient.db, {
@@ -423,6 +427,8 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         tools: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await submitTestHumanPrompt(dbClient.db, {
@@ -464,6 +470,8 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         tools: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await submitTestHumanPrompt(dbClient.db, {

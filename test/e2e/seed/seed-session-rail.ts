@@ -91,6 +91,8 @@ async function mk(
     resources: [],
     metadata: { origin: ORIGIN, batch: BATCH, seedTitle: input.title },
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     parentSessionId: input.parentSessionId ?? null,
     ...(input.maxDepth !== undefined

@@ -218,6 +218,38 @@ describe("NativeComputerDriver", () => {
     }
   });
 
+  test("stops live capture on a poisoned helper before opening a replacement", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.captureError = new NativeComputerError(
+      "timeout",
+      "ScreenCaptureKit frame wait timed out",
+      true,
+      false,
+    );
+    const replacement = new FixtureNativeTransport();
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => replacement,
+    });
+    try {
+      const frames = await driver.subscribeFrames("window-1");
+      await expect(frames[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: false,
+        value: { frameId: "frame-2", sequence: 1 },
+      });
+      await frames.close();
+      expect(poisoned.stoppedCaptures).toBeGreaterThanOrEqual(1);
+      expect(poisoned.closed).toBe(true);
+      expect(poisoned.teardown[0]).toBe("stop");
+      expect(poisoned.teardown.at(-1)).toBe("close");
+      expect(poisoned.teardown.indexOf("stop")).toBeLessThan(poisoned.teardown.indexOf("close"));
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("replaces a poisoned native helper once for safe target reads", async () => {
     const poisoned = new FixtureNativeTransport();
     poisoned.targetsError = new Error("native computer helper returned a malformed response");
@@ -303,11 +335,13 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   dispatched: NativeComputerActionCommand | null = null;
   validateError: Error | null = null;
   startCaptureError: Error | null = null;
+  captureError: Error | null = null;
   targetsError: Error | null = null;
   dispatchObservation: ReturnType<typeof observation> | null = observation("observation-2");
   dispatchError: Error | null = null;
   closed = false;
   stoppedCaptures = 0;
+  teardown: Array<"stop" | "close"> = [];
   startedCaptureOptions: NativeComputerCaptureOptions[] = [];
   observationFrameId: string | null = "frame-1";
   captures = 0;
@@ -326,6 +360,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   }
 
   async capture(_targetId: string, options?: NativeComputerCaptureOptions) {
+    if (this.captureError) throw this.captureError;
     this.captures += 1;
     const width = Math.min(20, options?.maxWidth ?? 20);
     const height = Math.min(10, Math.max(1, Math.floor((width / 20) * 10)));
@@ -349,6 +384,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
 
   async stopCapture(): Promise<void> {
     this.stoppedCaptures += 1;
+    this.teardown.push("stop");
   }
 
   async clipboard() {
@@ -367,6 +403,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   }
 
   async close(): Promise<void> {
+    this.teardown.push("close");
     this.closed = true;
   }
 }

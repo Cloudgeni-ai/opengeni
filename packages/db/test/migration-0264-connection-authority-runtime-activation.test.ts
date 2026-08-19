@@ -121,6 +121,8 @@ describe("migration 0264 connection authority runtime activation", () => {
         metadata: {},
         createdBy: { kind: "subject", subjectId },
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId,
       });
@@ -278,6 +280,8 @@ describe("migration 0264 connection authority runtime activation", () => {
         metadata: {},
         createdBy: { kind: "subject", subjectId },
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId,
       });
@@ -459,6 +463,8 @@ describe("migration 0264 connection authority runtime activation", () => {
         metadata: {},
         createdBy: { kind: "subject", subjectId },
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId,
       });
@@ -860,6 +866,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           metadata: {},
           createdBy: { kind: "subject", subjectId },
           model: "test-model",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
           sandboxBackend: "none",
           subjectId,
         });
@@ -1006,6 +1014,8 @@ describe("migration 0264 connection authority runtime activation", () => {
         tools: [],
         metadata: {},
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         parentSessionId: raceSession.id,
       });
