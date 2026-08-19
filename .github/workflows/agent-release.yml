@@ -39,6 +39,7 @@ jobs:
   guard:
     name: Guard
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -68,6 +69,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: guard
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -553,6 +555,7 @@ jobs:
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

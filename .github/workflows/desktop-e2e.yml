@@ -21,6 +21,7 @@ jobs:
   desktop-image:
     name: Desktop image build + stack assertions
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v6

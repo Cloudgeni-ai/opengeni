@@ -1,0 +1,105 @@
+name: Install pinned Playwright browsers
+description: >-
+  Restore or download exactly the pinned Playwright browsers under a hard
+  per-attempt wall clock. An unbounded `playwright install` can wedge for the
+  full GitHub job default (360 minutes) while holding a runner slot, which
+  starves every other pull request in the account. Bounding the attempt turns
+  that outage into a fast, visible, re-runnable failure.
+
+inputs:
+  browsers:
+    description: Space-separated Playwright browser list, for example "chromium firefox".
+    required: true
+  only-shell:
+    description: Install the headless shell build instead of full Chromium.
+    required: false
+    default: "false"
+  attempt-timeout-seconds:
+    description: >-
+      Hard wall clock for one install attempt. The observed p90 is 83s across
+      every browser set, and p95 is 3.5m, so the default clears the healthy-but-
+      slow tail that used to finish green and only trips on the pathological tail. Worst case per attempt is
+      this value plus the 15s SIGKILL grace, so the whole step is bounded by
+      attempts * (timeout + 15s); keep that inside the calling job's
+      timeout-minutes alongside the job's own work.
+    required: false
+    default: "360"
+  attempts:
+    description: >-
+      Bounded attempts before the step fails. A retry reuses the same runner, so
+      it only recovers a transient stall; the fast failure is the real remedy.
+    required: false
+    default: "2"
+
+runs:
+  using: composite
+  steps:
+    # Inputs reach the shell through the environment, never through `${{ }}`
+    # interpolation into the script body, so a value can never be parsed as
+    # shell syntax.
+    - name: Resolve pinned Playwright version
+      id: pinned
+      shell: bash
+      env:
+        PLAYWRIGHT_BROWSERS: ${{ inputs.browsers }}
+        PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
+      run: |
+        set -euo pipefail
+        version="$(node -p "require('playwright/package.json').version")"
+        if [ -z "${version}" ]; then
+          echo "::error::Could not resolve the installed Playwright version."
+          exit 1
+        fi
+        slug="$(printf '%s' "${PLAYWRIGHT_BROWSERS}" | tr ' ' '-')"
+        if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
+          slug="${slug}-shell"
+        fi
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+
+    # Keyed on the exact resolved Playwright version and browser set. A miss
+    # only costs today's behaviour; a hit removes the download that drives the
+    # entire hang tail. No restore-keys: a partial restore of another browser
+    # set would re-download anyway and could not be saved under this key.
+    - name: Restore pinned Playwright browsers
+      uses: actions/cache@v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ steps.pinned.outputs.version }}-${{ steps.pinned.outputs.slug }}
+
+    - name: Install pinned Playwright browsers
+      shell: bash
+      env:
+        PLAYWRIGHT_BROWSERS: ${{ inputs.browsers }}
+        PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
+        ATTEMPT_TIMEOUT_SECONDS: ${{ inputs.attempt-timeout-seconds }}
+        ATTEMPTS: ${{ inputs.attempts }}
+      run: |
+        set -uo pipefail
+        only_shell=""
+        if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
+          only_shell="--only-shell"
+        fi
+        attempt=1
+        while [ "${attempt}" -le "${ATTEMPTS}" ]; do
+          echo "::group::Playwright install attempt ${attempt}/${ATTEMPTS}"
+          # The runner invokes this as `bash --noprofile --norc -eo pipefail`,
+          # and `set -uo pipefail` does NOT clear that errexit. Without the
+          # `|| status=$?` guard the first failing attempt aborts the script,
+          # so the retry, the warnings, and the error summary never run.
+          status=0
+          timeout --kill-after=15s "${ATTEMPT_TIMEOUT_SECONDS}s" \
+            bun x playwright install --with-deps ${only_shell} ${PLAYWRIGHT_BROWSERS} || status=$?
+          echo "::endgroup::"
+          if [ "${status}" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            echo "::warning::Playwright install attempt ${attempt} exceeded ${ATTEMPT_TIMEOUT_SECONDS}s and was killed."
+          else
+            echo "::warning::Playwright install attempt ${attempt} failed with exit ${status}."
+          fi
+          attempt=$((attempt + 1))
+        done
+        echo "::error::Playwright install failed after ${ATTEMPTS} bounded attempts."
+        exit 1
