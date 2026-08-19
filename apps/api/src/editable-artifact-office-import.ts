@@ -228,9 +228,7 @@ async function readVerifiedWorkspaceFile(
   for (let start = 0; start < file.sizeBytes; start += MAX_BOUNDED_OBJECT_CHUNK_BYTES) {
     throwIfAborted(signal);
     const end = Math.min(file.sizeBytes, start + MAX_BOUNDED_OBJECT_CHUNK_BYTES) - 1;
-    const chunk = await retryWhileMissing(async () =>
-      storage.getFileRange(file, { start, end }),
-    );
+    const chunk = await retryWhileMissing(async () => storage.getFileRange(file, { start, end }));
     if (!chunk || chunk.byteLength !== end - start + 1) {
       throw new EditableArtifactOfficeImportError("source_changed");
     }

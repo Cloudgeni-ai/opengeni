@@ -1624,7 +1624,9 @@ export async function indexDocumentNow(
       );
   });
   try {
-    const object = await retryWhileMissing(async () => objectStorage.getObjectBytes(file.objectKey));
+    const object = await retryWhileMissing(async () =>
+      objectStorage.getObjectBytes(file.objectKey),
+    );
     if (!object) throw new Error("document source object is missing");
     const bytes = object.bytes;
     const parsed = await services.parser.parse(bytes, file);
