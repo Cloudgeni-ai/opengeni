@@ -575,8 +575,7 @@ function xaiSseTerminalError(
     eventType,
     requestId: audit.requestId,
     status,
-    diagnosticTruncated:
-      eventTypeField.truncated || codeField.truncated || messageField.truncated,
+    diagnosticTruncated: eventTypeField.truncated || codeField.truncated || messageField.truncated,
     headers,
   });
 }
