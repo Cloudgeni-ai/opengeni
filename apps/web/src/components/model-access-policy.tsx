@@ -379,9 +379,7 @@ export function ModelAccessPolicySection({
                               type="checkbox"
                               checked={draft.selectedModelIds.has(model.id)}
                               disabled={!canManage || saving}
-                              onChange={(event) =>
-                                setModelSelected(model.id, event.target.checked)
-                              }
+                              onChange={(event) => setModelSelected(model.id, event.target.checked)}
                               className="size-3.5 shrink-0 accent-brand"
                             />
                             <span className="min-w-0 flex-1 truncate text-sm">{model.label}</span>
