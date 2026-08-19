@@ -91,6 +91,12 @@ async function sessionVisibilityFixture() {
       and status = 'active'
   `;
   const otherSubjectId = `user:session-other-${suffix}`;
+  // The second member's personal workspace keeps the SHAPE real provisioning
+  // produces: an organization_memberships pointer and NO workspace_memberships
+  // row at all (0219 raises 42501 on one). An earlier revision of this fixture
+  // hand-inserted a membership row here and used the result as the fork
+  // destination, which is why the personal-workspace ownership defect repaired
+  // by migration 0302 was invisible to this suite.
   const otherPersonalWorkspaceId = crypto.randomUUID();
   await shared.admin`
     insert into workspaces (id, account_id, name, external_source, external_id)
@@ -107,6 +113,10 @@ async function sessionVisibilityFixture() {
     ) returning id
   `;
   await shared.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${otherPersonalWorkspaceId}, ${ownerGrant.accountId})
+  `;
+  await shared.admin`
     insert into workspace_memberships (
       account_id, workspace_id, subject_id, role, permissions
     ) values (
@@ -114,17 +124,29 @@ async function sessionVisibilityFixture() {
       'member', '["sessions:read","sessions:control"]'::jsonb
     )
   `;
+  // An ORDINARY second shared workspace is what a cross-workspace fork can
+  // actually target: fork_session_content requires a workspace_memberships row
+  // for the actor in the destination (0225), which a personal workspace by
+  // construction never has.
+  const forkDestinationWorkspaceId = crypto.randomUUID();
+  await shared.admin`
+    insert into workspaces (id, account_id, name, external_source, external_id)
+    values (
+      ${forkDestinationWorkspaceId}, ${ownerGrant.accountId}, 'Fork destination workspace',
+      'session-visibility-test', ${`fork-destination-${suffix}`}
+    )
+  `;
   await shared.admin`
     insert into workspace_memberships (
       account_id, workspace_id, subject_id, role, permissions
     ) values (
-      ${ownerGrant.accountId}, ${otherPersonalWorkspaceId}, ${ownerSubjectId},
+      ${ownerGrant.accountId}, ${forkDestinationWorkspaceId}, ${ownerSubjectId},
       'member', '["sessions:read","sessions:create","sessions:control"]'::jsonb
     )
   `;
   await shared.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
-    values (${otherPersonalWorkspaceId}, ${ownerGrant.accountId})
+    values (${forkDestinationWorkspaceId}, ${ownerGrant.accountId})
   `;
   const session = await createSession(client.db, {
     accountId: ownerGrant.accountId,
@@ -194,6 +216,7 @@ async function sessionVisibilityFixture() {
     ownerSubjectId,
     otherSubjectId,
     otherPersonalWorkspaceId,
+    forkDestinationWorkspaceId,
     otherMembershipId: otherMembership!.id,
     session,
   };
@@ -358,12 +381,12 @@ describe("migration 0225 session visibility and fork activation", () => {
       sourceWorkspaceId: value.ownerGrant.workspaceId,
       sourceSessionId: value.session.id,
       actorSubjectId: value.ownerSubjectId,
-      destinationWorkspaceId: value.otherPersonalWorkspaceId,
+      destinationWorkspaceId: value.forkDestinationWorkspaceId,
       destinationVisibility: "user_private",
       operationKey,
     });
     expect(forked).toMatchObject({
-      workspaceId: value.otherPersonalWorkspaceId,
+      workspaceId: value.forkDestinationWorkspaceId,
       visibility: "user_private",
       authorityEpoch: 1,
       copiedHistoryItemCount: 1,
@@ -425,7 +448,7 @@ describe("migration 0225 session visibility and fork activation", () => {
       sourceWorkspaceId: value.ownerGrant.workspaceId,
       sourceSessionId: value.session.id,
       actorSubjectId: value.ownerSubjectId,
-      destinationWorkspaceId: value.otherPersonalWorkspaceId,
+      destinationWorkspaceId: value.forkDestinationWorkspaceId,
       destinationVisibility: "user_private",
       operationKey,
     });
