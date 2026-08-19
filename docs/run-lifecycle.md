@@ -1449,4 +1449,8 @@ misleading trailing `failed`. Actual provider failure/incomplete/error,
 transport failure, timeout, or caller abort remains failed/timed out. SuperGrok
 persists only `started`, `headers`, `first_event`, and terminal checkpoints—not
 every streamed event—and the terminal checkpoint carries bounded event-count,
-last-event-type, last-progress-duration, and silence facts.
+last-event-type, last-progress-duration, and silence facts. An HTTP 200 SSE
+error/failed/incomplete terminal is not forwarded into the Agents SDK; the
+transport throws the bounded exact provider message and `turn.failed` stores
+that diagnostic. Lifecycle audit stays metadata-only; worker stdout stays
+sanitized.
