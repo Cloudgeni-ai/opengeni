@@ -1146,11 +1146,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       await db.execute(sql`
         insert into sessions (
           account_id, workspace_id, status, initial_message, resources, tools, metadata,
-          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+          model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+          tool_policy, created_at, updated_at
         )
         select ${value.owner.accountId}, ${value.owner.workspaceId}, 'idle',
           'Newer completed task ' || n::text, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
-          'gpt-5.6-terra', 'none', gen_random_uuid(),
+          'gpt-5.6-terra', 'medium', 'standard', 'none', gen_random_uuid(),
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
           statement_timestamp() - make_interval(secs => n),
           statement_timestamp() - make_interval(secs => n)

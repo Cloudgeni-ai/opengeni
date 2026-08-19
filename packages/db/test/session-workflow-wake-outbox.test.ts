@@ -61,6 +61,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return { grant, session };
@@ -229,6 +231,8 @@ describe("transactional session workflow wake outbox", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
 

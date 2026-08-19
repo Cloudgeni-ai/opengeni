@@ -47,6 +47,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["POST", "/queue/33333333-3333-4333-8333-333333333333/delete", "session.queue.control"],
   ["GET", "/composer-draft", "session.composer.read"],
   ["PUT", "/composer-draft", "session.composer.write"],
+  ["POST", "/composer-draft/submit", "session.append"],
   ["POST", "/control", "session.control"],
   ["POST", "/steer", "session.steer"],
   ["GET", "/human-input-requests", "session.human_input.read"],

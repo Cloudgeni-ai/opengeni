@@ -54,7 +54,13 @@ export {
   shouldSubmitOnKey,
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
-export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export type {
+  ComposerControllerState,
+  ComposerPolicy,
+  ComposerSendExtras,
+  ComposerState,
+  UseComposerOptions,
+} from "./hooks/use-composer";
 export {
   VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
   VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS,

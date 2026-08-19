@@ -6,11 +6,33 @@ import type {
   ResourceRef,
   ToolRef,
 } from "@opengeni/contracts";
-import { and, eq } from "drizzle-orm";
+import { stableJson } from "@opengeni/contracts";
+import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
+
+async function lockNewSessionDraftIdentity(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`new-session-draft:${workspaceId}:${subjectId}`}, 0))`,
+  );
+}
+
+export type NewSessionDraftSnapshot = {
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  toolsProvided: boolean;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
+  options: NewSessionDraftOptions;
+};
 
 export class NewSessionDraftConflictError extends Error {
   readonly name = "NewSessionDraftConflictError";
@@ -87,7 +109,7 @@ export async function saveNewSessionDraftInTransaction(
     toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
-    latencyMode?: LatencyMode;
+    latencyMode: LatencyMode;
     options: NewSessionDraftOptions;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
@@ -111,6 +133,7 @@ export async function saveNewSessionDraftInTransaction(
       .limit(1);
     if (!membership) throw new NewSessionDraftAccessError();
   }
+  await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
   const current = await getNewSessionDraftInTransaction(db, { ...input, lock: true });
   const currentRevision = current?.revision ?? 0;
   if (currentRevision !== input.expectedRevision) {
@@ -128,7 +151,7 @@ export async function saveNewSessionDraftInTransaction(
     tools: input.tools,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode ?? "standard",
+    latencyMode: input.latencyMode,
     // Keep the explicit/omitted policy in the existing JSONB extension point;
     // adding a column here would turn a client preference into a migration.
     sessionOptions: storedOptions(input.options, input.toolsProvided),
@@ -200,15 +223,21 @@ function safeWorkingDir(value: unknown, targetSandboxId: string | undefined): st
 
 /**
  * Replace one exact accepted draft with the next-create safe seed. The row is
- * locked before the revision check so a concurrent save either commits first
- * and wins (this returns false), or observes the incremented seed revision and
- * reports a typed OCC conflict. A missing row is an idempotent no-op.
+ * identity-serialized before the revision check so even the absent-row
+ * revision-zero case cannot race a first save. Exact create callers receive a
+ * typed conflict; legacy revision-only callers retain the old false/no-op
+ * result. A missing row is an idempotent no-op.
  */
 export async function seedNewSessionDraftInTransaction(
   db: Database,
-  input: { workspaceId: string; subjectId: string; expectedRevision: number },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    expectedRevision: number;
+    expectedSnapshot?: NewSessionDraftSnapshot;
+  },
 ): Promise<boolean> {
-  if (input.expectedRevision === 0) return false;
+  await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
   const [current] = await db
     .select()
     .from(schema.newSessionDrafts)
@@ -220,7 +249,27 @@ export async function seedNewSessionDraftInTransaction(
     )
     .for("update")
     .limit(1);
-  if (!current || current.revision !== input.expectedRevision) return false;
+  if (!current || current.revision !== input.expectedRevision) {
+    if (input.expectedSnapshot) {
+      throw new NewSessionDraftConflictError(current?.revision ?? 0);
+    }
+    return false;
+  }
+  if (
+    input.expectedSnapshot &&
+    stableJson({
+      text: current.text,
+      resources: current.resources,
+      tools: newSessionDraftToolsProvided(current) ? current.tools : [],
+      toolsProvided: newSessionDraftToolsProvided(current),
+      model: current.model,
+      reasoningEffort: current.reasoningEffort,
+      latencyMode: current.latencyMode,
+      options: publicNewSessionDraftOptions(current),
+    }) !== stableJson(input.expectedSnapshot)
+  ) {
+    throw new NewSessionDraftConflictError(current.revision);
+  }
 
   const options = current.sessionOptions as StoredNewSessionDraftOptions;
   const targetSandboxId =

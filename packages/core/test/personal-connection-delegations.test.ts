@@ -243,6 +243,8 @@ describe("personal MCP connection delegation", () => {
         metadata: {},
         createdBy: { kind: "subject", subjectId },
         model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         subjectId,
       });

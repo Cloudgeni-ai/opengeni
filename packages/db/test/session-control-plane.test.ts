@@ -123,6 +123,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return { grant, session };
@@ -660,6 +662,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: { mustNeverLeak: "x".repeat(100_000) },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const third = await createSession(client.db, {
@@ -669,6 +673,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: second.id,
     });
@@ -804,6 +810,8 @@ describe("clean session control plane", () => {
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
           sandboxBackend: "none",
         }),
       );
@@ -868,6 +876,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
@@ -946,6 +956,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const third = await createSession(client.db, {
@@ -955,6 +967,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const moved = await createSession(client.db, {
@@ -964,6 +978,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
 
@@ -1018,6 +1034,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
@@ -1123,10 +1141,11 @@ describe("clean session control plane", () => {
       db.execute(sql`
         insert into sessions (
           account_id, workspace_id, initial_message, resources, tools, metadata,
-          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+          model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+          tool_policy, created_at, updated_at
         )
         select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
-          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
+          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'medium', 'standard', 'none',
           gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
           statement_timestamp() - make_interval(secs => n),
           statement_timestamp() - make_interval(secs => 5001 - n)
@@ -1988,6 +2007,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -2024,6 +2045,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -4496,6 +4519,8 @@ describe("clean session control plane", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         parentSessionId: parent.id,
       });
@@ -4624,6 +4649,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: parent.id,
       createdByActor: {
@@ -5142,6 +5169,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await send(grant, firstSession.id, "first session work");
@@ -6372,6 +6401,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: session.id,
     });
@@ -6560,6 +6591,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: session.id,
     })

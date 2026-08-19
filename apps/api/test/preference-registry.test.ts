@@ -197,6 +197,8 @@ async function seedAttempt(
     tools: [],
     metadata: {},
     model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const executionGeneration = 3;

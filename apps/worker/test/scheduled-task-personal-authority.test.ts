@@ -379,6 +379,8 @@ describe("scheduled task personal MCP authority", () => {
       toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const task = await createScheduledTask(client.db, {
@@ -460,6 +462,8 @@ describe("scheduled task personal MCP authority", () => {
       toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const latentServerId = `latent-${crypto.randomUUID()}`;
@@ -1353,6 +1357,8 @@ describe("scheduled task personal MCP authority", () => {
         scheduledTaskRunMode: "new_session_per_run",
       },
       model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: {
         kind: "service",
@@ -1486,6 +1492,8 @@ describe("scheduled task personal MCP authority", () => {
       },
       createdByContext: { scheduledTaskId: task.id, scheduledTaskRunId: runId },
       model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      latencyMode: "standard",
       sandboxBackend: "none",
       createIdempotencyKey,
       maxNestedAgentDepthOverride: null,
@@ -1626,6 +1634,8 @@ describe("scheduled task personal MCP authority", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const created = await createScheduledTask(client.db, {

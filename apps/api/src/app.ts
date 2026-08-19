@@ -1395,6 +1395,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/queue",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft\/submit$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft/submit",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
   },

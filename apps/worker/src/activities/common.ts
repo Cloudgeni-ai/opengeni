@@ -5,11 +5,7 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 
-export {
-  mergeResourceRefs,
-  mergeToolRefs,
-  reasoningEffortForMetadata as reasoningEffortForSession,
-} from "@opengeni/contracts";
+export { mergeResourceRefs, mergeToolRefs } from "@opengeni/contracts";
 
 /**
  * Refuse to revive a terminal reusable session on a scheduled fire. Mirrors the

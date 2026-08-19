@@ -261,6 +261,8 @@ describe("rig route permission matrix", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
     });

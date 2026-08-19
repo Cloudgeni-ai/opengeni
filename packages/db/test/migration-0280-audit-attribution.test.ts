@@ -76,6 +76,8 @@ async function claimedTurnFixture(initiatingHuman?: string): Promise<Fixture> {
       : {}),
     ...(initiatingHuman ? { subjectId: initiatingHuman } : {}),
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(db, {

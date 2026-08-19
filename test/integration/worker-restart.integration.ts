@@ -125,6 +125,8 @@ describe("worker restart resilience", () => {
       tools: [{ kind: "mcp", id: "docs" }],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
@@ -277,6 +279,8 @@ describe("worker restart resilience", () => {
       tools: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
@@ -451,6 +455,8 @@ describe("worker restart resilience", () => {
       tools: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
@@ -571,6 +577,8 @@ describe("worker restart resilience", () => {
       tools: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;

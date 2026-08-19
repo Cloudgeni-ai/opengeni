@@ -117,6 +117,16 @@ describe("BrowserSession route discipline", () => {
     expect(create).toContain('identity.status !== "active"');
   });
 
+  test("routes attached-device BrowserSession end through the original placement fence", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withBrowserPlacement"),
+      source.indexOf("async function withActiveBrowserController"),
+    );
+    expect(placement).toContain("attachedEndPlacementInstanceId(");
+    expect(source).toContain('operation === "browser.end" && expectedPlacementInstanceId');
+  });
+
   test("admits every controller call through the durable generation fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     expect(source).toContain("touchBrowserSessionController(deps.db");

@@ -152,6 +152,8 @@ describe("workspace membership removal fencing", () => {
       createdBy: { kind: "subject", subjectId: target },
       subjectId: target,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const bystanderSession = await createSession(db, {
@@ -163,6 +165,8 @@ describe("workspace membership removal fencing", () => {
       createdBy: { kind: "subject", subjectId: bystander },
       subjectId: bystander,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const targetTurn = await insertQueuedTurn(workspace, targetSession.id, target);
@@ -269,6 +273,8 @@ describe("workspace membership removal fencing", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const transition = await transitionSessionVisibility(db, {
@@ -289,6 +295,8 @@ describe("workspace membership removal fencing", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
 
@@ -344,6 +352,8 @@ describe("workspace membership removal fencing", () => {
       createdBy: { kind: "subject", subjectId: target },
       subjectId: target,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const turnId = crypto.randomUUID();

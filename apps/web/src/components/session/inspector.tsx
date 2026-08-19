@@ -120,10 +120,7 @@ export function SessionInspector(props: {
 
               <InspectorSection title="Runtime">
                 <InfoRow label="Model" value={props.session.model} />
-                <InfoRow
-                  label="Effort"
-                  value={String(props.session.metadata.reasoningEffort ?? "low")}
-                />
+                <InfoRow label="Effort" value={props.session.reasoningEffort} />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow
                   label="Variable set"

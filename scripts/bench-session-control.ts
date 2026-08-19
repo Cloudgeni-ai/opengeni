@@ -53,12 +53,13 @@ try {
     await scopedDb.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, title,
-        resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
+        resources, tools, metadata, model, reasoning_effort, latency_mode,
+        sandbox_backend, sandbox_group_id,
         temporal_workflow_id, tool_policy
       ) values (
         ${rootId}::uuid, ${accountId}::uuid, ${workspaceId}::uuid, 'idle',
         'benchmark root', 'Benchmark root', '[]'::jsonb, '[]'::jsonb,
-        jsonb_build_object('bench_index', 0), 'benchmark-model', 'none',
+        jsonb_build_object('bench_index', 0), 'benchmark-model', 'medium', 'standard', 'none',
         ${rootId}::uuid, ${`session-${rootId}`},
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       )
@@ -67,7 +68,8 @@ try {
     await scopedDb.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, title,
-        resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
+        resources, tools, metadata, model, reasoning_effort, latency_mode,
+        sandbox_backend, sandbox_group_id,
         parent_session_id, temporal_workflow_id, tool_policy
       )
       select
@@ -81,6 +83,8 @@ try {
         '[]'::jsonb,
         jsonb_build_object('bench_index', generated.i),
         'benchmark-model',
+        'medium',
+        'standard',
         'none',
         md5(${workspaceId} || ':' || generated.i::text)::uuid,
         case
