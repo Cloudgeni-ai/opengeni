@@ -109,6 +109,7 @@ export const GRANDFATHERED_MIGRATIONS: readonly string[] = [
   "0275_scheduled_connection_authority.sql",
   "0277_workspace_writer_authority_attribution.sql",
   "0280_connection_and_variable_set_audit_attribution.sql",
+  "0289_session_composer_policy_authority.sql",
 ];
 
 /**

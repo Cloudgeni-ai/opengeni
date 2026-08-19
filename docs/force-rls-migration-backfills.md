@@ -152,7 +152,7 @@ A non-zero count on a deployment that already ran 0256 confirms the no-op.
 
 ## Full classification of the shipped ledger
 
-Sixty-seven migrations contain a top-level write over a FORCE-RLS table; twenty
+Sixty-eight migrations contain a top-level write over a FORCE-RLS table; twenty
 contain a preflight guard that can never fire. The complete machine-checked
 inventory is `GRANDFATHERED_MIGRATIONS` / `GRANDFATHERED_VACUOUS_GUARDS` in
 `scripts/migration-rls-backfills.ts`. Their dispositions:
@@ -175,7 +175,10 @@ wrong:
 (browser state transfer), `0213`, `0215`, `0222`, `0224`, `0226`, `0232`
 (component kind), `0233`, `0252`, `0256` (the personal-connection loop - its
 `connections_authority_shape_check` is `FALSE` for a `subject_id IS NOT NULL`
-row, so the classification half aborts rather than mis-classifying), `0258`.
+row, so the classification half aborts rather than mis-classifying), `0258`,
+`0289` (the `sessions.reasoning_effort` / `sessions.latency_mode` seed is
+followed immediately by `SET NOT NULL` on both columns in the same file, so a
+blinded backfill leaves every pre-existing row `NULL` and the migration aborts).
 
 ### Benign
 
