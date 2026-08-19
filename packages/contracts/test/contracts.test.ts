@@ -72,6 +72,9 @@ import {
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
+  OPEN_SUFFIX_RUN_STATE_MARKER,
+  isOpenSuffixRunStateBlob,
   SessionEvent,
   compactSessionEventResult,
   ToolAuthNeededPayload,
@@ -2403,6 +2406,30 @@ describe("cleared run-state sentinel", () => {
       false,
     );
     expect(isClearedRunStateBlob("null")).toBe(false);
+  });
+});
+
+describe("open-suffix run-state sentinel", () => {
+  test("the canonical blob is recognized as the leftover-heap placeholder", () => {
+    expect(isOpenSuffixRunStateBlob(OPEN_SUFFIX_RUN_STATE_BLOB)).toBe(true);
+    expect(
+      isOpenSuffixRunStateBlob(JSON.stringify({ [OPEN_SUFFIX_RUN_STATE_MARKER]: true, note: "x" })),
+    ).toBe(true);
+    expect(isClearedRunStateBlob(OPEN_SUFFIX_RUN_STATE_BLOB)).toBe(false);
+  });
+
+  test("real run-state blobs and junk are not treated as the open-suffix sentinel", () => {
+    expect(
+      isOpenSuffixRunStateBlob(
+        JSON.stringify({
+          $schemaVersion: "1.11",
+          currentTurn: 1,
+          generatedItems: [],
+        }),
+      ),
+    ).toBe(false);
+    expect(isOpenSuffixRunStateBlob(null)).toBe(false);
+    expect(isOpenSuffixRunStateBlob(CLEARED_RUN_STATE_BLOB)).toBe(false);
   });
 });
 

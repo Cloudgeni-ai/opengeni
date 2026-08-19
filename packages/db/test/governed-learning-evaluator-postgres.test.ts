@@ -66,6 +66,8 @@ async function fixture(workspaceMode: "suggest" | "automatic" = "automatic") {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: ownerSubjectId },
       createdByContext: {},

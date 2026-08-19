@@ -223,21 +223,29 @@ export async function listGovernedLearningActivationHistory(
   }
 }
 
+// The translated errors keep the originating failure as `cause`. The SQLSTATE
+// alone collapses distinguishable outcomes - a stale instruction-policy
+// baseline and a duplicate-key conflict are both surfaced here - so callers
+// that need to tell them apart can still reach the exact database diagnostic
+// without re-running the operation.
 function translate(error: unknown): never {
   const state = nestedPostgresSqlState(error);
   if (state === "42501") {
     throw new GovernedLearningActivationAuthorityError(
       "Governed-learning activation is unavailable",
+      { cause: error },
     );
   }
   if (state === "23505" || state === "40001") {
     throw new GovernedLearningActivationConflictError(
       "Governed-learning activation conflicted with current authority",
+      { cause: error },
     );
   }
   if (state === "23514" || state === "55000" || state === "22023") {
     throw new GovernedLearningActivationInvalidOperationError(
       "Governed-learning activation is no longer eligible",
+      { cause: error },
     );
   }
   throw error;

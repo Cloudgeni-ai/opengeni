@@ -259,8 +259,8 @@ describe("capabilities browser e2e", () => {
 
         for (const theme of ["light", "dark"] as const) {
           await setTheme(page, theme);
-          await expectVisible(page.getByLabel("Search capabilities"));
-          expect(await page.getByLabel("Search capabilities").count()).toBe(1);
+          await expectVisible(page.getByLabel("Search connectors"));
+          expect(await page.getByLabel("Search connectors").count()).toBe(1);
           await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
           await page.screenshot({
             path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
@@ -324,7 +324,7 @@ describe("capabilities browser e2e", () => {
       expect(initialCount).toBeLessThanOrEqual(48);
 
       const startedAt = performance.now();
-      await page.getByLabel("Search capabilities").fill("Capability 4999");
+      await page.getByLabel("Search connectors").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);
@@ -352,12 +352,19 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
-      // The Google Drive integration row is the knowledge connection; named
-      // Drive accounts (per-account tool namespaces) live in Connected services.
-      await expectVisible(
-        page.getByRole("button", { name: "Google Drive. Not connected", exact: true }),
-      );
-      const instance = page.locator('[data-integration-instance="finance"]');
+      // One Google Drive row folds every account in: the primary knowledge
+      // connection plus each named Drive account (its own tool namespace).
+      // The row's accessible name carries the state, and the accounts - with
+      // their per-instance facets - live in the row's detail sheet.
+      const driveRow = page.getByRole("button", {
+        name: "Google Drive. Not connected",
+        exact: true,
+      });
+      await expectVisible(driveRow);
+      await driveRow.click();
+      const sheet = page.locator('[data-integration-sheet="google-drive"]');
+      await expectVisible(sheet);
+      const instance = sheet.locator('[data-integration-access-item="finance"]');
       await expectVisible(instance);
       await expectText(instance, "Google Drive — Finance");
       await instance
@@ -628,7 +635,11 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
       return cycle.some(
         (member) =>
           member.startsWith("capabilities-services-") ||
-          member.startsWith("integration-control-center-view-"),
+          member.startsWith("integration-account-facets-") ||
+          member.startsWith("integration-facets-panel-") ||
+          member.startsWith("custom-api-setup-dialog-") ||
+          member.startsWith("google-drive-folder-dialog-") ||
+          member.startsWith("google-drive-knowledge-source-dialog-"),
       )
         ? cycle
         : null;

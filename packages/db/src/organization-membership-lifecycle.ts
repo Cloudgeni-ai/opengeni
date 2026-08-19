@@ -39,14 +39,10 @@ import * as schema from "./schema";
  * Bounded replay of one exact organization-lifecycle transaction after a
  * PostgreSQL deadlock abort.
  *
- * The lifecycle SECURITY DEFINER seam takes the organization row
- * (`managed_accounts FOR UPDATE`) before it takes the account's `workspaces`
- * rows `FOR KEY SHARE`. An ordinary workspace writer necessarily takes the
- * opposite order: it locks its `workspaces` row first and only then reaches
- * `managed_accounts` implicitly, through the account foreign-key check of a row
- * it inserts (a session event, goal, or system-update row, for example),
- * which needs `FOR KEY SHARE` on the same organization row. PostgreSQL resolves
- * that inversion by aborting one of the two transactions with `40P01`.
+ * A lifecycle command spans an entire organization and therefore touches many
+ * rows that ordinary workspace writers touch too, so it can land in a lock
+ * cycle with one. PostgreSQL resolves a cycle by aborting one of the two
+ * transactions with `40P01`.
  *
  * Replay is exact rather than approximate: the whole lifecycle command runs in
  * one transaction keyed by its caller-supplied operation id
@@ -62,13 +58,15 @@ import * as schema from "./schema";
  * ONE of the two transactions in the cycle as the victim, and it may pick the
  * ordinary workspace writer instead of the lifecycle command. That writer is a
  * plain caller of an unrelated module (`transitionSessionVisibility`, a session
- * event/goal/system-update insert, ...); nothing here can replay it, and
- * wrapping every ordinary workspace writer in a deadlock retry would be a far
- * larger change than removing the inversion. So this covers exactly the
- * lifecycle side of the cycle: it is a partial, caller-side mitigation, NOT the
- * fix. The inversion lives in the SQL seam and only a migration removes it -
- * the lifecycle seam must stop holding an exclusive `managed_accounts` lock
- * across workspace-row acquisition.
+ * event/goal/system-update insert, ...); nothing here can replay it. So this
+ * covers exactly the lifecycle side of a cycle: it is a caller-side safety net,
+ * NOT a lock-order fix. The known organization/workspace lock-order inversion
+ * was removed in SQL by migration
+ * `0299_organization_membership_lock_order.sql` (advisory-lock mutual exclusion
+ * plus a downgraded `managed_accounts FOR KEY SHARE` row lock), and its
+ * parallel-load probe reads `pg_stat_database.deadlocks` directly so this
+ * replay cannot mask a regression. Do not treat this wrapper as licence to
+ * reintroduce a conflicting organization row lock.
  *
  * Every lifecycle entry point whose command acquires workspace rows - and so
  * can be inside the cycle at all - is wrapped: `accept` (it inserts the
@@ -519,9 +517,9 @@ export async function acceptOrganizationInvitation(
   invitation: OrganizationInvitationType;
   membership: OrganizationMemberType;
 }> {
-  // `accept` inserts the invited human's personal workspace while the command
-  // already holds `managed_accounts FOR UPDATE`, so it carries the identical
-  // lock-order inversion as suspend/offboard and needs the identical replay.
+  // `accept` inserts the invited human's personal workspace, so like
+  // suspend/offboard it acquires workspace rows and can be inside a lock cycle
+  // with an ordinary workspace writer. It needs the identical replay.
   const result = await withOrganizationLifecycleDeadlockReplay(async () =>
     runCommand(db, { action: "accept", ...input }),
   );

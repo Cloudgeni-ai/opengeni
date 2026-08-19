@@ -3033,6 +3033,10 @@ export const sessions = pgTable(
     forkedAt: timestamp("forked_at", { withTimezone: true }),
     forkedByOrganizationMembershipId: uuid("forked_by_organization_membership_id"),
     model: text("model").notNull(),
+    // Immutable session-default execution policy. Follow-up composer drafts and
+    // accepted turns are separate authorities and never mutate these columns.
+    reasoningEffort: text("reasoning_effort").notNull(),
+    latencyMode: text("latency_mode").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
     // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
     // every existing + new row is a behavior-preserving no-op). CHECK-constrained
@@ -3199,6 +3203,14 @@ export const sessions = pgTable(
     }),
   },
   (table) => ({
+    reasoningEffortValid: check(
+      "sessions_reasoning_effort_check",
+      sql`${table.reasoningEffort} in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')`,
+    ),
+    latencyModeValid: check(
+      "sessions_latency_mode_check",
+      sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
     workspaceCreated: index("sessions_workspace_created_idx").on(
@@ -7004,6 +7016,12 @@ export const sessionPendingToolCalls = pgTable(
     callType: text("call_type").notNull(),
     callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
     callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
+    interruptionKind: text("interruption_kind"),
+    tiedReasoningItems: losslessJsonb("tied_reasoning_items")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    tiedReasoningItemsCodecVersion: losslessCodecVersion("tied_reasoning_items_codec_version"),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
@@ -7027,6 +7045,14 @@ export const sessionPendingToolCalls = pgTable(
       table.workspaceId,
       table.sessionId,
       table.turnId,
+    ),
+    interruptionKindValid: check(
+      "session_pending_tool_calls_interruption_kind_chk",
+      sql`${table.interruptionKind} is null or ${table.interruptionKind} in ('human_input', 'approval', 'interaction_intervention')`,
+    ),
+    tiedReasoningItemsArray: check(
+      "session_pending_tool_calls_tied_reasoning_items_chk",
+      sql`jsonb_typeof(${table.tiedReasoningItems}) = 'array'`,
     ),
   }),
 );

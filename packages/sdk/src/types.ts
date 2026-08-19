@@ -1078,6 +1078,8 @@ export type Session = {
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;
   model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs;
   sandboxGroupId: string;
@@ -3788,7 +3790,7 @@ export type ComposerDraft = {
   resources: ResourceRef[];
   model: string;
   reasoningEffort: ReasoningEffort;
-  latencyMode?: LatencyMode | undefined;
+  latencyMode: LatencyMode;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -3814,7 +3816,7 @@ export type NewSessionDraft = {
   toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
-  latencyMode?: LatencyMode | undefined;
+  latencyMode: LatencyMode;
   options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
@@ -3963,6 +3965,24 @@ export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
   "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
 > & { expectedRevision: number };
+
+export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
+  expectedDraftRevision: number;
+  clientEventId: string;
+  delivery: "send" | "steer";
+  controlEtag?: string;
+  modelContext?: string;
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
+  connectionAuthorities?: McpConnectionAuthoritySelection[];
+};
+
+export type SubmitComposerDraftResponse = {
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  draft: ComposerDraft;
+  interruptionCount: number;
+  replay: boolean;
+};
 
 export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
   expectedRevision: number;

@@ -16,6 +16,7 @@ import {
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
+  attachOpenSuffixToPendingToolCalls,
   claimSessionWorkForAttempt,
   createDb,
   createFileUpload,
@@ -42,6 +43,7 @@ import {
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
+  registerPendingSessionToolCall,
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
@@ -56,6 +58,7 @@ import {
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   type AccessGrant,
   type SessionStatus,
@@ -1771,6 +1774,35 @@ describe("worker activities integration", () => {
       throw new Error(`approval fixture was not claimed: ${initialClaim.reason}`);
     }
     const turn = initialClaim.turn;
+    expect(
+      await registerPendingSessionToolCall(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId: initialAttemptId,
+        callId: "approval-1",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "approval-1",
+          name: "needs_approval",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    expect(
+      await attachOpenSuffixToPendingToolCalls(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId: initialAttemptId,
+        members: [{ callId: "approval-1", interruptionKind: "approval", reasoningItems: [] }],
+      }),
+    ).toEqual({ accepted: true, attached: 1 });
     await saveRunState(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1778,7 +1810,7 @@ describe("worker activities integration", () => {
       turnId: turn.id,
       expectedExecutionGeneration: turn.executionGeneration,
       expectedAttemptId: initialAttemptId,
-      serializedRunState: '{"schemaVersion":"test","history":[]}',
+      serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals: [{ id: "approval-1" }],
     });
     expect(
@@ -1813,7 +1845,7 @@ describe("worker activities integration", () => {
         close: async () => {},
       }),
       prepareInput: async (_agent, input) => {
-        expect(input.kind).toBe("approval");
+        expect(input.kind).toBe("message");
         return { input: "approved", persistedHistoryCount: 0 };
       },
       runStream: async () => {
@@ -4079,6 +4111,8 @@ async function createOwnedSession(
   return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     ...input,
   });
 }

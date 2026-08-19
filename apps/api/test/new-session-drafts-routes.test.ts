@@ -41,6 +41,7 @@ mock.module("@opengeni/core", () => ({
       toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "high" as const,
+      latencyMode: "priority" as const,
       options: {},
       updatedAt: null,
     };
@@ -65,6 +66,7 @@ mock.module("@opengeni/core", () => ({
       tools: [];
       model: string;
       reasoningEffort: "high";
+      latencyMode: "priority";
       options: {};
     };
     return {
@@ -75,6 +77,7 @@ mock.module("@opengeni/core", () => ({
       toolsProvided: request.toolsProvided,
       model: request.model,
       reasoningEffort: request.reasoningEffort,
+      latencyMode: request.latencyMode,
       options: request.options,
       updatedAt: "2026-07-20T00:00:00.000Z",
     };
@@ -135,6 +138,7 @@ describe("new-session draft routes", () => {
       toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
+      latencyMode: "priority",
       options: {},
       updatedAt: null,
     });
@@ -164,6 +168,7 @@ describe("new-session draft routes", () => {
           tools: [],
           model: "gpt-5.6-sol",
           reasoningEffort: "high",
+          latencyMode: "priority",
           options: {},
         }),
       },
@@ -204,6 +209,7 @@ describe("new-session draft routes", () => {
           tools: [],
           model: "gpt-5.6-sol",
           reasoningEffort: "high",
+          latencyMode: "priority",
           options: {},
         }),
       },
@@ -253,7 +259,7 @@ describe("new-session draft routes", () => {
     expect(JSON.parse(raw)).toEqual({
       code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
       message:
-        "Invalid new-session draft request: text, resources, tools, model, reasoningEffort, and 2 more failed schema validation",
+        "Invalid new-session draft request: text, resources, tools, model, reasoningEffort, and 3 more failed schema validation",
     });
   });
 });

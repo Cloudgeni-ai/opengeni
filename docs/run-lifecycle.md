@@ -33,6 +33,18 @@ optimistic row disappears when the authoritative `user.message` arrives, so
 HTTP-first, SSE-first, reconnect, and remount paths cannot create duplicate
 visible messages.
 
+The outside and inside composers are separate authorities. Before a session
+exists, `new_session_drafts` owns the next session. Inside a session,
+`composer_drafts` owns the next message for that actor/session; navigation and
+workspace defaults do not copy policy between them. Send/Steer submits one exact
+inside draft revision and the server rotates that row to a blank next revision
+in the same transaction that freezes the queued turn. Every queued turn therefore
+retains its own text, resources, model, reasoning, and latency. Editing a queued
+turn checks that exact snapshot back into the inside composer atomically, and a
+nonempty composer is replaced only after explicit confirmation. An independent
+session fork copies the source session's exact typed reasoning and latency; it
+does not invent defaults or consult either composer.
+
 On the server, prompt acceptance remains one canonical Postgres transaction:
 the user event, queued turn, session/queue state, optional realtime mirror,
 audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
@@ -234,8 +246,9 @@ availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
 silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Approval `RunState` retains its distinct 3 MiB,
-65,536-node, and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
+sessions under the boundary. Pause stores only the open-suffix sentinel; the
+approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
+65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
 normalized into a fresh zero backlog. The release target remains at most
 50 MiB incremental RSS per active turn. A production read-only forensic
@@ -306,7 +319,7 @@ binds that snapshot to the accepted logical turn. Its default `retrieval_only`
 (migration 0271; absent settings resolve to it) removes
 the broad Memory V1 working-set block and
 legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. An explicit `legacy_standing` opt-out restores the prior prompt path. A root still receives the bounded company profile, while a child
+unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
@@ -483,10 +496,13 @@ Request-time filters may normalize computer calls, normalize provider item
 identities, or bound tool output deterministically; they may not classify or
 rewrite arbitrary textual content and may not remove or reorder an
 earlier `view_image` call/result pair. Computer-use tools are likewise exposed
-only when the caller supplies a proven visual transport: responses routes
-use hosted computer tools, Codex subscription routes return structured image
-results, and chat-wire or omitted/unproven public runtime routes receive no
-computer tools rather than screenshot data URLs encoded as text.
+only when the caller supplies a proven visual transport: Responses wires
+(including Gateway Kimi and SuperGrok) and Codex use `computer_*` function
+tools with structured image results when the model catalog lists image input.
+Gateway DeepSeek stays text-only and therefore receives neither image input nor
+computer tools. Chat Completions receives no computer tools: tool results on
+that wire are text, so a screenshot would become a base64 string rather than an
+image the model sees.
 
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
@@ -1152,17 +1168,18 @@ audit reads may return it, so it is never a secret boundary.
    preserves omitted references in one compact catalog. When old bytes are
    actually needed, the model uses the existing dedicated Files MCP download
    URL plus shell instead of startup rematerialization.
-2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
-   blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
-   job is resuming a turn that paused mid-flight for a human approval or
-   structured-input tool call (`requires_action`); neither a half-finished tool
-   approval nor an unanswered tool call can be represented as plain history
-   items. Before the blob is written, every copy of a retained screenshot tool
-   result and generated-image result inside the RunState is compacted to its
-   retry-stable receipt. On SDK resume, generated-image hosted items are
-   temporarily projected to the same provider-neutral artifact fact used by
-   ordinary history; the durable checkpoint stays compact.
-   The blob is written only for those cases.
+2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
+   Pauses flush completed-pair history, then persist the bounded open suffix
+   on `session_pending_tool_calls` (the pending call item, tied reasoning the
+   sanitizer would drop, and interruption kind). Unpaired calls never enter
+   model-facing `session_history_items`. The same settlement writes the
+   open-suffix sentinel into `agent_run_states` with pending-approval /
+   human-input snapshots. Resume settles one suffix member
+   (human-input response, approval invoke through the existing MCP execute-once
+   fence, or rejection), promotes reasoning + call + bounded result as one pair,
+   and either stays `requires_action` without a model call or continues from
+   history. Missing suffix rows fail closed. It does not reconstruct SDK
+   `RunState`.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and
@@ -1219,8 +1236,9 @@ replays paid work. Canonical:
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same
-transaction stores its request rows, the opaque `agent_run_states` checkpoint,
-the `requires_action` projection, and requested events. The request row is
+transaction stores its request rows, the open-suffix pending-tool receipts,
+the `agent_run_states` sentinel, the `requires_action` projection, and
+requested events. The request row is
 owned by the exact turn execution generation; its creation attempt is only
 provenance. Answer, allowed skip, expiry, or cancellation is first-writer-wins
 and becomes structured output for that same SDK tool call. It never becomes a

@@ -190,10 +190,11 @@ those exact servers join the first-provider-request barrier. Every other MCP,
 including strict first-party OpenGeni, begins connection/listing concurrently.
 Ordinary text may settle without waiting; `tool_search`, deferred invocation,
 Codemode activation, and catalog-dependent work join the same attempt promise.
-Generic deferred invocation then late-registers the exact authorized tool through
-the SDK and executes it in the same model response; its internal registration
-items are absent from provider history and user-visible events. This is never a
-second authority registry or a weaker authorization path. Duplicate refs
+Generic deferred invocation then renames a valid `tool_invoke` to the exact
+authorized tool and binds it through `resolveMissingFunctionTool` in the same
+model response; leftover historical registration items stay absent from provider
+history and user-visible events. This is never a second authority registry or a
+weaker authorization path. Duplicate refs
 merge conservatively: strict wins for failure semantics and eager wins for the
 startup choice. Approval/human-input resumes and editable-artifact turns remain
 fully prepared because continuation requires their exact prior execution/catalog

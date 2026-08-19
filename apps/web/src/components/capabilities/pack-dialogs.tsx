@@ -4,27 +4,27 @@
 // uninstall. Legacy inline Skills and sandboxImage fields are disclosed as
 // migrations into ordinary Skill and Rig ownership rather than hidden runtime
 // overrides.
-import type { usePacks } from "@opengeni/react";
+//
+// A Pack is a Bundle, so it lists through the same uniform row as every Skill
+// and Plugin (see `bundles-section.tsx`). Only its detail differs: installing
+// one means choosing a Rig and a Variable Set and reviewing an exact component
+// plan, which does not compress into the four-block Integration sheet, so a
+// Pack row opens `PackDetailDialog` instead.
 import {
-  BoxesIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   CircleDashedIcon,
   Loader2Icon,
   PackageCheckIcon,
-  PackageIcon,
   PlusIcon,
   RefreshCwIcon,
   ServerCogIcon,
   Share2Icon,
-  SparkleIcon,
   Trash2Icon,
   TriangleAlertIcon,
-  WrenchIcon,
 } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -35,12 +35,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { EmptyState } from "@/components/ui/empty-state";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { listViewState } from "@/lib/load-state";
 import { scheduleLabel } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
 import type {
@@ -51,8 +49,8 @@ import type {
   PackUninstallPreview,
 } from "@/types";
 
-type PackSelection = { rigId?: string; variableSetId?: string };
-type RigOption = {
+export type PackSelection = { rigId?: string; variableSetId?: string };
+export type RigOption = {
   id: string;
   name: string;
   image: string | null;
@@ -60,48 +58,34 @@ type RigOption = {
   verified: boolean;
 };
 
-export function PacksSection(props: {
-  packs: ReturnType<typeof usePacks>;
-  variableSets: Array<{ id: string; name: string }>;
-  rigs: RigOption[];
-  busyPackId: string | null;
+/**
+ * Register a Pack manifest. Any workspace admin may publish their own manifest
+ * here, so this is a first-class entry point rather than an OpenGeni-only one.
+ * Registration installs nothing: the additions and any account, compute, or
+ * configuration requirements are reviewed in the Pack's own detail dialog.
+ */
+export function PackManifestDialog({
+  open,
+  onOpenChange,
+  onRegister,
+  restoreFocusRef,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onRegister: (manifestDraft: string) => Promise<boolean>;
-  onPreviewInstall: (
-    pack: CapabilityPack,
-    selection: PackSelection,
-  ) => Promise<PackInstallationPreview | null>;
-  onInstall: (
-    pack: CapabilityPack,
-    preview: PackInstallationPreview,
-    selection: PackSelection,
-    idempotencyKey: string,
-  ) => Promise<boolean>;
-  onPreviewUninstall: (pack: CapabilityPack) => Promise<PackUninstallPreview | null>;
-  onUninstall: (
-    pack: CapabilityPack,
-    preview: PackUninstallPreview,
-    idempotencyKey: string,
-  ) => Promise<boolean>;
-  onUnregister: (pack: CapabilityPack) => Promise<boolean>;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }) {
-  const { packs } = props;
-  const [registerOpen, setRegisterOpen] = useState(false);
   const [manifestDraft, setManifestDraft] = useState("");
   const [registering, setRegistering] = useState(false);
-  const packsView = listViewState({
-    loading: packs.loading,
-    error: packs.error,
-    count: packs.packs.length,
-  });
 
   async function register() {
     if (registering) return;
     setRegistering(true);
     try {
-      const registered = await props.onRegister(manifestDraft);
+      const registered = await onRegister(manifestDraft);
       if (registered) {
-        setRegisterOpen(false);
         setManifestDraft("");
+        onOpenChange(false);
       }
     } finally {
       setRegistering(false);
@@ -109,113 +93,60 @@ export function PacksSection(props: {
   }
 
   return (
-    <section className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-fg">Packs</h2>
-          <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-            Solution bundles that add Skills, Integrations, and templates as one reviewed plan.
-            Install multiple Packs safely; shared components stay active until their final owner is
-            removed.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setRegisterOpen((open) => !open)}
-        >
-          <PlusIcon />
-          Add manifest
-        </Button>
-      </div>
-
-      {registerOpen ? (
-        <div className="grid gap-2 rounded-xl border border-border bg-surface/50 p-4">
-          <p className="text-xs leading-5 text-fg-subtle">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="sm:max-w-2xl"
+        onCloseAutoFocus={(event) => restoreOpenerFocus(event, restoreFocusRef)}
+      >
+        <DialogHeader>
+          <DialogTitle>Add a Pack manifest</DialogTitle>
+          <DialogDescription>
             Paste a Pack manifest as JSON. Registration does not install anything; you review its
             additions and any account, compute, or configuration requirements in the next step.
-          </p>
-          <textarea
-            value={manifestDraft}
-            onChange={(event) => setManifestDraft(event.target.value)}
-            placeholder='{"id": "my-pack", "name": "My pack", "version": "1.0.0", "components": […]}'
-            className="min-h-40 rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
-            aria-label="Pack manifest JSON"
-          />
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={registering || !manifestDraft.trim()}
-              onClick={() => void register()}
-            >
-              {registering ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
-              Register Pack
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
-      {packsView === "loading" ? (
-        <div className="rounded-xl border border-border bg-surface/50 p-4">
-          <Skeleton className="h-4 w-44" />
-          <Skeleton className="mt-2 h-3 w-3/4" />
-        </div>
-      ) : packsView === "error" ? (
-        <LoadErrorState
-          title="Couldn't load Packs"
-          error={packs.error}
-          onRetry={() => void packs.refresh()}
-        />
-      ) : packsView === "empty" ? (
-        <EmptyState
-          icon={<PackageIcon className="size-4" />}
-          title="No Packs yet"
-          description="Register a Pack manifest, review its pinned dependencies, and install it into this workspace."
-          action={
-            <Button type="button" size="sm" onClick={() => setRegisterOpen(true)}>
-              <PlusIcon />
-              Add manifest
-            </Button>
+          </DialogDescription>
+        </DialogHeader>
+        <textarea
+          value={manifestDraft}
+          onChange={(event) => setManifestDraft(event.target.value)}
+          placeholder={
+            '{"id": "my-pack", "name": "My pack", "version": "1.0.0", "components": […]}'
           }
+          className="min-h-40 rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+          aria-label="Pack manifest JSON"
         />
-      ) : (
-        <div className="grid gap-3">
-          {packs.packs.map((pack) => (
-            <PackCard
-              key={pack.id}
-              pack={pack}
-              installation={packs.installationFor(pack.id)}
-              variableSets={props.variableSets}
-              rigs={props.rigs}
-              busy={props.busyPackId === pack.id}
-              onPreviewInstall={(selection) => props.onPreviewInstall(pack, selection)}
-              onInstall={(preview, selection, idempotencyKey) =>
-                props.onInstall(pack, preview, selection, idempotencyKey)
-              }
-              onPreviewUninstall={() => props.onPreviewUninstall(pack)}
-              onUninstall={(preview, idempotencyKey) =>
-                props.onUninstall(pack, preview, idempotencyKey)
-              }
-              onUnregister={() => props.onUnregister(pack)}
-            />
-          ))}
-        </div>
-      )}
-    </section>
+        <DialogFooter>
+          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            // Only this dialog's own submit gates it. Another Pack installing
+            // elsewhere in the section says nothing about registering a manifest.
+            disabled={registering || !manifestDraft.trim()}
+            onClick={() => void register()}
+          >
+            {registering ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
+            Register Pack
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function PackCard(props: {
+/**
+ * One Pack's whole detail flow: Rig and Variable Set selection, the reviewed
+ * component plan, its contents, and the install/update/repair, uninstall, and
+ * unregister actions. Mounted only for the Pack whose row is open.
+ */
+export function PackDetailDialog(props: {
+  open: boolean;
   pack: CapabilityPack;
   installation: PackInstallation | null;
   variableSets: Array<{ id: string; name: string }>;
   rigs: RigOption[];
   busy: boolean;
+  onOpenChange: (open: boolean) => void;
   onPreviewInstall: (selection: PackSelection) => Promise<PackInstallationPreview | null>;
   onInstall: (
     preview: PackInstallationPreview,
@@ -225,12 +156,11 @@ function PackCard(props: {
   onPreviewUninstall: () => Promise<PackUninstallPreview | null>;
   onUninstall: (preview: PackUninstallPreview, idempotencyKey: string) => Promise<boolean>;
   onUnregister: () => Promise<boolean>;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const { pack, installation } = props;
   const installed = Boolean(installation && installation.status !== "disabled");
-  const [expanded, setExpanded] = useState(false);
   const [confirmUnregister, setConfirmUnregister] = useState(false);
-  const [installOpen, setInstallOpen] = useState(false);
   const [selection, setSelection] = useState<PackSelection>(() =>
     initialPackSelection(pack, installation),
   );
@@ -244,13 +174,15 @@ function PackCard(props: {
   const [uninstallPreview, setUninstallPreview] = useState<PackUninstallPreview | null>(null);
   const [uninstallLoading, setUninstallLoading] = useState(false);
   const [uninstallOperationId, setUninstallOperationId] = useState(newOperationId);
+  const previewInstall = props.onPreviewInstall;
+  const openedFor = useRef<string | null>(null);
 
   async function reviewInstallation(nextSelection: PackSelection) {
     const revision = ++reviewRevision.current;
     setReviewing(true);
     setReviewFailed(false);
     try {
-      const result = await props.onPreviewInstall(nextSelection);
+      const result = await previewInstall(nextSelection);
       if (revision !== reviewRevision.current) return;
       setPreview(result);
       setReviewedSelectionKey(result ? selectionKey(nextSelection) : null);
@@ -260,16 +192,26 @@ function PackCard(props: {
     }
   }
 
-  async function openInstall() {
+  // Opening the row is the review request: the reader asked to see the plan,
+  // not to press a second button for it.
+  useEffect(() => {
+    if (!props.open) {
+      openedFor.current = null;
+      return;
+    }
+    if (openedFor.current === pack.id) return;
+    openedFor.current = pack.id;
     const nextSelection = initialPackSelection(pack, installation);
     setSelection(nextSelection);
     setPreview(null);
     setReviewedSelectionKey(null);
     setReviewFailed(false);
     setInstallOperationId(newOperationId());
-    setInstallOpen(true);
-    await reviewInstallation(nextSelection);
-  }
+    void reviewInstallation(nextSelection);
+    // Re-running on selection/preview state would loop; the pack identity and
+    // open state are the only inputs that may start a fresh review.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open, pack.id]);
 
   function updateSelection(nextSelection: PackSelection) {
     reviewRevision.current += 1;
@@ -283,7 +225,7 @@ function PackCard(props: {
   async function installReviewedPack(): Promise<void> {
     if (!preview || reviewedSelectionKey !== selectionKey(selection) || !preview.ready) return;
     const completed = await props.onInstall(preview, selection, installOperationId);
-    if (completed) setInstallOpen(false);
+    if (completed) props.onOpenChange(false);
   }
 
   async function openUninstall() {
@@ -298,7 +240,6 @@ function PackCard(props: {
     }
   }
 
-  const status = packInstallationStatus(installation);
   const currentSelectionReviewed = reviewedSelectionKey === selectionKey(selection);
   const installReady = Boolean(preview?.ready && currentSelectionReviewed);
   const installLabel = preview
@@ -310,121 +251,9 @@ function PackCard(props: {
     : "Review plan";
 
   return (
-    <article className="rounded-xl border border-border bg-surface/50 p-4">
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-2/70 text-brand">
-              <PackageIcon className="size-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <h3 className="truncate text-sm font-medium">{pack.name}</h3>
-                <MetaChip className="font-mono">v{pack.version}</MetaChip>
-                {status ? <MetaChip dot={status.tone}>{status.label}</MetaChip> : null}
-              </div>
-              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-2xs text-fg-subtle">
-                <span>{pack.role}</span>
-                <span aria-hidden className="text-fg-subtle/50">
-                  ·
-                </span>
-                <span>{pack.category}</span>
-                {installation?.manifestDigest ? (
-                  <>
-                    <span aria-hidden className="text-fg-subtle/50">
-                      ·
-                    </span>
-                    <span className="font-mono">{installation.manifestDigest.slice(0, 10)}</span>
-                  </>
-                ) : null}
-              </div>
-            </div>
-          </div>
-          <p className="mt-2 line-clamp-2 text-xs leading-5 text-fg-muted">{pack.description}</p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {pack.components.length > 0 ? (
-              <MetaChip>
-                <BoxesIcon className="size-3 shrink-0" />
-                {pack.components.length} pinned component{pack.components.length === 1 ? "" : "s"}
-              </MetaChip>
-            ) : null}
-            {pack.skills.length > 0 ? (
-              <MetaChip>
-                <SparkleIcon className="size-3 shrink-0" />
-                {pack.skills.length} inline Skill{pack.skills.length === 1 ? "" : "s"}
-              </MetaChip>
-            ) : null}
-            {pack.rig || pack.sandboxImage ? (
-              <MetaChip>
-                <ServerCogIcon className="size-3 shrink-0" />
-                Special compute
-              </MetaChip>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((open) => !open)}
-          >
-            <ChevronDownIcon className={cn("transition-transform", expanded && "rotate-180")} />
-            Contents
-          </Button>
-          <Button type="button" size="sm" disabled={props.busy} onClick={() => void openInstall()}>
-            {props.busy ? (
-              <Loader2Icon className="animate-spin" />
-            ) : installation?.status === "needs_attention" ? (
-              <WrenchIcon />
-            ) : installed ? (
-              <RefreshCwIcon />
-            ) : (
-              <PackageCheckIcon />
-            )}
-            {installation?.status === "needs_attention"
-              ? "Repair"
-              : installed
-                ? "Review"
-                : "Review install"}
-          </Button>
-          {installed ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={props.busy}
-              onClick={() => void openUninstall()}
-            >
-              <Trash2Icon />
-              Uninstall
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`Unregister ${pack.name}`}
-            className="text-fg-subtle hover:text-status-failed"
-            disabled={props.busy || installed}
-            title={
-              installed
-                ? "Uninstall this Pack before unregistering its manifest"
-                : "Unregister this Pack (built-ins cannot be removed)"
-            }
-            onClick={() => setConfirmUnregister(true)}
-          >
-            <Trash2Icon className="size-3.5" />
-          </Button>
-        </div>
-      </div>
-
-      {expanded ? <PackContents pack={pack} /> : null}
-
+    <>
       <PackInstallationDialog
-        open={installOpen}
+        open={props.open}
         pack={pack}
         installation={installation}
         variableSets={props.variableSets}
@@ -434,15 +263,21 @@ function PackCard(props: {
         reviewing={reviewing}
         reviewFailed={reviewFailed}
         busy={props.busy}
+        installed={installed}
         selectionReviewed={currentSelectionReviewed}
         installReady={installReady}
         installLabel={installLabel}
+        {...(props.restoreFocusRef ? { restoreFocusRef: props.restoreFocusRef } : {})}
         onOpenChange={(open) => {
-          if (!open && !reviewing && !props.busy) setInstallOpen(false);
+          // Close on outside click / Escape even mid-review or mid-install; a
+          // busy submit disables its own button rather than suppressing close.
+          if (!open) props.onOpenChange(false);
         }}
         onSelectionChange={updateSelection}
         onReview={() => void reviewInstallation(selection)}
         onInstall={() => void installReviewedPack()}
+        onUninstall={() => void openUninstall()}
+        onUnregister={() => setConfirmUnregister(true)}
       />
 
       <ConfirmDialog
@@ -469,8 +304,21 @@ function PackCard(props: {
         confirmLabel="Unregister Pack"
         onConfirm={props.onUnregister}
       />
-    </article>
+    </>
   );
+}
+
+/**
+ * Return focus to the element that opened a dialog. The dialogs here are
+ * controlled and have no Radix trigger, so without this the closing focus scope
+ * has nothing to return to and focus falls to the body.
+ */
+function restoreOpenerFocus(event: Event, restoreFocusRef?: RefObject<HTMLElement | null>): void {
+  const opener = restoreFocusRef?.current ?? null;
+  if (restoreFocusRef) restoreFocusRef.current = null;
+  if (!opener?.isConnected) return;
+  event.preventDefault();
+  opener.focus();
 }
 
 function PackInstallationDialog(props: {
@@ -484,22 +332,31 @@ function PackInstallationDialog(props: {
   reviewing: boolean;
   reviewFailed: boolean;
   busy: boolean;
+  installed: boolean;
   selectionReviewed: boolean;
   installReady: boolean;
   installLabel: string;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
   onOpenChange: (open: boolean) => void;
   onSelectionChange: (selection: PackSelection) => void;
   onReview: () => void;
   onInstall: () => void;
+  onUninstall: () => void;
+  onUnregister: () => void;
 }) {
   const { pack, preview, selection } = props;
   const showsRig = Boolean(pack.rig || pack.sandboxImage);
   const hardcodedRigId = pack.rig?.rigId;
   const selectedRig = props.rigs.find((rig) => rig.id === selection.rigId);
+  const [contentsOpen, setContentsOpen] = useState(false);
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent
+        className="sm:max-w-2xl"
+        data-pack-dialog={pack.id}
+        onCloseAutoFocus={(event) => restoreOpenerFocus(event, props.restoreFocusRef)}
+      >
         <DialogHeader>
           <DialogTitle>
             {preview?.action === "update"
@@ -513,6 +370,8 @@ function PackInstallationDialog(props: {
             or stores account credentials.
           </DialogDescription>
         </DialogHeader>
+
+        <PackIdentity pack={pack} installation={props.installation} />
 
         <div className="grid min-h-0 gap-4 overflow-y-auto pr-1">
           {pack.variableSet || showsRig ? (
@@ -593,37 +452,158 @@ function PackInstallationDialog(props: {
           ) : null}
           {props.reviewing ? <PackPlanSkeleton /> : null}
           {!props.reviewing && preview ? <PackInstallationPlan preview={preview} /> : null}
+
+          <div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-expanded={contentsOpen}
+              onClick={() => setContentsOpen((open) => !open)}
+            >
+              <ChevronDownIcon
+                className={cn("transition-transform", contentsOpen && "rotate-180")}
+              />
+              Contents
+            </Button>
+            {contentsOpen ? <PackContents pack={pack} /> : null}
+          </div>
         </div>
 
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={props.reviewing || props.busy}
-            onClick={() => props.onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            variant={props.selectionReviewed ? "outline" : "default"}
-            disabled={props.reviewing || props.busy}
-            onClick={props.onReview}
-          >
-            {props.reviewing ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
-            {preview ? "Review again" : "Review plan"}
-          </Button>
-          <Button
-            type="button"
-            disabled={!props.installReady || props.reviewing || props.busy}
-            onClick={props.onInstall}
-          >
-            {props.busy ? <Loader2Icon className="animate-spin" /> : <PackageCheckIcon />}
-            {props.installLabel}
-          </Button>
+        <DialogFooter className="sm:justify-between">
+          <PackDetailActions
+            busy={props.busy}
+            installed={props.installed}
+            reviewing={props.reviewing}
+            reviewed={props.selectionReviewed}
+            hasPreview={preview !== null}
+            installReady={props.installReady}
+            installLabel={props.installLabel}
+            onCancel={() => props.onOpenChange(false)}
+            onReview={props.onReview}
+            onInstall={props.onInstall}
+            onUninstall={props.onUninstall}
+            onUnregister={props.onUnregister}
+          />
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The installed identity a repair or a two-version comparison actually turns
+ * on: which manifest version this row is, what role and category it claims,
+ * which digest is installed right now, and the Pack's own description in full.
+ * Rendered as its own strip because the dialog title only ever carries a name.
+ */
+export function PackIdentity({
+  pack,
+  installation,
+}: {
+  pack: CapabilityPack;
+  installation: PackInstallation | null;
+}) {
+  return (
+    <div data-pack-identity={pack.id} className="grid gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-fg-subtle">
+        <MetaChip className="font-mono">v{pack.version}</MetaChip>
+        <span>{pack.role}</span>
+        <span aria-hidden className="text-fg-subtle/50">
+          ·
+        </span>
+        <span>{pack.category}</span>
+        {installation?.manifestDigest ? (
+          <>
+            <span aria-hidden className="text-fg-subtle/50">
+              ·
+            </span>
+            <span className="font-mono" title={installation.manifestDigest}>
+              {installation.manifestDigest.slice(0, 12)}
+            </span>
+          </>
+        ) : null}
+      </div>
+      {pack.description.trim() ? (
+        <p className="line-clamp-2 text-xs leading-5 text-fg-muted">{pack.description}</p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The Pack dialog's footer. Extracted from the dialog frame so the two
+ * destructive, ownership-releasing verbs - Uninstall and Unregister - are unit
+ * testable: Radix portals the dialog itself out of reach of the DOM shim, but
+ * the buttons that fire the callbacks do not have to live in there.
+ */
+export function PackDetailActions(props: {
+  busy: boolean;
+  installed: boolean;
+  reviewing: boolean;
+  /** True while the reviewed plan still describes the current selections. */
+  reviewed: boolean;
+  hasPreview: boolean;
+  installReady: boolean;
+  installLabel: string;
+  onCancel: () => void;
+  onReview: () => void;
+  onInstall: () => void;
+  onUninstall: () => void;
+  onUnregister: () => void;
+}) {
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {props.installed ? (
+          <Button type="button" variant="outline" disabled={props.busy} onClick={props.onUninstall}>
+            <Trash2Icon />
+            Uninstall
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          className="text-fg-subtle hover:text-status-failed"
+          disabled={props.busy || props.installed}
+          title={
+            props.installed
+              ? "Uninstall this Pack before unregistering its manifest"
+              : "Unregister this Pack (built-ins cannot be removed)"
+          }
+          onClick={props.onUnregister}
+        >
+          Unregister
+        </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={props.reviewing || props.busy}
+          onClick={props.onCancel}
+        >
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          variant={props.reviewed ? "outline" : "default"}
+          disabled={props.reviewing || props.busy}
+          onClick={props.onReview}
+        >
+          {props.reviewing ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+          {props.hasPreview ? "Review again" : "Review plan"}
+        </Button>
+        <Button
+          type="button"
+          disabled={!props.installReady || props.reviewing || props.busy}
+          onClick={props.onInstall}
+        >
+          {props.busy ? <Loader2Icon className="animate-spin" /> : <PackageCheckIcon />}
+          {props.installLabel}
+        </Button>
+      </div>
+    </>
   );
 }
 
@@ -810,7 +790,7 @@ function PackPlanSkeleton() {
   );
 }
 
-function PackContents({ pack }: { pack: CapabilityPack }) {
+export function PackContents({ pack }: { pack: CapabilityPack }) {
   return (
     <div className="mt-4 grid gap-4 border-t border-border pt-4 md:grid-cols-2">
       <PackSection title="Pinned components">
@@ -1002,15 +982,6 @@ function newOperationId(): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function packInstallationStatus(
-  installation: PackInstallation | null,
-): { label: string; tone: "idle" | "running" | "waiting" | "cancelled" } | null {
-  if (!installation || installation.status === "disabled") return null;
-  if (installation.status === "active") return { label: "Installed", tone: "idle" };
-  if (installation.status === "installing") return { label: "Installing", tone: "running" };
-  return { label: "Needs attention", tone: "waiting" };
 }
 
 function humanize(value: string): string {

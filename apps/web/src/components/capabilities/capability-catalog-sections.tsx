@@ -18,14 +18,12 @@ import type { ListViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
-export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = [
-  "all",
-  "pack",
-  "mcp",
-  "api",
-  "skill",
-  "plugin",
-];
+/**
+ * The kinds the Connectors grid can actually show. Skills, Plugins, and Packs
+ * are Bundles and live in their own section with their own search, so offering
+ * them here would only ever produce an empty grid.
+ */
+export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 
 export function CapabilityDiscoveryControls({
   query,
@@ -47,9 +45,9 @@ export function CapabilityDiscoveryControls({
         <Input
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search integrations, tools, and skills"
+          placeholder="Search connectors"
           className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
-          aria-label="Search capabilities"
+          aria-label="Search connectors"
         />
       </div>
 
@@ -78,12 +76,17 @@ export function CapabilityDiscoveryControls({
   );
 }
 
+/**
+ * The enabled Connectors strip. Its input is already scoped to `mcp`/`api`
+ * items (`isConnectorCatalogItem`), so no Skill, Plugin, or Pack reaches it:
+ * Bundles have their own section, with their own authority rules and their own
+ * remove affordance.
+ */
 export function EnabledCapabilitiesSection({
   items,
   busyId,
   connectionHealth,
   logoUrl,
-  canManageSkills,
   onOpen,
   onDisable,
 }: {
@@ -91,16 +94,20 @@ export function EnabledCapabilitiesSection({
   busyId: string | null;
   connectionHealth: (item: CapabilityCatalogItem) => ConnectionHealth;
   logoUrl: (item: CapabilityCatalogItem) => string | null;
-  canManageSkills: boolean;
   onOpen: (item: CapabilityCatalogItem) => void;
   onDisable: (item: CapabilityCatalogItem) => void;
 }) {
   if (items.length === 0) return null;
   return (
     <section className="space-y-3" aria-labelledby="enabled-capabilities-heading">
-      <h2 id="enabled-capabilities-heading" className="text-sm font-semibold text-fg">
+      {/*
+        Enabled and Browse are two views of the one Connectors section, not
+        top-level surfaces of their own: the page has exactly three <h2>s
+        (Integrations, Connectors, Bundles) and these sit under Connectors.
+      */}
+      <h3 id="enabled-capabilities-heading" className="text-sm font-semibold text-fg">
         Enabled
-      </h2>
+      </h3>
       <div className="grid gap-2 sm:grid-cols-2">
         {items.map((item) => (
           <EnabledCard
@@ -109,7 +116,6 @@ export function EnabledCapabilitiesSection({
             health={connectionHealth(item)}
             logoSrc={logoUrl(item)}
             busy={busyId === item.id}
-            canManageSkills={canManageSkills}
             onOpen={() => onOpen(item)}
             onDisable={() => onDisable(item)}
           />
@@ -131,11 +137,13 @@ export function CapabilityBrowseSection({
   registrySearched,
   registryResults,
   logoUrl,
+  health,
   onRetry,
   onOpen,
   onOpenRegistry,
   onSearchRegistry,
   onLoadMore,
+  onQuickConnect,
 }: {
   filter: CapabilityFilter;
   query: string;
@@ -148,18 +156,22 @@ export function CapabilityBrowseSection({
   registrySearched: string | null;
   registryResults: CapabilityCatalogItem[];
   logoUrl: (item: CapabilityCatalogItem) => string | null;
+  /** Connection health per item, so an enabled-but-broken row never reads as connected. */
+  health?: (item: CapabilityCatalogItem) => ConnectionHealth;
   onRetry: () => void;
   onOpen: (item: CapabilityCatalogItem) => void;
   onOpenRegistry: (item: CapabilityCatalogItem) => void;
   onSearchRegistry: () => void;
   onLoadMore: () => void;
+  /** The icon quick-connect fast path; omitted for items with no dialog-free or one-dialog connect action. */
+  onQuickConnect?: (item: CapabilityCatalogItem) => (() => void) | undefined;
 }) {
   return (
     <section className="space-y-4" aria-labelledby="browse-capabilities-heading">
       {filter === "all" || enabledCount > 0 ? (
-        <h2 id="browse-capabilities-heading" className="text-sm font-semibold text-fg">
+        <h3 id="browse-capabilities-heading" className="text-sm font-semibold text-fg">
           Browse
-        </h2>
+        </h3>
       ) : null}
 
       {catalogView === "loading" ? (
@@ -185,7 +197,9 @@ export function CapabilityBrowseSection({
                 key={item.id}
                 item={item}
                 logoSrc={logoUrl(item)}
+                {...(health ? { health: health(item) } : {})}
                 onOpen={() => onOpen(item)}
+                onQuickConnect={onQuickConnect?.(item)}
               />
             ))}
           </div>
@@ -221,7 +235,6 @@ function EnabledCard({
   health,
   logoSrc,
   busy,
-  canManageSkills,
   onOpen,
   onDisable,
 }: {
@@ -229,14 +242,11 @@ function EnabledCard({
   health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
-  canManageSkills: boolean;
   onOpen: () => void;
   onDisable: () => void;
 }) {
   const needsAttention = health.state === "attention";
-  const canRemove =
-    (item.kind === "skill" && item.actions.includes("uninstall")) ||
-    (item.kind === "mcp" && item.actions.includes("disconnect"));
+  const canRemove = item.kind === "mcp" && item.actions.includes("disconnect");
   const status = needsAttention
     ? {
         label: "Needs attention",
@@ -282,19 +292,12 @@ function EnabledCard({
           type="button"
           variant="ghost"
           size="sm"
-          disabled={busy || (item.kind === "skill" && !canManageSkills)}
-          title={
-            item.kind === "skill" && !canManageSkills
-              ? "Workspace administrator permission is required to remove Skills"
-              : undefined
-          }
+          disabled={busy}
           onClick={onDisable}
           className="shrink-0 pointer-coarse:min-h-11"
         >
           {busy ? (
             <Loader2Icon className="animate-spin motion-reduce:animate-none" />
-          ) : item.kind === "skill" ? (
-            "Remove"
           ) : (
             "Disconnect"
           )}

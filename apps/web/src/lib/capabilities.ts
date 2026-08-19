@@ -1,3 +1,4 @@
+import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
@@ -120,6 +121,19 @@ export function emptyCapabilityForm(): CapabilityFormState {
     installUrl: "",
     enableAfterAdd: true,
   };
+}
+
+/**
+ * The Connectors surface owns exactly MCP servers and API connectors. Skills,
+ * Plugins, and Packs are Bundles - a named collection of tools and
+ * instructions, not a live connection - and have their own section with their
+ * own search, so they never enter the Enabled, Browse, or Featured
+ * projections. (No `kind: "plugin"` catalog item is produced at all today;
+ * scoping by kind here keeps that an implementation detail rather than a fact
+ * the UI silently depends on.)
+ */
+export function isConnectorCatalogItem(item: CapabilityCatalogItem): boolean {
+  return item.kind === "mcp" || item.kind === "api";
 }
 
 export function filterCapabilityCatalogItems(
@@ -268,6 +282,87 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   return { mode: "enable" };
 }
 
+/**
+ * Workspace-shared is the default for a new connection; the explicit
+ * "Connect only for me" choice (and every personal-only connector) overrides it.
+ */
+export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
+
+/**
+ * The one-click / one-dialog connect fast path offered by a row or tile icon,
+ * derived purely from the catalog item so it can be asserted without React.
+ *
+ * `null` means "no fast path": the full detail sheet owns it. That deliberately
+ * covers dedicated lifecycles (Skills, Plugins, Fiken, social) AND any api-key
+ * connector declaring more than one required header, which a single-field
+ * dialog would silently half-connect.
+ *
+ * Ownership is never assumed: a personal-only connector (official Gmail,
+ * Slack's hosted MCP) resolves to `personal` here exactly as the detail sheet
+ * does, so the fast path can never start a workspace-owned binding for one.
+ */
+export type CapabilityQuickConnectPlan =
+  | { mode: "enable" }
+  | {
+      mode: "oauth";
+      ownership: ConnectionOwnership;
+      providerDomain: string;
+      mcpUrl: string | null;
+      /** True when the connector is not curated-official, so one confirming dialog is shown first. */
+      confirm: boolean;
+    }
+  | {
+      mode: "api_key";
+      ownership: ConnectionOwnership;
+      providerDomain: string;
+      field: RequiredHeaderField;
+    };
+
+export function capabilityQuickConnectPlan(
+  item: CapabilityCatalogItem,
+): CapabilityQuickConnectPlan | null {
+  const plan = capabilityConnectPlan(item);
+  const ownership: ConnectionOwnership = capabilityRequiresPersonalConnection(item)
+    ? "personal"
+    : DEFAULT_CONNECTION_OWNERSHIP;
+  if (plan.mode === "enable") return { mode: "enable" };
+  if (plan.mode === "oauth") {
+    return {
+      mode: "oauth",
+      ownership,
+      providerDomain: plan.providerDomain,
+      mcpUrl: plan.mcpUrl,
+      confirm: !capabilityCuration(item).official,
+    };
+  }
+  if (plan.mode === "api_key") {
+    // More than one required header cannot be collected by the single-field
+    // quick dialog; hand the whole connector to the detail sheet instead of
+    // storing half its credential.
+    if (plan.fields.length > 1) return null;
+    return {
+      mode: "api_key",
+      ownership,
+      providerDomain: plan.providerDomain,
+      field: plan.fields[0] ?? GENERIC_API_KEY_FIELD,
+    };
+  }
+  return null;
+}
+
+/**
+ * The stored credential for an api-key connect. Keyed by the field's WIRE
+ * header name (what the broker injects), never by its human label - "API key"
+ * is not even a legal HTTP header token, so keying by the label silently
+ * stores an unusable credential that only fails later as a 401.
+ */
+export function apiKeyCredential(
+  field: RequiredHeaderField,
+  value: string,
+): { headers: Record<string, string> } {
+  return { headers: { [field.name]: value } };
+}
+
 const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
 // Slack's hosted MCP issues user tokens only; shared Slack access is the
 // OpenGeni workspace bot, never one member's grant.
@@ -361,6 +456,23 @@ export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
   if (plan.mode === "api_key" || plan.mode === "fiken_api_token") return "API key";
   return null;
+}
+
+/**
+ * The same four-state chip Integrations rows use, derived for a Connectors
+ * catalog item so both surfaces render the identical compact state indicator.
+ * `health` is optional: tiles that only ever show not-yet-enabled items (the
+ * Browse grid, registry results) can omit it since every item there is
+ * necessarily "Not connected".
+ */
+export function capabilityStateChip(
+  item: Pick<CapabilityCatalogItem, "enabled">,
+  health?: ConnectionHealth,
+): IntegrationChip {
+  if (!item.enabled) return { label: "Not connected", tone: "idle" };
+  if (health?.state === "unverified") return { label: "Loading", tone: "plain" };
+  if (health?.state === "attention") return { label: "Needs attention", tone: "warn" };
+  return { label: "Connected", tone: "ok" };
 }
 
 export function preferredSocialConnection(

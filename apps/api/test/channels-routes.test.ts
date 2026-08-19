@@ -185,6 +185,8 @@ describe("channel routes", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     expect(session.channelId).toBeNull();

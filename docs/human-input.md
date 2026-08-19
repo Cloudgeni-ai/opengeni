@@ -14,7 +14,7 @@ install a `requires_action` boundary. The setting defaults to enabled.
 This is not tool approval. Approval asks whether an already-proposed tool may
 run and can approve or reject it. Structured human input is itself a tool call:
 when the workspace setting allows it, OpenGeni authorizes that built-in call,
-freezes the SDK `RunState`, and later injects one of these structured outcomes
+freezes it behind the open suffix, and later injects one of these structured outcomes
 into that exact call:
 
 - `answered`, with validated question answers;
@@ -37,14 +37,16 @@ settlement fence, and has a strong foreign key to the attempt that first
 created it. That creation attempt is immutable provenance; a recovery attempt
 does not replace it.
 
-The worker atomically writes the serialized `agent_run_states` checkpoint, all
-new human-input rows, the requested events, and the session's
-`requires_action` status. A crash therefore cannot expose a request without its
-resumable SDK state, or a resumable state without its request. On recovery,
+The worker atomically writes the bounded open-suffix pending-tool receipts,
+an `agent_run_states` sentinel, all new human-input rows, the
+requested events, and the session's `requires_action` status. A crash therefore
+cannot expose a request without durable completed-pair history and the open
+suffix, or a suffix without its request. On recovery,
 OpenGeni loads the response selected by the triggering
-`user.humanInputResponse` event and injects it directly into the matching tool
-call. It does not rediscover the response through a best-effort event or tool
-call lookup during execution.
+`user.humanInputResponse` event, writes the paired history result, and
+continues from history when the interruption group is empty.
+It does not rediscover the response through a best-effort event or tool
+call lookup during execution, and it does not require `RunState.fromString`.
 
 Settlement is first-writer-wins under a database lock and compare-and-set:
 

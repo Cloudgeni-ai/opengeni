@@ -330,6 +330,31 @@ async function settle(count = 12): Promise<void> {
   for (let index = 0; index < count; index += 1) await Promise.resolve();
 }
 
+/**
+ * Wait for a resumable-recording hook to reach an exact status.
+ *
+ * The recovery loop is driven by real `setTimeout` hints from the server
+ * response (`retryAfterMilliseconds`), so a single fixed sleep sized to the
+ * hint is a race on a loaded CI runner: the assertion can fire while the hook
+ * is still one poll short of its terminal status. Poll the observed status
+ * instead and let the assertion that follows report the real value if the
+ * budget is exhausted.
+ */
+async function waitForVoiceStatus(
+  hook: { result: { current: { status: string } } },
+  status: string,
+  timeoutMilliseconds = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (hook.result.current.status !== status) {
+    if (Date.now() >= deadline) return;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await settle(30);
+    });
+  }
+}
+
 async function seedStoppedRecording(
   store: MemoryVoiceRecordingStore,
   recordingId: string,
@@ -1357,17 +1382,17 @@ describe("useVoiceInput", () => {
 
     await act(async () => {
       hook.result.current.retry();
-      await new Promise((resolve) => setTimeout(resolve, 600));
       await settle(30);
     });
+    await waitForVoiceStatus(hook, "error");
     expect(hook.result.current.status).toBe("error");
     expect(hook.result.current.error).toBe("unknown");
 
     await act(async () => {
       hook.result.current.retry();
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
       await settle(30);
     });
+    await waitForVoiceStatus(hook, "idle");
 
     expect(getCalls).toBeGreaterThan(0);
     expect(uploadCalls).toBe(0);

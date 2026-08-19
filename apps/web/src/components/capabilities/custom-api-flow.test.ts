@@ -10,6 +10,7 @@ import {
   customApiPreviewDiff,
   customApiSourceFromDraft,
   emptyCustomApiDraft,
+  filterCustomApiInstances,
   initialCustomApiFlowState,
   normalizeCustomApiUrl,
   type CustomApiFlowState,
@@ -380,4 +381,62 @@ function connection(
     createdAt: "2026-08-10T00:00:00.000Z",
     updatedAt: "2026-08-10T00:00:00.000Z",
   };
+}
+
+describe("filterCustomApiInstances", () => {
+  const instances = [
+    customApiInstance("finance", "Linear - Finance", "linear.example.test"),
+    customApiInstance("billing", "Stripe billing", "api.stripe.com"),
+  ];
+
+  test("a blank query keeps every installed instance", () => {
+    expect(filterCustomApiInstances(instances, "   ").map((entry) => entry.instanceKey)).toEqual([
+      "finance",
+      "billing",
+    ]);
+  });
+
+  test("a query narrows custom APIs like every other connector", () => {
+    expect(filterCustomApiInstances(instances, "stripe").map((entry) => entry.instanceKey)).toEqual(
+      ["billing"],
+    );
+    expect(
+      filterCustomApiInstances(instances, "linear.example").map((entry) => entry.instanceKey),
+    ).toEqual(["finance"]);
+    expect(filterCustomApiInstances(instances, "nothing-here")).toEqual([]);
+  });
+});
+
+function customApiInstance(
+  instanceKey: string,
+  displayName: string,
+  providerDomain: string,
+): ApiIntegrationInstallationSummary {
+  return {
+    capabilityId: `api:${instanceKey}`,
+    pluginKey: `integration/${instanceKey}`,
+    installationVersion: 1,
+    instanceId: `instance-${instanceKey}`,
+    instanceKey,
+    displayName,
+    instanceVersion: 1,
+    serverId: `api_${instanceKey}`,
+    name: displayName,
+    description: null,
+    protocol: "openapi",
+    definitionId: instanceKey,
+    definitionProvenance: "workspace",
+    providerDomain,
+    baseUrl: `https://${providerDomain}/`,
+    sourceUrl: null,
+    connected: true,
+    requiresConnection: true,
+    connectionId: "connection-1",
+    ownership: "workspace",
+    allowedTools: [],
+    toolCount: 0,
+    approvalRequiredToolCount: 0,
+    revisionId: "rev-1",
+    contentSha256: "sha-1",
+  } as unknown as ApiIntegrationInstallationSummary;
 }

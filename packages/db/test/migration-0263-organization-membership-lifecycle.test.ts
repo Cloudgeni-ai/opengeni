@@ -260,6 +260,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       metadata: {},
       createdBy: { kind: "subject" as const, subjectId: fixture.targetSubject },
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none" as const,
     };
 
@@ -810,6 +812,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: ownerSubject },
       subjectId: ownerSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const targetOwnedSession = await createSession(client.db, {
@@ -821,6 +825,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const initiatedTurnId = crypto.randomUUID();
@@ -1004,6 +1010,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const approvalSession = await createSession(client.db, {
@@ -1015,6 +1023,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const recoveringSession = await createSession(client.db, {
@@ -1026,6 +1036,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const capacitySession = await createSession(client.db, {
@@ -1037,6 +1049,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const privateTransition = await transitionSessionVisibility(client.db, {
@@ -1274,6 +1288,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await transitionSessionVisibility(client.db, {
@@ -1386,21 +1402,21 @@ describe("migration 0263 organization membership lifecycle", () => {
     if (offboardRace[1]?.status === "rejected") {
       let visibilityFailureState = nestedPostgresSqlState(offboardRace[1].reason);
       if (visibilityFailureState === "40P01") {
-        // The lifecycle seam still takes `managed_accounts FOR UPDATE` before
-        // the account's `workspaces` rows, while this ordinary writer takes its
-        // own workspace row first and reaches `managed_accounts` afterwards
-        // through an insert's foreign-key check. PostgreSQL breaks that cycle
-        // by aborting ONE of the two - and it may pick either. The lifecycle
-        // side replays itself; this arm is a plain caller and legitimately
-        // surfaces the deadlock abort, so asserting 42501 on the first result
-        // was a coin flip, not a contract.
+        // Any deadlock between the lifecycle command and this ordinary
+        // workspace writer is broken by PostgreSQL aborting ONE of the two -
+        // and it may pick either. The lifecycle side replays itself; this arm
+        // is a plain caller and legitimately surfaces the deadlock abort, so
+        // asserting 42501 on the first result would be a coin flip, not a
+        // contract.
         //
         // Replaying it here is deterministic rather than hopeful: the offboard
         // above is already fulfilled and therefore committed, so the actor's
         // authority is revoked and this transition must now be denied outright.
-        // OPE-275 removes the inversion in SQL (advisory-lock mutual exclusion
-        // plus a downgraded row lock), after which this branch becomes
-        // unreachable and should be deleted with it.
+        // Migration 0299 removed the organization/workspace lock-order
+        // inversion in SQL (advisory-lock mutual exclusion plus a downgraded
+        // `managed_accounts FOR KEY SHARE` row lock), so this branch should not
+        // fire; it stays only so an unrelated cycle cannot make the assertion
+        // below victim-dependent again.
         let replayFulfilled = false;
         let replayState: string | null = null;
         try {
@@ -2357,6 +2373,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: fixture.targetSubject },
       subjectId: fixture.targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await shared.admin`
@@ -2405,6 +2423,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: fixture.targetSubject },
       subjectId: fixture.targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const recordingId = crypto.randomUUID();

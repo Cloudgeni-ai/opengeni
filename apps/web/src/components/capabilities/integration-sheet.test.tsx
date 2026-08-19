@@ -66,17 +66,8 @@ async function render(node: React.ReactNode) {
   };
 }
 
-/** Structural fingerprint: tag names and roles, ignoring text and ids. */
-function shape(element: Element): string {
-  const parts: string[] = [element.tagName.toLowerCase()];
-  const role = element.getAttribute("role");
-  if (role) parts.push(`[role=${role}]`);
-  const children = [...element.children].map(shape).join(",");
-  return children ? `${parts.join("")}(${children})` : parts.join("");
-}
-
 describe("IntegrationRow", () => {
-  test("renders every integration through the same row shape", async () => {
+  test("renders every integration through the same two-button row shape", async () => {
     const onOpen = mock(() => {});
     const rendered = await render(
       <>
@@ -102,19 +93,122 @@ describe("IntegrationRow", () => {
       </>,
     );
     try {
-      const rows = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-      expect(rows).toHaveLength(3);
-      expect(rows[0]?.getAttribute("aria-label")).toBe("Slack. Connected");
-      expect(rows[1]?.getAttribute("aria-label")).toBe("GitHub. Not connected");
-      // Apart from the mark (logo vs monogram) and the chip dot, the DOM shape is identical.
-      const shapes = rows.map((row) => shape(row).replace(/span\(img\)|span/g, "mark"));
-      expect(new Set(shapes.map((entry) => entry.replace(/mark\(mark\)/g, "mark"))).size).toBe(1);
-      for (const row of rows) {
-        expect(row.querySelector("[data-integration-chip]")).not.toBeNull();
+      const rowContainers = [...rendered.container.querySelectorAll("[data-integration-row]")];
+      expect(rowContainers).toHaveLength(3);
+      // Every row's body-open button is a real sibling of the state indicator,
+      // never nested inside it - one clean click target per row. Its accessible
+      // name carries the connection state, so the state is never colour-only.
+      for (const row of rowContainers) {
+        expect(row.tagName).not.toBe("BUTTON");
+        const openButton = row.querySelector("button");
+        expect(openButton).not.toBeNull();
+        expect(openButton?.querySelector("button")).toBeNull();
+      }
+      expect(rowContainers[0]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Slack. Connected",
+      );
+      expect(rowContainers[1]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "GitHub. Not connected",
+      );
+      expect(rowContainers[2]?.querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Google Drive. Set up by an admin",
+      );
+      // The indicator itself is decorative, so each row still exposes its state
+      // as text for assistive tech and forced-colours users.
+      expect(rowContainers[0]?.textContent).toContain("Connected");
+      expect(rowContainers[2]?.textContent).toContain("Set up by an admin");
+      for (const row of rowContainers) {
         expect(row.textContent).not.toContain("scope");
       }
-      await act(async () => rows[1]!.click());
+      const openButtons = rowContainers.map(
+        (row) => row.querySelector("button") as HTMLButtonElement,
+      );
+      await act(async () => openButtons[1]!.click());
       expect(onOpen).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  // The row's aria-label replaces its contents, so a caller with a fact that
+  // must be heard supplies it as one opaque string; the row branches on nothing.
+  test("an optional accessible detail is spoken between the name and the state", async () => {
+    const rendered = await render(
+      <>
+        <IntegrationRow
+          model={model({
+            id: "pack:infra-ops",
+            name: "Infrastructure operations",
+            chip: { label: "Not installed", tone: "idle" },
+            accessibleDetail: "Pack, curated by OpenGeni",
+          })}
+          onOpen={() => {}}
+        />
+        <IntegrationRow
+          model={model({ id: "blank-detail", accessibleDetail: "   " })}
+          onOpen={() => {}}
+        />
+      </>,
+    );
+    try {
+      expect(
+        rendered.container
+          .querySelector('[data-integration-row="pack:infra-ops"] > button')
+          ?.getAttribute("aria-label"),
+      ).toBe("Infrastructure operations. Pack, curated by OpenGeni. Not installed");
+      // Nothing meaningful to add: the name reads exactly as it did before.
+      expect(
+        rendered.container
+          .querySelector('[data-integration-row="blank-detail"] > button')
+          ?.getAttribute("aria-label"),
+      ).toBe("Slack. Connected");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("only the not-connected state renders an interactive quick-connect icon", async () => {
+    const onOpen = mock(() => {});
+    const onQuickConnect = mock(() => {});
+    const rendered = await render(
+      <>
+        <IntegrationRow model={model()} onOpen={onOpen} />
+        <IntegrationRow
+          model={model({
+            id: "github",
+            chip: { label: "Not connected", tone: "idle" },
+          })}
+          onOpen={onOpen}
+          onQuickConnect={onQuickConnect}
+        />
+      </>,
+    );
+    try {
+      const rows = [...rendered.container.querySelectorAll("[data-integration-row]")];
+      // Connected: the indicator is decorative, not a button.
+      const connectedButtons = [...rows[0]!.querySelectorAll("button")];
+      expect(connectedButtons).toHaveLength(1);
+      // Not connected with a quick-connect handler: a second, real button.
+      const idleButtons = [...rows[1]!.querySelectorAll("button")];
+      expect(idleButtons).toHaveLength(2);
+      await act(async () => idleButtons[1]!.click());
+      expect(onQuickConnect).toHaveBeenCalledTimes(1);
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("omits the quick-connect icon entirely when no fast path exists, even if not connected", async () => {
+    const rendered = await render(
+      <IntegrationRow
+        model={model({ chip: { label: "Not connected", tone: "idle" } })}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      const row = rendered.container.querySelector("[data-integration-row]")!;
+      expect([...row.querySelectorAll("button")]).toHaveLength(1);
     } finally {
       await rendered.unmount();
     }
@@ -196,6 +290,128 @@ describe("IntegrationSheet", () => {
       ).not.toContain("Disconnect");
     } finally {
       await locked.unmount();
+    }
+  });
+
+  // The Bundle footer: a surface whose real verbs are not connect/disconnect.
+  test("renders the actions footer a Bundle needs, with its unavailability reason", async () => {
+    const onUpdate = mock(() => {});
+    const onRemove = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-skill-release-operator",
+            name: "release-operator",
+            chip: { label: "Installed", tone: "ok" },
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: { label: "Check for update", onClick: onUpdate },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector(
+        '[data-integration-sheet="bundle-skill-release-operator"]',
+      )!;
+      // Neither of the connection verbs appears: a Bundle is not connected.
+      const labels = [...sheet.querySelectorAll("button")].map((node) => node.textContent?.trim());
+      expect(labels).toContain("Check for update");
+      expect(labels).toContain("Remove");
+      expect(labels).not.toContain("Reconnect");
+      expect(labels).not.toContain("Disconnect");
+      expect(labels).not.toContain("Set up");
+
+      const update = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Check for update",
+      )!;
+      const remove = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Remove",
+      )!;
+      await act(async () => update.click());
+      await act(async () => remove.click());
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+      expect(onRemove).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+
+    // A Plugin that never retained a source URL: the button stays visible and
+    // says why it cannot run, rather than silently doing nothing.
+    const unavailable = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-plugin-research",
+            name: "Research suite",
+            chip: { label: "Installed", tone: "ok" },
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: {
+                label: "Review update",
+                onClick: onUpdate,
+                disabled: true,
+                unavailableReason: "This installed Plugin did not retain a source URL.",
+              },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="bundle-plugin-research"]')!;
+      const review = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Review update",
+      )! as HTMLButtonElement;
+      expect(review.disabled).toBe(true);
+      expect(review.title).toBe("This installed Plugin did not retain a source URL.");
+      await act(async () => review.click());
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      await unavailable.unmount();
+    }
+  });
+
+  test("a busy actions footer disables both of its verbs", async () => {
+    const onUpdate = mock(() => {});
+    const onRemove = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "bundle-busy",
+            access: undefined,
+            options: [],
+            footer: {
+              kind: "actions",
+              primary: { label: "Check for update", onClick: onUpdate },
+              secondary: { label: "Remove", onClick: onRemove, destructive: true },
+              busy: true,
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="bundle-busy"]')!;
+      for (const label of ["Check for update", "Remove"]) {
+        const node = [...sheet.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent?.trim() === label,
+        )! as HTMLButtonElement;
+        expect(node.disabled).toBe(true);
+      }
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(onRemove).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
     }
   });
 
@@ -307,6 +523,94 @@ describe("IntegrationSheet", () => {
       expect(second).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("Connected accounts items render a status dot and an inline per-item action", async () => {
+    const onReconnect = mock(() => {});
+    const onEdit = mock(() => {});
+    const rendered = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({
+            id: "outlook-mail",
+            name: "Outlook Mail",
+            access: {
+              title: "Connected accounts",
+              editLabel: "+ Add account",
+              onEdit,
+              items: [
+                { name: "ana@acme.com", status: "ok" },
+                {
+                  name: "ben@acme.com",
+                  status: "warn",
+                  meta: "Needs attention",
+                  actions: [{ label: "Reconnect", onClick: onReconnect }],
+                },
+              ],
+            },
+          })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="outlook-mail"]')!;
+      const items = [...sheet.querySelectorAll("li")];
+      expect(items).toHaveLength(2);
+      expect(items[0]?.textContent).toContain("ana@acme.com");
+      expect(items[0]?.querySelector("button")).toBeNull();
+      const reconnect = items[1]?.querySelector("button");
+      expect(reconnect?.textContent?.trim()).toBe("Reconnect");
+      await act(async () => reconnect!.click());
+      expect(onReconnect).toHaveBeenCalledTimes(1);
+      const addAccount = [...sheet.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "+ Add account",
+      )!;
+      await act(async () => addAccount.click());
+      expect(onEdit).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("Tools renders a flat informational chip grid and is omitted when empty", async () => {
+    const withTools = await render(
+      <Sheet open>
+        <IntegrationSheetBody
+          model={model({ tools: { tools: ["mail.read", "mail.send", "mail.read"] } })}
+        />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      const heading = [...sheet.querySelectorAll("h3")].find(
+        (node) => node.textContent === "Tools",
+      );
+      expect(heading).toBeDefined();
+      const chips = heading!.closest("section")!.querySelectorAll("span");
+      expect([...chips].map((node) => node.textContent)).toEqual([
+        "mail.read",
+        "mail.send",
+        "mail.read",
+      ]);
+      // Purely informational: no button/toggle inside a tool chip.
+      expect(heading!.closest("section")!.querySelector("button")).toBeNull();
+    } finally {
+      await withTools.unmount();
+    }
+
+    const withoutTools = await render(
+      <Sheet open>
+        <IntegrationSheetBody model={model({ tools: { tools: [] } })} />
+      </Sheet>,
+    );
+    try {
+      const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
+      expect([...sheet.querySelectorAll("h3")].some((node) => node.textContent === "Tools")).toBe(
+        false,
+      );
+    } finally {
+      await withoutTools.unmount();
     }
   });
 

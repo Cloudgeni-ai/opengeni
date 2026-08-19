@@ -28,7 +28,12 @@ import type {
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, lt, notExists, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
-import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
+import {
+  withRlsContext,
+  withSessionRlsActorContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+} from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -155,6 +160,16 @@ export class WorkspaceInstructionPolicyOnboardingProposalContentError extends Er
     );
   }
 }
+
+/**
+ * The exact diagnostic `activate_human_confirmed_learning_decision` raises when
+ * a proposal's compare-and-set baseline no longer matches the live head. It is
+ * matched by message because the SQLSTATE (40001) is shared with other
+ * conflicts. Kept here so the SQL and the code that keys recovery off it cannot
+ * drift apart silently - the migration test pins the same string.
+ */
+export const INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC =
+  "instruction-policy proposal baseline is stale";
 
 export class WorkspaceInstructionPolicyOnboardingProposalStaleError extends Error {
   readonly name = "WorkspaceInstructionPolicyOnboardingProposalStaleError";
@@ -283,6 +298,14 @@ function activeRevisionRequestFingerprint(input: ActiveRevisionInput): string {
   ]);
 }
 
+// The activation baseline is deliberately NOT part of either fingerprint. Its
+// job is compare-and-set staleness detection at write time, not the identity of
+// the request: two calls that ask for the same rule on the same target are the
+// same operation even if the head moved between them. Hashing a live-read value
+// into the identity made an ordinary turn-recovery replay of the same
+// operationId fail as an operation-reuse conflict once a confirm advanced the
+// head. Staleness is still enforced - by the compare-and-set below and by the
+// activation function - it is just no longer conflated with request identity.
 function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestInput): string {
   return operationRequestFingerprint("create_onboarding_proposal", [
     ["accountId", true, input.accountId],
@@ -294,8 +317,6 @@ function onboardingProposalRequestFingerprint(input: OnboardingProposalRequestIn
     ["sourceId", true, input.sourceId],
     ["sourceVersion", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
-    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
-    ["expectedActivationVersion", true, input.expectedActivationVersion],
     ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
@@ -311,8 +332,6 @@ function knowledgeProposalRequestFingerprint(input: OnboardingProposalRequestInp
     ["knowledgeProposalId", true, input.sourceId],
     ["knowledgeProposalContentHash", true, input.sourceVersion],
     ["confidenceBps", true, input.confidenceBps],
-    ["expectedCurrentRevisionId", true, input.expectedCurrentRevisionId],
-    ["expectedActivationVersion", true, input.expectedActivationVersion],
     ["createdBySubjectId", true, input.createdBySubjectId],
   ]);
 }
@@ -796,6 +815,11 @@ async function getOnboardingProposalBySourceVersionInTransaction(
         eq(schema.workspaceInstructionPolicyOnboardingProposals.sourceVersion, input.sourceVersion),
       ),
     )
+    .orderBy(
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.baselineActivationVersion),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+      desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
+    )
     .limit(1);
   return row ?? null;
 }
@@ -1075,11 +1099,19 @@ async function createWorkspaceInstructionPolicySourceProposal(
         throw new WorkspaceInstructionPolicyOnboardingProposalStaleError(currentHead);
       }
 
+      // A second proposal for the same knowledge proposal is legitimate when it
+      // is a rebaselined successor - the confirm path adds one when the head
+      // moved after the human already answered. Only a duplicate against the
+      // same baseline is a conflict.
       const sourceConflict = await getOnboardingProposalBySourceVersionInTransaction(
         scopedDb,
         input,
       );
-      if (sourceConflict) {
+      if (
+        sourceConflict &&
+        sourceConflict.baselineActivationVersion === currentActivationVersion &&
+        (sourceConflict.baselineRevisionId ?? null) === (currentHead?.revisionId ?? null)
+      ) {
         throw new WorkspaceInstructionPolicyOnboardingProposalConflictError(
           sourceConflict.id,
           sourceConflict.draftRevisionId,
@@ -1239,6 +1271,95 @@ export async function createWorkspaceInstructionPolicyKnowledgeProposal(
     { ...request, requestFingerprint: knowledgeProposalRequestFingerprint(request) },
     "knowledge_proposal",
     () => input.knowledgeProposalId,
+  );
+}
+
+/**
+ * Add a successor instruction-policy proposal for a knowledge proposal whose
+ * existing proposal was left behind by a moved head.
+ *
+ * This exists for one case: the human already answered "save", and only then
+ * did the head move. Re-asking them would be the alternative. The successor
+ * reuses the exact immutable source facts of the stranded proposal - same
+ * knowledge proposal id, same content hash, same target, same author - so the
+ * human's confirmation, which is bound to the knowledge proposal id, still
+ * describes precisely what gets activated. Only the compare-and-set baseline
+ * and the draft's place in the revision chain move forward.
+ *
+ * Returns the existing proposal unchanged when it is already current, so a
+ * retry of the same confirmation is idempotent.
+ */
+export async function rebaselineWorkspaceInstructionPolicyKnowledgeProposal(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    knowledgeProposalId: string;
+    operationId: string;
+    initiatingHumanSubjectId: string;
+  },
+): Promise<WorkspaceInstructionPolicyOnboardingProposal> {
+  const stranded = await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.workspaceInstructionPolicyOnboardingProposals)
+      .where(
+        and(
+          eq(schema.workspaceInstructionPolicyOnboardingProposals.workspaceId, input.workspaceId),
+          eq(
+            schema.workspaceInstructionPolicyOnboardingProposals.sourceId,
+            input.knowledgeProposalId,
+          ),
+          eq(schema.workspaceInstructionPolicyOnboardingProposals.status, "proposed"),
+        ),
+      )
+      .orderBy(
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.baselineActivationVersion),
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.createdAt),
+        desc(schema.workspaceInstructionPolicyOnboardingProposals.id),
+      )
+      .limit(1);
+    if (!row) return null;
+    const draft = await getRevisionInTransaction(scoped, input.workspaceId, row.draftRevisionId);
+    return draft ? { row, draft } : null;
+  });
+  if (!stranded) {
+    throw new WorkspaceInstructionPolicyInvalidOperationError(
+      "No inactive instruction-policy proposal exists for this knowledge proposal",
+    );
+  }
+  const target: WorkspaceInstructionPolicyTarget = {
+    kind: stranded.row.kind as WorkspaceInstructionPolicyKind,
+    scope: stranded.row.scope as WorkspaceInstructionPolicyScope,
+    roleKey: stranded.row.roleKey,
+  };
+  const baseline = await getWorkspaceInstructionPolicyBaseline(db, {
+    workspaceId: input.workspaceId,
+    target,
+  });
+  // The draft-validation trigger binds a knowledge-proposal draft to the
+  // initiating human carried in the transaction, exactly as the original write
+  // did through the governed-write authority seam. The successor must be
+  // created under that same frozen human, not the ambient caller.
+  return await withSessionRlsActorContext(
+    {
+      subjectId: input.initiatingHumanSubjectId,
+      initiatingHumanSubjectId: input.initiatingHumanSubjectId,
+    },
+    async () =>
+      await createWorkspaceInstructionPolicyKnowledgeProposal(db, {
+        operationId: input.operationId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...target,
+        content: stranded.draft.content,
+        knowledgeProposalId: stranded.row.sourceId,
+        knowledgeProposalContentHash: stranded.row.sourceVersion,
+        confidenceBps: stranded.row.confidenceBps,
+        expectedCurrentRevisionId: baseline.expectedCurrentRevisionId,
+        expectedActivationVersion: baseline.expectedActivationVersion,
+        createdBySubjectId: stranded.row.createdBySubjectId,
+      }),
   );
 }
 

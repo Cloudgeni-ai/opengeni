@@ -47,6 +47,8 @@ async function session(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
   });

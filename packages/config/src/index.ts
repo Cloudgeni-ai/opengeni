@@ -333,6 +333,26 @@ const SettingsSchema = z.object({
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   productAccessMode: ProductAccessMode.default("local"),
+  // --- canonical organization-tenancy authority activation, default OFF ---
+  // The named PRE-ACTIVATION opt-out for the organization-tenancy program. FALSE (the
+  // default, and the value an operator leaves in place to decline or defer) means
+  // this deployment stays on the reversible legacy workspace-owned lane: no phase-F
+  // subsystem may switch its access decision to organization/membership authority
+  // ids. TRUE is an operator's explicit statement that the activation preconditions
+  // in docs/organization-tenancy.md have been proven for this deployment and that
+  // the one-way boundary is accepted.
+  //
+  // This is NOT a kill switch and NOT a rollback: once an activation migration has
+  // committed, setting it back to false does not restore the legacy authority - only
+  // forward recovery is available. It also grants and revokes nothing by itself;
+  // every individual authorization decision keeps its own fences.
+  //
+  // No runtime path reads it yet: canonical activation (phase F) is unshipped, so
+  // the flag exists to reserve the name, pin the safe default, and give every future
+  // activation slice one gate to consult. EnvBoolean (NOT z.coerce.boolean(), which
+  // coerces "false" -> true and would activate the moment an operator wrote the
+  // variable out to disable it).
+  organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
@@ -2070,6 +2090,9 @@ export function getSettings(): Settings {
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
+    organizationTenancyCanonicalActivationEnabled: optional(
+      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+    ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
@@ -3354,6 +3377,7 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
       const capabilities = legacyModelCapabilities(settings, {
         reasoningEffort: true,
         hostedWebSearch: true,
+        vision: true,
       });
       capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
       capabilities.reasoning.defaultEffort = "high";

@@ -1,6 +1,7 @@
 import {
   TASK_NOTE_LIST_DEFAULT_LIMIT,
   TASK_NOTE_LIST_MAX_LIMIT,
+  TASK_NOTE_MAX_LIFETIME_DAYS,
   TaskNote,
   TaskNoteKind,
   TaskNoteListResponse,
@@ -142,9 +143,9 @@ export async function createTaskNote(db: Database, input: CreateTaskNoteInput) {
   if (
     !Number.isSafeInteger(input.expiresInDays) ||
     input.expiresInDays < 1 ||
-    input.expiresInDays > 30
+    input.expiresInDays > TASK_NOTE_MAX_LIFETIME_DAYS
   ) {
-    throw new Error("Task note expiry must be 1-30 whole days");
+    throw new Error(`Task note expiry must be 1-${TASK_NOTE_MAX_LIFETIME_DAYS} whole days`);
   }
   const rows = await withRlsContext(
     db,
@@ -210,9 +211,11 @@ export async function replaceTaskNote(db: Database, input: ReplaceTaskNoteInput)
     input.expectedReplacedVersion !== 1 ||
     !Number.isSafeInteger(input.replacementExpiresInDays) ||
     input.replacementExpiresInDays < 1 ||
-    input.replacementExpiresInDays > 30
+    input.replacementExpiresInDays > TASK_NOTE_MAX_LIFETIME_DAYS
   ) {
-    throw new Error("Task-note replacement requires version 1 and a 1-30 day expiry");
+    throw new Error(
+      `Task-note replacement requires version 1 and a 1-${TASK_NOTE_MAX_LIFETIME_DAYS} day expiry`,
+    );
   }
   const archiveOperationId = derivedTaskNoteOperationId(input.operationId, "archive");
   const createOperationId = derivedTaskNoteOperationId(input.operationId, "create");

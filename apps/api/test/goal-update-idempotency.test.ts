@@ -88,6 +88,8 @@ describe("goal_update idempotency", () => {
       tools: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(client.db, {

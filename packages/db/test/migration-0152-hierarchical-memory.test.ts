@@ -225,6 +225,8 @@ beforeAll(async () => {
     resources: [],
     metadata: { memoryRoleKey: "operator" },
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const bobSession = await createSession(client.db, {
@@ -234,6 +236,8 @@ beforeAll(async () => {
     resources: [],
     metadata: { memoryRoleKey: "reviewer" },
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const aliceAttempt = await seedAttempt({

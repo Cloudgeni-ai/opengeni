@@ -141,6 +141,24 @@ describe("approval RunState materialization boundary", () => {
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
   });
+
+  test("requires_action pause flushes paired history and attaches the open suffix", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    expect(source).toContain("attachOpenSuffixToPendingToolCalls");
+    expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
+    expect(source).toContain("reconcileConversationTruth({ requireDurable: true })");
+    expect(source).toContain("settleOpenSuffixResumeIfNeeded");
+  });
+
+  test("approval and human-input resume require open-suffix rows", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/run-input.ts", import.meta.url),
+    ).text();
+    expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+    expect(source).toContain("Open suffix resume has no interruption rows");
+  });
 });
 
 describe("workspace structured human-input policy", () => {
@@ -4749,20 +4767,20 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
       configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
     }) as Parameters<typeof computerToolModeForTurn>[0];
 
-  test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
-    // api is irrelevant once kind is codex-subscription — codex wins.
+  test("codex-subscription → function-image", () => {
+    // api is irrelevant once kind is codex-subscription — image input wins.
     expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
       "function-image",
     );
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 
-  test("a chat-wire provider without proven visual image transport → disabled", () => {
+  test("a chat-wire provider cannot receive screenshot tool results as images → disabled", () => {
     expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
   });
 
-  test("a registry responses provider → hosted", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
+  test("a registry responses provider → function-image", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("function-image");
   });
 
   test("any text-only model → disabled before provider transport selection", () => {
@@ -4770,19 +4788,28 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
     expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
       "disabled",
     );
+    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses", false))).toBe(
+      "disabled",
+    );
   });
 
-  test("Gateway Responses models do not inherit OpenAI hosted computer tools", () => {
+  test("Gateway Responses vision models use computer_* function tools", () => {
     expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
-      "disabled",
+      "function-image",
     );
     expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
-      "disabled",
+      "function-image",
     );
   });
 
-  test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
-    expect(computerToolModeForTurn(null)).toBe("hosted");
+  test("SuperGrok Responses vision models use computer_* function tools", () => {
+    expect(computerToolModeForTurn(resolved("xai-subscription", "responses"))).toBe(
+      "function-image",
+    );
+  });
+
+  test("the LEGACY global-client fallback (resolveTurnModel → null) → function-image", () => {
+    expect(computerToolModeForTurn(null)).toBe("function-image");
   });
 });
 

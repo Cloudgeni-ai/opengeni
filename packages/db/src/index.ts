@@ -264,7 +264,10 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
-import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
+import {
+  seedNewSessionDraftInTransaction,
+  type NewSessionDraftSnapshot,
+} from "./new-session-drafts";
 import {
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
@@ -13310,7 +13313,7 @@ export async function resolveWorkspaceMemoryBlock(
   if (
     !workspace ||
     !resolveWorkspaceMemoryEnabled(workspace.settings) ||
-    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+    resolveWorkspaceMemoryPromptMode() === "retrieval_only"
   ) {
     return null;
   }
@@ -17594,6 +17597,36 @@ export async function inventoryOrganizationTenancy(
       const [row] = await rawRows<{ result: unknown }>(
         scopedDb,
         sql`select inventory_organization_tenancy(${input.organizationId}) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
+/**
+ * Organization-tenancy phase D classification assertion (0291) for Variable Sets, Rigs, and
+ * Connected Machines. Read-only over every resource table: it proves each row
+ * already carries an explicit terminal authority classification and never
+ * rewrites one. Supplying `runKey` additionally records the verdicts durably
+ * through the 0286 tenancy backfill ledger (one receipt per family plus one
+ * append-only unresolved row per resource that could not be proven); the
+ * result reports `ledgerAvailable` so a run that could not record its
+ * obligations is visible rather than silent. A run key may be used once - the
+ * ledger refuses to re-open a settled receipt.
+ */
+export async function verifyOrganizationResourceClassification(
+  db: Database,
+  input: { organizationId: string; runKey?: string | null },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select verify_organization_resource_classification(
+          ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
       );
       return (row?.result ?? {}) as Record<string, unknown>;
     },
@@ -25228,6 +25261,8 @@ export type SessionCreateInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   variableSetId?: string | null;
   rigId?: string | null;
@@ -25722,6 +25757,8 @@ async function createSessionInTransaction(
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
+            reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
             sandboxGroupId: input.sandboxGroupId ?? id,
@@ -30267,6 +30304,153 @@ export async function recordPendingSessionToolCallResult(
         };
       }),
   );
+}
+
+export type OpenSuffixInterruptionKind = "human_input" | "approval" | "interaction_intervention";
+
+export type OpenSuffixPendingToolCall = {
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+  interruptionKind: OpenSuffixInterruptionKind;
+  tiedReasoningItems: Array<Record<string, unknown>>;
+  resultItem: Record<string, unknown> | null;
+  modelToolOutputTruncationTokens: number | null;
+};
+
+function asOpenSuffixInterruptionKind(value: string | null): OpenSuffixInterruptionKind | null {
+  if (value === null) {
+    return null;
+  }
+  if (value === "human_input" || value === "approval" || value === "interaction_intervention") {
+    return value;
+  }
+  throw new Error(`Unknown pending-tool interruption kind: ${value}`);
+}
+
+/**
+ * Bind unpaired interruption calls and their tied reasoning onto existing
+ * pending receipts. Fail closed when any interruption call is missing.
+ */
+export async function attachOpenSuffixToPendingToolCalls(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    members: Array<{
+      callId: string;
+      interruptionKind: OpenSuffixInterruptionKind;
+      reasoningItems: Array<Record<string, unknown>>;
+    }>;
+  },
+): Promise<{ accepted: boolean; attached: number }> {
+  if (input.members.length === 0) {
+    return { accepted: true, attached: 0 };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false, attached: 0 };
+        const ordered = [...input.members].sort((left, right) =>
+          left.callId.localeCompare(right.callId),
+        );
+        let attached = 0;
+        for (const member of ordered) {
+          const [pending] = await tx
+            .select()
+            .from(schema.sessionPendingToolCalls)
+            .where(
+              and(
+                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                eq(schema.sessionPendingToolCalls.callId, member.callId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!pending) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} has no pending tool-call receipt`,
+            );
+          }
+          if (pending.resultItem) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} already has a recorded result`,
+            );
+          }
+          const existingKind = asOpenSuffixInterruptionKind(pending.interruptionKind);
+          if (existingKind && existingKind !== member.interruptionKind) {
+            throw new Error(
+              `Open suffix interruption ${member.callId} changed kind from ${existingKind} to ${member.interruptionKind}`,
+            );
+          }
+          const updated = await tx
+            .update(schema.sessionPendingToolCalls)
+            .set(
+              withLosslessContentWriteVersion(
+                {
+                  interruptionKind: member.interruptionKind,
+                  tiedReasoningItems: member.reasoningItems,
+                },
+                "tiedReasoningItems",
+                "tiedReasoningItemsCodecVersion",
+              ),
+            )
+            .where(eq(schema.sessionPendingToolCalls.id, pending.id))
+            .returning({ id: schema.sessionPendingToolCalls.id });
+          if (updated.length === 1) {
+            attached += 1;
+          }
+        }
+        return { accepted: true, attached };
+      }),
+  );
+}
+
+/** Turn-scoped interruption suffix rows, including already-settled members. */
+export async function listTurnOpenSuffixToolCalls(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<OpenSuffixPendingToolCall[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, workspaceId),
+          eq(schema.sessionPendingToolCalls.sessionId, sessionId),
+          eq(schema.sessionPendingToolCalls.turnId, turnId),
+          isNotNull(schema.sessionPendingToolCalls.interruptionKind),
+        ),
+      )
+      .orderBy(asc(schema.sessionPendingToolCalls.createdAt));
+    return rows.map((row) => {
+      const interruptionKind = asOpenSuffixInterruptionKind(row.interruptionKind);
+      if (!interruptionKind) {
+        throw new Error(`Pending tool call ${row.callId} is missing interruption kind`);
+      }
+      return {
+        callId: row.callId,
+        callType: row.callType,
+        callItem: row.callItem,
+        interruptionKind,
+        tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
+        resultItem: row.resultItem ?? null,
+        modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
+      };
+    });
+  });
 }
 
 /**
@@ -50170,6 +50354,7 @@ export type InitializeSessionStartInput = {
   consumeNewSessionDraft?: {
     subjectId: string;
     expectedRevision: number;
+    expectedSnapshot?: NewSessionDraftSnapshot;
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
@@ -50370,6 +50555,9 @@ export async function initializeSessionStartAtomically(
               workspaceId: input.workspaceId,
               subjectId: input.consumeNewSessionDraft.subjectId,
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+              ...(input.consumeNewSessionDraft.expectedSnapshot
+                ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+                : {}),
             });
           }
           return {
@@ -50564,13 +50752,8 @@ export async function initializeSessionStartAtomically(
                   tools: session.tools,
                   toolsProvided: session.toolPolicy?.mode === "explicit",
                   model: session.model,
-                  reasoningEffort: reasoningEffortForMetadata(
-                    session.metadata,
-                    input.reasoningEffortFallback,
-                  ),
-                  latencyMode:
-                    input.turnExecutionPolicy?.latencyMode ??
-                    latencyModeForMetadata(session.metadata, "standard"),
+                  reasoningEffort: session.reasoningEffort,
+                  latencyMode: input.turnExecutionPolicy?.latencyMode ?? session.latencyMode,
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
@@ -50686,6 +50869,9 @@ export async function initializeSessionStartAtomically(
             workspaceId: input.workspaceId,
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+            ...(input.consumeNewSessionDraft.expectedSnapshot
+              ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+              : {}),
           });
         }
         const changed =
@@ -52314,11 +52500,11 @@ export async function claimSessionWorkForAttempt(
                     model: latestStarted?.model ?? session.model,
                     reasoningEffort: reasoningEffortForMetadata(
                       { reasoningEffort: latestStarted?.reasoningEffort },
-                      reasoningEffortForMetadata(session.metadata, "medium"),
+                      session.reasoningEffort as ReasoningEffort,
                     ),
                     latencyMode: latencyModeForMetadata(
                       { latencyMode: latestStarted?.latencyMode },
-                      latencyModeForMetadata(session.metadata, "standard"),
+                      session.latencyMode as LatencyMode,
                     ),
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                     sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
@@ -52632,13 +52818,13 @@ export async function claimSessionWorkForAttempt(
             {
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
-            reasoningEffortForMetadata(session.metadata, "medium"),
+            session.reasoningEffort as ReasoningEffort,
           );
           let latencyMode = latencyModeForMetadata(
             {
               latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
             },
-            latencyModeForMetadata(session.metadata, "standard"),
+            session.latencyMode as LatencyMode,
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
@@ -55618,11 +55804,12 @@ export type ApplySessionTurnSettlementInput = {
   activeTurnId: string | null;
   events: AppendEventInput[];
   /**
-   * A mid-turn SDK freeze installed atomically with requires_action. Human
-   * input requests are public protocol rows; ordinary approvals remain only in
-   * pendingApprovals. No request can become visible without the exact frozen
-   * RunState needed to resume it, and no frozen request can miss its status
-   * transition/events because all writes share this transaction.
+   * A mid-turn requires_action freeze. Human-input rows and interaction
+   * interventions are public protocol; ordinary approvals remain in
+   * pendingApprovals. Pause attaches the bounded open suffix on
+   * `session_pending_tool_calls` and stores the open-suffix sentinel here.
+   * Resume uses the suffix plus paired history and must not call
+   * `RunState.fromString`.
    */
   runState?: {
     serializedRunState: string;
@@ -56020,6 +56207,11 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
+        await assertApprovalRunStateForSave(
+          tx,
+          input.runState.serializedRunState,
+          input.runState.pendingApprovals,
+        );
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(
@@ -57920,6 +58112,8 @@ export async function getScheduledTargetSessionExecution(
         visibility: schema.sessions.visibility,
         authorityEpoch: schema.sessions.authorityEpoch,
         model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
         metadata: schema.sessions.metadata,
         tools: schema.sessions.tools,
         sandboxBackend: schema.sessions.sandboxBackend,
@@ -58008,11 +58202,11 @@ export async function getScheduledTargetSessionExecution(
       model: latestStarted?.model ?? session.model,
       reasoningEffort: reasoningEffortForMetadata(
         { reasoningEffort: latestStarted?.reasoningEffort },
-        reasoningEffortForMetadata(session.metadata, "medium"),
+        session.reasoningEffort as ReasoningEffort,
       ),
       latencyMode: latencyModeForMetadata(
         { latencyMode: latestStarted?.latencyMode },
-        latencyModeForMetadata(session.metadata, "standard"),
+        session.latencyMode as LatencyMode,
       ),
       tools: (latestStarted?.tools ?? session.tools) as ToolRef[],
       sandboxBackend: (latestStarted?.sandboxBackend ?? session.sandboxBackend) as SandboxBackend,
@@ -60676,6 +60870,8 @@ function mapSession(
     ),
     createdByContext: row.createdByContext ?? {},
     model: row.model,
+    reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: row.latencyMode as LatencyMode,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
     sandboxGroupId: row.sandboxGroupId,

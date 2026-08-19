@@ -62,6 +62,8 @@ try {
       resources: [],
       metadata: {},
       model: "benchmark-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: grant.subjectId },
       createdByContext: {},
@@ -76,7 +78,8 @@ try {
       scopedDb.execute(sql`
         insert into sessions (
           id, account_id, workspace_id, status, initial_message, title,
-          resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
+          resources, tools, metadata, model, reasoning_effort, latency_mode,
+          sandbox_backend, sandbox_group_id,
           parent_session_id, temporal_workflow_id, tool_policy
         )
         select
@@ -90,6 +93,8 @@ try {
           '[]'::jsonb,
           jsonb_build_object('bench_index', generated.i),
           'benchmark-model',
+          'medium',
+          'standard',
           'none',
           md5(${grant.workspaceId} || ':agent-authority:' || generated.i::text)::uuid,
           ${root.id}::uuid,

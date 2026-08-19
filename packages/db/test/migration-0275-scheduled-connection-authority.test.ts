@@ -709,6 +709,8 @@ describe("migration 0275 scheduled connection authority", () => {
         createdBy: { kind: "subject", subjectId: targetSubject },
         subjectId: targetSubject,
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
       });
       // Session two: target-owned, moved private and then explicitly back to
@@ -723,6 +725,8 @@ describe("migration 0275 scheduled connection authority", () => {
         createdBy: { kind: "subject", subjectId: targetSubject },
         subjectId: targetSubject,
         model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
       });
       const privateTransition = await transitionSessionVisibility(client.db, {
