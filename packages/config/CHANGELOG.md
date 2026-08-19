@@ -8,7 +8,7 @@
 
 ### Patch Changes
 
-- f4afa19: Advertise SuperGrok image input so Grok and Gateway Kimi receive attachments, view*image, and computer*\* screenshots. DeepSeek stays text-only.
+- f4afa19: Advertise SuperGrok image input so Grok and Gateway Kimi receive attachments, `view_image`, and `computer_*` screenshots. DeepSeek stays text-only.
 - Updated dependencies [1c78ed0]
 - Updated dependencies [f4afa19]
 - Updated dependencies [8583779]
