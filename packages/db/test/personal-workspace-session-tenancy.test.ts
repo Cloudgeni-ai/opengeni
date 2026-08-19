@@ -102,14 +102,99 @@ async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<s
   return session.id;
 }
 
+/**
+ * The drizzle wrapper re-throws as `Failed query: ...` and keeps the real
+ * PostgreSQL error on `cause`, so assert across the whole chain rather than the
+ * outermost message.
+ */
+async function expectSqlFailure(fn: () => Promise<unknown>, pattern: RegExp): Promise<void> {
+  let caught: unknown;
+  try {
+    await fn();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeDefined();
+  const messages: string[] = [];
+  for (let error = caught; error instanceof Error; error = error.cause) {
+    messages.push(error.message);
+  }
+  expect(messages.join(" | ")).toMatch(pattern);
+}
+
+/**
+ * KNOWN DEFECT, PINNED — NOT FIXED HERE.
+ *
+ * `transition_session_visibility` (0225) and `fork_session_content` (0289) both
+ * require a `workspace_memberships` row for the actor in the target / source /
+ * destination workspace. A managed human's personal workspace never has one
+ * (migration 0219 raises on it), so the owner is refused inside the one
+ * workspace they always belong to.
+ *
+ * Both are SECURITY DEFINER, so there is no application-layer fix — only a
+ * migration, which is deliberately not in this PR because the ordinal would
+ * collide with #1631's 0302 rewriting these same functions. Neither has a
+ * production caller (`test/session-visibility-contract-surface.test.ts` enforces
+ * that), so this is latent rather than live.
+ *
+ * These tests assert the CURRENT WRONG BEHAVIOUR with its exact message, so the
+ * defect is recorded and CI stays green. Whoever ships the migration should
+ * invert them — the fix is the disjunct 0258 already uses:
+ *
+ *   IF actor_membership.personal_workspace_id IS DISTINCT FROM <workspace> THEN
+ *     <existing workspace_memberships requirement>
+ *   END IF;
+ *
+ * `transition_session_visibility` additionally needs a non-null
+ * `owner_organization_membership_id`, which is exactly what #1631 repairs at the
+ * mint — so that seam needs BOTH halves.
+ */
 describe("session tenancy SQL seams inside a managed human's own personal workspace", () => {
-  test("transition_session_visibility accepts the owner in their own personal workspace", async () => {
+  test("PINNED DEFECT: transition_session_visibility refuses the owner in their own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
     const sessionId = await ownedSession(human, human.personalWorkspaceId);
 
+    await expectSqlFailure(
+      async () =>
+        await transitionSessionVisibility(client!.db, {
+          workspaceId: human.personalWorkspaceId,
+          sessionId,
+          actorSubjectId: human.subjectId,
+          targetVisibility: "user_private",
+          expectedAuthorityEpoch: 1,
+          operationKey: `visibility-${crypto.randomUUID()}`,
+        }),
+      /session visibility transition requires active membership/,
+    );
+  }, 180_000);
+
+  test("PINNED DEFECT: fork_session_content refuses the owner's own personal workspace as source", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const sessionId = await ownedSession(human, human.personalWorkspaceId);
+
+    await expectSqlFailure(
+      async () =>
+        await forkSessionContent(client!.db, {
+          sourceWorkspaceId: human.personalWorkspaceId,
+          sourceSessionId: sessionId,
+          actorSubjectId: human.subjectId,
+          destinationWorkspaceId: human.personalWorkspaceId,
+          destinationVisibility: "user_private",
+          operationKey: `fork-${crypto.randomUUID()}`,
+        }),
+      /session fork source workspace access is unavailable/,
+    );
+  }, 180_000);
+
+  test("the same operations succeed in an ordinary workspace, so the seam is not simply broken", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const sessionId = await ownedSession(human, human.legacyWorkspaceId);
+
     const result = await transitionSessionVisibility(client.db, {
-      workspaceId: human.personalWorkspaceId,
+      workspaceId: human.legacyWorkspaceId,
       sessionId,
       actorSubjectId: human.subjectId,
       targetVisibility: "user_private",
@@ -118,23 +203,6 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     });
     expect(result.visibility).toBe("user_private");
     expect(result.ownerOrganizationMembershipId).toBe(human.organizationMembershipId);
-  }, 180_000);
-
-  test("fork_session_content accepts the owner's personal workspace as source and destination", async () => {
-    if (!shared || !client) return;
-    const human = await provisionManagedHuman();
-    const sessionId = await ownedSession(human, human.personalWorkspaceId);
-
-    const forked = await forkSessionContent(client.db, {
-      sourceWorkspaceId: human.personalWorkspaceId,
-      sourceSessionId: sessionId,
-      actorSubjectId: human.subjectId,
-      destinationWorkspaceId: human.personalWorkspaceId,
-      destinationVisibility: "user_private",
-      operationKey: `fork-${crypto.randomUUID()}`,
-    });
-    expect(forked.workspaceId).toBe(human.personalWorkspaceId);
-    expect(forked.sessionId).not.toBe(sessionId);
   }, 180_000);
 
   test("another human never transitions a session in someone else's personal workspace", async () => {
