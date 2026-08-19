@@ -521,6 +521,14 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (
+        migrations.has("0296_force_rls_backfill_noop_repair.sql") &&
+        migrations.has("0299_organization_membership_lock_order.sql")
+      ) {
+        return includesActivation
+          ? "24fb6b4938a573dc516315b6e1d893fa44647f56cdc277157fb0bc07b21dbd30"
+          : "7d5b83e7a150b8c3fae51129c0fd0d727f48428bc207b2ac0202dce6b3203a71";
+      }
       if (migrations.has("0299_organization_membership_lock_order.sql")) {
         return includesActivation
           ? "c2b79a82f91fcae25012f4cea86a4fda5953290173974161a8b9fcb74219f25d"
@@ -1106,7 +1114,8 @@ describe("release schema contract", () => {
         (migrations.has("0292_truthful_tenancy_inventory_counters.sql") ? 1 : 0) +
         (migrations.has("0293_confirm_time_rule_rebaseline.sql") ? 1 : 0) +
         (migrations.has("0294_preference_activation_authority.sql") ? 1 : 0) +
-        (migrations.has("0295_retire_legacy_standing_memory_mode.sql") ? 1 : 0),
+        (migrations.has("0295_retire_legacy_standing_memory_mode.sql") ? 1 : 0) +
+        (migrations.has("0296_force_rls_backfill_noop_repair.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
