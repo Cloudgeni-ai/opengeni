@@ -171,13 +171,14 @@ async function bearer(
   workspace: { accountId: string; workspaceId: string },
   subjectId: string,
   permissions: Permission[],
+  principalKind: "human_session" | "service" = "human_session",
 ): Promise<string> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions,
-    principalKind: "human_session",
+    principalKind,
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
@@ -507,6 +508,74 @@ describe("connections routes", () => {
     expect(await contradictory.text()).toContain(
       "ownership and subjectId describe different connection owners",
     );
+  });
+
+  test("a non-human principal cannot own a personal connection on any create path", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(
+        workspace,
+        "service-subject",
+        ["connections:read", "connections:write"],
+        "service",
+      ),
+      "content-type": "application/json",
+    };
+
+    // Manual create: workspace ownership still works, personal is refused.
+    const workspaceOwned = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          credential: { headers: { authorization: "Bearer fixture" } },
+        }),
+      },
+    );
+    expect(workspaceOwned.status).toBe(201);
+    const personal = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "personal-api.example.com",
+        kind: "api_key",
+        ownership: "personal",
+        credential: { headers: { authorization: "Bearer fixture" } },
+      }),
+    });
+    expect(personal.status).toBe(422);
+    expect(await personal.text()).toContain("requires an authenticated human");
+
+    // Gmail is personal-only, so a non-human principal is refused outright
+    // rather than silently downgraded to the ownership its profile forbids.
+    const gmail = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "gmailmcp.googleapis.com",
+          mcpUrl: OFFICIAL_GMAIL_MCP_URL,
+        }),
+      },
+    );
+    expect(gmail.status).toBe(422);
+    expect(await gmail.text()).toContain("requires an authenticated human");
+
+    // The two personal-only first-party connectors carry no ownership field at
+    // all, so their start routes fence the principal directly.
+    for (const path of ["google-drive", "atlassian"]) {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/${path}/install`,
+        { method: "POST", headers, body: JSON.stringify({}) },
+      );
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("requires an authenticated human");
+    }
   });
 
   test("manual api_key create/list/get/revoke is permission-gated and never returns secret material", async () => {

@@ -53,6 +53,36 @@ Decisions baked in:
 
 **Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
 
+An **omitted** ownership resolves through the resolved provider profile's declared
+default (`defaultOwnershipFor`, §5.2.2): workspace, unless the profile's
+`allowedOwnership` is personal-only. No flow may fall back to `personal` on its
+own — that inverts the doctrine for every caller that did not spell ownership
+out, and the web app always sends an explicit choice, so such a fallback is
+reachable only by direct API/SDK callers.
+
+**Only a managed human may own a personal connection**
+(`apps/api/src/connection-ownership.ts`). An API key, the shared `configured:`
+key, a service principal, an agent attempt, and any principal whose grant
+subject is not its authenticated subject are refused with an explicit **422**
+before a connection is created — never silently downgraded to workspace
+ownership, which a personal-only profile (Gmail, hosted Slack MCP) forbids
+outright. Two independent facts require it: personal execution resolves only
+through the immutable delegation snapshot frozen on a *human's* causal turn or
+scheduled task, and `bind_connection_authority` (migration 0256) can mint the
+`user` authority scope only for a subject holding an active organization
+membership, so a machine-owned personal row lands on the `legacy_user`
+compatibility lane that no delegation snapshot can select. `principalKind` is
+the trusted signal (the delegated-token contract forbids a `human_session`
+claim from carrying serviceInitiator or exact agent-attempt authority); the
+`api_key:`/`configured:` subject-prefix check is belt-and-braces, and it is also
+the only signal an OAuth *callback* has, since a callback carries signed state
+rather than a live principal. Unknown provenance fails closed.
+
+The two personal-only first-party connectors (`google-drive/install`,
+`atlassian/install`) carry no ownership field at all and always write
+`subject_id = <caller>`, so their start routes apply the same fence directly and
+their callbacks re-check the state subject's shape.
+
 ## 3. Credential encryption
 
 Reuse the existing AES-256-GCM envelope: `encryptEnvironmentValue`/`decryptEnvironmentValue` in `packages/db/src/environment-crypto.ts` (current lossless format `v2:<base64 iv>:<base64 ciphertext||tag>`, with historical `v1` reads retained), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `environmentsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:

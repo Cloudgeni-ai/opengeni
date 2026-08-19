@@ -60,6 +60,10 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
+  isPersonalConnectionOwnerSubject,
+  personalOnlyConnectionPrincipalMessage,
+} from "../connection-ownership";
+import {
   integrationBaseUrl,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
@@ -1503,6 +1507,15 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
 }
 
 async function requireCallbackGrant(deps: ApiRouteDeps, state: AtlassianOAuthState): Promise<void> {
+  // This connector is personal-only by construction: its start request carries
+  // no ownership and the callback always writes `subjectId: state.subjectId`.
+  // A state minted by a machine principal before the start-side fence existed
+  // must not land a machine-owned personal Connection.
+  if (!isPersonalConnectionOwnerSubject(state.subjectId)) {
+    throw new HTTPException(422, {
+      message: personalOnlyConnectionPrincipalMessage("Atlassian"),
+    });
+  }
   const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
   if (
     !grant ||

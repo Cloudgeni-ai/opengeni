@@ -115,13 +115,16 @@ async function freshWorkspace() {
   return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId };
 }
 
-async function bearer(workspace: Awaited<ReturnType<typeof freshWorkspace>>): Promise<string> {
+async function bearer(
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  principalKind: "human_session" | "service" = "human_session",
+): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
     permissions: ["connections:read", "connections:write", "workspace:read"],
-    principalKind: "human_session",
+    principalKind,
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
 }
@@ -232,13 +235,14 @@ async function start(
   fixture: ReturnType<typeof providerFixture>,
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   payload: Record<string, unknown>,
+  principalKind: "human_session" | "service" = "human_session",
 ) {
   const response = await testApp(fixture).request(
     `/v1/workspaces/${workspace.workspaceId}/integrations/oauth/start`,
     {
       method: "POST",
       headers: {
-        authorization: await bearer(workspace),
+        authorization: await bearer(workspace, principalKind),
         "content-type": "application/json",
         "x-opengeni-access-key": EDGE_ACCESS_KEY,
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
@@ -522,5 +526,84 @@ describe("API Integration provider OAuth", () => {
         insufficientWorkspace.subjectId,
       ),
     ).toEqual([]);
+  }, 60_000);
+
+  test("an omitted ownership takes the documented workspace default, not personal", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "google-refresh-token",
+    });
+    const started = await start(fixture, workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+    });
+    expect(started.response.status).toBe(200);
+    const connected = await callback(
+      fixture,
+      new URL(started.authorizationUrl).searchParams.get("state")!,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    const location = new URL(connected.headers.get("location")!);
+    expect(location.searchParams.get("integration_oauth")).toBe("success");
+    expect(location.searchParams.get("ownership")).toBe("workspace");
+    const connections = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
+    expect(connections).toHaveLength(1);
+    // Workspace-owned means no owner subject: the caller never asked for a
+    // personal Connection, so none was minted under their subject.
+    expect(connections[0]!.subjectId).toBeNull();
+  }, 60_000);
+
+  test("a non-human principal cannot request personal ownership", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const refused = await start(
+      fixture,
+      workspace,
+      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
+      "service",
+    );
+    expect(refused.response.status).toBe(422);
+    expect(JSON.stringify(refused.body)).toContain("requires an authenticated human");
+
+    // The refusal is explicit, never a silent downgrade to workspace ownership.
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toEqual([]);
+
+    // The same principal may still create the documented workspace-owned
+    // Connection, so this narrows rather than blocking the flow outright.
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "google-refresh-token",
+    });
+    const allowed = await start(
+      fixture,
+      workspace,
+      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id },
+      "service",
+    );
+    expect(allowed.response.status).toBe(200);
+    const connected = await callback(
+      fixture,
+      new URL(allowed.authorizationUrl).searchParams.get("state")!,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(connected.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
+      "success",
+    );
+    const connections = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(connections).toHaveLength(1);
+    expect(connections[0]!.subjectId).toBeNull();
   }, 60_000);
 });

@@ -40,6 +40,7 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { assertConnectionOwnershipAllowedForPrincipal } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
 import {
   DEFAULT_OAUTH_PROFILE,
@@ -79,6 +80,12 @@ export type OAuthStartContext = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /**
+   * False for every principal that cannot own a personal Connection (API keys,
+   * the configured key, services, agent attempts). Resolved by the route from
+   * the live authenticated principal, never inferred here.
+   */
+  personalOwnershipAllowed: boolean;
   requestUrl: string;
   payload: OAuthStartRequest;
 };
@@ -364,6 +371,13 @@ async function startMcpOAuthWithinDeadline(
   // A reconnect of a legacy row must not renew an ownership the profile no
   // longer allows (e.g. shared authority over one human's hosted-Slack grant).
   assertOwnershipAllowed(profile, ownership);
+  // Only a managed human can own a personal Connection: personal-authority
+  // execution resolves through a delegation snapshot frozen on a human's causal
+  // turn, and migration 0256 can mint the `user` authority scope only for a
+  // subject that holds an active organization membership. For a personal-only
+  // profile (Gmail, hosted Slack MCP) this refuses the whole flow rather than
+  // silently downgrading to the workspace ownership those profiles forbid.
+  assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
   assertDiscoveredAuthorizationServer(settings, discovery.as, profile, providerDomain);

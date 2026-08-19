@@ -38,10 +38,21 @@ import {
 import { HTTPException } from "hono/http-exception";
 
 import {
+  assertConnectionOwnershipAllowedForPrincipal,
+  isPersonalConnectionOwnerSubject,
+} from "../connection-ownership";
+import {
   integrationBaseUrl,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
+import {
+  assertOwnershipAllowed,
+  builtInOAuthProfileFor,
+  defaultOwnershipFor,
+  DEFAULT_OAUTH_PROFILE,
+  type OAuthProviderProfile,
+} from "./oauth-profiles";
 
 const PROVIDER_OAUTH_CALLBACK_PATH = "/v1/integrations/provider-oauth/callback";
 const PROVIDER_OAUTH_TIMEOUT_MS = 15_000;
@@ -117,6 +128,12 @@ export async function startApiIntegrationProviderOAuth(
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    /**
+     * False for every principal that cannot own a personal Connection (API
+     * keys, the configured key, services, agent attempts). Resolved by the
+     * route from the live authenticated principal, never inferred here.
+     */
+    personalOwnershipAllowed: boolean;
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
   },
@@ -155,7 +172,15 @@ export async function startApiIntegrationProviderOAuth(
       message: "The selected Connection ownership does not match this OAuth request",
     });
   }
-  const ownership = existingOwnership ?? input.payload.ownership ?? "personal";
+  // An omitted ownership takes the documented default: workspace-owned, unless
+  // the resolved provider profile is personal-only (the same rule the MCP OAuth
+  // start already applies). It used to silently default to `personal`, which
+  // inverted the documented default for every caller that did not spell it out
+  // - the web app always sends one, so only direct API/SDK callers hit it.
+  const profile = providerOAuthProfile(definition, providerDomain);
+  const ownership = existingOwnership ?? input.payload.ownership ?? defaultOwnershipFor(profile);
+  assertOwnershipAllowed(profile, ownership);
+  assertConnectionOwnershipAllowedForPrincipal(ownership, input.personalOwnershipAllowed);
   const authorizeScopes = uniqueStrings([
     ...(existing?.grantedScopes ?? []),
     ...definition.authentication.scopes,
@@ -227,6 +252,7 @@ export async function completeApiIntegrationProviderOAuth(
   let state: ProviderOAuthState | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
+    requireProviderOAuthOwner(state);
     await requireProviderOAuthGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -385,6 +411,23 @@ export async function completeApiIntegrationProviderOAuth(
       ),
     };
   }
+}
+
+/**
+ * The ownership fences that apply to a curated Definition, read from the same
+ * profile table the MCP OAuth start uses. No curated Definition targets a
+ * personal-only provider today (they are Google Workspace and Microsoft Graph
+ * APIs), so this resolves to the default profile and its workspace default;
+ * matching by provider domain keeps the Slack/Gmail fences in force if one ever
+ * does, instead of letting this flow mint an ownership their profile forbids.
+ */
+function providerOAuthProfile(
+  definition: IntegrationDefinition,
+  providerDomain: string,
+): OAuthProviderProfile {
+  return (
+    builtInOAuthProfileFor({ mcpUrl: definition.baseUrl, providerDomain }) ?? DEFAULT_OAUTH_PROFILE
+  );
 }
 
 function requiredDefinition(id: string): IntegrationDefinition {
@@ -675,6 +718,17 @@ async function requireProviderOAuthGrant(
     grant.accountId !== state.accountId ||
     !hasPermission(grant.permissions, "connections:write")
   ) {
+    throw new ProviderOAuthCallbackError("connection_conflict");
+  }
+}
+
+/**
+ * A state minted before the start-side principal fence existed can still be in
+ * flight for one `oauthStateTtlMs` window. A machine subject must not land a
+ * personal Connection through it.
+ */
+function requireProviderOAuthOwner(state: ProviderOAuthState): void {
+  if (state.ownership === "personal" && !isPersonalConnectionOwnerSubject(state.subjectId)) {
     throw new ProviderOAuthCallbackError("connection_conflict");
   }
 }
