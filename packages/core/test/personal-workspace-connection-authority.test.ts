@@ -435,4 +435,64 @@ describe("managed-human personal workspace connection authority", () => {
       }),
     ).toHaveLength(1);
   }, 180_000);
+
+  // INTENDED WIDENING, stated deliberately. The delegated filter collapses the
+  // source before the workspace is consulted, so a delegated bearer now freezes
+  // nothing in ORDINARY SHARED workspaces too - where it previously worked
+  // through a real `workspace_memberships` row. An embedding host minting
+  // user-facing delegated tokens (`docs/embedding.md`) loses personal
+  // connection delegation across the board.
+  //
+  // We keep it broad on purpose: a delegated grant's `subjectId` is unvalidated
+  // token payload, so letting it select someone's personal connections in a
+  // shared workspace is the same defect one room over. Denying everywhere is
+  // the honest boundary. This test exists so the behaviour is pinned rather
+  // than an invisible side effect of the personal-workspace fix.
+  test("a delegated bearer freezes nothing in an ordinary SHARED workspace either", async () => {
+    if (!client) return;
+    const human = await provisionManagedHuman();
+
+    // The legacy Better Auth workspace: a real membership row, ordinary shared.
+    await createSocialConnection(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.legacyWorkspaceId,
+      subjectId: human.subjectId,
+      provider: "x",
+      accountHandle: "shared",
+      status: "connected",
+    });
+
+    const grant = {
+      workspaceId: human.legacyWorkspaceId,
+      accountId: human.accountId,
+      subjectId: human.subjectId,
+      permissions: [],
+      principalKind: "human_session" as const,
+    };
+
+    // Control: the same subject and workspace via a canonical cookie grant.
+    expect(
+      await freezePersonalConnectionDelegations({
+        db: client.db,
+        workspaceId: human.legacyWorkspaceId,
+        settings: { mcpServers: [] },
+        tools: [{ id: "opengeni" }],
+        source: personalConnectionDelegationSourceForGrant(grant),
+      }),
+    ).toHaveLength(1);
+
+    // Delegated: denied, even though a `workspace_memberships` row exists.
+    expect(
+      await freezePersonalConnectionDelegations({
+        db: client.db,
+        workspaceId: human.legacyWorkspaceId,
+        settings: { mcpServers: [] },
+        tools: [{ id: "opengeni" }],
+        source: personalConnectionDelegationSourceForGrant({
+          ...grant,
+          metadata: { delegated: true },
+        }),
+      }),
+    ).toEqual([]);
+  }, 180_000);
 });

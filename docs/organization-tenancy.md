@@ -188,14 +188,44 @@ Anything else - a subject that was looked up, inferred, or supplied by a caller
 over widening what the oracle is asked.
 
 A `callerHasLiveWorkspaceAuthority` variant that derives the subject from an
-established authenticated context, instead of accepting it as a parameter, would
-make the common case structural. It is deliberately **not** added here: three of
+already-established scope, instead of accepting it as a parameter, is worth
+having as defence in depth. It is deliberately **not** added here: **four** of
 this path's five call sites legitimately ask about a non-caller subject (a
-frozen delegation owner), so such a variant is an additional API for the
-caller-subject sites rather than a replacement, and the deeper fix - having
+frozen delegation owner - only the `freezePersonalConnectionDelegations` subject
+branch asks about the caller's own subject), so such a variant is an addition
+for the minority case rather than a replacement, and an API you cannot migrate
+most of your call sites onto is worse than no API in a bug fix.
+
+**Be precise about what such a variant would and would not buy.** It forces the
+caller to have gone through scope establishment, which is a real improvement -
+but it is still a convention, not a proof, because the scope itself is set by
+the application role. For the same reason, "make
 `list_self_organization_memberships` read the GUC instead of taking the subject
-as a parameter - is a migration with repo-wide blast radius. Both belong in a
-follow-up, not in a bug fix.
+as a parameter" is **not** the structural fix it appears to be: reading the GUC
+rather than a parameter changes nothing about *who may set that GUC*.
+`setSubjectRlsContext` is an ordinary `set_config` that accepts any string from
+any `opengeni_app` connection, so the caller still names whoever it likes - the
+name just arrives by a different route. Reaching for that design because it
+"feels" safer is the exact reasoning error this section exists to correct.
+
+The genuine structural fix is to stop letting the application role set
+`opengeni.subject_id` freely at all - a definer-only setter, or an attested
+subject established once at authentication and immutable thereafter. That is a
+much larger conversation than either variant, and nothing short of it converts
+this oracle into an authorization.
+
+> **Merge note.** A concurrent branch introduces exactly such a scope-derived
+> variant (`subjectHasLiveWorkspaceAuthorityInScope`) and repairs
+> `listSessionsForSubject` / `setSessionPin`. When it lands, converge on one
+> name for the arbitrary-subject oracle rather than leaving two, drop those two
+> seams from the "still on the bare join" list below, and revisit this
+> paragraph. **Whichever change lands second must preserve the subject-GUC
+> restore described under the mechanical traps** - that branch does not carry
+> it, so a naive resolution toward its version silently reopens the leak. Its
+> positive `PersonalWorkspaceOwnerException` flag is a better shape than this
+> path's blocklist and is worth converging on; its doc claim that an in-scope
+> subject "cannot name a third party" needs the same correction this section
+> makes, since the scope is still set by the application role.
 
 The personal-connection authority path uses the oracle at every hop -
 `freezePersonalConnectionDelegations` and the `*ForGrant` connection resolvers
@@ -222,6 +252,22 @@ reopening:
 - The account and the workspace passed to a probe must come from one object.
   Scoping RLS by a grant's account while reading memberships for a different
   object's workspace silently filters every row out and drops authority.
+- `personalConnectionDelegationSourceForGrant` checks the `{sessionId, turnId}`
+  turn branch **above** its delegated filter, which is safe only because
+  `DelegatedAccessTokenPayload` forbids a `human_session` principal from
+  carrying attempt claims. That coupling is load-bearing; it is pinned by
+  `packages/contracts/test/delegated-access-token-attempt-claims.test.ts`.
+  Relaxing the refinement means moving the filter above the turn branch.
+
+**Delegated grants carry no personal-connection authority anywhere.** The
+delegated filter collapses the source before the workspace is consulted, so a
+delegated bearer freezes zero personal connections in ordinary **shared**
+workspaces as well as personal ones. That is a deliberate widening of the
+denial, not a side effect of the personal-workspace fix: a delegated payload's
+`subjectId` is signed token content with no row behind it, so letting it borrow
+someone's private provider credentials in a shared workspace is the same defect
+as letting it reach their personal workspace. Operator-facing consequences are
+in [`docs/embedding.md`](embedding.md).
 
 Seams still on the bare join, and therefore still wrong for a personal
 workspace, are known and deliberately out of scope of that change. They deny

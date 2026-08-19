@@ -61,10 +61,12 @@ export type PersonalConnectionDelegationSource =
  *
  * - at freeze time the subject is `source.subjectId`, and
  *   `personalConnectionDelegationSourceForGrant` admits only a grant whose
- *   `subjectId` came from a real authenticated principal - agent-attempt,
- *   service, service-initiated, and **delegated/bearer** grants are all
- *   collapsed to `{kind:"none"}` before they can reach here, because a
- *   delegated grant's subject is unvalidated signed-token payload; and
+ *   `subjectId` came from a real authenticated principal. Agent-attempt,
+ *   service, service-initiated, and **delegated/bearer** grants never reach
+ *   this branch: they resolve to `{kind:"none"}`, or - for a worker-signed
+ *   agent attempt - to `{kind:"turn"}`, which probes only a frozen
+ *   `ownerSubjectId` already persisted for the grant's own workspace. Either
+ *   way an unvalidated signed-token subject is never the probed subject; and
  * - on the `*ForGrant` paths the subject is the frozen `ownerSubjectId` of a
  *   delegation already persisted for the workspace the caller is already
  *   authorized in.
@@ -102,6 +104,16 @@ export function personalConnectionDelegationSourceForGrant(
 ): PersonalConnectionDelegationSource {
   const callerSessionId = grant.metadata?.["sessionId"];
   const callerTurnId = grant.metadata?.["turnId"];
+  // LOAD-BEARING ORDERING. This turn branch sits ABOVE the delegated filter
+  // below, so a grant carrying both `sessionId` and `turnId` never reaches that
+  // filter. That is safe only because `DelegatedAccessTokenPayload`'s
+  // `superRefine` forbids `principalKind: "human_session"` from carrying any
+  // attempt claim (`turnId`/`attemptId`/`executionGeneration`), so a delegated
+  // human-session bearer is structurally unable to take this branch. If that
+  // refinement is ever relaxed, a delegated bearer could route around the
+  // delegated filter by presenting a turn reference - move the filter above
+  // this branch at the same time. Pinned by
+  // `packages/contracts/test/delegated-access-token-attempt-claims.test.ts`.
   if (typeof callerSessionId === "string" && typeof callerTurnId === "string") {
     return { kind: "turn", sessionId: callerSessionId, turnId: callerTurnId };
   }

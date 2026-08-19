@@ -697,7 +697,10 @@ export async function validatedScheduledTaskUpdate(input: {
   } else {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
       input.db,
-      input.existing.workspaceId,
+      // Same object as the subject just below, and as the freeze call further
+      // down: the task was loaded with `getScheduledTask(db, grant.workspaceId,
+      // ...)`, so this is `input.existing.workspaceId`, sourced consistently.
+      input.grant.workspaceId,
       input.settings,
       { subjectId: input.grant.subjectId },
     );

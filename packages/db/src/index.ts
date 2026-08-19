@@ -17525,9 +17525,14 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
       try {
         return await probeNamedSubjectWorkspaceAuthority(scopedDb, input);
       } finally {
-        await scopedDb.execute(
-          sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
-        );
+        // Never let the restore mask the original failure. Inside a caller's
+        // transaction a failed probe leaves the transaction aborted, so this
+        // statement would itself throw `25P02` and replace the real diagnostic.
+        // Losing the restore on an already-failing path is harmless: the caller
+        // is unwinding to a rollback either way.
+        await scopedDb
+          .execute(sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`)
+          .catch(() => undefined);
       }
     },
   );
