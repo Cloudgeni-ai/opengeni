@@ -102,7 +102,14 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   production session stays `workspace_shared`. Do not add the first caller
   without the activation prerequisites (cache/pin stripping, cancellation,
   owner-only grants) and an update to
-  `test/session-visibility-contract-surface.test.ts`. See
+  `test/session-visibility-contract-surface.test.ts`. An organization-wide
+  lifecycle seam serializes on the transaction-scoped advisory key
+  `hashtextextended('organization-membership:<organization id>')` and may take no
+  lock stronger than `managed_accounts FOR KEY SHARE` before the canonical
+  workspace prefix (migration 0299): every ordinary workspace writer
+  holds its `workspaces` row and then reaches `managed_accounts` through the
+  account FK check of a row it inserts, so an organization-row `FOR UPDATE` held
+  across workspace acquisition is a deadlock. See
   `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
