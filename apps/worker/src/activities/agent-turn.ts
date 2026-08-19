@@ -292,6 +292,7 @@ import {
 import { mergeResourceRefs } from "./common";
 import {
   fetchXaiSubscriptionQuota,
+  classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionTransportError,
@@ -13263,6 +13264,16 @@ export function agentRunFailurePayload(
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
+    };
+  }
+  const xaiStreamTerminal = classifyXaiSubscriptionStreamingTerminalError(error);
+  if (xaiStreamTerminal) {
+    return {
+      error: xaiStreamTerminal.message,
+      code: xaiStreamTerminal.code,
+      retryable: xaiStreamTerminal.status === 429,
+      lastEventType: xaiStreamTerminal.eventType,
+      ...(xaiStreamTerminal.requestId ? { requestId: xaiStreamTerminal.requestId } : {}),
     };
   }
   const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);

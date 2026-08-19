@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  isXaiSubscriptionTransportError,
   normalizeXaiResponseEventJson,
   normalizeXaiSubscriptionRequestBody,
   type XaiModelRequestEvent,
   XaiSubscriptionStreamIdleTimeoutError,
+  XaiSubscriptionStreamingTerminalError,
   xaiSubscriptionFetch,
   xaiSubscriptionRequestStorage,
 } from "../src";
@@ -199,6 +201,76 @@ describe("SuperGrok subscription fetch", () => {
     );
     await expect(reader.read()).rejects.toBeInstanceOf(XaiSubscriptionStreamIdleTimeoutError);
     expect(calls).toBe(1);
+  });
+
+  test("fails HTTP-200 SSE error terminals with the exact bounded provider message and no body in audit", async () => {
+    const durable: XaiModelRequestEvent[] = [];
+    const wrapped = xaiSubscriptionFetch(async () => {
+      return new Response(
+        `data: ${JSON.stringify({
+          type: "error",
+          code: "invalid_request",
+          message: "SECRET context overflow after tool results",
+        })}\n\n`,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "prov-sse-error",
+          },
+        },
+      );
+    });
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "request-sse-error",
+        onModelRequestEvent: (event) => {
+          durable.push(event);
+        },
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    let caught: unknown;
+    try {
+      await reader.read();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      name: "XaiSubscriptionStreamingTerminalError",
+      message: "SECRET context overflow after tool results",
+      code: "invalid_request",
+      eventType: "error",
+      requestId: "request-sse-error",
+      status: 400,
+    });
+    expect(caught).toBeInstanceOf(XaiSubscriptionStreamingTerminalError);
+    expect(isXaiSubscriptionTransportError(caught)).toBe(true);
+    expect(JSON.stringify(durable)).not.toContain("SECRET");
+    expect(durable.map((event) => event.phase)).toEqual([
+      "started",
+      "headers",
+      "first_event",
+      "failed",
+    ]);
+    expect(durable.at(-1)).toMatchObject({
+      eventCount: 1,
+      lastEventType: "error",
+      responseObserved: true,
+      status: 200,
+    });
   });
 
   test("keeps a healthy hosted-search continuation streaming to its terminal response", async () => {

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { contextInputBudgetTokens, getSettings, settingsWithResolvedModelContext } from "../src";
+import {
+  configuredModels,
+  contextInputBudgetTokens,
+  getSettings,
+  settingsWithResolvedModelContext,
+} from "../src";
 
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
   const saved: NodeJS.ProcessEnv = { ...process.env };
@@ -84,6 +89,24 @@ describe("context input budget", () => {
       effectiveContextWindowTokens: 258_400,
       autoCompactTokenLimit: 244_800,
     });
+    expect(resolved.contextWindowTokens).toBe(272_000);
+    expect(resolved.contextEffectiveWindowTokens).toBe(258_400);
+    expect(resolved.contextAutoCompactThresholdTokens).toBe(244_800);
+    expect(contextInputBudgetTokens(resolved)).toBe(258_400);
+  });
+
+  test("billed GPT-5.6 Sol resolves to the Codex 272k context catalog", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-sol",
+      },
+      () => getSettings(),
+    );
+    const model = configuredModels(settings).find((candidate) => candidate.id === "gpt-5.6-sol");
+    expect(model).toBeDefined();
+    const resolved = settingsWithResolvedModelContext(settings, model!);
     expect(resolved.contextWindowTokens).toBe(272_000);
     expect(resolved.contextEffectiveWindowTokens).toBe(258_400);
     expect(resolved.contextAutoCompactThresholdTokens).toBe(244_800);

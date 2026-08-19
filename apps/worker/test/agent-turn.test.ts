@@ -16,6 +16,7 @@ import {
   XaiSubscriptionHostedToolContinuationError,
   XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
+  XaiSubscriptionStreamingTerminalError,
 } from "@opengeni/xai-subscription";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -4804,6 +4805,47 @@ describe("transient provider error classifier", () => {
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
+    });
+  });
+
+  test("persists the exact SuperGrok SSE terminal diagnostic on turn.failed", () => {
+    const terminal = new XaiSubscriptionStreamingTerminalError({
+      message: "SECRET context overflow after tool results",
+      code: "invalid_request",
+      eventType: "error",
+      requestId: "req-secret",
+      status: 400,
+    });
+    expect(agentRunFailurePayload(terminal)).toEqual({
+      error: "SECRET context overflow after tool results",
+      code: "invalid_request",
+      retryable: false,
+      lastEventType: "error",
+      requestId: "req-secret",
+    });
+    expect(
+      agentRunFailurePayload(
+        Object.assign(new Error("Responses request terminated unsuccessfully (error)."), {
+          cause: terminal,
+        }),
+      ),
+    ).toMatchObject({
+      error: "SECRET context overflow after tool results",
+      code: "invalid_request",
+    });
+    expect(
+      agentRunFailurePayload(
+        new XaiSubscriptionStreamingTerminalError({
+          message: "SECRET rate limited",
+          code: "rate_limit_exceeded",
+          eventType: "error",
+          status: 429,
+        }),
+      ),
+    ).toMatchObject({
+      error: "SECRET rate limited",
+      code: "rate_limit_exceeded",
+      retryable: true,
     });
   });
 

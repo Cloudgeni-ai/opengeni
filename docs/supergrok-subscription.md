@@ -111,9 +111,15 @@ Each streaming response has one liveness rule: if no complete, valid SSE data
 event arrives for `OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` (default
 five minutes), the transport cancels that accepted stream and surfaces a typed
 partial-response timeout without replay. Every valid event resets the timer;
-there is no model-call or run-duration deadline. Request lifecycle audit records
-request identity, attempt, headers, first event, event count/type, last-progress
-duration, and terminal outcome, but never request bodies, credentials, or output.
+there is no model-call or run-duration deadline. HTTP 200 SSE terminals
+(`type: "error"`, `response.failed`, `response.error`, `response.incomplete`)
+are intercepted before the OpenAI Agents SDK: the transport does not enqueue
+them, throws a typed error whose message is the exact bounded provider
+diagnostic, and the worker persists that text on `turn.failed`. Request
+lifecycle audit records request identity, attempt, headers, first event, event
+count/type, last-progress duration, and terminal outcome, but never request
+bodies, credentials, output, or the provider error text. Worker stdout/OTEL
+stay sanitized.
 
 ## Failure and durable capacity semantics
 
