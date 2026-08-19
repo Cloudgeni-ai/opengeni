@@ -541,7 +541,9 @@ function xaiSseTerminalError(
   );
   const rawCode =
     record.code ??
-    (typeof record.type === "string" && record.type !== eventTypeField.value && record.type !== "error"
+    (typeof record.type === "string" &&
+    record.type !== eventTypeField.value &&
+    record.type !== "error"
       ? record.type
       : undefined);
   const codeField = boundedTerminalErrorField(rawCode, MAX_TERMINAL_ERROR_FIELD_BYTES);
