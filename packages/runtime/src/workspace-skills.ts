@@ -17,9 +17,17 @@ type WorkspaceSkill = Readonly<{
   name: string;
   description: string;
   path: string;
-  fingerprint: string;
   source: string;
 }>;
+
+type DiscoveredWorkspaceSkill = {
+  name: string;
+  description: string;
+  path: string;
+  source: string;
+  directory: string;
+  fingerprint?: string;
+};
 
 /**
  * Index skills that already exist in the live workspace.
@@ -93,7 +101,7 @@ export async function discoverWorkspaceSkills(
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
   }
-  const discovered = new Map<string, WorkspaceSkill>();
+  const discovered = new Map<string, DiscoveredWorkspaceSkill>();
   let candidates = 0;
   for (const searchPath of searchPaths) {
     let entries;
@@ -133,26 +141,39 @@ export async function discoverWorkspaceSkills(
       if (reservedNames.has(key)) {
         throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
       }
-      const candidate: WorkspaceSkill = {
+      const candidate: DiscoveredWorkspaceSkill = {
         name,
         description,
         path: skillMarkdownPath,
-        fingerprint: await fingerprintWorkspaceDirectory(session, entry.path, runAs),
         source: searchPath.source,
+        directory: entry.path,
       };
       const existing = discovered.get(key);
       if (!existing) {
         discovered.set(key, candidate);
         continue;
       }
-      if (existing.fingerprint !== candidate.fingerprint) {
+      // Unique names only need SKILL.md frontmatter for the prompt-cache prefix.
+      // Hash both trees only when the same name appears in two search paths.
+      const existingFingerprint =
+        existing.fingerprint ??
+        (await fingerprintWorkspaceDirectory(session, existing.directory, runAs));
+      const candidateFingerprint = await fingerprintWorkspaceDirectory(
+        session,
+        candidate.directory,
+        runAs,
+      );
+      if (existingFingerprint !== candidateFingerprint) {
         throw new Error(
           `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
         );
       }
+      existing.fingerprint = existingFingerprint;
     }
   }
-  return [...discovered.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...discovered.values()]
+    .map(({ name, description, path, source }) => ({ name, description, path, source }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 async function fingerprintWorkspaceDirectory(
