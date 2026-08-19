@@ -20,6 +20,8 @@ type Job = Readonly<{
   "timeout-minutes"?: number;
 }>;
 
+type Step = Readonly<{ run?: string; uses?: string }>;
+
 async function workflowFiles(): Promise<readonly string[]> {
   const entries = await readdir(workflowDir);
   return entries.filter((entry) => entry.endsWith(".yml") || entry.endsWith(".yaml")).sort();
@@ -73,6 +75,67 @@ describe("workflow timeout contract", () => {
     );
     expect(action).toContain("timeout --kill-after=15s");
     expect(action).toContain("path: ~/.cache/ms-playwright");
+    // `--with-deps` was previously locked by the four inline call sites. Moving
+    // the command into one shared place removed that lock, so re-assert it here.
+    expect(action).toContain("playwright install --with-deps");
+    // actions/cache's post step is `post-if: success()`, so the combined action
+    // never saves after a bounded failure and a cold key on a degraded network
+    // can never converge. The split restore/save with always() is what makes a
+    // timed-out install genuinely re-runnable.
+    expect(action).toContain("actions/cache/restore@");
+    expect(action).toContain("actions/cache/save@");
+    expect(action).toMatch(
+      /if: \$\{\{ always\(\) && steps\.restore\.outputs\.cache-hit != 'true' \}\}/u,
+    );
+  });
+
+  // A job cap below the job's own declared step budgets is worse than no cap:
+  // the job is CANCELLED rather than failed, and `if: failure()` artifact
+  // uploads do not run on cancellation, so the diagnostics that explain the
+  // hang are destroyed exactly when they are needed.
+  test("no job cap sits below its own declared inner step budgets", async () => {
+    const installBoundMinutes = await (async () => {
+      const action = Bun.YAML.parse(
+        await readFile(resolve(root, ".github/actions/playwright-browsers/action.yml"), "utf8"),
+      ) as { inputs: Record<string, { default?: string }> };
+      const perAttempt = Number(action.inputs["attempt-timeout-seconds"]?.default);
+      const attempts = Number(action.inputs.attempts?.default);
+      expect(Number.isFinite(perAttempt) && Number.isFinite(attempts)).toBe(true);
+      // 15s is the SIGKILL grace in `timeout --kill-after=15s`.
+      return ((perAttempt + 15) * attempts) / 60;
+    })();
+
+    const violations: string[] = [];
+    for (const file of await workflowFiles()) {
+      const parsed = Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as {
+        jobs?: Record<
+          string,
+          { uses?: string; "timeout-minutes"?: number; steps?: readonly Step[] }
+        >;
+      };
+      for (const [name, job] of Object.entries(parsed.jobs ?? {})) {
+        if (job?.uses) continue;
+        const cap = job?.["timeout-minutes"];
+        if (typeof cap !== "number") continue;
+        let inner = 0;
+        let usesBoundedInstall = false;
+        for (const step of job.steps ?? []) {
+          const run = String(step.run ?? "");
+          for (const m of run.matchAll(/--timeout-seconds\s+(\d+)/gu)) inner += Number(m[1]) / 60;
+          for (const m of run.matchAll(/--timeout\s+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
+          if (String(step.uses ?? "").includes("playwright-browsers")) usesBoundedInstall = true;
+        }
+        if (inner === 0) continue;
+        // 1 minute covers checkout + toolchain + dependency install.
+        const needed = 1 + inner + (usesBoundedInstall ? installBoundMinutes : 0);
+        if (cap < needed) {
+          violations.push(
+            `${file}:${name} cap ${cap}m is below its own budgets (${needed.toFixed(1)}m needed)`,
+          );
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 
   // The runner executes `shell: bash` steps as

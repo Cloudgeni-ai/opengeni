@@ -16,20 +16,28 @@ inputs:
     default: "false"
   attempt-timeout-seconds:
     description: >-
-      Hard wall clock for one install attempt. The observed p90 is 83s across
-      every browser set, and p95 is 3.5m, so the default clears the healthy-but-
-      slow tail that used to finish green and only trips on the pathological tail. Worst case per attempt is
-      this value plus the 15s SIGKILL grace, so the whole step is bounded by
-      attempts * (timeout + 15s); keep that inside the calling job's
-      timeout-minutes alongside the job's own work.
+      Hard wall clock for one install attempt. Measured per browser set over
+      successful installs, p99 is 2.8m (chromium), 5.4m (chromium --only-shell),
+      12.0m (chromium+firefox+webkit) and 22.4m (chromium+firefox); pooled p95
+      is 7.3m. The default therefore clears the p99 of three of the four sets,
+      rather than the pooled p90 an earlier revision of this action wrongly
+      cited. Worst case is this value plus the 15s SIGKILL grace, times
+      `attempts`; keep that inside the calling job's timeout-minutes alongside
+      that job's own declared step budgets.
     required: false
-    default: "360"
+    default: "900"
   attempts:
     description: >-
-      Bounded attempts before the step fails. A retry reuses the same runner, so
-      it only recovers a transient stall; the fast failure is the real remedy.
+      Bounded attempts before the step fails. Defaults to one: a retry reuses the
+      same runner, so it cannot escape a bad network path, and `--with-deps`
+      means a SIGKILLed attempt can leave a held dpkg lock that makes the next
+      attempt fail instantly rather than retry the download. For a
+      slow-but-progressing download one long attempt strictly dominates two
+      short ones. Cross-run recovery comes from the unconditional cache save
+      below, which persists partial progress so a re-run resumes instead of
+      repeating a cold download.
     required: false
-    default: "2"
+    default: "1"
 
 runs:
   using: composite
@@ -43,6 +51,7 @@ runs:
       env:
         PLAYWRIGHT_BROWSERS: ${{ inputs.browsers }}
         PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
+        RUNNER_OS: ${{ runner.os }}
       run: |
         set -euo pipefail
         version="$(node -p "require('playwright/package.json').version")"
@@ -56,16 +65,26 @@ runs:
         fi
         echo "version=${version}" >> "$GITHUB_OUTPUT"
         echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+        echo "key=playwright-${RUNNER_OS}-${version}-${slug}" >> "$GITHUB_OUTPUT"
 
     # Keyed on the exact resolved Playwright version and browser set. A miss
     # only costs today's behaviour; a hit removes the download that drives the
     # entire hang tail. No restore-keys: a partial restore of another browser
     # set would re-download anyway and could not be saved under this key.
+    #
+    # Split restore/save rather than `actions/cache`, whose post step is
+    # `post-if: success()`. With the combined action a bounded failure never
+    # saves, so a cold key on a degraded network can never converge: every
+    # re-run repeats the same cold download and is killed again. Saving on
+    # failure persists partial progress instead - Playwright writes its
+    # INSTALLATION_COMPLETE marker last, so an incomplete browser is simply
+    # re-downloaded while completed ones are kept.
     - name: Restore pinned Playwright browsers
-      uses: actions/cache@v6.1.0
+      id: restore
+      uses: actions/cache/restore@v6.1.0
       with:
         path: ~/.cache/ms-playwright
-        key: playwright-${{ runner.os }}-${{ steps.pinned.outputs.version }}-${{ steps.pinned.outputs.slug }}
+        key: ${{ steps.pinned.outputs.key }}
 
     - name: Install pinned Playwright browsers
       shell: bash
@@ -103,3 +122,13 @@ runs:
         done
         echo "::error::Playwright install failed after ${ATTEMPTS} bounded attempts."
         exit 1
+
+    # `always()` so a bounded failure still persists whatever downloaded, which
+    # is what makes the re-run after a timeout actually converge. Skipped on a
+    # hit, where the key already exists and saving would error.
+    - name: Save pinned Playwright browsers
+      if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.pinned.outputs.key }}
