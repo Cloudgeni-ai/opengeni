@@ -299,7 +299,7 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
 
   // NOT a personal-workspace defect. This pins the 0281 stream-token mint, which
   // ALREADY resolves the organization membership's `personal_workspace_id`
-  // pointer correctly via `subjectHasLiveWorkspaceAuthority`. It is the seam the
+  // pointer correctly via `namedSubjectHasLiveWorkspaceAuthority`. It is the seam the
   // corrected rule was extracted FROM, not one that was missing it. If this file
   // is failing, look at the suite's shared-process mocks (see
   // `selfhosted-stream-mint.test.ts`), not at personal-workspace authority.

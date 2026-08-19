@@ -10,12 +10,15 @@ import {
   createSession,
   listSessionsForSubject,
   managedPersonalWorkspacePermissions,
+  namedSubjectHasLiveWorkspaceAuthority,
+  rlsSubjectIdOrEmpty,
   NewSessionDraftAccessError,
   saveNewSessionDraftInTransaction,
   SessionListAccessError,
   SessionPinAccessError,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
+  withRlsContext,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
@@ -818,6 +821,50 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
     await expect(
       saveDraftDirectly(suspended.personalWorkspaceId, suspended.accountId, suspended.subjectId),
     ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
+  }, 180_000);
+});
+
+describe("namedSubjectHasLiveWorkspaceAuthority does not leak its probed subject", () => {
+  test("the caller's subject GUC survives the probe, and an unset one stays unset", async () => {
+    if (!shared || !client) return;
+    const caller = await provisionManagedHuman();
+    const probed = await provisionManagedHuman();
+
+    // `withRlsContext` restores account_id/workspace_id when unwinding a nested
+    // scope but NOT subject_id, so without an explicit restore the probed
+    // subject would leak out of the savepoint and silently re-scope every
+    // remaining statement in the caller's transaction to whoever was probed.
+    const observed = await withWorkspaceSubjectRls(
+      client.db,
+      caller.personalWorkspaceId,
+      caller.subjectId,
+      async (scoped) => {
+        await namedSubjectHasLiveWorkspaceAuthority(scoped, {
+          accountId: probed.accountId,
+          workspaceId: probed.personalWorkspaceId,
+          subjectId: probed.subjectId,
+        });
+        return await rlsSubjectIdOrEmpty(scoped);
+      },
+    );
+    expect(observed).toBe(caller.subjectId);
+    expect(observed).not.toBe(probed.subjectId);
+
+    // A transaction that never had a subject must end with it still unset, not
+    // pinned to the probed one. "" is the canonical unset for this GUC.
+    const fromUnset = await withRlsContext(
+      client.db,
+      { accountId: caller.accountId, workspaceId: null },
+      async (scoped) => {
+        await namedSubjectHasLiveWorkspaceAuthority(scoped, {
+          accountId: probed.accountId,
+          workspaceId: probed.personalWorkspaceId,
+          subjectId: probed.subjectId,
+        });
+        return await rlsSubjectIdOrEmpty(scoped);
+      },
+    );
+    expect(fromUnset).toBe("");
   }, 180_000);
 });
 

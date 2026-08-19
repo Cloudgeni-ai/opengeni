@@ -19,7 +19,7 @@ import { rawRows, type Database } from "./database";
  * session pins, the composer draft — call this variant so the read and the write
  * share one transaction snapshot and one advisory fence. Seams that need to ask
  * about a subject that is NOT the caller call
- * {@link subjectHasLiveWorkspaceAuthority} (`@opengeni/db`), which is a thin
+ * {@link namedSubjectHasLiveWorkspaceAuthority} (`@opengeni/db`), which is a thin
  * scope wrapper over exactly this body.
  *
  * True when the subject currently holds workspace authority the same way the
@@ -110,6 +110,36 @@ export async function subjectHasLiveWorkspaceAuthorityInScope(
 }
 
 /**
+ * The applied subject GUC, or `""` when none is set. `""` is the canonical
+ * "unset" for this GUC: `current_subject_id()` is
+ * `nullif(current_setting('opengeni.subject_id', true), '')` (0239 precedent), so
+ * a caller restoring `""` genuinely clears it rather than pinning an empty
+ * subject. Never throws, so it is safe for capturing a prior value that may
+ * legitimately be absent.
+ */
+export async function rlsSubjectIdOrEmpty(scopedDb: Database): Promise<string> {
+  const [row] = await rawRows<{ subjectId: string | null }>(
+    scopedDb,
+    sql`select current_setting('opengeni.subject_id', true) as "subjectId"`,
+  );
+  return row?.subjectId ?? "";
+}
+
+/**
+ * The subject of the caller's ALREADY-applied RLS scope, required to be present.
+ * Used by the in-scope resolver to check that a caller is asking about its own
+ * scope rather than naming a third party — a consistency check, not proof that
+ * anything authenticated that subject.
+ */
+async function subjectIdInRlsScope(scopedDb: Database): Promise<string> {
+  const subjectId = await rlsSubjectIdOrEmpty(scopedDb);
+  if (!subjectId) {
+    throw new Error("RLS subject context is not applied on the active backend");
+  }
+  return subjectId;
+}
+
+/**
  * The tenant account of the caller's ALREADY-applied RLS scope. `withRlsContext`
  * sets and read-back-verifies this GUC on the pinned backend before running the
  * scoped body, so it is exact rather than a re-derivation — which lets a seam
@@ -117,23 +147,6 @@ export async function subjectHasLiveWorkspaceAuthorityInScope(
  * {@link subjectHasLiveWorkspaceAuthorityInScope} without a second round trip to
  * resolve the account.
  */
-/**
- * The authenticated subject of the caller's ALREADY-applied RLS scope, as
- * `setSubjectRlsContext` set and read back on the pinned backend. Used to prove
- * that a caller is asking about its own scope rather than naming a third party.
- */
-async function subjectIdInRlsScope(scopedDb: Database): Promise<string> {
-  const [row] = await rawRows<{ subjectId: string | null }>(
-    scopedDb,
-    sql`select current_setting('opengeni.subject_id', true) as "subjectId"`,
-  );
-  const subjectId = row?.subjectId ?? "";
-  if (!subjectId) {
-    throw new Error("RLS subject context is not applied on the active backend");
-  }
-  return subjectId;
-}
-
 export async function accountIdInRlsScope(scopedDb: Database): Promise<string> {
   const [row] = await rawRows<{ accountId: string | null }>(
     scopedDb,

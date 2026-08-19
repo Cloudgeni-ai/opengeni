@@ -397,6 +397,7 @@ import { assertActiveManagedHumanOrganizationMembership } from "./organization-m
 export * from "./workspace-authority";
 import {
   accountIdInRlsScope,
+  rlsSubjectIdOrEmpty,
   subjectHasLiveWorkspaceAuthorityInScope,
 } from "./workspace-authority";
 export { memoryTextForStorage } from "./memory-domain";
@@ -17464,22 +17465,22 @@ export async function getSessionAuthorityEpoch(
 /**
  * ORACLE, NOT AN AUTHORIZATION. It sets `opengeni.subject_id` from its own
  * argument, so `list_self_organization_memberships`' `42501` guard is satisfied
- * for whatever subject the caller names: it answers for ANY subject and cannot
+ * for whatever subject the caller NAMES: it answers for ANY subject and cannot
  * establish who the caller is. Passing it a request-derived subject is a
  * vulnerability. Call it only about a subject you are already entitled to ask
  * about — one authenticated out of band, or the frozen owner of a delegation
- * you already hold.
+ * you already hold. The `named` prefix is the warning: you are naming a subject,
+ * not proving you are one.
  *
  * When the subject IS the caller, use {@link subjectHasLiveWorkspaceAuthorityInScope}
- * instead: it refuses to set the subject GUC and raises unless the subject
- * matches the transaction's authenticated scope. Both exist on purpose — some
- * callers legitimately ask about a non-caller subject, which the in-scope
- * variant cannot express.
+ * instead: it refuses to set the subject GUC at all, so the oracle shape is
+ * unrepresentable there. Both exist on purpose — some callers legitimately ask
+ * about a non-caller subject, which the in-scope variant cannot express.
  *
  * The authority rule itself lives in that in-scope variant; this is a scope
  * wrapper over it, so there is one implementation.
  */
-export async function subjectHasLiveWorkspaceAuthority(
+export async function namedSubjectHasLiveWorkspaceAuthority(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<boolean> {
@@ -17487,8 +17488,21 @@ export async function subjectHasLiveWorkspaceAuthority(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
+      // `withRlsContext` restores account_id/workspace_id when it unwinds a
+      // nested scope, but NOT subject_id — so without this the probed subject
+      // would leak out of the savepoint and silently re-scope the caller's
+      // remaining statements to whoever was probed. Restore it explicitly.
+      // Empty string is the canonical "unset": `current_subject_id()` is
+      // `nullif(current_setting(...), '')` (0239 precedent), so restoring "" on
+      // a transaction that had no subject leaves it genuinely unset rather than
+      // pinning it to a literal empty subject.
+      const priorSubjectId = await rlsSubjectIdOrEmpty(scopedDb);
       await setSubjectRlsContext(scopedDb, input.subjectId);
-      return await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, input);
+      const result = await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, input);
+      await scopedDb.execute(
+        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+      );
+      return result;
     },
   );
 }

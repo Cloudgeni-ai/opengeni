@@ -94,7 +94,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   on one denies its owner: `subjectHasLiveWorkspaceAuthorityInScope`
   (`packages/db/src/workspace-authority.ts`) is the single implementation of the
   corrected rule. **Neither that resolver nor its exported
-  `subjectHasLiveWorkspaceAuthority` sibling is an authorization** — both answer
+  `namedSubjectHasLiveWorkspaceAuthority` sibling is an authorization** — both answer
   "does subject X hold authority here" and neither establishes that the caller
   is X. The exported one sets `opengeni.subject_id` from its own argument, so it
   is an arbitrary-subject oracle; never pass it a request-derived subject. The

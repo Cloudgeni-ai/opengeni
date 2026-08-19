@@ -194,7 +194,7 @@ What the in-scope variant does buy, concretely:
   advisory fence, so it serialises with `removeWorkspaceMember()`;
 - it keeps the corrected rule to one implementation shared with the oracle.
 
-The exported `subjectHasLiveWorkspaceAuthority` sets that GUC from its own
+The exported `namedSubjectHasLiveWorkspaceAuthority` sets that GUC from its own
 argument and will answer for **any** subject named, so its `42501` guard proves
 nothing about the caller — never pass it a request-derived subject.
 
