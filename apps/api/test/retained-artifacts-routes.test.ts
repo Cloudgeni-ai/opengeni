@@ -30,7 +30,7 @@ import {
   updateWorkspaceVideoGenerationPolicy,
   type DbClient,
 } from "@opengeni/db";
-import type { ObjectStorage } from "@opengeni/storage";
+import { OBJECT_VISIBILITY_RETRY_DELAYS_MS, type ObjectStorage } from "@opengeni/storage";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -717,7 +717,10 @@ describe("retained artifact metadata and bounded content", () => {
       artifactId: missing.fileId,
       reason: "missing_storage",
     });
-    expect(fixture.existenceCalls).toEqual([empty.fileId, missing.fileId]);
+    expect(fixture.existenceCalls).toEqual([
+      empty.fileId,
+      ...Array.from({ length: OBJECT_VISIBILITY_RETRY_DELAYS_MS.length + 1 }, () => missing.fileId),
+    ]);
     expect(fixture.calls).toHaveLength(0);
   });
 
@@ -787,7 +790,13 @@ describe("retained artifact metadata and bounded content", () => {
     expect(await unsupportedResponse.json()).toMatchObject({
       reason: "unsupported",
     });
-    expect(fixture.calls).toEqual([{ fileId: missing.fileId, start: 0, end: 31 }]);
+    expect(fixture.calls).toEqual(
+      Array.from({ length: OBJECT_VISIBILITY_RETRY_DELAYS_MS.length + 1 }, () => ({
+        fileId: missing.fileId,
+        start: 0,
+        end: 31,
+      })),
+    );
   });
 
   test("enforces signed grants and app-role FORCE-RLS isolation before storage access", async () => {
