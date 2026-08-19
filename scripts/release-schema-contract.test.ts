@@ -521,6 +521,11 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0297_session_ownership_classification_and_backfill.sql")) {
+        return includesActivation
+          ? "f39e0463f4b9998e3d4f4c4cff520b351a9a7d6306c426a6d0869df7997bacdb"
+          : "07df0f730ab85c40901217a218d2e69be4b4d55d53b8c2302268d0ae36e2cd6d";
+      }
       if (migrations.has("0290_organization_membership_backfill.sql")) {
         return includesActivation
           ? "7378438b51b04a8ddd2080bfa8ca8a07d05a3bcfd2030e36da1991cd62ca337f"
@@ -1106,6 +1111,7 @@ describe("release schema contract", () => {
         (migrations.has("0279_workspace_connection_use_lane.sql") ? 1 : 0) +
         (migrations.has("0280_connection_and_variable_set_audit_attribution.sql") ? 1 : 0) +
         (migrations.has("0291_resource_authority_classification_assertion.sql") ? 1 : 0) +
+        (migrations.has("0297_session_ownership_classification_and_backfill.sql") ? 1 : 0) +
         (migrations.has("0299_organization_membership_lock_order.sql") ? 1 : 0) +
         (migrations.has("0281_viewer_holder_authority_claims.sql") ? 1 : 0) +
         (migrations.has("0282_variable_set_session_attach_attribution.sql") ? 1 : 0) +

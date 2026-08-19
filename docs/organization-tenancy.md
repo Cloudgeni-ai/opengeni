@@ -760,6 +760,64 @@ tables - contrast the documents gate, whose
 post-migration invariant violation (`documents_authority_chk`, 0258) and is
 therefore truthful and drainable.
 
+#### Session ownership (migration 0297)
+
+Sessions are **not** an undifferentiated ownerless backlog. Migration 0225's
+`guard_session_authority_write` trigger already derives session ownership on
+every INSERT, and `session_visibility_isolation` is live. `0285`'s
+`sessions.ownerless` count is therefore the residue of two INSERT-only
+derivation branches - inherit the same-workspace parent's owner pair, otherwise
+resolve the `subject`-kind creator's active organization membership **and** a
+`workspace_memberships` row in that workspace - and not a migration backlog.
+
+`bun run db:backfill-session-ownership --organization-id <uuid> --classify`
+gives one verdict per session. Exactly two populations are deterministically
+repairable, and `--apply` repairs only those:
+
+- **Personal-workspace convergence.** The session's workspace is exactly the
+  `personal_workspace_id` of one active membership (0218's unique
+  `organization_memberships_personal_workspace_idx` makes that a 1:1 anchor)
+  and the session's `created_by_subject_id` is that same membership's subject.
+  Slice B provisions a personal workspace *without* a `workspace_memberships`
+  row, so 0225's second branch cannot reach these rows even today - the
+  population still grows until that derivation is extended, which is a phase F
+  decision and not part of this backfill.
+- **Parent-inheritance closure.** An ownerless session whose same-workspace
+  parent now has an owner pair: branch 1 of the live trigger replayed against
+  durable parent data, which is also what makes the driver resumable.
+
+Everything else is recorded unresolved with a fixed reason code and never
+guessed: `service`-created sessions (`legacy_shape_unrecognized`), non-`user:`
+subjects such as `api_key:` and `configured:` that 0219/0263 can never provision
+an organization anchor for (`external_lane_owns_row`, permanently unrepairable
+and still being minted), creators without a live membership
+(`missing_organization_membership`), a personal-workspace anchor that names a
+different subject than the creator (`ambiguous_candidate_authority`), and - the
+largest refusal - an active managed human's session in an ordinary shared
+workspace (`no_deterministic_evidence`), because replaying 0225's second branch
+retroactively would evaluate **today's** workspace grants against a historical
+session, which is exactly the current-access inference this phase forbids.
+
+The backfill is dry-run by default, bounded by `--limit`, resumable through
+`FOR UPDATE ... SKIP LOCKED`, and idempotent. It writes only the owner pair: it
+never touches `visibility`, `authority_epoch`, or `updated_at`, appends no
+session event, and widens no read - every candidate is necessarily
+`workspace_shared`, which `session_visibility_isolation` short-circuits on.
+
+Its candidate predicate carries the classifier's `created_by_subject_id LIKE
+'user:%'` fence in its own SQL, on both the dry-run count and the `--apply`
+claim. The write path must never be more permissive than the classification
+that authorizes it: `external_lane_owns_row` is called permanently unrepairable
+here, so the seam refuses it by construction rather than relying on 0219/0263
+never having minted a non-`user:` anchor.
+
+Session rows are safe to re-run over - an attributed row stops matching either
+candidate predicate. A `--run-key` ledger is deliberately *not*: each batch
+opens its own `<run-key>:batch-N` receipt and the ledger refuses to re-open a
+settled one, so a repeat under the same key fails on the first settled batch
+instead of overwriting immutable evidence. Resume or repeat with a new
+`--run-key`, or omit it and record nothing.
+
 ### E. Validate
 
 Verify organization/membership/workspace consistency, one personal workspace

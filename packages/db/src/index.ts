@@ -17559,6 +17559,75 @@ export async function verifyOrganizationResourceClassification(
   );
 }
 
+/**
+ * Organization-tenancy phase D session ownership classification (0297). Read-only over
+ * `sessions`: it proves every attributed session points at one live,
+ * internally consistent organization membership, and names a fixed reason code
+ * for every session it refuses to attribute. Supplying `runKey` additionally
+ * records those refusals durably through the tenancy backfill ledger (one
+ * `sessions` receipt plus one append-only unresolved row each); the result
+ * reports `ledgerAvailable` so a run that could not record its obligations is
+ * visible rather than silent. A run key may be used once - the ledger refuses
+ * to re-open a settled receipt.
+ *
+ * It never writes a session row and never infers user authority from
+ * `created_by`, a default workspace, or current workspace access.
+ */
+export async function classifyOrganizationSessionOwnership(
+  db: Database,
+  input: { organizationId: string; runKey?: string | null },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select classify_organization_session_ownership(
+          ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
+/**
+ * Organization-tenancy phase D session ownership backfill (0297). One bounded, resumable,
+ * idempotent batch of the only two deterministic repairs: a session sitting in
+ * exactly one active membership's personal workspace whose creator subject is
+ * that same membership, and the parent-inheritance closure migration 0225's own
+ * trigger would have produced. `dryRun` defaults to true. Candidates are
+ * claimed with `FOR UPDATE ... SKIP LOCKED`, so concurrent drivers never
+ * contend; keep calling while `moreLikely` is true.
+ */
+export async function backfillOrganizationSessionOwnership(
+  db: Database,
+  input: {
+    organizationId: string;
+    limit?: number;
+    dryRun?: boolean;
+    runKey?: string | null;
+  },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select backfill_organization_session_ownership(
+          ${input.organizationId},
+          ${input.limit ?? 500}::integer,
+          ${input.dryRun ?? true}::boolean,
+          ${input.runKey ?? null}::text
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
 export async function getVariableSetValuesForRun(
   db: Database,
   input: {
