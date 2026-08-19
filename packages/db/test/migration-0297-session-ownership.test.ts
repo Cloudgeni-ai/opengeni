@@ -135,6 +135,8 @@ async function insertSession(
     model: "gpt-5",
     sandbox_backend: "none",
     sandbox_group_id: id,
+    reasoning_effort: "medium",
+    latency_mode: "standard",
     first_party_mcp_tools: admin.json([]),
     tool_policy: admin.json({ mode: "workspace_default", inheritedFromSessionId: null }),
     ...overrides,
