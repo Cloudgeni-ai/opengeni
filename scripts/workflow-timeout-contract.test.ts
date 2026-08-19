@@ -27,6 +27,48 @@ async function workflowFiles(): Promise<readonly string[]> {
   return entries.filter((entry) => entry.endsWith(".yml") || entry.endsWith(".yaml")).sort();
 }
 
+/**
+ * Remove shell comments while preserving a `#` that sits inside a quoted
+ * string. A regex cannot do this: blanking everything after a whitespace-
+ * preceded `#` also deletes real budgets on lines like
+ * `echo "fixes #42" && bun x t --timeout-seconds 6000`, which would make the
+ * guard blind to a spelling it currently catches.
+ */
+function stripShellComments(source: string): string {
+  let out = "";
+  let quote: string | null = null;
+  let atCommandBoundary = true;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i] as string;
+    if (ch === "\n") {
+      quote = null;
+      atCommandBoundary = true;
+      out += ch;
+      continue;
+    }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      out += ch;
+      atCommandBoundary = false;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      out += ch;
+      atCommandBoundary = false;
+      continue;
+    }
+    if (ch === "#" && atCommandBoundary) {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      i -= 1;
+      continue;
+    }
+    out += ch;
+    atCommandBoundary = /[\s;&|(]/u.test(ch);
+  }
+  return out;
+}
+
 describe("workflow timeout contract", () => {
   test("every job bounds itself well below the 360-minute GitHub default", async () => {
     const files = await workflowFiles();
@@ -123,19 +165,32 @@ describe("workflow timeout contract", () => {
         let inner = 0;
         let usesBoundedInstall = false;
         for (const step of job.steps ?? []) {
-          // Shell comments are prose, not budgets: a line that mentions
-          // `timeout 3600` in passing must not be read as an hour of work.
-          const run = String(step.run ?? "").replace(/(^|\s)#[^\n]*/gu, "$1");
+          // Distinguishing a real budget from prose needs quote awareness, not
+          // a tighter anchor. Two sanitised views are used:
+          //
+          //  - `commentless` removes only a `#` that genuinely starts a shell
+          //    comment. A naive /(^|\s)#.*/ also blanks the rest of a line
+          //    after a quoted `#`, which silently deletes real budgets:
+          //    `echo "fixes #42" && bun x t --timeout-seconds 6000`.
+          //  - `unquoted` additionally blanks quoted spans, so prose inside an
+          //    `echo` is not read as a command. Flag-form budgets are matched
+          //    on `commentless` so a genuine `bash -c "... --timeout-seconds N"`
+          //    still counts.
+          const commentless = stripShellComments(String(step.run ?? ""));
+          const unquoted = commentless.replace(/'[^']*'|"[^"]*"/gu, (m) => " ".repeat(m.length));
           // Both `--flag N` and `--flag=N` spellings.
-          for (const m of run.matchAll(/--timeout-seconds[\s=]+(\d+)/gu))
+          for (const m of commentless.matchAll(/--timeout-seconds[\s=]+(\d+)/gu))
             inner += Number(m[1]) / 60;
-          for (const m of run.matchAll(/--timeout[\s=]+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
+          for (const m of commentless.matchAll(/--timeout[\s=]+(\d{5,})/gu))
+            inner += Number(m[1]) / 60_000;
           // A bare coreutils `timeout 3600 ...` bounds the step as much as a
-          // test-runner flag does. Anchored to a command position - start of
-          // line or after a shell separator - so prose inside an `echo` is not
-          // read as a budget. Leading options are consumed explicitly: `-k` and
-          // `-s` take a value, and a greedy `-\S+` would read the SIGKILL grace
-          // as the duration. Suffixes follow coreutils: bare is seconds.
+          // test-runner flag does. The anchor stays permissive so command
+          // positions like `; do timeout ...`, `sudo timeout ...` and
+          // `env FOO=bar timeout ...` are still seen - a retry loop is the most
+          // common way CI bounds a command. Leading options are consumed
+          // explicitly: `-k` and `-s` take a value, and a greedy `-\S+` would
+          // read the SIGKILL grace as the duration. Suffixes follow coreutils,
+          // where a bare number means seconds.
           const suffixMinutes: Record<string, number> = {
             "": 1 / 60,
             s: 1 / 60,
@@ -144,8 +199,8 @@ describe("workflow timeout contract", () => {
             d: 1440,
           };
           const bareTimeout =
-            /(?:^|[;&|(])[^\S\n]*timeout\s+(?:(?:-[ks]\s*\S+|--kill-after=\S+|--signal=\S+|--preserve-status|--foreground|-v|--verbose)\s+)*(\d+(?:\.\d+)?)([smhd]?)(?![\w.])/gmu;
-          for (const m of run.matchAll(bareTimeout)) {
+            /(?:^|[\s;&|(])timeout\s+(?:(?:-[ks]\s*\S+|--kill-after[=\s]\S+|--signal[=\s]\S+|--preserve-status|--foreground|-v|--verbose)\s+)*(\d+(?:\.\d+)?)([smhd]?)(?![\w.])/gmu;
+          for (const m of unquoted.matchAll(bareTimeout)) {
             inner += Number(m[1]) * (suffixMinutes[m[2] ?? ""] ?? 1 / 60);
           }
           // A step-level timeout-minutes is an upper bound on that step and
@@ -155,8 +210,8 @@ describe("workflow timeout contract", () => {
           // A budget that is only known at runtime cannot be checked
           // statically. Fail closed rather than silently counting it as zero.
           const expressionBudget =
-            /--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(run) ||
-            /(?:^|[;&|(])[^\S\n]*timeout\s+\$\{\{/mu.test(run) ||
+            /--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(commentless) ||
+            /(?:^|[\s;&|(])timeout\s+\$\{\{/mu.test(unquoted) ||
             (stepCap !== undefined && typeof stepCap !== "number");
           if (expressionBudget) {
             violations.push(
