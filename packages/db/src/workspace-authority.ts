@@ -17,9 +17,10 @@ import { rawRows, type Database } from "./database";
  *
  * Seams that must serialize the answer with their own writes — session listing,
  * session pins, the composer draft — call this variant so the read and the write
- * share one transaction snapshot and one advisory fence. Seams that just need
- * the answer call {@link subjectHasLiveWorkspaceAuthority} (`@opengeni/db`),
- * which is a thin scope wrapper over exactly this body.
+ * share one transaction snapshot and one advisory fence. Seams that need to ask
+ * about a subject that is NOT the caller call
+ * {@link subjectHasLiveWorkspaceAuthority} (`@opengeni/db`), which is a thin
+ * scope wrapper over exactly this body.
  *
  * True when the subject currently holds workspace authority the same way the
  * route-time access builder derives it: a `workspace_memberships` row whose
@@ -31,36 +32,44 @@ import { rawRows, type Database } from "./database";
  * is read from `created_by`, a default workspace, a resource name, or current
  * access.
  *
- * **Owner-only by construction.** The personal-workspace half reads
- * `list_self_organization_memberships`, a SECURITY DEFINER seam (0263) that
- * raises `42501` unless the requested subject is exactly the transaction's own
- * `opengeni.subject_id` GUC and matches `user:%`. The only fact it can ever
- * return is "subject X owns personal workspace W", for the exact X named — so
- * no account or organization administrator, API key, service principal, or
- * delegated bearer reaches a different human's personal workspace through it,
- * whatever subject a caller supplies. Callers must still keep the exception off
- * a principal's own authorization path: pass only a subject the caller is
- * entitled to ask about (its own canonical managed-cookie subject, or the
- * frozen owner of a delegation it already holds).
+ * # This function is NOT an authorization. Read this before relying on it.
+ *
+ * It answers "does subject X hold authority over workspace W". It does NOT
+ * establish that the caller is X. Nothing here authenticates anybody.
+ *
+ * The scope assertion below is a **consistency check, not an authorization**.
+ * It prevents one thing: a caller naming a third-party subject while its
+ * transaction is scoped to someone else. It cannot detect a caller that scoped
+ * the transaction to an attacker-chosen subject in the first place, because
+ * `withWorkspaceSubjectRls(db, workspaceId, subjectId, ...)` takes that subject
+ * from its argument too. At today's three call sites both sides come from the
+ * same variable, so the check is a tautology there and fires only if a future
+ * refactor makes them diverge. Treat it as a tripwire against that refactor —
+ * never as evidence that the subject was authenticated.
+ *
+ * **The actual authorization for the personal-workspace exception lives in the
+ * API layer**: `AccessGrantAuthorization.canonicalManagedHumanSession`
+ * (`@opengeni/core`), stamped only where a Better Auth cookie was verified. A
+ * caller that has not proven that must not enable the exception. If you are
+ * adding a caller, that stamp is the part you have to get right; this function
+ * will happily answer `true` for any subject you scope a transaction to.
  *
  * Non-`user:` subjects (API keys, delegated service principals, configured and
  * local principals) can never own an organization membership, so they
- * short-circuit to the plain membership answer instead of tripping that
- * `42501`.
+ * short-circuit to the plain membership answer instead of tripping
+ * `list_self_organization_memberships`' `42501`.
  */
 export async function subjectHasLiveWorkspaceAuthorityInScope(
   scopedDb: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<boolean> {
-  // This function must never be an arbitrary-subject oracle. It deliberately
-  // does NOT set `opengeni.subject_id`: it answers only about the subject the
-  // caller's transaction is ALREADY scoped to, which
-  // `withWorkspaceSubjectRls(db, workspaceId, subjectId, ...)` applied and read
-  // back on the pinned backend before this body runs. The assertion below turns
-  // "the caller happened to pass the right subject" into "the caller cannot
-  // pass any other one" — without it, a seam that forwards a request-derived
-  // subject would reach `list_self_organization_memberships` under a scope it
-  // did not authenticate.
+  // CONSISTENCY CHECK, NOT AN AUTHORIZATION. This function deliberately does not
+  // set `opengeni.subject_id`, so it cannot be handed a scope of its own — that
+  // makes the oracle shape unrepresentable here. But the scope it inherits was
+  // set by `withWorkspaceSubjectRls` from ITS caller's argument, so a match
+  // proves only that one caller used one subject consistently; it proves
+  // nothing about who that subject is. Authorization is the API layer's
+  // canonical-managed-cookie stamp. See the doc comment above.
   const scopedSubjectId = await subjectIdInRlsScope(scopedDb);
   if (scopedSubjectId !== input.subjectId) {
     throw new Error(

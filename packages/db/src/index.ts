@@ -26756,16 +26756,17 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
  * pointer is their whole grant, and
  * {@link subjectHasLiveWorkspaceAuthorityInScope} is the single resolver for it.
  *
- * The flag exists because `subjectId` alone cannot carry the distinction
- * `AGENTS.md` requires. The exception is for "the canonical managed-cookie
- * (Better Auth) session" only — "Bearer/delegated principals, API keys, and
- * account or organization administrators receive no personal-workspace access
- * through that exception" — but a host-signed delegated bearer chooses its own
- * `subjectId` claim and could name the owner. So the API layer must state this
- * positively, from `AccessGrantAuthorization.canonicalManagedHumanSession`
- * (`@opengeni/core`), which reflects HOW the request authenticated rather than
- * the shape of a grant value the caller may control.
- * Omitted/false keeps the historical bare-membership fence exactly.
+ * **This flag is the authorization.** The resolver it gates is not: it answers
+ * "does subject X hold authority here" and establishes nothing about who the
+ * caller is. The exception is for "the canonical managed-cookie (Better Auth)
+ * session" only — "Bearer/delegated principals, API keys, and account or
+ * organization administrators receive no personal-workspace access through that
+ * exception" — and a host-signed delegated bearer chooses its own `subjectId`,
+ * `principalKind`, `metadata.delegated`, and `serviceInitiator` claims, so no
+ * inspection of the grant can carry that distinction. Set this ONLY from
+ * `AccessGrantAuthorization.canonicalManagedHumanSession` (`@opengeni/core`),
+ * which reflects HOW the request authenticated. Omitted/false keeps the
+ * historical bare-membership fence exactly.
  */
 export type PersonalWorkspaceOwnerException = boolean;
 

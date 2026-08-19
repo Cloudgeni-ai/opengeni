@@ -141,25 +141,41 @@ membership's own pointer counts as stated authority — nothing is inferred from
 `created_by`, connection attribution, a default workspace, a resource name, or
 current access.
 
-Two properties keep it owner-only, and both are structural rather than
-conventions:
+**Exactly one thing authorizes the exception**, and it is not the resolver:
 
-1. **It never sets `opengeni.subject_id`.** It runs on the caller's already
-   scoped transaction and raises if the requested subject differs from the
-   subject that scope authenticated, so it cannot be used as an
-   arbitrary-subject oracle. The exported
-   `subjectHasLiveWorkspaceAuthority` in `@opengeni/db` *does* set that GUC from
-   its own argument and therefore **is** such an oracle — see its doc comment;
-   never pass it a request-derived subject.
-2. **The API layer must positively assert canonical managed-cookie
-   provenance.** Session listing, session pins, and the composer draft take an
-   explicit `personalWorkspaceOwnerException` flag that defaults to absent, and
-   the API supplies it from `AccessGrantAuthorization.canonicalManagedHumanSession`.
-   That value is stamped only inside the one branch of `resolveAccessContext`
-   that verified a Better Auth cookie, so bearer/delegated principals, API keys,
-   service initiators, and account or organization administrators fail closed —
-   including any authentication path added later, which is absent from the stamp
-   by default rather than by an exclusion list.
+1. **The API layer's canonical managed-cookie stamp.** Session listing, session
+   pins, and the composer draft take an explicit `personalWorkspaceOwnerException`
+   flag that defaults to absent, and the API supplies it from
+   `AccessGrantAuthorization.canonicalManagedHumanSession`. That value is stamped
+   only inside the one branch of `resolveAccessContext` that verified a Better
+   Auth cookie, so bearer/delegated principals, API keys, service initiators, and
+   account or organization administrators fail closed — including any
+   authentication path added later, which is absent from the stamp by default
+   rather than by an exclusion list. Do not substitute a shape check on the grant
+   (`principalKind`, `metadata.delegated`, `serviceInitiator`): a delegated
+   bearer chooses all of those, and its `subjectId`, inside its own token.
+
+**The resolver is not a second guard.** `subjectHasLiveWorkspaceAuthorityInScope`
+answers "does subject X hold authority over workspace W"; it does not establish
+that the caller is X, and neither does its exported sibling. It refuses to set
+`opengeni.subject_id` and raises when the requested subject differs from the
+transaction's scope, but that scope was itself set by `withWorkspaceSubjectRls`
+from a caller-supplied argument. At all three call sites both sides come from the
+same variable, so the check is a tautology there. It is a **consistency check —
+a tripwire against a future refactor that makes the two diverge — not an
+authorization.**
+
+What the in-scope variant does buy, concretely:
+
+- it makes the arbitrary-subject oracle shape **unrepresentable** at these seams,
+  because it has no way to scope a transaction itself;
+- it keeps the authority read inside the caller's transaction, snapshot, and
+  advisory fence, so it serialises with `removeWorkspaceMember()`;
+- it keeps the corrected rule to one implementation shared with the oracle.
+
+The exported `subjectHasLiveWorkspaceAuthority` sets that GUC from its own
+argument and will answer for **any** subject named, so its `42501` guard proves
+nothing about the caller — never pass it a request-derived subject.
 
 Known remaining seams with the bare-membership defect, both SECURITY DEFINER and
 therefore only fixable by migration: `transition_session_visibility` (0225) and
