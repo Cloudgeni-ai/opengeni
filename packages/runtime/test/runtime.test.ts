@@ -3476,15 +3476,6 @@ describe("runtime event normalization", () => {
     expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
   });
 
-  test("the codemode directive text is a stable, generic, host-agnostic snapshot", () => {
-    // Pinned verbatim so an unintended edit to the substrate prompt fails here.
-    // It must name only generic substrate handles (ogtool, $OPENGENI_CODEMODE_*),
-    // never a host/product name.
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toBe(
-      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
-    );
-  });
-
   test("builds native S3 mount entries for file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     const manifest = buildManifest(

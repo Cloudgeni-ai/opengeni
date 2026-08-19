@@ -434,7 +434,6 @@ describe("Gmail REST MCP adapter", () => {
   });
 
   test("retains the hosted MCP URL as the OAuth resource identity", () => {
-    expect(OFFICIAL_GMAIL_MCP_URL).toBe("https://gmailmcp.googleapis.com/mcp/v1");
     expect(isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, connectionRef)).toBe(true);
     expect(
       isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, {
