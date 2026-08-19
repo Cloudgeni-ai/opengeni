@@ -23,6 +23,8 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
+import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
+
 type PendingDeviceCode = {
   userCode: string;
   verificationUri: string;
@@ -84,6 +86,7 @@ export function SuperGrokSubscriptionsCard({
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const cancelled = useRef(false);
+  const pollAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -101,6 +104,8 @@ export function SuperGrokSubscriptionsCard({
     void refresh();
     return () => {
       cancelled.current = true;
+      pollAbort.current?.abort();
+      pollAbort.current = null;
     };
   }, [refresh]);
 
@@ -117,42 +122,38 @@ export function SuperGrokSubscriptionsCard({
         "_blank",
         "noopener,noreferrer",
       );
-      const poll = async (delaySeconds: number): Promise<void> => {
-        let result: Awaited<ReturnType<typeof client.supergrokConnectPoll>>;
-        try {
-          result = await client.supergrokConnectPoll(workspaceId, start.state);
-        } catch (error) {
-          if (!cancelled.current) {
-            setPending(null);
-            toast.error(error instanceof Error ? error.message : "Failed to verify xAI login");
-          }
-          return;
-        }
-        if (result.status === "connected") {
-          if (!cancelled.current) {
-            setPending(null);
+      pollAbort.current?.abort();
+      const controller = new AbortController();
+      pollAbort.current = controller;
+      void pollSuperGrokDeviceLogin({
+        poll: () => client.supergrokConnectPoll(workspaceId, start.state),
+        initialIntervalSeconds: start.intervalSeconds,
+        expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
+        signal: controller.signal,
+      })
+        .then(async (result) => {
+          if (!result || controller.signal.aborted || cancelled.current) return;
+          setPending(null);
+          if (result.status === "connected") {
             toast.success(
               result.scope === "workspace"
                 ? "SuperGrok connected for the workspace"
                 : "Private SuperGrok account connected",
             );
             await refresh();
+            return;
           }
-          return;
-        }
-        if (result.status === "expired" || result.status === "denied") {
-          if (!cancelled.current) {
+          toast.error(result.status === "expired" ? "The xAI code expired" : "xAI login denied");
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted && !cancelled.current) {
             setPending(null);
-            toast.error(result.status === "expired" ? "The xAI code expired" : "xAI login denied");
+            toast.error(error instanceof Error ? error.message : "Failed to verify xAI login");
           }
-          return;
-        }
-        if (result.status === "pending" || result.status === "slow_down") {
-          const nextDelay = Math.max(1, result.intervalSeconds ?? delaySeconds);
-          setTimeout(() => void poll(nextDelay), nextDelay * 1_000);
-        }
-      };
-      setTimeout(() => void poll(start.intervalSeconds), start.intervalSeconds * 1_000);
+        })
+        .finally(() => {
+          if (pollAbort.current === controller) pollAbort.current = null;
+        });
     } catch (error) {
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start xAI login");

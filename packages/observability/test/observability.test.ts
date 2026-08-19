@@ -516,6 +516,40 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
   });
 
+  test("public structured logs retain only grammar-validated request correlation ids", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("valid", {
+        correlationId: "request.2026-08-19:abc_123",
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 502,
+        workspaceId: "workspace-must-not-leak",
+      });
+      obs.warn("invalid", {
+        correlationId: "request id with spaces and bearer material",
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 502,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "valid",
+      correlationId: "request.2026-08-19:abc_123",
+      errorClass: "HttpOperationError",
+      errorCode: "internal_error",
+      status: 502,
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
   test("physical cancellation logs retain duration and safe sandbox correlation", () => {
     const observed: string[] = [];
     const originalLog = console.log;

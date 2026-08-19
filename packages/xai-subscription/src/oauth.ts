@@ -316,6 +316,41 @@ export async function fetchXaiVerifiedIdentity(
   };
 }
 
+/**
+ * Derive stable account metadata from the token response returned directly by
+ * xAI's HTTPS device-token endpoint. The access-token principal identifies the
+ * selected user/team/org account when present; ID-token claims provide the
+ * human-readable profile metadata. Provider requests still validate the access
+ * token before any subscription capability is used.
+ */
+export function xaiIdentityFromDeviceTokens(tokens: XaiOAuthTokens): XaiVerifiedIdentity {
+  const accessClaims = decodeXaiJwtPayload(tokens.accessToken);
+  const idClaims = tokens.idToken ? decodeXaiJwtPayload(tokens.idToken) : null;
+  const subject =
+    nullableString(accessClaims?.principal_id) ??
+    nullableString(accessClaims?.principalId) ??
+    nullableString(idClaims?.sub) ??
+    nullableString(accessClaims?.sub);
+  if (!subject) {
+    throw new XaiSubscriptionError(
+      "invalid_response",
+      "xAI OAuth token response is missing account identity",
+    );
+  }
+  const givenName =
+    nullableString(idClaims?.given_name) ?? nullableString(accessClaims?.given_name);
+  const familyName =
+    nullableString(idClaims?.family_name) ?? nullableString(accessClaims?.family_name);
+  const combinedName = [givenName, familyName].filter(Boolean).join(" ") || null;
+  const emailVerifiedClaim = idClaims?.email_verified ?? accessClaims?.email_verified;
+  return {
+    subject,
+    email: nullableString(idClaims?.email) ?? nullableString(accessClaims?.email),
+    emailVerified: typeof emailVerifiedClaim === "boolean" ? emailVerifiedClaim : null,
+    name: nullableString(idClaims?.name) ?? nullableString(accessClaims?.name) ?? combinedName,
+  };
+}
+
 export function decodeXaiJwtPayload(jwt: string): Record<string, unknown> | null {
   const payload = jwt.split(".")[1];
   if (!payload) return null;
