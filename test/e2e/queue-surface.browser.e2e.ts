@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
@@ -229,7 +229,9 @@ type QueueErrorEvidence = {
 };
 
 describe("queue surface browser acceptance", () => {
-  let browser: Browser;
+  let browser: Browser | null = null;
+  let chromeExecutablePath: string | undefined;
+  let browserRelaunchCount = 0;
   let demo: StartedProcess;
   let baseUrl: string;
   const measurements: BrowserMeasurement[] = [];
@@ -238,6 +240,19 @@ describe("queue surface browser acceptance", () => {
   const textResizeReflowEvidence: TextResizeReflowEvidence[] = [];
   const queueErrorEvidence: QueueErrorEvidence[] = [];
   let accessibilityEvidence: BrowserAccessibilityEvidence | null = null;
+
+  async function launchChrome(): Promise<Browser> {
+    return await chromium.launch(
+      chromeExecutablePath ? { executablePath: chromeExecutablePath } : undefined,
+    );
+  }
+
+  async function newBrowserContext(
+    options?: Parameters<Browser["newContext"]>[0],
+  ): Promise<Awaited<ReturnType<Browser["newContext"]>>> {
+    if (!browser) throw new Error("Queue acceptance Chrome is not available");
+    return await browser.newContext(options);
+  }
 
   beforeAll(async () => {
     const port = await freePort();
@@ -253,9 +268,9 @@ describe("queue surface browser acceptance", () => {
       }
       const configuredChromium = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
       const sandboxChromium = "/usr/local/bin/chromium";
-      const executablePath =
+      chromeExecutablePath =
         configuredChromium ?? (existsSync(sandboxChromium) ? sandboxChromium : undefined);
-      browser = await chromium.launch(executablePath ? { executablePath } : undefined);
+      browser = await launchChrome();
       demo = await startProcess(
         [
           "bun",
@@ -286,10 +301,42 @@ describe("queue surface browser acceptance", () => {
     }
   }, 90_000);
 
+  /**
+   * One shared Chrome serves every test in this file, so a Chrome that dies
+   * mid-run used to take the whole file with it: the test that was driving it
+   * failed on a timeout (its Playwright call never returns), and every later
+   * test then failed with `Target page, context or browser has been closed`.
+   * That cascade destroys the acceptance evidence of every remaining test and
+   * buries the one real failure. Killing Chrome mid-run reproduces exactly that
+   * pair of symptoms.
+   *
+   * Replacing a provably dead Chrome at a TEST BOUNDARY softens nothing. The
+   * test that was driving the dead Chrome still fails, so a crash caused by the
+   * surface under test stays visible, and every later test still proves its own
+   * guarantee against a live Chrome instead of reporting a meaningless
+   * closed-browser error. Replacements are counted into the written evidence, so
+   * a crash is never silent.
+   *
+   * The repair deliberately happens only here and never inside a test helper: a
+   * Bun test that exceeds its timeout is abandoned, not cancelled, and keeps
+   * running concurrently with the tests that follow it. A repair reachable from
+   * that abandoned test could swap the shared Chrome out from under a live one.
+   */
+  beforeEach(async () => {
+    if (browser?.isConnected()) return;
+    browserRelaunchCount += 1;
+    const dead = browser;
+    browser = null;
+    // Never await the dead handle: `close()` can wait on a connection that a
+    // killed Chrome will never answer, and the process is already gone.
+    void dead?.close().catch(() => undefined);
+    browser = await launchChrome();
+  }, 60_000);
+
   afterAll(async () => {
     await writeFile(
       `${evidenceDir}/measurements.json`,
-      `${JSON.stringify({ measurements }, null, 2)}\n`,
+      `${JSON.stringify({ measurements, browserRelaunchCount }, null, 2)}\n`,
     );
     if (accessibilityEvidence) {
       await writeFile(
@@ -319,7 +366,7 @@ describe("queue surface browser acceptance", () => {
   test("large prompts and 100 rows stay bounded across the viewport and theme matrix", async () => {
     for (const viewport of viewports) {
       for (const theme of themes) {
-        const context = await browser.newContext({
+        const context = await newBrowserContext({
           viewport,
           hasTouch: viewport.width <= 768,
           isMobile: viewport.width <= 375,
@@ -504,7 +551,7 @@ describe("queue surface browser acceptance", () => {
   }, 120_000);
 
   test("dragging and read-only disclosure cannot escape the viewport", async () => {
-    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    const context = await newBrowserContext({ viewport: { width: 375, height: 812 } });
     const page = await context.newPage();
     await page.goto(`${baseUrl}/queue.html?count=2&theme=dark`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "2 queued prompts" }).click();
@@ -525,7 +572,7 @@ describe("queue surface browser acceptance", () => {
     expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
     await context.close();
 
-    const readOnlyContext = await browser.newContext({ viewport: { width: 768, height: 960 } });
+    const readOnlyContext = await newBrowserContext({ viewport: { width: 768, height: 960 } });
     const readOnlyPage = await readOnlyContext.newPage();
     await readOnlyPage.goto(`${baseUrl}/queue.html?count=1&theme=light&readOnly=1`, {
       waitUntil: "networkidle",
@@ -548,7 +595,7 @@ describe("queue surface browser acceptance", () => {
 
   test("portaled actions retain a 44px coarse-pointer target at every acceptance width", async () => {
     for (const viewport of viewports) {
-      const context = await browser.newContext({ viewport, hasTouch: true });
+      const context = await newBrowserContext({ viewport, hasTouch: true });
       try {
         const page = await context.newPage();
         const diagnostics = observePageFailures(page);
@@ -573,7 +620,7 @@ describe("queue surface browser acceptance", () => {
 
   test("Chrome exposes one useful bounded summary per duplicate-prefix prompt", async () => {
     const viewport = { width: 320, height: 800 };
-    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+    const context = await newBrowserContext({ viewport, hasTouch: true, isMobile: true });
     try {
       const page = await context.newPage();
       const diagnostics = observePageFailures(page);
@@ -691,7 +738,7 @@ describe("queue surface browser acceptance", () => {
       "combining",
       "zwj",
     ] as const satisfies readonly QueueFallbackKind[];
-    const context = await browser.newContext({
+    const context = await newBrowserContext({
       viewport: { width: 320, height: 800 },
       hasTouch: true,
       isMobile: true,
@@ -762,7 +809,7 @@ describe("queue surface browser acceptance", () => {
 
   test("styled Chrome paints bounded identities for non-rendering prompt code points", async () => {
     for (const viewport of viewports) {
-      const context = await browser.newContext({
+      const context = await newBrowserContext({
         viewport,
         hasTouch: viewport.width <= 768,
         isMobile: viewport.width <= 375,
@@ -900,7 +947,7 @@ describe("queue surface browser acceptance", () => {
 
   test("320px mobile queue reflows at 200% root text in both themes", async () => {
     const viewport = { width: 320, height: 800 } as const;
-    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+    const context = await newBrowserContext({ viewport, hasTouch: true, isMobile: true });
     try {
       const page = await context.newPage();
       const diagnostics = observePageFailures(page);
@@ -1068,7 +1115,7 @@ describe("queue surface browser acceptance", () => {
       for (const source of sources) {
         for (const shape of shapes) {
           const direction = shape === "multiline" ? "rtl" : "ltr";
-          const context = await browser.newContext({
+          const context = await newBrowserContext({
             viewport,
             hasTouch: true,
             isMobile: true,
@@ -1228,7 +1275,7 @@ describe("queue surface browser acceptance", () => {
     const clusterNames = ["zwj", "combining"] as const;
 
     for (const viewport of boundaryViewports) {
-      const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+      const context = await newBrowserContext({ viewport, hasTouch: true, isMobile: true });
       try {
         const page = await context.newPage();
         const diagnostics = observePageFailures(page);
