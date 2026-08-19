@@ -598,6 +598,35 @@ or current access. Provision personal workspaces for active memberships through
 an idempotent lifecycle operation. Record backfill receipts and unresolved rows
 without widening access.
 
+The receipt/unresolved ledger is migration 0300: `tenancy_backfill_receipts`
+(one idempotent row per organization, resource family, and run key, carrying
+classified/skipped/unresolved counts) and `tenancy_backfill_unresolved_rows`
+(one append-only row per resource that could not be classified deterministically,
+carrying only the resource id and a fixed reason code). Both are FORCE RLS with
+no direct `opengeni_app` DML; the only write path is the `tenancy_backfill_ledger`
+lifecycle seam - `open_tenancy_backfill_receipt`,
+`record_tenancy_backfill_unresolved`, and `complete_tenancy_backfill_receipt`.
+
+Three properties of that seam are load-bearing. The append function takes exactly
+receipt, resource, and reason: an unresolved row records a *refusal* to infer
+authority, so the ledger has no column and no argument able to express the
+inference it declined to make. The unresolved count is owned by the append
+path rather than supplied at completion, so a sweep cannot settle its own
+receipt while understating its outstanding obligations. Settled receipts are
+evidence: they accept no further rows, cannot be re-opened, and cannot be
+settled twice. And every seam is tenant-fenced on the caller's exact
+`opengeni.account_id` (the 0285 precedent): `open_tenancy_backfill_receipt`
+fences on its organization argument, the other two on the resolved receipt's
+owning organization, each raising `42501` on a mismatch. One organization
+therefore cannot open, append to, or settle another organization's receipt -
+which would both pollute phase-D evidence and make the victim's in-flight
+backfill fail `already settled`.
+
+Receipt opening is idempotent concurrently, not merely serially: it yields to
+the unique `(organization, resource family, run key)` index and adopts the
+winner's row, so parallel sweeps in later slices converge on one receipt rather
+than surfacing a duplicate-key error.
+
 The phase's data source is the read-only inventory seam (migration 0285,
 corrected by 0292): `bun run db:inventory-tenancy --organization-id <uuid>`
 reports content-free counts of every legacy-attribution population - ownerless

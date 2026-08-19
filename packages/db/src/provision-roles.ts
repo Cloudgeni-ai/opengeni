@@ -568,6 +568,31 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0300's tenancy backfill ledger seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not
+    -- yet exist, and these three live in the data schema rather than
+    -- opengeni_private, so the blanket sweep above never reaches them.
+    -- Re-converge them here so migrate-then-provision matches the reverse
+    -- order; without this the "only write path" seam is unreachable on a
+    -- green-field database.
+    FOR routine_signature IN
+      SELECT unnest(ARRAY[
+        'open_tenancy_backfill_receipt(uuid, text, text)',
+        'record_tenancy_backfill_unresolved(uuid, uuid, text)',
+        'complete_tenancy_backfill_receipt(uuid, bigint, bigint, text)'
+      ])
+    LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
+        IS NOT NULL
+      THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)},
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0291's classification assertion seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not yet
     -- exist, and it lives in the data schema rather than opengeni_private, so
