@@ -600,7 +600,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
       const workspace = await getWorkspace(routeDeps.db, workspaceId);
       const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });

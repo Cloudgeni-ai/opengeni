@@ -85,19 +85,26 @@ describe("Company Brain first-party MCP policy", () => {
     }
   });
 
-  test("legacy standing mode keeps memory_save only as the rollback surface", async () => {
+  test("Memory V1 writes are not registered even when explicitly selected", async () => {
+    // memory_save/memory_correct are retired. Selecting them by name must not
+    // resurrect them: the retirement is a property of the surface, not of what
+    // a caller happens to ask for.
     const server = buildOpenGeniMcpServer(
       deps(),
-      grant([...Permission.options], ["memory_search", "memory_save"]),
-      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "legacy_standing" },
+      grant([...Permission.options], [
+        "memory_search",
+        "memory_save",
+        "memory_correct",
+      ] as unknown as FirstPartyMcpToolName[]),
+      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "memory-legacy-description-test", version: "1" });
+    const client = new Client({ name: "memory-retired-writes-test", version: "1" });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
-      expect(names).toEqual(["memory_save", "memory_search"]);
+      expect(names).toEqual(["memory_search"]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

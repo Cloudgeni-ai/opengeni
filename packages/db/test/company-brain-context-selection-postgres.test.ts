@@ -432,11 +432,14 @@ describe("accepted-turn Company Brain context selection", () => {
     await prepareSnapshots(legacyAttempt);
     const legacySelected = await resolve(legacyAttempt);
     expect(legacySelected.receipt).toMatchObject({
-      memoryPromptMode: "legacy_standing",
+      memoryPromptMode: "retrieval_only",
       turnContextSnapshotSource: "legacy_first_claim",
-      selectedMemoryCount: 1,
+      // Retired: a stored opt-out no longer selects or renders anything.
+      selectedMemoryCount: 0,
     });
-    expect(legacySelected.workspaceMemory).toContain("Explicit legacy standing keeps injection.");
+    // The mode is still recorded on the receipt as a historical fact, but the
+    // standing block itself is retired: nothing is composed into the prompt.
+    expect(legacySelected.workspaceMemory).toBeNull();
   }, 180_000);
 
   test("freezes mode and bounded legacy workspace instructions when the turn is accepted", async () => {
@@ -446,7 +449,7 @@ describe("accepted-turn Company Brain context selection", () => {
     await shared.admin`
       update workspaces set settings = ${shared.admin.json({
         memoryEnabled: true,
-        memoryPromptMode: "legacy_standing",
+        memoryPromptMode: "retrieval_only",
       })}::jsonb, agent_instructions = ${acceptedInstructions}
       where id = ${f.grant.workspaceId}
     `;
@@ -467,7 +470,7 @@ describe("accepted-turn Company Brain context selection", () => {
     const selected = await resolve(attempt);
     expect(selected.receipt).toMatchObject({
       memoryEnabled: true,
-      memoryPromptMode: "legacy_standing",
+      memoryPromptMode: "retrieval_only",
       turnContextSnapshotSource: "accepted_turn",
       legacyWorkspaceInstructionsOriginalUtf8Bytes: Buffer.byteLength(acceptedInstructions, "utf8"),
       legacyWorkspaceInstructionsTruncated: true,
@@ -546,18 +549,16 @@ describe("accepted-turn Company Brain context selection", () => {
     const first = await resolve(firstAttempt);
     expect(first.receipt).toMatchObject({
       sessionRole: "root",
-      memoryPromptMode: "legacy_standing",
+      memoryPromptMode: "retrieval_only",
       companyProfileIncluded: true,
-      selectedMemoryCount: 2,
-      renderedMemoryCount: 2,
-      visibleMemoryCount: 2,
+      selectedMemoryCount: 0,
+      renderedMemoryCount: 0,
+      visibleMemoryCount: 0,
       omittedMemoryCount: 0,
     });
-    expect(first.workspaceMemory).toContain("Pinned architecture discovery.");
-    expect(first.workspaceMemory).not.toContain("after turn acceptance");
-    expect(first.workspaceMemory!.indexOf("Pinned architecture discovery.")).toBeLessThan(
-      first.workspaceMemory!.indexOf("Secondary implementation discovery."),
-    );
+    // Candidate selection, ordering and the budget are still exercised through
+    // the receipt above; the standing block they used to render into is gone.
+    expect(first.workspaceMemory).toBeNull();
     const [durableReceipt] = await shared.admin<
       Array<{ memorySelections: Array<Record<string, unknown>> }>
     >`
@@ -568,17 +569,9 @@ describe("accepted-turn Company Brain context selection", () => {
     expect(JSON.stringify(durableReceipt?.memorySelections)).not.toContain(
       "Pinned architecture discovery.",
     );
-    expect(Object.keys(durableReceipt!.memorySelections[0]!).sort()).toEqual(
-      [
-        "contentHash",
-        "id",
-        "kind",
-        "memoryVersion",
-        "pinned",
-        "textCodecVersion",
-        "textHash",
-      ].sort(),
-    );
+    // Nothing is composed, so nothing is recorded as selected. The receipt
+    // stays content-free either way, which is what the assertion above pins.
+    expect(durableReceipt!.memorySelections).toEqual([]);
 
     await saveWorkspaceMemory(client.db, {
       accountId: f.grant.accountId,
@@ -603,9 +596,9 @@ describe("accepted-turn Company Brain context selection", () => {
     expect(replay.receipt.id).toBe(first.receipt.id);
     expect(replay.receipt.selectionHash).toBe(first.receipt.selectionHash);
     expect(replay.receipt.memoryEnabled).toBe(true);
-    expect(replay.receipt.memoryPromptMode).toBe("legacy_standing");
-    expect(replay.receipt.selectedMemoryCount).toBe(2);
-    expect(replay.workspaceMemory).not.toContain("newer row");
+    expect(replay.receipt.memoryPromptMode).toBe("retrieval_only");
+    expect(replay.receipt.selectedMemoryCount).toBe(0);
+    expect(replay.workspaceMemory).toBeNull();
 
     await correctWorkspaceMemory(client.db, {
       accountId: f.grant.accountId,
@@ -622,15 +615,15 @@ describe("accepted-turn Company Brain context selection", () => {
     const shrunk = await resolve(recovery);
     expect(shrunk.receipt.id).toBe(first.receipt.id);
     expect(shrunk.receipt).toMatchObject({
-      selectedMemoryCount: 2,
-      renderedMemoryCount: 2,
+      selectedMemoryCount: 0,
+      renderedMemoryCount: 0,
       visibleMemoryCount: 0,
       budgetOmittedMemoryCount: 0,
-      authorizationOmittedMemoryCount: 2,
-      omittedMemoryCount: 2,
+      authorizationOmittedMemoryCount: 0,
+      omittedMemoryCount: 0,
     });
-    expect(shrunk.workspaceMemory).toContain("currently empty");
-    expect(shrunk.workspaceMemory).not.toContain("Hash-drifted content");
+    // Revocation and hash drift still shrink the visible set on the receipt.
+    expect(shrunk.workspaceMemory).toBeNull();
   }, 180_000);
 
   test("derives root and child containment and denies cross-session, cross-tenant, and direct runtime table access", async () => {
@@ -871,7 +864,7 @@ describe("accepted-turn Company Brain context selection", () => {
     }
   }, 180_000);
 
-  test("caps deterministic candidate order and renders only whole entries inside the standing token budget", async () => {
+  test("selects and renders nothing even with many candidates and a stored opt-out", async () => {
     if (!shared || !client) return;
     const f = await fixture();
     const writes = Array.from({ length: 52 }, (_, index) =>
@@ -905,24 +898,24 @@ describe("accepted-turn Company Brain context selection", () => {
     });
     await prepareSnapshots(attempt);
     const selected = await resolve(attempt);
-    expect(selected.receipt.selectedMemoryCount).toBe(50);
-    expect(selected.receipt.renderedMemoryCount).toBeLessThan(50);
-    expect(selected.receipt.visibleMemoryCount).toBe(selected.receipt.renderedMemoryCount);
-    expect(selected.receipt.budgetOmittedMemoryCount).toBe(
-      50 - selected.receipt.renderedMemoryCount,
-    );
-    expect(selected.receipt.authorizationOmittedMemoryCount).toBe(0);
-    expect(selected.receipt.omittedMemoryCount).toBe(selected.receipt.budgetOmittedMemoryCount);
-    expect(selected.workspaceMemory).toContain("bounded-00-");
-    expect(selected.workspaceMemory!.indexOf("bounded-00-")).toBeLessThan(
-      selected.workspaceMemory!.indexOf("bounded-51-"),
-    );
-    expect(selected.workspaceMemory).not.toContain("bounded-01-");
-    expect(Buffer.byteLength(selected.workspaceMemory!, "utf8")).toBeLessThan(16_000);
-    for (const renderedLine of selected
-      .workspaceMemory!.split("\n")
-      .filter((candidateLine) => candidateLine.startsWith("- ["))) {
-      expect(renderedLine.endsWith("x".repeat(700))).toBe(true);
-    }
+    // This workspace has many candidate memories and stores the retired
+    // opt-out, which is the shape that used to produce the largest standing
+    // block. Nothing is selected, nothing is rendered, and the receipt says so
+    // rather than recording a subset that was never composed.
+    expect(selected.receipt).toMatchObject({
+      memoryPromptMode: "retrieval_only",
+      selectedMemoryCount: 0,
+      renderedMemoryCount: 0,
+      visibleMemoryCount: 0,
+      budgetOmittedMemoryCount: 0,
+      authorizationOmittedMemoryCount: 0,
+      omittedMemoryCount: 0,
+    });
+    expect(selected.workspaceMemory).toBeNull();
+    // The rows themselves are untouched and still reachable through search.
+    const [remaining] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from knowledge_memories
+      where workspace_id = ${f.grant.workspaceId} and status = 'active'`;
+    expect(remaining!.count).toBeGreaterThanOrEqual(50);
   }, 180_000);
 });
