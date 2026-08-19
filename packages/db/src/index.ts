@@ -17457,14 +17457,39 @@ export async function getSessionAuthorityEpoch(
 }
 
 /**
- * Mint-time live-authority recheck for a human viewer subject (0281). True
- * when the subject currently holds workspace authority the same way the
+ * THE canonical live-workspace-authority resolver for one exact subject.
+ *
+ * `getWorkspaceGrant` is a bare `workspace_memberships` join and is therefore
+ * NOT a complete authority answer: a managed human's personal workspace
+ * deliberately has no row in that table (migration 0219 raises on one), so its
+ * owner's access is the `organization_memberships.personal_workspace_id`
+ * pointer instead. Every seam that needs "does this subject still hold
+ * workspace authority here" must call this function rather than re-deriving
+ * the rule, so the owner-only personal-workspace exception has exactly one
+ * implementation.
+ *
+ * True when the subject currently holds workspace authority the same way the
  * route-time access builder derives it: a `workspace_memberships` row whose
  * owning organization membership (when one exists) is active, or an active
  * organization membership whose personal-workspace pointer is exactly this
- * workspace (managed personal workspaces deliberately have no membership
- * row). Never infers authority any other way; a deleted membership row and a
- * suspended/revoked organization membership are both false.
+ * workspace. Never infers authority any other way; a deleted membership row
+ * and a suspended/revoked organization membership are both false.
+ *
+ * **Owner-only by construction.** The personal-workspace half reads
+ * `list_self_organization_memberships`, a SECURITY DEFINER seam that raises
+ * `42501` unless the requested subject is exactly the transaction's own
+ * subject GUC. The only fact it can ever return is "subject X owns personal
+ * workspace W", for the X named in the call - so no account/organization
+ * administrator, API key, service, or delegated bearer can reach a different
+ * human's personal workspace through it, whatever subject a caller supplies.
+ * Callers must still keep the exception off the request principal's own
+ * authorization path: pass only a subject the caller is entitled to ask about
+ * (its own canonical managed-cookie subject, or the frozen owner of a
+ * delegation it already holds).
+ *
+ * Non-`user:` subjects (API keys, services, configured/local principals) can
+ * never own an organization membership, so they short-circuit to the plain
+ * membership answer instead of tripping the seam's `42501`.
  */
 export async function subjectHasLiveWorkspaceAuthority(
   db: Database,
@@ -17482,6 +17507,9 @@ export async function subjectHasLiveWorkspaceAuthority(
             and workspace_id = ${input.workspaceId}
           limit 1`,
       );
+      if (!input.subjectId.startsWith("user:")) {
+        return Boolean(membershipRow);
+      }
       const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
         scopedDb,
         sql`select list_self_organization_memberships(${input.subjectId}) as result`,

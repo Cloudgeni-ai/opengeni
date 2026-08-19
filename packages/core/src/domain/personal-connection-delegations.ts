@@ -18,19 +18,58 @@ import {
   getSessionTurnPersonalConnectionDelegations,
   getConnectionMetadata,
   getSocialConnection,
-  getWorkspaceGrant,
   listConnectionsMetadata,
   listSocialConnections,
   resolvePersonalConnectionAuthoritySelectionOrigin,
+  subjectHasLiveWorkspaceAuthority,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 
 export type PersonalConnectionDelegationSource =
-  | { kind: "subject"; subjectId: string }
+  | {
+      kind: "subject";
+      subjectId: string;
+      /**
+       * Organization of the authorizing grant. The owner-only
+       * personal-workspace pointer lives on an organization membership, so
+       * the account is part of the question, not an optimization.
+       */
+      accountId: string;
+    }
   | { kind: "turn"; sessionId: string; turnId: string }
   | { kind: "none" };
+
+/**
+ * Is `subjectId` still authorized in `workspaceId`?
+ *
+ * Personal-connection authority has always been "the owner must still belong
+ * to this workspace", but the old check was `getWorkspaceGrant` - a bare
+ * `workspace_memberships` join. A managed human's personal workspace
+ * deliberately has no row in that table (migration 0219 raises on one), so the
+ * join answered `false` for the one person who always belongs, and every
+ * personal connection silently disappeared inside the owner's own private
+ * workspace.
+ *
+ * `subjectHasLiveWorkspaceAuthority` is the single canonical resolver for this
+ * question and already models both halves - the membership row and the
+ * organization membership's `personal_workspace_id` pointer. It is owner-only
+ * by construction (see its doc comment in `@opengeni/db`): the only fact its
+ * pointer branch can return is "subject X owns personal workspace W" for the
+ * exact X asked about, so it cannot widen an administrator, API key, service,
+ * or delegated bearer into someone else's personal workspace.
+ *
+ * The subjects asked about here are exactly the two this seam is entitled to
+ * ask about: the authorizing grant's own subject at freeze time, and the
+ * frozen `ownerSubjectId` of a delegation the caller already holds.
+ */
+async function ownerStillBelongsToWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await subjectHasLiveWorkspaceAuthority(db, input);
+}
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 export type AuthorizedAtlassianConnection = {
   connection: ConnectionMetadata;
@@ -65,7 +104,7 @@ export function personalConnectionDelegationSourceForGrant(
   ) {
     return { kind: "none" };
   }
-  return { kind: "subject", subjectId: grant.subjectId };
+  return { kind: "subject", subjectId: grant.subjectId, accountId: grant.accountId };
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
@@ -104,7 +143,13 @@ export async function authorizedSocialConnectionsForGrant(input: {
   ).filter((item) => item.connectionType === "social");
   const personal: AuthorizedSocialConnection[] = [];
   for (const delegation of delegations) {
-    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId)))
+    if (
+      !(await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        subjectId: delegation.ownerSubjectId,
+      }))
+    )
       continue;
     const connection = await getSocialConnection(
       input.db,
@@ -161,7 +206,13 @@ export async function authorizedAtlassianConnectionsForGrant(input: {
   ).filter((item) => item.connectionType === "atlassian");
   const personal: AuthorizedAtlassianConnection[] = [];
   for (const delegation of delegations) {
-    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId))) {
+    if (
+      !(await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        subjectId: delegation.ownerSubjectId,
+      }))
+    ) {
       continue;
     }
     const connection = await getConnectionMetadata(
@@ -504,6 +555,12 @@ export function withFrozenPersonalConnectionDelegations(input: {
   resolveCredential: ConnectionCredentialResolver;
   settings: Pick<Settings, "mcpServers">;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  /**
+   * Does the frozen delegation owner still hold workspace authority? Supply
+   * the canonical `subjectHasLiveWorkspaceAuthority` resolver, never a bare
+   * `workspace_memberships` lookup: a managed human's personal workspace has
+   * no membership row, so a bare lookup revokes the owner's own connections.
+   */
   ownerHasWorkspaceMembership: (subjectId: string) => Promise<boolean>;
 }): ConnectionCredentialResolver {
   return async (request) => {
@@ -605,7 +662,11 @@ export async function freezePersonalConnectionDelegations(input: {
     });
   }
   const ownerSubjectId = input.source.subjectId;
-  const membership = await getWorkspaceGrant(input.db, ownerSubjectId, input.workspaceId);
+  const membership = await ownerStillBelongsToWorkspace(input.db, {
+    accountId: input.source.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: ownerSubjectId,
+  });
   const targetLocalConnections = await listConnectionsMetadata(
     input.db,
     input.workspaceId,

@@ -20,9 +20,9 @@ import {
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   getConnectionMetadata,
-  getWorkspaceGrant,
   prepareConnectorActionApproval,
   requireFile,
+  subjectHasLiveWorkspaceAuthority,
   type ConnectorActionAttemptIdentity,
   type ConnectorActionInvocation,
   type Database,
@@ -56,7 +56,14 @@ export type GoogleDrivePublicationTarget = Readonly<{
 
 export type GoogleDrivePublicationPorts = {
   getConnection: typeof getConnectionMetadata;
-  getMembership: typeof getWorkspaceGrant;
+  /**
+   * Live workspace authority for the frozen delegation owner. This must be the
+   * canonical resolver, not a bare `workspace_memberships` join: a managed
+   * human's personal workspace deliberately has no membership row (migration
+   * 0219), so a bare join denies the owner publication inside their own
+   * private workspace.
+   */
+  getMembership: typeof subjectHasLiveWorkspaceAuthority;
   readMaterialization: typeof readAuthorizedEditableArtifactMaterialization;
   requireFile: typeof requireFile;
   prepare: typeof prepareConnectorActionApproval;
@@ -67,7 +74,7 @@ export type GoogleDrivePublicationPorts = {
 
 const defaultPorts: GoogleDrivePublicationPorts = {
   getConnection: getConnectionMetadata,
-  getMembership: getWorkspaceGrant,
+  getMembership: subjectHasLiveWorkspaceAuthority,
   readMaterialization: readAuthorizedEditableArtifactMaterialization,
   requireFile,
   prepare: prepareConnectorActionApproval,
@@ -78,10 +85,11 @@ const defaultPorts: GoogleDrivePublicationPorts = {
 
 export async function resolveGoogleDrivePublicationTarget(
   db: Database,
-  workspaceId: string,
+  workspace: { accountId: string; workspaceId: string },
   delegations: readonly McpPersonalConnectionDelegation[],
   ports: Pick<GoogleDrivePublicationPorts, "getConnection" | "getMembership"> = defaultPorts,
 ): Promise<GoogleDrivePublicationTarget | null> {
+  const { workspaceId } = workspace;
   const frozen = delegations.filter(
     (delegation) =>
       delegation.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
@@ -91,7 +99,14 @@ export async function resolveGoogleDrivePublicationTarget(
   if (frozen.length !== 1) return null;
   const delegation = frozen[0]!;
   const activated = delegation.userDelegation !== undefined;
-  if (!activated && !(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) {
+  if (
+    !activated &&
+    !(await ports.getMembership(db, {
+      accountId: workspace.accountId,
+      workspaceId,
+      subjectId: delegation.ownerSubjectId,
+    }))
+  ) {
     return null;
   }
   const originWorkspaceId = activated ? delegation.originWorkspaceId : workspaceId;

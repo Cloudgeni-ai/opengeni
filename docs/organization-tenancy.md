@@ -128,6 +128,71 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### `getWorkspaceGrant` is not an authority answer
+
+`getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
+`workspace_memberships` join. Because a managed personal workspace deliberately
+has no row there, it returns `null` for the one human who always belongs. Any
+seam that re-derives "does this subject still hold workspace authority here"
+from that join denies the owner inside their own private workspace.
+
+`subjectHasLiveWorkspaceAuthority` (same module) is **the** canonical resolver
+for that question and models both halves - the membership row whose owning
+organization membership is active, and the active organization membership whose
+`personal_workspace_id` pointer is exactly this workspace. Every predicate-style
+authority probe must call it instead of re-deriving the rule, so the owner-only
+exception has one implementation.
+
+It is owner-only *by construction*, not by caller discipline: the pointer branch
+reads `list_self_organization_memberships`, a SECURITY DEFINER seam that raises
+`42501` unless the requested subject is exactly the transaction's own subject
+GUC and is shaped `user:%`. The only fact the branch can ever return is "subject
+X owns personal workspace W" for the exact X asked about, so no account or
+organization administrator, API key, service, or delegated bearer can reach a
+different human's personal workspace through it, whatever subject a caller
+supplies. Non-`user:` subjects short-circuit to the plain membership answer.
+Callers must still pass only a subject they are entitled to ask about: their own
+canonical managed-cookie subject, or the frozen owner of a delegation they
+already hold.
+
+The personal-connection authority path uses it at every hop -
+`freezePersonalConnectionDelegations` and the `*ForGrant` connection resolvers
+in `packages/core/src/domain/personal-connection-delegations.ts`, the per-turn
+`ownerHasWorkspaceMembership` port and
+`resolveGoogleDrivePublicationTarget` in `apps/worker/src/activities/` - and the
+stream-token mint recheck in `apps/api/src/sandbox/viewer.ts`. Do not
+reintroduce a `getWorkspaceGrant` boolean in those positions, and do not widen
+`getWorkspaceGrant` itself: it is also the fallback inside
+`accessGrantAuthorization`, where a delegated bearer or API-key principal would
+inherit any widening.
+
+Seams still on the bare join, and therefore still wrong for a personal
+workspace, are known and deliberately out of scope of that change. They deny
+the owner rather than leaking to anyone else, so each is a broken feature, not
+an authority hole:
+
+- `listSessionsForSubject` and `setSessionPin` (`packages/db/src/index.ts`) -
+  the session list and pin routes 403 in the owner's personal workspace.
+- `listWorkspaceMembers` / `listWorkspacesForSubject`
+  (`packages/db/src/index.ts`) - empty roster; the workspace-list fallback is
+  latent only because `managedPersonalWorkspacePermissions` carries
+  `workspace:read`.
+- `withCodexAppsRequestAuthorization`, `designateCodexAppsCredential`,
+  `clearCodexAppsCredential` (`packages/db/src/index.ts`) and
+  `resolveCodexAppsCredentialIdForRun`
+  (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
+  execution.
+- `saveNewSessionDraftInTransaction` (`packages/db/src/new-session-drafts.ts`) -
+  composer draft saves.
+- The OAuth-callback grant rechecks over the signed `state.subjectId` in
+  `apps/api/src/integrations/{oauth-client,provider-oauth,google-drive,atlassian,fiken,social-oauth}.ts`
+  and `apps/api/src/routes/connections.ts` - connecting a provider *from* a
+  personal workspace fails at callback even though `connections:write` is in
+  the personal permission set.
+- SQL seams without the personal-workspace disjunct:
+  `transition_session_visibility` (0225), `fork_session_content` (0289), and
+  the xAI subscription authority views/functions in 0234.
+
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
 capability with a fixed schema-plus-`pg_catalog` search path, PUBLIC execution

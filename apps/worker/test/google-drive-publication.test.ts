@@ -215,10 +215,10 @@ describe("Google Drive editable artifact publication", () => {
   test("discovers only an active subject-owned write connection with an explicit destination", async () => {
     const resolved = await resolveGoogleDrivePublicationTarget(
       {} as Database,
-      workspaceId,
+      { accountId, workspaceId },
       [publicationDelegation],
       {
-        getMembership: async () => ({}) as never,
+        getMembership: async () => true,
         getConnection: async () => connection() as never,
       },
     );
@@ -226,10 +226,10 @@ describe("Google Drive editable artifact publication", () => {
     expect(
       await resolveGoogleDrivePublicationTarget(
         {} as Database,
-        workspaceId,
+        { accountId, workspaceId },
         [publicationDelegation],
         {
-          getMembership: async () => ({}) as never,
+          getMembership: async () => true,
           getConnection: async () =>
             connection({
               grantedScopes: ["https://www.googleapis.com/auth/drive.readonly"],
@@ -240,10 +240,10 @@ describe("Google Drive editable artifact publication", () => {
     expect(
       await resolveGoogleDrivePublicationTarget(
         {} as Database,
-        workspaceId,
+        { accountId, workspaceId },
         [publicationDelegation],
         {
-          getMembership: async () => null,
+          getMembership: async () => false,
           getConnection: async () => {
             throw new Error("must not read a connection after membership revocation");
           },
@@ -253,10 +253,10 @@ describe("Google Drive editable artifact publication", () => {
     expect(
       await resolveGoogleDrivePublicationTarget(
         {} as Database,
-        workspaceId,
+        { accountId, workspaceId },
         [publicationDelegation, publicationDelegation],
         {
-          getMembership: async () => ({}) as never,
+          getMembership: async () => true,
           getConnection: async () => connection() as never,
         },
       ),
@@ -268,7 +268,7 @@ describe("Google Drive editable artifact publication", () => {
     let membershipReads = 0;
     const resolved = await resolveGoogleDrivePublicationTarget(
       {} as Database,
-      workspaceId,
+      { accountId, workspaceId },
       [
         {
           ...publicationDelegation,
@@ -291,7 +291,7 @@ describe("Google Drive editable artifact publication", () => {
       {
         getMembership: async () => {
           membershipReads += 1;
-          return null;
+          return false;
         },
         getConnection: async (_db, requestedWorkspaceId) => {
           expect(requestedWorkspaceId).toBe(originWorkspaceId);
@@ -677,7 +677,7 @@ describe("Google Drive editable artifact publication", () => {
         }) as never,
       ports: {
         getConnection: async () => connection() as never,
-        getMembership: async () => ({}) as never,
+        getMembership: async () => true,
         readMaterialization: async () => materialization() as never,
         requireFile: async () => sourceFile,
         prepare: async () => ({ managed: true, decision: "allow" }),
@@ -701,10 +701,15 @@ describe("Google Drive editable artifact publication", () => {
     const frozenDelegation = { ...publicationDelegation, outputDestination: destination };
     // Frozen matches live: resolves to the frozen destination.
     expect(
-      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
-        getMembership: async () => ({}) as never,
-        getConnection: async () => connection() as never,
-      }),
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        { accountId, workspaceId },
+        [frozenDelegation],
+        {
+          getMembership: async () => true,
+          getConnection: async () => connection() as never,
+        },
+      ),
     ).toEqual(target);
     // The owner re-pointed the connection at a different folder after
     // acceptance: the already-accepted turn must not publish anywhere.
@@ -716,19 +721,24 @@ describe("Google Drive editable artifact publication", () => {
       selectedAt: "2026-08-16T00:00:00.000Z",
     };
     expect(
-      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
-        getMembership: async () => ({}) as never,
-        getConnection: async () => moved as never,
-      }),
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        { accountId, workspaceId },
+        [frozenDelegation],
+        {
+          getMembership: async () => true,
+          getConnection: async () => moved as never,
+        },
+      ),
     ).toBeNull();
     // A pre-freeze delegation keeps the bounded legacy live resolution.
     expect(
       await resolveGoogleDrivePublicationTarget(
         {} as Database,
-        workspaceId,
+        { accountId, workspaceId },
         [publicationDelegation],
         {
-          getMembership: async () => ({}) as never,
+          getMembership: async () => true,
           getConnection: async () => moved as never,
         },
       ),
@@ -750,7 +760,7 @@ describe("Google Drive editable artifact publication", () => {
       resolveCredential: async () => ({ status: "auth_needed" }) as never,
       ports: {
         getConnection: async () => connection() as never,
-        getMembership: async () => ({}) as never,
+        getMembership: async () => true,
         readMaterialization: async () => materialization() as never,
         requireFile: async () => sourceFile,
         prepare: async () => ({ managed: true, decision: "allow" }),
@@ -788,7 +798,7 @@ describe("Google Drive editable artifact publication", () => {
       resolveCredential: async () => ({ status: "auth_needed" }) as never,
       ports: {
         getConnection: async () => connection() as never,
-        getMembership: async () => ({}) as never,
+        getMembership: async () => true,
         readMaterialization: async () => materialization() as never,
         requireFile: async () => sourceFile,
         prepare: async () => ({ managed: true, decision: "allow" }),
@@ -826,7 +836,7 @@ describe("Google Drive editable artifact publication", () => {
         }) as never,
       ports: {
         getConnection: async () => connection() as never,
-        getMembership: async () => ({}) as never,
+        getMembership: async () => true,
         readMaterialization: async () => materialization() as never,
         requireFile: async () => sourceFile,
         prepare: async () => ({ managed: true, decision: "allow" }),
