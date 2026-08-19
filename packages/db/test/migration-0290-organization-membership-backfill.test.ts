@@ -658,7 +658,7 @@ describe("migration 0290 organization membership backfill", () => {
         order by subject_id`
     ).map((row) => row.subject_id);
     const mergeOrder = [...defaultCollationOrder].sort();
-    if (defaultCollationOrder.join(" ") === mergeOrder.join(" ")) return;
+    if (defaultCollationOrder.join("\u0000") === mergeOrder.join("\u0000")) return;
 
     const seen: string[] = [];
     let cursor: string | null = null;
