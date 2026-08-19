@@ -26,6 +26,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   defaultBranch: "main",
   versionBranch: "changeset-release/main",
   releaseWorkflowPath: ".github/workflows/release.yml",
+  openVersionPrWorkflowPath: ".github/workflows/open-version-pr.yml",
   ciWorkflowPath: ".github/workflows/ci.yml",
   ciWorkflowFile: "ci.yml",
   sealWorkflowPath: ".github/workflows/seal-release-head.yml",
@@ -468,6 +469,21 @@ function releasePushContext(env) {
   };
 }
 
+function versionPrDispatchContext(env) {
+  if (env.GITHUB_EVENT_NAME === "push") return releasePushContext(env);
+  const context = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath,
+    "workflow_dispatch",
+  );
+  requiredEnvironment(env, ["GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID"]);
+  return {
+    ...context,
+    runAttempt: assertPositiveInteger(env.GITHUB_RUN_ATTEMPT, "GITHUB_RUN_ATTEMPT"),
+    runId: assertPositiveInteger(env.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
+  };
+}
+
 function automationInputs(env, suppliedInputs) {
   const values = suppliedInputs ?? {
     prNumber: env.AUTOMATION_PR_NUMBER,
@@ -628,7 +644,7 @@ async function convergedVersionHeadSha(api, context, options = {}) {
 export async function validateVersionPrDispatch(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
-  const context = releasePushContext(env);
+  const context = versionPrDispatchContext(env);
   const prNumber = assertPositiveInteger(
     options.prNumber ?? env.VERSION_PR_NUMBER,
     "Version PR number",
@@ -676,15 +692,16 @@ export async function validateVersionPrDispatch(options = {}) {
 function assertSourceRun(run, context) {
   invariant(run?.id === context.sourceRunId, "source Release run ID changed");
   invariant(run?.run_attempt === context.sourceRunAttempt, "source Release run attempt changed");
-  invariant(run?.event === "push", "source Release run was not triggered by a push");
+  const pushRelease =
+    run?.event === "push" && run?.path === RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath;
+  const dispatchedVersion =
+    run?.event === "workflow_dispatch" &&
+    run?.path === RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath;
+  invariant(pushRelease || dispatchedVersion, "source run is not a trusted Version PR producer");
   invariant(
     (run?.status === "in_progress" && run.conclusion === null) ||
       (run?.status === "completed" && run.conclusion === "success"),
     "source Release run is neither in progress nor successfully completed",
-  );
-  invariant(
-    run?.path === RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
-    "source run did not execute the Release workflow",
   );
   invariant(
     run?.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
