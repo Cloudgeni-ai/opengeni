@@ -3731,6 +3731,18 @@ describe("workflow contracts", () => {
       e2e.steps.find((step: any) => step.name === "Run exactly the impacted E2E tests").run,
     ).toContain("scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e");
 
+    for (const jobName of ["e2e-shards", "browser-acceptance", "package-contracts"]) {
+      const aptStabilizer = ci.jobs[jobName].steps.find(
+        (step: any) => step.name === "Stabilize Ubuntu package downloads",
+      );
+      expect(aptStabilizer.run).toContain(
+        "https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu",
+      );
+      expect(aptStabilizer.run).toContain('Acquire::Retries "3";');
+      expect(aptStabilizer.run).toContain('Acquire::http::Timeout "30";');
+      expect(aptStabilizer.run).toContain('Acquire::https::Timeout "30";');
+    }
+
     const expectedGateNames = {
       "test-suite": [
         "React warning-free test gate",
@@ -3738,6 +3750,7 @@ describe("workflow contracts", () => {
         "Recovery integration regressions",
       ],
       "browser-acceptance": [
+        "Stabilize Ubuntu package downloads",
         "Install pinned Chromium runtime",
         "Install pinned cross-browser runtimes",
         "Editable artifact browser acceptance",
@@ -3761,6 +3774,7 @@ describe("workflow contracts", () => {
         "Production native artifact contracts",
         "Build client packages (contracts + SDK + React)",
         "Reproduce committed modality WASM packages from clean Rust sources",
+        "Stabilize Ubuntu package downloads",
         "Install Chromium for packed WASM package proof",
         "Packed SDK Worker and modality WASM packages",
         "Publish closure guard",
