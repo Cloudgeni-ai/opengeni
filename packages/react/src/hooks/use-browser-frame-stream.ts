@@ -389,7 +389,7 @@ export function useBrowserFrameStream(
         connectSocket();
       } catch (cause) {
         if (attachmentAbort.signal.aborted || disposed) return;
-        fail(cause);
+        fail(cause, !isPlacementGenerationLossError(cause));
       }
     };
 
@@ -422,4 +422,9 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
     return new Uint8Array(await value.arrayBuffer());
   }
   throw new Error("browser frame stream returned a non-binary message");
+}
+
+function isPlacementGenerationLossError(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return /placement instance changed|controller authority changed/i.test(message);
 }

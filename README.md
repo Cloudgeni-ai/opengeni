@@ -406,6 +406,20 @@ obligations. The configured storage bucket is frozen into that authority and
 must still match on resume; a legacy bucket mismatch or an unexpected retained
 database reference aborts before any external object is touched.
 
+Before activating organization authority, gate the cutover on the strictly
+read-only tenancy parity check. It exits `0` when every invariant gate passed,
+`1` when one failed, and `2` when it could not run; it never writes, repairs,
+or widens anything, and no reported mismatch is resolved toward user authority
+(see [`docs/organization-tenancy.md`](docs/organization-tenancy.md) phase E):
+
+```bash
+bun run db:check-tenancy-parity --organization-id <uuid>
+```
+
+Point it at a **writable primary** - it cannot run against a read replica,
+because it claims and releases its own transaction-local capability row
+(`25006: cannot execute DELETE in a read-only transaction`).
+
 GitHub endpoints:
 
 - `GET /v1/workspaces/:workspaceId/github/app`

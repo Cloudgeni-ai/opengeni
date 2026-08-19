@@ -827,7 +827,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (operation !== "computer.end") {
         assertConnectedMachineComputerAccess(enrollment, operation);
       }
-      assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
+      const placementInstanceId = attachedEndPlacementInstanceId(
+        operation,
+        expectedPlacementInstanceId,
+        device.connectionGeneration,
+      );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
@@ -856,7 +860,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       waitSignal.throwIfAborted();
       return await callback({
         placement: expectedPlacement,
-        placementInstanceId: device.connectionGeneration,
+        placementInstanceId,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
       });
@@ -1570,6 +1574,20 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
   if (expected !== null && expected !== actual) {
     throw new ComputerSessionStateError("ComputerSession placement instance changed");
   }
+}
+
+/** End must still reach the live agent with the session's original token
+ *  fence. A later Chrome generation must not block ScreenCaptureKit teardown. */
+function attachedEndPlacementInstanceId(
+  operation: ChannelAOperation,
+  expectedPlacementInstanceId: string | null,
+  liveGeneration: string,
+): string {
+  if (operation === "computer.end" && expectedPlacementInstanceId) {
+    return expectedPlacementInstanceId;
+  }
+  assertPlacementInstance(expectedPlacementInstanceId, liveGeneration);
+  return liveGeneration;
 }
 
 function assertConnectedMachineComputerAccess(

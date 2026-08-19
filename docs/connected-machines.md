@@ -77,6 +77,20 @@ ScreenCaptureKit/CGEvent desktop feature as the release build. This is the suppo
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
 
+Attached Chrome profiles are a separate physical placement. Inventory reports a
+`connectionGeneration` that becomes the BrowserSession/ComputerSession
+`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+device's still-live sessions `lost` with `controller_transition_expired` and
+never rebinds the old controller token. In-flight `/end` (`ending`) is left
+to finish physical teardown instead of being rewritten to `lost`. Heartbeats
+must prove the live generation before they pulse. `/end` still talks to the
+live agent with that original fence so the Mac helper can `stopCapture` and
+exit; otherwise ScreenCaptureKit leaves `replayd` and multiple
+`opengeni-computer-native` processes running. A new shared-seat
+ComputerSession displaces the previous helper. Open a replacement through
+**Browser → New browser → Connected Chrome**; generic New desktop does not
+infer the Chrome device.
+
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
@@ -128,8 +142,13 @@ Rules to keep in mind:
   available for context, but the platform never `git clone`s onto the user's
   real filesystem — the machine uses its own git auth.
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
-  target the backend is the machine itself, so leave it off (or `"none"`) and
-  point at the machine with `targetSandboxId`.
+  target the backend is the machine itself, so leave it off and point at the
+  machine with `targetSandboxId`.
+- **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
+  machine-primary home**, even when the parent is `backend: none`. Omitted
+  `sandbox` still shares the creator's box only when no machine is named.
+  Explicit `sandbox: "shared"` or `{ groupId }` plus a machine target is a
+  **422**.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required

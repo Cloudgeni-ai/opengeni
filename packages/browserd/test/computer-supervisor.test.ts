@@ -84,6 +84,106 @@ describe("ComputerSupervisor", () => {
     }
   });
 
+  test("displaces other shared-seat helpers when a new ComputerSession is created", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-displace-");
+    const drivers: FixtureComputerDriver[] = [];
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      displaceExistingSessions: true,
+      environmentAllocator: fixtureEnvironmentAllocator(),
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        drivers.push(driver);
+        return driver;
+      },
+    });
+    try {
+      await supervisor.createSession(options());
+      await supervisor.createSession({
+        ...options(),
+        computerSessionId: "33333333-3333-4333-8333-333333333333",
+        controllerGeneration: "controller-2",
+      });
+      expect(supervisor.listSessions()).toEqual([
+        expect.objectContaining({
+          computerSessionId: "33333333-3333-4333-8333-333333333333",
+        }),
+      ]);
+      expect(drivers[0]?.closed).toBe(true);
+      expect(drivers[1]?.closed).toBe(false);
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("serializes concurrent shared-seat creates so only one helper survives", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-displace-race-");
+    const drivers: FixtureComputerDriver[] = [];
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      displaceExistingSessions: true,
+      environmentAllocator: fixtureEnvironmentAllocator(),
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        drivers.push(driver);
+        return driver;
+      },
+    });
+    try {
+      await Promise.all([
+        supervisor.createSession(options()),
+        supervisor.createSession({
+          ...options(),
+          computerSessionId: "33333333-3333-4333-8333-333333333333",
+          controllerGeneration: "controller-2",
+        }),
+      ]);
+      expect(supervisor.listSessions()).toHaveLength(1);
+      expect(drivers.filter((driver) => !driver.closed)).toHaveLength(1);
+      expect(drivers.filter((driver) => driver.closed)).toHaveLength(1);
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps isolated-seat ComputerSessions side by side", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-isolated-");
+    const drivers: FixtureComputerDriver[] = [];
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      environmentAllocator: fixtureEnvironmentAllocator(),
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        drivers.push(driver);
+        return driver;
+      },
+    });
+    try {
+      await supervisor.createSession(options());
+      await supervisor.createSession({
+        ...options(),
+        computerSessionId: "33333333-3333-4333-8333-333333333333",
+        controllerGeneration: "controller-2",
+      });
+      expect(supervisor.listSessions()).toHaveLength(2);
+      expect(drivers.every((driver) => !driver.closed)).toBe(true);
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
   test("enforces placement capacity across independent ComputerSessions", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-capacity-");
     const supervisor = await ComputerSupervisor.open({
@@ -126,6 +226,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
   };
   dispatches = 0;
   listTargetCalls = 0;
+  closed = false;
 
   constructor(
     private readonly sessionId: string,
@@ -168,7 +269,9 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     throw new Error("unused");
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    this.closed = true;
+  }
 
   private targetValue(): ComputerTarget {
     return {

@@ -1189,6 +1189,8 @@ async function createDurableSession(
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
 }

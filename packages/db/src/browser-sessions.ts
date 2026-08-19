@@ -23,6 +23,7 @@ import {
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -2194,6 +2195,15 @@ export async function touchBrowserSessionController(
           )
           .limit(1);
         if (!observed) return false;
+        if (observed.placementKind === "attached_device") {
+          if (!observed.deviceId || !observed.placementInstanceId) return false;
+          const current = await attachedDeviceGenerationMatches(tx, {
+            workspaceId: input.workspaceId,
+            deviceId: observed.deviceId,
+            placementInstanceId: observed.placementInstanceId,
+          });
+          if (!current) return false;
+        }
         if (observed.controllerHostSandboxGroupId) {
           // Match the reaper's exact lease -> holder -> BrowserSession lock
           // order. The pre-lock observation is only a locator; every authority

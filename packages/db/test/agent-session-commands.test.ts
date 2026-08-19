@@ -66,6 +66,8 @@ async function makeSession(
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(parentSessionId ? { parentSessionId } : {}),
   });
@@ -274,6 +276,8 @@ describe("attempt-fenced Agent session commands", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: parent.session.id,
       createdByActor: parent.actor,

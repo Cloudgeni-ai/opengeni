@@ -166,6 +166,8 @@ async function seedSession(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "modal",
     sandboxGroupId: input.groupId,
   });

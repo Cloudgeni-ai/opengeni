@@ -264,7 +264,10 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
-import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
+import {
+  seedNewSessionDraftInTransaction,
+  type NewSessionDraftSnapshot,
+} from "./new-session-drafts";
 import {
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
@@ -306,6 +309,7 @@ import {
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
+import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
 import {
   sessionRealtimeIsActiveInTransaction,
   settleExpiredSessionRealtimeInTransaction,
@@ -368,6 +372,8 @@ export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
+export * from "./managed-human-provisioning";
+export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
@@ -1688,87 +1694,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
 
-    const personalWorkspaceExternalSource = "opengeni:organization-membership";
-    const personalWorkspaceExternalId = `${account.id}:${subjectId}`;
-    let [personalWorkspace] = await tx
-      .select()
-      .from(schema.workspaces)
-      .where(
-        and(
-          eq(schema.workspaces.externalSource, personalWorkspaceExternalSource),
-          eq(schema.workspaces.externalId, personalWorkspaceExternalId),
-        ),
-      )
-      .limit(1);
-    if (!personalWorkspace) {
-      [personalWorkspace] = await tx
-        .insert(schema.workspaces)
-        .values({
-          accountId: account.id,
-          name: "Personal workspace",
-          slug: null,
-          externalSource: personalWorkspaceExternalSource,
-          externalId: personalWorkspaceExternalId,
-        })
-        .onConflictDoUpdate({
-          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-          set: { updatedAt: new Date() },
-        })
-        .returning();
-    }
-    if (!personalWorkspace) {
-      throw new Error("Failed to ensure personal workspace");
-    }
-    if (
-      personalWorkspace.accountId !== account.id ||
-      personalWorkspace.externalSource !== personalWorkspaceExternalSource ||
-      personalWorkspace.externalId !== personalWorkspaceExternalId
-    ) {
-      throw new Error("Managed personal workspace identity conflict");
-    }
-
-    await setRlsContext(tx as unknown as Database, {
+    await ensureManagedHumanPersonalWorkspace(tx as unknown as Database, {
       accountId: account.id,
-      workspaceId: personalWorkspace.id,
+      subjectId,
     });
-    const [personalWorkspaceControl] = await tx
-      .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
-      .from(schema.workspaceInferenceControls)
-      .where(eq(schema.workspaceInferenceControls.workspaceId, personalWorkspace.id))
-      .limit(1);
-    if (!personalWorkspaceControl) {
-      await tx
-        .insert(schema.workspaceInferenceControls)
-        .values({
-          workspaceId: personalWorkspace.id,
-          accountId: account.id,
-        })
-        .onConflictDoNothing();
-    }
-    await setRlsContext(tx as unknown as Database, {
-      accountId: account.id,
-      workspaceId: null,
-    });
-
-    const [provisionedMembership] = await rawRows<{
-      organization_membership_id: string;
-      personal_workspace_id: string;
-    }>(
-      tx,
-      sql`
-        select * from ensure_managed_human_personal_workspace(
-          ${account.id},
-          ${subjectId},
-          ${personalWorkspace.id}
-        )
-      `,
-    );
-    if (
-      !provisionedMembership ||
-      provisionedMembership.personal_workspace_id !== personalWorkspace.id
-    ) {
-      throw new Error("Managed organization membership provisioning did not converge");
-    }
 
     // Keep persisted legacy grants first so defaultWorkspaceId and callers that
     // still select the first grant preserve the existing default workspace.
@@ -13310,7 +13239,7 @@ export async function resolveWorkspaceMemoryBlock(
   if (
     !workspace ||
     !resolveWorkspaceMemoryEnabled(workspace.settings) ||
-    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+    resolveWorkspaceMemoryPromptMode() === "retrieval_only"
   ) {
     return null;
   }
@@ -17601,6 +17530,419 @@ export async function inventoryOrganizationTenancy(
 }
 
 /**
+ * How much independent evidence a parity gate carries.
+ *
+ * - `constraint` / `trigger`: the property is already enforced by the physical
+ *   schema, so the gate is a shadow verification that the enforcement is still
+ *   present and validated - it cannot be the first line of defence.
+ * - `runtime`: nothing in the schema prevents the violation. These are the
+ *   gates that carry real evidence about a cutover.
+ */
+export type TenancyParityGateBasis = "constraint" | "trigger" | "runtime";
+
+export interface TenancyParityGateDefinition {
+  readonly id: string;
+  readonly title: string;
+  readonly basis: TenancyParityGateBasis;
+  /** What a violation means, and why it must never resolve to user authority. */
+  readonly rule: string;
+}
+
+export interface TenancyParityGateResult extends TenancyParityGateDefinition {
+  readonly status: "pass" | "fail";
+  readonly violations: number;
+  /** Bounded row identifiers only - never subjects, names, keys, or values. */
+  readonly evidence: readonly string[];
+  readonly evidenceTruncated: boolean;
+}
+
+export interface TenancyParityLaneDefinition {
+  readonly id: string;
+  readonly title: string;
+  /**
+   * `drainable`: a backfill can take it to zero.
+   * `observation`: immutable history, reported over a bounded recent window so
+   * that "the lane stopped being exercised" is still a reachable zero.
+   */
+  readonly kind: "drainable" | "observation";
+  /** The workstream that owns draining this lane, when it is not this one. */
+  readonly owner?: string;
+}
+
+export interface TenancyParityLaneResult extends TenancyParityLaneDefinition {
+  readonly count: number;
+  readonly drained: boolean;
+}
+
+export interface TenancyParityUnverifiable {
+  readonly id: string;
+  readonly title: string;
+  /** Why no honest number exists for this property today. */
+  readonly reason: string;
+}
+
+export interface TenancyParityReport {
+  readonly schemaVersion: 1;
+  readonly organizationId: string;
+  readonly generatedAt: string;
+  readonly evidenceLimit: number;
+  readonly observationWindowDays: number;
+  /** `fail` when any invariant gate has at least one violation. */
+  readonly status: "pass" | "fail";
+  /** Every gate passes AND every compatibility lane is drained. */
+  readonly cutoverReady: boolean;
+  readonly summary: {
+    readonly gates: number;
+    readonly gatesFailed: number;
+    readonly violations: number;
+    readonly lanes: number;
+    readonly lanesUndrained: number;
+    readonly unverifiable: number;
+  };
+  readonly gates: readonly TenancyParityGateResult[];
+  readonly lanes: readonly TenancyParityLaneResult[];
+  readonly unverifiable: readonly TenancyParityUnverifiable[];
+}
+
+/**
+ * Ordered catalog of the organization-tenancy parity gates (phase E). Every id
+ * matches a key emitted by `check_organization_tenancy_parity` (migration
+ * 0298); a gate present here but absent from the seam is reported as a
+ * structural mismatch rather than silently passing.
+ */
+export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
+  {
+    id: "membership_personal_workspace_pointer",
+    title: "Every active organization membership identifies a personal workspace",
+    basis: "constraint",
+    rule: "organization_memberships_active_personal_workspace_check (0218).",
+  },
+  {
+    id: "membership_personal_workspace_exclusive",
+    title: "A personal workspace identifies at most one organization membership",
+    basis: "constraint",
+    rule: "organization_memberships_personal_workspace_idx (0218) partial unique index.",
+  },
+  {
+    id: "membership_personal_workspace_same_organization",
+    title: "A personal workspace belongs to the membership's organization",
+    basis: "constraint",
+    rule: "organization_memberships_personal_workspace_account_fk (0218) composite FK.",
+  },
+  {
+    id: "personal_workspace_has_no_membership_row",
+    title: "A managed personal workspace carries no workspace_memberships row",
+    basis: "runtime",
+    rule:
+      "The owner-only personal-workspace grant is a derived access projection, not a " +
+      "delegable membership. A persisted row there is exactly how membership CRUD and " +
+      "the subject-membership fallback would widen it into shared access.",
+  },
+  {
+    id: "authority_resource_single_owner",
+    title: "One owning membership per user resource",
+    basis: "runtime",
+    rule:
+      "The physical unique index is per (account, membership, kind, resource), so two " +
+      "different memberships can still claim one resource. The ambiguity is reported; " +
+      "it must never be resolved toward either claimant's user authority.",
+  },
+  {
+    id: "grant_delegation_fence_complete",
+    title: "Zero partial delegations",
+    basis: "constraint",
+    rule: "organization_user_resource_grants_session_fence_check (0218).",
+  },
+  {
+    id: "grant_owner_membership_active",
+    title: "An active grant's owning organization membership is active",
+    basis: "runtime",
+    rule:
+      "Suspension revokes personal-resource grants and offboarding runs the same " +
+      "teardown. A live delegation owned by a suspended or revoked human is a fallback " +
+      "to user authority.",
+  },
+  {
+    id: "grant_authority_live",
+    title: "An active grant's user-resource authority is not revoked",
+    basis: "runtime",
+    rule: "Revocation is immediate; an active grant over a revoked authority outlives it.",
+  },
+  {
+    id: "grant_session_fence_not_ahead",
+    title: "A session-fenced grant's epoch is never ahead of its session",
+    basis: "runtime",
+    rule:
+      "Authority epochs are monotonic and the fence is copied from the session at " +
+      "issuance, so a higher grant epoch would survive the advance meant to revoke it.",
+  },
+  {
+    id: "session_owner_provenance_paired",
+    title: "Session owner provenance is complete and paired",
+    basis: "trigger",
+    rule:
+      "guard_session_authority_write (0225) raises 23514 on a half-set owner pair or a " +
+      "user_private session with no owner.",
+  },
+  {
+    id: "session_owner_subject_matches_membership",
+    title: "A session's denormalized owner subject names its owning membership",
+    basis: "runtime",
+    rule: "The pair is written together but nothing keeps it consistent afterwards.",
+  },
+  {
+    id: "session_owner_membership_same_organization",
+    title: "A session's owning membership exists in the session's organization",
+    basis: "constraint",
+    rule: "sessions_owner_membership_fk (0218) composite FK.",
+  },
+  {
+    id: "login_binding_dispute_propagated",
+    title: "A disputed login binding disputed its canonical identity",
+    basis: "runtime",
+    rule:
+      "The (provider, provider_account) unique index makes a duplicate binding " +
+      "impossible, so a provider-account collision is recorded by disputing the " +
+      "existing binding AND both identities. A disputed binding whose identity is still " +
+      "usable is a collision that never fenced its identity.",
+  },
+  {
+    id: "identity_active_binding_owned",
+    title: "A canonical identity's active login binding is its own",
+    basis: "runtime",
+    rule: "canonical_human_identities_active_binding_fk proves existence, never ownership.",
+  },
+  {
+    id: "user_scoped_resource_live_anchor",
+    title: "Shadow scope comparison: every user-scope claim has a live anchor",
+    basis: "runtime",
+    rule:
+      "Legacy effective scope is workspace for every resource. A connection, variable " +
+      "set, rig, Connected Machine, or Document whose proposed effective scope is user " +
+      "must have an active authority owned by an active membership. Without one there " +
+      "is no reachable user resolution: it must fall back to workspace or deny.",
+  },
+];
+
+/**
+ * Compatibility lanes. These are legacy populations, NOT invariant violations:
+ * a non-zero lane blocks a cutover but is not schema corruption.
+ */
+export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
+  {
+    // NOT bounded today: 0256's guard_connection_authority_write still actively
+    // mints `legacy_user` for any NEW connection whose subject has no active
+    // organization membership, and no migration upgrades an existing
+    // `legacy_user` row to `user`. It becomes drainable only once the
+    // membership backfill lands and stops the mint.
+    id: "connectionsLegacyUser",
+    title:
+      "Connections on the legacy_user authority lane (drainable after the membership backfill)",
+    kind: "drainable",
+    owner: "organization-membership backfill",
+  },
+  {
+    id: "workspaceWriterAdmissionsLegacyUnattributedInWindow",
+    title:
+      "Workspace writer admissions with legacy_unattributed authority in the observation window",
+    kind: "observation",
+  },
+  {
+    id: "workspaceWriterProcessesLegacyUnattributedInWindow",
+    title:
+      "Retained workspace processes with legacy_unattributed authority in the observation window",
+    kind: "observation",
+  },
+  {
+    id: "documentsLegacyPersonalNullAuthority",
+    title: "Legacy personal Documents with no common authority",
+    kind: "drainable",
+    owner: "document authority migration",
+  },
+  {
+    id: "codexCredentialsUnattributedConnector",
+    title: "Codex subscription credentials with no recorded connecting human",
+    kind: "drainable",
+    owner: "Codex connector ownership repair",
+  },
+  {
+    id: "workspaceMemberSubjectsWithoutMembershipAnchor",
+    title: "Humans with workspace access but no organization-membership anchor",
+    kind: "drainable",
+  },
+  {
+    id: "sessionsAttributableButUnattributed",
+    title: "Ownerless sessions whose creator today's write fence would attribute",
+    kind: "drainable",
+  },
+  {
+    id: "connectionUseLegacyResolutionsInWindow",
+    title: "Legacy/pre-snapshot connection resolutions inside the observation window",
+    kind: "observation",
+  },
+];
+
+/**
+ * Properties phase E names that have no honest measurement today. They are
+ * reported explicitly instead of being emitted as a counter that can never
+ * reach zero.
+ */
+export const TENANCY_PARITY_UNVERIFIABLE: readonly TenancyParityUnverifiable[] = [
+  {
+    id: "variableSetsLegacyClassification",
+    title: "Variable Sets awaiting explicit authority classification",
+    reason:
+      "workspace_variable_sets.authority_scope defaults to 'workspace' and " +
+      "workspace_variable_sets_authority_shape_check REQUIRES authority_id IS NULL for " +
+      "organization/workspace scope. A never-classified legacy row and a deliberately " +
+      "workspace-owned row are therefore byte-identical: no discriminator exists. Any " +
+      "'unclassified' counter here is structurally total minus user-scoped and can " +
+      "never drain to zero.",
+  },
+  {
+    id: "rigsLegacyClassification",
+    title: "Rigs awaiting explicit authority classification",
+    reason:
+      "Same shape as Variable Sets (rigs_authority_shape_check, 0262): a legacy row and " +
+      "a deliberate workspace row are indistinguishable.",
+  },
+  {
+    id: "machinesLegacyClassification",
+    title: "Connected Machines awaiting explicit authority classification",
+    reason:
+      "Same shape as Variable Sets (enrollments_authority_shape_check, 0262): a legacy " +
+      "row and a deliberate workspace row are indistinguishable.",
+  },
+  {
+    id: "sessionsDefaultVisibility",
+    title: "Sessions still on the default visibility",
+    reason:
+      "'workspace_shared' is the permanent correct visibility for a shared session, not " +
+      "a legacy marker. Counting it would count the intended steady state forever.",
+  },
+  {
+    id: "sessionsOwnerless",
+    title: "Sessions with no owning organization membership",
+    reason:
+      "A null owner is legitimate forever for API-key, delegated, and service-created " +
+      "sessions, and for creators with no active organization membership - " +
+      "guard_session_authority_write (0225) attributes only subject-created sessions " +
+      "whose creator holds both an active organization membership and a workspace " +
+      "membership. Only that attributable subset is drainable; it is reported as the " +
+      "'sessionsAttributableButUnattributed' lane.",
+  },
+];
+
+interface RawTenancyParityGate {
+  violations?: number;
+  evidence?: unknown;
+  truncated?: boolean;
+}
+
+/**
+ * Compose the operator-facing parity report from the raw seam output. Pure and
+ * total: an id the seam did not emit is reported as a failing gate with an
+ * explicit structural-mismatch violation rather than silently passing.
+ */
+export function composeTenancyParityReport(
+  raw: Record<string, unknown>,
+  options?: { generatedAt?: string },
+): TenancyParityReport {
+  const rawGates = (raw.gates ?? {}) as Record<string, RawTenancyParityGate | undefined>;
+  const rawLanes = (raw.lanes ?? {}) as Record<string, number | undefined>;
+  const gates: TenancyParityGateResult[] = TENANCY_PARITY_GATES.map((definition) => {
+    const observed = rawGates[definition.id];
+    if (!observed || typeof observed.violations !== "number") {
+      return {
+        ...definition,
+        status: "fail" as const,
+        violations: Number.NaN,
+        evidence: [],
+        evidenceTruncated: false,
+      };
+    }
+    const evidence = Array.isArray(observed.evidence)
+      ? observed.evidence.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    return {
+      ...definition,
+      status: observed.violations === 0 ? ("pass" as const) : ("fail" as const),
+      violations: observed.violations,
+      evidence,
+      evidenceTruncated: observed.truncated === true,
+    };
+  });
+  const lanes: TenancyParityLaneResult[] = TENANCY_PARITY_LANES.map((definition) => {
+    const count = rawLanes[definition.id];
+    const resolved = typeof count === "number" ? count : Number.NaN;
+    return { ...definition, count: resolved, drained: resolved === 0 };
+  });
+  const gatesFailed = gates.filter((gate) => gate.status === "fail").length;
+  const lanesUndrained = lanes.filter((lane) => !lane.drained).length;
+  const violations = gates.reduce(
+    (total, gate) => total + (Number.isFinite(gate.violations) ? gate.violations : 0),
+    0,
+  );
+  return {
+    schemaVersion: 1,
+    organizationId: String(raw.organizationId ?? ""),
+    generatedAt: options?.generatedAt ?? new Date().toISOString(),
+    evidenceLimit: typeof raw.evidenceLimit === "number" ? raw.evidenceLimit : 0,
+    observationWindowDays:
+      typeof raw.observationWindowDays === "number" ? raw.observationWindowDays : 0,
+    status: gatesFailed === 0 ? "pass" : "fail",
+    cutoverReady: gatesFailed === 0 && lanesUndrained === 0,
+    summary: {
+      gates: gates.length,
+      gatesFailed,
+      violations,
+      lanes: lanes.length,
+      lanesUndrained,
+      unverifiable: TENANCY_PARITY_UNVERIFIABLE.length,
+    },
+    gates,
+    lanes,
+    unverifiable: TENANCY_PARITY_UNVERIFIABLE,
+  };
+}
+
+/**
+ * Read-only organization tenancy parity check (0298, phase E). Verifies the
+ * structural tenancy invariants, reports the compatibility lanes, and names the
+ * properties that are currently unverifiable. It never writes, repairs, or
+ * widens anything, and no reported mismatch is resolved toward user authority.
+ */
+export async function checkOrganizationTenancyParity(
+  db: Database,
+  input: {
+    organizationId: string;
+    evidenceLimit?: number;
+    observationWindowDays?: number;
+    generatedAt?: string;
+  },
+): Promise<TenancyParityReport> {
+  const raw = await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select check_organization_tenancy_parity(
+          ${input.organizationId},
+          ${input.evidenceLimit ?? 10},
+          ${input.observationWindowDays ?? 30}
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+  return composeTenancyParityReport(
+    raw,
+    input.generatedAt === undefined ? undefined : { generatedAt: input.generatedAt },
+  );
+}
+
+/**
  * Organization-tenancy phase D classification assertion (0291) for Variable Sets, Rigs, and
  * Connected Machines. Read-only over every resource table: it proves each row
  * already carries an explicit terminal authority classification and never
@@ -17623,6 +17965,75 @@ export async function verifyOrganizationResourceClassification(
         scopedDb,
         sql`select verify_organization_resource_classification(
           ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
+/**
+ * Organization-tenancy phase D session ownership classification (0297). Read-only over
+ * `sessions`: it proves every attributed session points at one live,
+ * internally consistent organization membership, and names a fixed reason code
+ * for every session it refuses to attribute. Supplying `runKey` additionally
+ * records those refusals durably through the tenancy backfill ledger (one
+ * `sessions` receipt plus one append-only unresolved row each); the result
+ * reports `ledgerAvailable` so a run that could not record its obligations is
+ * visible rather than silent. A run key may be used once - the ledger refuses
+ * to re-open a settled receipt.
+ *
+ * It never writes a session row and never infers user authority from
+ * `created_by`, a default workspace, or current workspace access.
+ */
+export async function classifyOrganizationSessionOwnership(
+  db: Database,
+  input: { organizationId: string; runKey?: string | null },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select classify_organization_session_ownership(
+          ${input.organizationId}, ${input.runKey ?? null}::text
+        ) as result`,
+      );
+      return (row?.result ?? {}) as Record<string, unknown>;
+    },
+  );
+}
+
+/**
+ * Organization-tenancy phase D session ownership backfill (0297). One bounded, resumable,
+ * idempotent batch of the only two deterministic repairs: a session sitting in
+ * exactly one active membership's personal workspace whose creator subject is
+ * that same membership, and the parent-inheritance closure migration 0225's own
+ * trigger would have produced. `dryRun` defaults to true. Candidates are
+ * claimed with `FOR UPDATE ... SKIP LOCKED`, so concurrent drivers never
+ * contend; keep calling while `moreLikely` is true.
+ */
+export async function backfillOrganizationSessionOwnership(
+  db: Database,
+  input: {
+    organizationId: string;
+    limit?: number;
+    dryRun?: boolean;
+    runKey?: string | null;
+  },
+): Promise<Record<string, unknown>> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select backfill_organization_session_ownership(
+          ${input.organizationId},
+          ${input.limit ?? 500}::integer,
+          ${input.dryRun ?? true}::boolean,
+          ${input.runKey ?? null}::text
         ) as result`,
       );
       return (row?.result ?? {}) as Record<string, unknown>;
@@ -25258,6 +25669,8 @@ export type SessionCreateInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   variableSetId?: string | null;
   rigId?: string | null;
@@ -25752,6 +26165,8 @@ async function createSessionInTransaction(
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
+            reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
             sandboxGroupId: input.sandboxGroupId ?? id,
@@ -50356,6 +50771,7 @@ export type InitializeSessionStartInput = {
   consumeNewSessionDraft?: {
     subjectId: string;
     expectedRevision: number;
+    expectedSnapshot?: NewSessionDraftSnapshot;
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
@@ -50556,6 +50972,9 @@ export async function initializeSessionStartAtomically(
               workspaceId: input.workspaceId,
               subjectId: input.consumeNewSessionDraft.subjectId,
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+              ...(input.consumeNewSessionDraft.expectedSnapshot
+                ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+                : {}),
             });
           }
           return {
@@ -50750,13 +51169,8 @@ export async function initializeSessionStartAtomically(
                   tools: session.tools,
                   toolsProvided: session.toolPolicy?.mode === "explicit",
                   model: session.model,
-                  reasoningEffort: reasoningEffortForMetadata(
-                    session.metadata,
-                    input.reasoningEffortFallback,
-                  ),
-                  latencyMode:
-                    input.turnExecutionPolicy?.latencyMode ??
-                    latencyModeForMetadata(session.metadata, "standard"),
+                  reasoningEffort: session.reasoningEffort,
+                  latencyMode: input.turnExecutionPolicy?.latencyMode ?? session.latencyMode,
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: input.turnExecutionPolicy
@@ -50872,6 +51286,9 @@ export async function initializeSessionStartAtomically(
             workspaceId: input.workspaceId,
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+            ...(input.consumeNewSessionDraft.expectedSnapshot
+              ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+              : {}),
           });
         }
         const changed =
@@ -52500,11 +52917,11 @@ export async function claimSessionWorkForAttempt(
                     model: latestStarted?.model ?? session.model,
                     reasoningEffort: reasoningEffortForMetadata(
                       { reasoningEffort: latestStarted?.reasoningEffort },
-                      reasoningEffortForMetadata(session.metadata, "medium"),
+                      session.reasoningEffort as ReasoningEffort,
                     ),
                     latencyMode: latencyModeForMetadata(
                       { latencyMode: latestStarted?.latencyMode },
-                      latencyModeForMetadata(session.metadata, "standard"),
+                      session.latencyMode as LatencyMode,
                     ),
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
                     sandboxOs: latestStarted?.sandboxOs ?? session.sandboxOs,
@@ -52818,13 +53235,13 @@ export async function claimSessionWorkForAttempt(
             {
               reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
             },
-            reasoningEffortForMetadata(session.metadata, "medium"),
+            session.reasoningEffort as ReasoningEffort,
           );
           let latencyMode = latencyModeForMetadata(
             {
               latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
             },
-            latencyModeForMetadata(session.metadata, "standard"),
+            session.latencyMode as LatencyMode,
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
@@ -58112,6 +58529,8 @@ export async function getScheduledTargetSessionExecution(
         visibility: schema.sessions.visibility,
         authorityEpoch: schema.sessions.authorityEpoch,
         model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
         metadata: schema.sessions.metadata,
         tools: schema.sessions.tools,
         sandboxBackend: schema.sessions.sandboxBackend,
@@ -58200,11 +58619,11 @@ export async function getScheduledTargetSessionExecution(
       model: latestStarted?.model ?? session.model,
       reasoningEffort: reasoningEffortForMetadata(
         { reasoningEffort: latestStarted?.reasoningEffort },
-        reasoningEffortForMetadata(session.metadata, "medium"),
+        session.reasoningEffort as ReasoningEffort,
       ),
       latencyMode: latencyModeForMetadata(
         { latencyMode: latestStarted?.latencyMode },
-        latencyModeForMetadata(session.metadata, "standard"),
+        session.latencyMode as LatencyMode,
       ),
       tools: (latestStarted?.tools ?? session.tools) as ToolRef[],
       sandboxBackend: (latestStarted?.sandboxBackend ?? session.sandboxBackend) as SandboxBackend,
@@ -60868,6 +61287,8 @@ function mapSession(
     ),
     createdByContext: row.createdByContext ?? {},
     model: row.model,
+    reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: row.latencyMode as LatencyMode,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
     sandboxGroupId: row.sandboxGroupId,

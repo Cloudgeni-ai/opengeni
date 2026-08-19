@@ -458,9 +458,10 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
         return formatted("", 75);
       },
     };
-    // Keep this far below the production 15s deadline while leaving enough event-loop
-    // headroom for the reserved cleanup admission under a loaded parallel test runner.
-    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 200 });
+    // Keep this far below the production 15s deadline. The data fence is 3/4 of
+    // this budget; the last quarter is reserved for cleanup admission. 200ms left
+    // only 50ms, which a loaded CI shard can spend before `rm` is admitted.
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 1_000 });
     const error = await c.screenshot().catch((value) => value);
     expect(error).toBeInstanceOf(ScreenshotReadError);
     expect((error as ScreenshotReadError).code).toBe("read_timeout");

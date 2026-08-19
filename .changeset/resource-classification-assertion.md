@@ -1,9 +1,0 @@
----
-"@opengeni/db": minor
----
-
-Add the explicit resource-classification assertion seam for Variable Sets, Rigs, and Connected Machines (migration 0291, rolling; organization-tenancy phase D slices 4-5), plus `bun run db:verify-resource-classification`. These three families need no data rewrite and none is performed: `authority_scope` is `NOT NULL DEFAULT 'workspace'` on all three tables and every `*_authority_shape_check` was `VALIDATE`d at creation, so a legacy unmigrated row and a deliberately workspace-scoped row are byte-identical and there is no discriminator to classify on. `connections` (0256) is the one sibling family with a genuine one (`subject_id` plus an active organization membership); none of these tables has it, and phase D forbids substituting `created_by`, connection attribution, a default workspace, a resource name, or current access.
-
-The seam therefore asserts and receipts instead. It proves per row what no constraint enforces - that a row claiming user ownership points at an authority of the matching `resource_kind`/`resource_id`, that the authority and its owning organization membership are both live, and that the delegation still has an origin workspace - and records every failure as an unresolved obligation with a fixed reason code through the tenancy backfill ledger, never as a guess or a rewrite. Its report states `ledgerAvailable` plainly so a run that could not record its obligations is visible rather than silent.
-
-It is a `SECURITY DEFINER` capability-claiming seam rather than migration SQL for a structural reason: all three tables are FORCE RLS behind `workspace_rls_visible`, which is false while the workspace GUC is unset, and the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`. A plain migration-time `UPDATE` on these tables matches zero rows and reports success on such a deployment, and only appears to work in a harness that migrates as superuser.

@@ -1,5 +1,22 @@
 # @opengeni/config
 
+## 0.17.0
+
+### Minor Changes
+
+- 4541ab2: Named pre-activation opt-out for canonical organization-tenancy authority: `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` (`organizationTenancyCanonicalActivationEnabled`) defaults to `false`, the reversible pre-activation posture, and is parsed with `EnvBoolean` so an explicit `false` cannot be coerced into activation. Leaving it unset or false is the supported way to decline or defer the one-way tenancy cutover; it is not a kill switch, and setting it back to false after an activation migration commits restores nothing. The chart's `config` map and `.env.example` pin the same safe default. The rollback boundary, activation preconditions, and operator procedure are documented in `docs/organization-tenancy.md` and `docs/deployment.md`.
+
+### Patch Changes
+
+- f4afa19: Advertise SuperGrok image input so Grok and Gateway Kimi receive attachments, `view_image`, and `computer_*` screenshots. DeepSeek stays text-only.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+
 ## 0.16.8
 
 ### Patch Changes

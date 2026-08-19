@@ -392,6 +392,8 @@ async function seed(opts: SeedOpts = {}) {
     resources: [],
     metadata: {},
     model: "gpt-test",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: opts.sandboxBackend ?? "modal",
   });
   const enrollment = await createEnrollment(db, {
@@ -1424,6 +1426,8 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
         resources: [],
         metadata: {},
         model: "gpt-test",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "modal",
       });
     const sessionA = await mk("a");

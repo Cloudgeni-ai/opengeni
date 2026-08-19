@@ -38,6 +38,11 @@ describe("useComposer embedding policy", () => {
           client,
           workspaceId: WORKSPACE_ID,
           draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
           events,
         }),
       [] as SessionEvent[],
@@ -103,6 +108,11 @@ describe("useComposer embedding policy", () => {
           client,
           workspaceId: WORKSPACE_ID,
           draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
         }),
       undefined,
     );
@@ -148,6 +158,11 @@ describe("useComposer embedding policy", () => {
           client: fakeClient({}),
           workspaceId: WORKSPACE_ID,
           draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
         }),
       undefined,
     );
@@ -205,6 +220,11 @@ describe("useComposer embedding policy", () => {
           client,
           workspaceId: WORKSPACE_ID,
           draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
           sendExtras: {
             resources: [
               {

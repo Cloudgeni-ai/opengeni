@@ -568,6 +568,31 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0300's tenancy backfill ledger seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not
+    -- yet exist, and these three live in the data schema rather than
+    -- opengeni_private, so the blanket sweep above never reaches them.
+    -- Re-converge them here so migrate-then-provision matches the reverse
+    -- order; without this the "only write path" seam is unreachable on a
+    -- green-field database.
+    FOR routine_signature IN
+      SELECT unnest(ARRAY[
+        'open_tenancy_backfill_receipt(uuid, text, text)',
+        'record_tenancy_backfill_unresolved(uuid, uuid, text)',
+        'complete_tenancy_backfill_receipt(uuid, bigint, bigint, text)'
+      ])
+    LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
+        IS NOT NULL
+      THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)},
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0291's classification assertion seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not yet
     -- exist, and it lives in the data schema rather than opengeni_private, so
@@ -581,6 +606,35 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.verify_organization_resource_classification(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0297's session ownership seams have the same shape: their own
+    -- conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and they live in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches them. (Their inner capability
+    -- predicate IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.classify_organization_session_ownership(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.classify_organization_session_ownership(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.backfill_organization_session_ownership(uuid,integer,boolean,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.backfill_organization_session_ownership(uuid, integer, boolean, text) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
@@ -651,6 +705,21 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0289 creates this definer accessor before opengeni_app may
+    -- exist, so its migration-time GRANT is skipped on the supported
+    -- migrate-then-provision order. Re-converge it here.
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_activation_authority(uuid,uuid[])',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_activation_authority(uuid, uuid[]) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

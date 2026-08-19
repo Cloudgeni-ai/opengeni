@@ -224,6 +224,8 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(db, {

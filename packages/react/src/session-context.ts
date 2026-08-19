@@ -316,6 +316,7 @@ export function useEmbeddedSession(
       "streamEvents",
       "getComposerDraft",
       "saveComposerDraft",
+      "submitComposerDraft",
       "sendMessage",
       "steerMessage",
       "getQueue",

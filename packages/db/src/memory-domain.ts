@@ -430,12 +430,6 @@ This workspace has shared long-lived memory, currently empty. Your context is lo
 export const MEMORY_SEARCH_TOOL_DESCRIPTION =
   "Search this workspace's shared long-lived memory (semantic + keyword). Use it before starting a new non-trivial task when the injected notes or current conversation do not already answer how the workspace does something. Results persist in conversation context: do not repeat the same search as routine setup on every continuation, resume, or interrupted turn. Returns scored records with ids. Indexed workspace documents are a separate store: search those with `knowledge_search`/`knowledge_get` (or `search_documents`) on the Document Search (docs) MCP server, not with this tool.";
 
-export const MEMORY_SAVE_TOOL_DESCRIPTION =
-  "Save one durable, future-useful fact to this workspace's shared memory: a stable preference, an environment fact, a procedure that worked, or a decision and its reason. Write it compactly (1–3 sentences), self-contained (no 'this session/above' references, absolute dates, name concrete things), so a future session can act on it alone. Do NOT save: session-specific state, speculation, anything derivable from the repo/docs, or near-duplicates of existing memories (search first — to refine or replace an existing record pass replaces_id). Most turns have nothing worth saving.";
-
-export const MEMORY_CORRECT_TOOL_DESCRIPTION =
-  "Flag a workspace memory as wrong or outdated the moment you discover it — this is the most valuable memory action, because a wrong memory misleads every future session. Pass the record's id (as shown in [brackets]); optionally give replacement_text with the corrected fact, otherwise the record is archived.";
-
 // ---------------------------------------------------------------------------
 // Text normalization + hashing (MUST match migration 0045 backfill exactly)
 // ---------------------------------------------------------------------------

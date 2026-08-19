@@ -70,6 +70,7 @@ import {
   UninstallPluginRequest as ContractUninstallPluginRequest,
   UninstallPluginResult as ContractUninstallPluginResult,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  SubmitComposerDraftRequest as ContractSubmitComposerDraftRequest,
   SlackUserLinkAccessRequest as ContractSlackUserLinkAccessRequest,
   PrepareSlackUserLinkAccessRequest as ContractPrepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessMutationRequest as ContractSlackUserLinkAccessMutationRequest,
@@ -190,6 +191,7 @@ import type {
   PreviewPluginRequest,
   ReasoningEffort,
   SaveNewSessionDraftRequest,
+  SubmitComposerDraftRequest,
   SlackUserLinkAccessRequest,
   PrepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessMutationRequest,
@@ -484,6 +486,7 @@ describe("SDK / contracts parity", () => {
       toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
+      latencyMode: "standard",
       options: {
         sandboxBackend: "modal",
         goal: { text: "finish", maxAutoContinuations: 8 },
@@ -491,6 +494,24 @@ describe("SDK / contracts parity", () => {
       },
     };
     expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
+  });
+
+  test("established-session submit requires one exact policy snapshot", () => {
+    const submit: SubmitComposerDraftRequest = {
+      expectedDraftRevision: 4,
+      clientEventId: "submit-draft-4",
+      delivery: "steer",
+      text: "freeze this",
+      annotations: [],
+      resources: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      connectionAuthorities: [],
+    };
+    expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
+    const { latencyMode: _latencyMode, ...missingLatency } = submit;
+    expect(ContractSubmitComposerDraftRequest.safeParse(missingLatency).success).toBe(false);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {

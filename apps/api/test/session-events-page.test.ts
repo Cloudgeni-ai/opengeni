@@ -94,6 +94,8 @@ async function fixture(): Promise<{
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {

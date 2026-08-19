@@ -255,6 +255,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const workspaceMutationFence = await claimRoutingAttempt({
@@ -543,6 +545,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "selfhosted",
       createdBy: { kind: "subject", subjectId },
       subjectId,
@@ -672,6 +676,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const acquired = await acquireLease(db, {
@@ -769,6 +775,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
 
@@ -991,6 +999,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const manifest = buildManifest(settings, [], {
@@ -1064,6 +1074,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     // A first-class Modal sibling row (no group/lease/box) — the categorical strand.
@@ -1126,6 +1138,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const enrollment = await createEnrollment(db, {
@@ -1211,6 +1225,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     // A stranded Modal-sibling pointer that WOULD reconcile if the lookup succeeded.
@@ -1288,6 +1304,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const enrollment = await createEnrollment(db, {

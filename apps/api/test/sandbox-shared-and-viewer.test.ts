@@ -627,6 +627,52 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     ).rejects.toMatchObject({ status: 422 });
   }, 60_000);
 
+  test("explicit 'shared' plus targetSandboxId ⇒ 422 (a machine target is an own-box home)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "pin to a machine while sharing",
+        sandbox: "shared",
+        targetSandboxId: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
+    });
+  }, 60_000);
+
+  test("explicit {groupId} plus targetSandboxId ⇒ 422 (a machine target cannot join a sibling group)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "pin to a machine while joining a group",
+        sandbox: { groupId: parent.sandboxGroupId },
+        targetSandboxId: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        "targetSandboxId requires an own sandbox (omit sandbox or pass 'new'); it cannot join a shared group",
+    });
+  }, 60_000);
+
   test("targetSandboxId is consumed (seedTargetSandbox path) — rejects on a backend:'none' session", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
@@ -785,6 +831,8 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       variableSetId: environmentId,
       sandboxGroupId: a.sandboxGroupId,
@@ -1015,6 +1063,8 @@ async function seedWarmBox(
     resources: [],
     metadata: {},
     model: "m",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "local",
   });
   const sandboxGroupId = session.sandboxGroupId;
@@ -1091,6 +1141,8 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       resources: [],
       metadata: {},
       model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "local",
     });
     const acquired = await acquireLease(db, {
@@ -1437,6 +1489,8 @@ describe("P1.4 GATED live-Modal viewer-keep-warm (opt-in)", () => {
         resources: [],
         metadata: {},
         model: "m",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "modal",
       });
 

@@ -101,6 +101,7 @@ export const sessionClient = {
   streamEvents: unused,
   getComposerDraft: unused,
   saveComposerDraft: unused,
+  submitComposerDraft: unused,
   sendMessage: unused,
   steerMessage: unused,
   getQueue: unused,

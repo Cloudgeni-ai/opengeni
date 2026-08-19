@@ -99,6 +99,8 @@ async function session(
     toolPolicy: input.toolPolicy ?? EXPLICIT,
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
   });

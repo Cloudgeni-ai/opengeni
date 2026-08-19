@@ -140,6 +140,8 @@ async function fixture() {
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     variableSetId: variableSet!.id,
     personalConnectionDelegations: [initialDelegation],

@@ -529,6 +529,9 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft/submit`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/composer-draft/submit",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/control`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",
     );

@@ -73,6 +73,9 @@ export type ComputerSupervisorOptions = {
   rootDirectory: string;
   nativeBinaryPath?: string;
   maxSessions?: number;
+  /** Shared physical seat (macOS attached desktop). A new ComputerSession
+   *  displaces every other helper so ScreenCaptureKit cannot accumulate. */
+  displaceExistingSessions?: boolean;
   environmentAllocator?: ComputerEnvironmentAllocator;
   baseEnvironment?: NodeJS.ProcessEnv;
   createDriver?: (context: ComputerSupervisorDriverContext) => Promise<ComputerSupervisorDriver>;
@@ -97,11 +100,13 @@ export class ComputerSupervisor {
   private readonly createDriver: (
     context: ComputerSupervisorDriverContext,
   ) => Promise<ComputerSupervisorDriver>;
+  private readonly displaceExistingSessions: boolean;
   private readonly environmentAllocator: ComputerEnvironmentAllocator;
   private readonly baseEnvironment: NodeJS.ProcessEnv;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
+  private displaceGate: Promise<void> = Promise.resolve();
   private closed = false;
 
   private constructor(options: ComputerSupervisorOptions) {
@@ -110,6 +115,7 @@ export class ComputerSupervisor {
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
     );
+    this.displaceExistingSessions = options.displaceExistingSessions === true;
     this.environmentAllocator =
       options.environmentAllocator ?? new ExistingComputerEnvironmentAllocator();
     this.baseEnvironment = { ...(options.baseEnvironment ?? process.env) };
@@ -161,31 +167,26 @@ export class ComputerSupervisor {
       this.assertSameBinding(runtime, options);
       return await this.describe(runtime);
     }
-    if (this.sessions.size + this.creating.size >= this.maxSessions) {
-      throw new InteractionControllerError(
-        "resource_unavailable",
-        "computer supervisor session capacity is exhausted",
-        true,
-      );
+    if (this.displaceExistingSessions) {
+      const displaced = this.displaceGate.then(async () => {
+        const current = this.sessions.get(options.computerSessionId);
+        if (current) {
+          this.assertSameBinding(current, options);
+          return await this.describe(current);
+        }
+        const currentPending = this.creating.get(options.computerSessionId);
+        if (currentPending) {
+          const runtime = await currentPending;
+          this.assertSameBinding(runtime, options);
+          return await this.describe(runtime);
+        }
+        await this.displaceOtherSessions(options.computerSessionId);
+        return await this.installSession(options);
+      });
+      this.displaceGate = displaced.then(() => undefined).catch(() => undefined);
+      return await displaced;
     }
-    const creation = this.buildRuntime(options);
-    this.creating.set(options.computerSessionId, creation);
-    try {
-      const runtime = await creation;
-      if (this.closed) {
-        await this.disposeRuntime(runtime, false);
-        throw new InteractionControllerError(
-          "resource_unavailable",
-          "computer supervisor is closed",
-        );
-      }
-      this.sessions.set(options.computerSessionId, runtime);
-      return await this.describe(runtime);
-    } finally {
-      if (this.creating.get(options.computerSessionId) === creation) {
-        this.creating.delete(options.computerSessionId);
-      }
-    }
+    return await this.installSession(options);
   }
 
   listSessions(): Array<
@@ -315,6 +316,54 @@ export class ComputerSupervisor {
     );
     if (failures.length > 0) {
       throw new AggregateError(failures, "computer supervisor shutdown failed");
+    }
+  }
+
+  private async installSession(
+    options: ValidatedSessionOptions,
+  ): Promise<ComputerSupervisorSession> {
+    if (this.sessions.size + this.creating.size >= this.maxSessions) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "computer supervisor session capacity is exhausted",
+        true,
+      );
+    }
+    const creation = this.buildRuntime(options);
+    this.creating.set(options.computerSessionId, creation);
+    try {
+      const runtime = await creation;
+      if (this.closed) {
+        await this.disposeRuntime(runtime, false);
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "computer supervisor is closed",
+        );
+      }
+      this.sessions.set(options.computerSessionId, runtime);
+      return await this.describe(runtime);
+    } finally {
+      if (this.creating.get(options.computerSessionId) === creation) {
+        this.creating.delete(options.computerSessionId);
+      }
+    }
+  }
+
+  private async displaceOtherSessions(computerSessionId: string): Promise<void> {
+    for (const [id, pending] of this.creating) {
+      if (id === computerSessionId) continue;
+      await pending.catch(() => undefined);
+    }
+    const others = [...this.sessions.values()].filter(
+      (runtime) =>
+        runtime.lifecycle === "active" && runtime.options.computerSessionId !== computerSessionId,
+    );
+    for (const runtime of others) {
+      await this.endSession(binding(runtime));
+    }
+    for (const [id, ending] of this.ending) {
+      if (id === computerSessionId) continue;
+      await ending.catch(() => undefined);
     }
   }
 
