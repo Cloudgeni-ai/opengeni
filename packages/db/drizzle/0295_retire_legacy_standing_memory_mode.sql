@@ -56,7 +56,7 @@ CREATE OR REPLACE FUNCTION capture_company_brain_turn_context_snapshot()
  RETURNS trigger
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO 'public', 'pg_catalog'
+ SET search_path FROM CURRENT
 AS $function$
 DECLARE
   root_id uuid;
@@ -129,7 +129,7 @@ CREATE OR REPLACE FUNCTION company_brain_context_get_or_create_selection(p_accou
  RETURNS TABLE(receipt_id uuid, root_session_id uuid, accepted_at timestamp with time zone, session_role text, memory_enabled boolean, memory_prompt_mode text, company_profile_included boolean, instruction_policy_entry_hash text, preference_descriptor_hash text, company_profile_snapshot_hash text, turn_context_snapshot_id uuid, turn_context_snapshot_hash text, turn_context_snapshot_source text, legacy_workspace_instructions text, legacy_workspace_instructions_original_utf8_bytes integer, legacy_workspace_instructions_truncated boolean, selection_hash text, selected_memory_count integer, rendered_memory_count integer, visible_memory_count integer, memory_id uuid, memory_kind text, memory_text text, memory_text_codec_version integer, memory_pinned boolean, selection_ordinal integer)
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO 'public', 'pg_catalog'
+ SET search_path FROM CURRENT
 AS $function$
 DECLARE
   authority record;
