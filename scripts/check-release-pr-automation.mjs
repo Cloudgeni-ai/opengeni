@@ -321,10 +321,6 @@ function assertIdentity(actual, expected, label) {
   return identity;
 }
 
-function hasStableIdentity(actual, expected) {
-  return actual?.id === expected.id && actual?.type === expected.type;
-}
-
 function assertVersionPull(pull, expected) {
   const expectedNumber = expected.prNumber ?? expected.number;
   invariant(pull?.number === expectedNumber, "Version PR number changed");
