@@ -17560,7 +17560,7 @@ export async function verifyOrganizationResourceClassification(
 }
 
 /**
- * OPE-204 phase D session ownership classification (0297). Read-only over
+ * Organization-tenancy phase D session ownership classification (0297). Read-only over
  * `sessions`: it proves every attributed session points at one live,
  * internally consistent organization membership, and names a fixed reason code
  * for every session it refuses to attribute. Supplying `runKey` additionally
@@ -17593,7 +17593,7 @@ export async function classifyOrganizationSessionOwnership(
 }
 
 /**
- * OPE-204 phase D session ownership backfill (0297). One bounded, resumable,
+ * Organization-tenancy phase D session ownership backfill (0297). One bounded, resumable,
  * idempotent batch of the only two deterministic repairs: a session sitting in
  * exactly one active membership's personal workspace whose creator subject is
  * that same membership, and the parent-inheritance closure migration 0225's own

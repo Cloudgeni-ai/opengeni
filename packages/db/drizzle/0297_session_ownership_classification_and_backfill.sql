@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
 -- Migration 0297: session ownership classification plus the one deterministic
--- backfill (OPE-204 phase D, slice 6).
+-- backfill (organization-tenancy phase D, slice 6).
 --
 -- THE PREMISE THIS SLICE WAS SCOPED ON WAS WRONG
 -- ----------------------------------------------
@@ -90,8 +90,8 @@
 --     later lifecycle work can attribute these; they are permanently
 --     ownerless by construction.
 --
--- WHY A SECURITY DEFINER SEAM AND NOT A MIGRATION-TIME `UPDATE` (OPE-276)
--- ----------------------------------------------------------------------
+-- WHY A SECURITY DEFINER SEAM AND NOT A MIGRATION-TIME `UPDATE`
+-- -------------------------------------------------------------
 -- `sessions` is FORCE ROW LEVEL SECURITY and its ordinary policy is
 -- workspace-scoped, which is false while the `opengeni.workspace_id` GUC is
 -- unset - as it is during migration. FORCE RLS applies to the table owner, and
@@ -747,6 +747,6 @@ END
 $session_ownership_grants$;
 
 COMMENT ON FUNCTION classify_organization_session_ownership(uuid, text) IS
-  'OPE-204 phase D session ownership classification. Read-only over sessions: it proves every attributed session points at one live, internally consistent organization membership and names a fixed reason for every session it refuses to attribute, recording those refusals through the tenancy backfill ledger. It never writes a session row and never infers user authority from created_by, a default workspace, or current workspace access.';
+  'Organization-tenancy phase D session ownership classification. Read-only over sessions: it proves every attributed session points at one live, internally consistent organization membership and names a fixed reason for every session it refuses to attribute, recording those refusals through the tenancy backfill ledger. It never writes a session row and never infers user authority from created_by, a default workspace, or current workspace access.';
 COMMENT ON FUNCTION backfill_organization_session_ownership(uuid, integer, boolean, text) IS
-  'OPE-204 phase D session ownership backfill. Attributes ONLY the two deterministic populations: a session in exactly one active membership''s personal workspace whose creator subject is that same membership, and the parent-inheritance closure that migration 0225''s own trigger would have produced. Bounded, resumable (FOR UPDATE SKIP LOCKED), idempotent, dry-run by default; it never changes visibility, authority epoch, or any read.';
+  'Organization-tenancy phase D session ownership backfill. Attributes ONLY the two deterministic populations: a session in exactly one active membership''s personal workspace whose creator subject is that same membership, and the parent-inheritance closure that migration 0225''s own trigger would have produced. Bounded, resumable (FOR UPDATE SKIP LOCKED), idempotent, dry-run by default; it never changes visibility, authority epoch, or any read.';

@@ -1,4 +1,4 @@
-// Migration 0297: OPE-204 phase D session ownership classification and the one
+// Migration 0297: organization-tenancy phase D session ownership classification and the one
 // deterministic backfill.
 //
 // The load-bearing claims under test are:
@@ -15,7 +15,7 @@
 //      changes no read: visibility, authority epoch, and `updated_at` are
 //      untouched.
 //   4. It still attributes a NON-ZERO count under a NOSUPERUSER NOBYPASSRLS
-//      function owner - the OPE-276 FORCE-RLS no-op trap that a
+//      function owner - the FORCE-RLS no-op trap that a
 //      superuser-migrating harness cannot otherwise catch.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -592,7 +592,7 @@ describe("migration 0297 session ownership", () => {
 
   test("attributes a non-zero count under a NOSUPERUSER NOBYPASSRLS owner", async () => {
     if (!shared) return;
-    // OPE-276: `sessions` is FORCE RLS, and FORCE RLS applies to the table
+    // The FORCE-RLS no-op trap: `sessions` is FORCE RLS, and FORCE RLS applies to the table
     // owner unless it holds BYPASSRLS. The documented deployment posture is a
     // non-superuser migration principal. Under that posture a seam without a
     // capability policy silently matches ZERO rows and reports success. This

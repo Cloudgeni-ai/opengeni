@@ -2,7 +2,7 @@
 "@opengeni/db": minor
 ---
 
-Add the OPE-204 phase D session ownership classification and backfill seam (migration 0297, rolling), plus `bun run db:backfill-session-ownership`.
+Add the organization-tenancy phase D session ownership classification and backfill seam (migration 0297, rolling), plus `bun run db:backfill-session-ownership`.
 
 The slice was scoped on a false premise. Sessions are not 100% owner-NULL: migration 0225's `guard_session_authority_write` trigger already derives session ownership on every INSERT, and `session_visibility_isolation` is live. 0285's `sessions.ownerless` count is the residue of that trigger's two INSERT-only branches, not a migration backlog - and part of it grows with every API-key or scheduled session.
 
@@ -10,4 +10,4 @@ Exactly two populations are deterministically repairable, and the backfill repai
 
 The backfill is dry-run by default, bounded by `--limit`, resumable through `FOR UPDATE ... SKIP LOCKED`, and idempotent over session rows. Its candidate predicate carries the classifier's `created_by_subject_id LIKE 'user:%'` fence in its own SQL on both the dry-run count and the `--apply` claim, so the write path can never attribute a subject the classifier calls permanently unrepairable; the invariant is enforced here by construction rather than borrowed from 0219/0263. A `--run-key` ledger is deliberately not re-runnable: each batch opens its own receipt and the ledger refuses to re-open a settled one, so repeat with a new key. Ledger recording is one set-based statement rather than a row-at-a-time loop. It writes only the owner pair behind 0225's own visibility-write capability: no `visibility`, `authority_epoch`, or `updated_at` change, no session event, and no read widened - every candidate is `workspace_shared`, which `session_visibility_isolation` short-circuits on. Receipt recording is `to_regprocedure`-guarded against the tenancy backfill ledger and reports `ledgerAvailable` plainly.
 
-Both routines are `SECURITY DEFINER` capability-claiming seams rather than migration SQL for a structural reason (OPE-276): `sessions` is FORCE RLS, the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`, and a plain migration-time `UPDATE sessions` therefore matches zero rows and reports success on such a deployment. The suite proves a non-zero attribution under a synthetic `NOSUPERUSER NOBYPASSRLS` owner.
+Both routines are `SECURITY DEFINER` capability-claiming seams rather than migration SQL for a structural reason: `sessions` is FORCE RLS, the documented deployment posture is a non-superuser migration principal without `BYPASSRLS`, and a plain migration-time `UPDATE sessions` therefore matches zero rows and reports success on such a deployment. The suite proves a non-zero attribution under a synthetic `NOSUPERUSER NOBYPASSRLS` owner.

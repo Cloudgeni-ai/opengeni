@@ -1,4 +1,4 @@
-// OPE-204 phase D session ownership classification and backfill (migration
+// Organization-tenancy phase D session ownership classification and backfill (migration
 // 0297). Usage:
 //
 //   # classify only - never writes a session row
