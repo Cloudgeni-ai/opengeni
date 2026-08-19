@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 1.1.3
+
+### Patch Changes
+
+- 3d451bf: Put session-coordination doctrine in the non-bypassable operational prompt: use session tools for user-requested session management, and spawn a child worker for a subtask instead of hijacking an unrelated existing session.
+- Updated dependencies [81d2da0]
+- Updated dependencies [6f61d6e]
+  - @opengeni/config@0.17.1
+  - @opengeni/sdk@2.0.1
+
 ## 1.1.2
 
 ### Patch Changes

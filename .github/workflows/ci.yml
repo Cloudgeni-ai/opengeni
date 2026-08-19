@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      actions: read # authenticate the exact push-triggered Release run
+      actions: read # authenticate the exact Version PR producer run
       checks: write # publish idempotent checks on the candidate head SHA
       contents: write # retain the exact head before any check can make the Version PR mergeable
       pull-requests: read # authenticate the bot PR and provider projection
