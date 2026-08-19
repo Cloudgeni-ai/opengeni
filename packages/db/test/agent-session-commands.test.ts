@@ -3,7 +3,6 @@ import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@open
 import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  AgentCommandAuthorityError,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -434,39 +433,34 @@ describe("attempt-fenced Agent session commands", () => {
     });
   });
 
-  test("Agent Pause rejects self and its direct parent with zero writes", async () => {
+  test("Agent Pause may target its parent with a durable receipt", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     const caller = await activeAgent(grant, parent.id);
 
-    for (const targetSessionId of [caller.session.id, parent.id]) {
-      await expect(
-        withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-          db.transaction((tx) =>
-            mutateSessionControlInTransaction(tx as unknown as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: targetSessionId,
-              actor: caller.actor,
-              operationKey: crypto.randomUUID(),
-              action: "pause",
-            }),
-          ),
-        ),
-      ).rejects.toMatchObject({
-        code: "TARGET_NOT_VERTICAL",
-      } satisfies Partial<AgentCommandAuthorityError>);
-    }
+    const paused = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: parent.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.control.state).toBe("paused");
     const rows = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ id: schema.sessionCommandReceipts.id })
         .from(schema.sessionCommandReceipts)
         .where(eq(schema.sessionCommandReceipts.actorAttemptId, caller.attemptId)),
     );
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
   });
 
-  test("transactional Agent commands reject lateral and skipped-generation targets", async () => {
+  test("transactional Agent commands allow lateral and skipped-generation targets", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     const caller = await activeAgent(grant, parent.id);
@@ -488,35 +482,33 @@ describe("attempt-fenced Agent session commands", () => {
     );
     expect(upstream).toMatchObject({ replay: false });
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            targetSessionId: sibling.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            text: "lateral update",
-          }),
-        ),
+    const lateral = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: sibling.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "lateral update",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(lateral).toMatchObject({ replay: false });
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            targetSessionId: grandchild.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            text: "skipped generation update",
-          }),
-        ),
+    const skipped = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: grandchild.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "skipped generation update",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(skipped).toMatchObject({ replay: false });
 
     const controlled = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -532,20 +524,19 @@ describe("attempt-fenced Agent session commands", () => {
     );
     expect(controlled.control.state).toBe("paused");
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            sessionId: parent.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            action: "pause",
-          }),
-        ),
+    const pausedParent = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: parent.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(pausedParent.control.state).toBe("paused");
   });
 
   test("Agent message stays pending under Pause and never becomes human queue work", async () => {
