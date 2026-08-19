@@ -116,7 +116,7 @@ For a map of every app and package and how they fit together, see [docs/architec
 - Temporal worker
 - Postgres with Drizzle and pgvector
 - NATS Core realtime bus
-- MinIO for local S3-compatible file storage and Azure Blob, AWS S3, or GCS for production object storage
+- Garage for local S3-compatible file storage and Azure Blob, AWS S3, or GCS for production object storage
 - OpenAI Agents SDK
 - Two co-equal compute targets: managed sandboxes (Docker, Modal, local, cloud providers, or none) and Connected Machines — computers you enroll and run sessions on directly (see [Connected Machines](#connected-machines) and [docs/architecture.md](docs/architecture.md) for the full list)
 - A Rust agent + stream relay for Connected Machines (`agent/crates`), served to hosts by the control plane
@@ -157,7 +157,7 @@ Open:
 - Web app: `http://127.0.0.1:3000`
 - API health: `http://127.0.0.1:8000/healthz`
 - NATS monitor: `http://127.0.0.1:8222`
-- MinIO console: `http://127.0.0.1:9001`
+- Garage S3 API: `http://127.0.0.1:3900`
 - Temporal gRPC: `127.0.0.1:7233`
 
 If you run Temporal with the local dev server instead of Docker Compose, the Temporal UI is commonly available at `http://127.0.0.1:8233`.
@@ -168,7 +168,7 @@ Use this when you want separate terminals for each long-running process:
 
 ```bash
 bun install
-docker compose up -d postgres nats temporal minio minio-init
+docker compose up -d postgres nats temporal garage garage-init
 bun run db:migrate
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
 bun run dev:api
@@ -197,13 +197,13 @@ Copy `.env.example` to `.env` and configure at least:
 
 If you are migrating from the pre-OpenGeni codebase, move the old `.env` aside and create a fresh one from `.env.example`; old `INFRA_AGENT_*` names are no longer read.
 
-For local MinIO, keep S3-compatible storage and both object-storage endpoints:
+For local Garage, keep S3-compatible storage and both object-storage endpoints:
 
 ```bash
 OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible
-OPENGENI_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:9000
-OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=http://minio:9000
-OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://minio:9000
+OPENGENI_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:3900
+OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=http://garage:3900
+OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 # Prefer unset: `bun run dev` sets OPENGENI_DOCKER_NETWORK=${COMPOSE_PROJECT_NAME}_default
 ```
 
@@ -211,7 +211,7 @@ The public endpoint is embedded in browser-facing signed URLs. The internal endp
 
 `bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`.
 
-For production deployments, use the native provider object store instead of running MinIO manually:
+For production deployments, use the native provider object store instead of running Garage or MinIO manually:
 
 ```bash
 OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob
@@ -255,7 +255,7 @@ bun run deployment:preflight -- --profile azure-existing-services
 bun run deployment:stack -- --profile gcp-managed
 ```
 
-The in-chart Postgres, Temporal, NATS, and MinIO templates support a persistent
+The in-chart Postgres, Temporal, NATS, and Garage templates support a persistent
 non-HA single-machine deployment as well as disposable local, CI, and smoke
 verification. Multi-node operators should use managed services, existing
 endpoints, or official upstream charts/operators. Keep cloud resource

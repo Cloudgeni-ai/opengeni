@@ -17812,10 +17812,13 @@ export const TENANCY_PARITY_UNVERIFIABLE: readonly TenancyParityUnverifiable[] =
     reason:
       "A null owner is legitimate forever for API-key, delegated, and service-created " +
       "sessions, and for creators with no active organization membership - " +
-      "guard_session_authority_write (0225) attributes only subject-created sessions " +
-      "whose creator holds both an active organization membership and a workspace " +
-      "membership. Only that attributable subset is drainable; it is reported as the " +
-      "'sessionsAttributableButUnattributed' lane.",
+      "guard_session_authority_write (0225, repaired by 0302) attributes only " +
+      "subject-created sessions whose creator holds an active organization membership " +
+      "AND stated authority over that workspace: a workspace_memberships row, or the " +
+      "membership's own personal_workspace_id pointer. Only that attributable subset " +
+      "is drainable; the 'sessionsAttributableButUnattributed' lane still measures " +
+      "the narrower workspace-membership half, so it under-reports pre-0302 " +
+      "personal-workspace rows that 0297's backfill owns.",
   },
 ];
 

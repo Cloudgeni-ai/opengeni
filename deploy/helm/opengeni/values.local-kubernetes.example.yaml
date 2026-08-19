@@ -88,8 +88,12 @@ nats:
   enabled: true
 
 minio:
+  enabled: false
+
+garage:
   enabled: true
   persistence:
+    metaSize: 512Mi
     size: 2Gi
 
 ingress:

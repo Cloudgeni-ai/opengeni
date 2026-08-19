@@ -42,7 +42,7 @@ spec:
             {{- end }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
-          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
+          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
           {{- end }}

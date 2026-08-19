@@ -79,6 +79,8 @@ import {
   settingsWithSessionMcpServersForRun,
 } from "../../apps/worker/src/activities/capabilities";
 import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   MemoryEventBus,
   parseSseBlock,
   startTestMcpServer,
@@ -4580,9 +4582,9 @@ describe("API component integration", () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
-        objectStorageEndpoint: "http://127.0.0.1:9000",
-        objectStorageAccessKeyId: "minioadmin",
-        objectStorageSecretAccessKey: "minioadmin",
+        objectStorageEndpoint: "http://127.0.0.1:3900",
+        objectStorageAccessKeyId: GARAGE_FIXTURE_ACCESS_KEY_ID,
+        objectStorageSecretAccessKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
       }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
@@ -10920,8 +10922,8 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
     databaseUrl,
     objectStorageEndpoint: endpoint,
     objectStorageSandboxEndpoint: endpoint,
-    objectStorageAccessKeyId: "minioadmin",
-    objectStorageSecretAccessKey: "minioadmin",
+    objectStorageAccessKeyId: GARAGE_FIXTURE_ACCESS_KEY_ID,
+    objectStorageSecretAccessKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   });
 }
 

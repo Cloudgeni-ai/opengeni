@@ -8,6 +8,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
+import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_IMAGE,
+  GARAGE_FIXTURE_MC_IMAGE,
+  GARAGE_FIXTURE_S3_PROVIDER,
+  GARAGE_FIXTURE_SANDBOX_ENDPOINT,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
+  OBJECT_STORAGE_FIXTURE_BUCKET,
+} from "./object-storage-fixture";
 
 export type TestServices = {
   projectName: string;
@@ -17,6 +26,7 @@ export type TestServices = {
   natsPort: number;
   natsMonitorPort: number;
   temporalPort: number;
+  /** Host port mapped to the object-storage S3 API (Garage 3900). */
   minioPort?: number;
   minioConsolePort?: number;
   databaseUrl: string;
@@ -27,6 +37,9 @@ export type TestServices = {
   dockerNetwork: string;
   objectStorageEndpoint?: string;
   objectStorageSandboxEndpoint?: string;
+  objectStorageAccessKeyId?: string;
+  objectStorageSecretAccessKey?: string;
+  objectStorageS3Provider?: string;
   migrate: () => Promise<void>;
   down: () => Promise<void>;
 };
@@ -63,6 +76,13 @@ async function startTestServicesAttempt(
     minioConsole: await freePort(),
   };
   const composeFile = join(cwd, "compose.yml");
+  if (options.objectStorage ?? false) {
+    const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "../../../deploy/garage");
+    await Promise.all([
+      Bun.write(join(cwd, "garage.toml"), Bun.file(join(fixturesDir, "local.toml"))),
+      Bun.write(join(cwd, "cors.xml"), Bun.file(join(fixturesDir, "cors.xml"))),
+    ]);
+  }
   await writeFile(
     composeFile,
     composeYaml(ports, {
@@ -115,7 +135,10 @@ async function startTestServicesAttempt(
     ...(options.objectStorage
       ? {
           objectStorageEndpoint: `http://127.0.0.1:${ports.minio}`,
-          objectStorageSandboxEndpoint: "http://minio:9000",
+          objectStorageSandboxEndpoint: GARAGE_FIXTURE_SANDBOX_ENDPOINT,
+          objectStorageAccessKeyId: GARAGE_FIXTURE_ACCESS_KEY_ID,
+          objectStorageSecretAccessKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
+          objectStorageS3Provider: GARAGE_FIXTURE_S3_PROVIDER,
         }
       : {}),
     migrate: async () => {
@@ -136,8 +159,8 @@ async function startTestServicesAttempt(
       await waitForTemporal(services.temporalHost);
     }
     if (options.objectStorage ?? false) {
-      await waitForMinio(services.objectStorageEndpoint!);
-      await bootstrapMinioBucket(projectName, composeFile);
+      await waitForGarage(services.objectStorageEndpoint!);
+      await bootstrapGarageCors(projectName, composeFile);
     }
     return services;
   } catch (error) {
@@ -221,7 +244,7 @@ type AttachedSandboxCleanup = {
 /**
  * Ownership-mode Docker sandboxes intentionally remain warm after the worker
  * exits. E2E stacks attach those boxes to their one-off Compose network so the
- * box can reach MinIO; leaving one attached makes `docker compose down` retain
+ * box can reach Garage; leaving one attached makes `docker compose down` retain
  * the network and leaks the box, its generated volume(s), and host workspace.
  *
  * Only remove containers carrying the upstream SDK's explicit ownership label.
@@ -392,7 +415,10 @@ function testServiceImages(options: {
     nats: "nats:2-alpine",
     ...((options.temporal ?? true) ? { temporal: "temporalio/auto-setup:1.28" } : {}),
     ...((options.objectStorage ?? false)
-      ? { minio: "minio/minio:latest", "minio-init": "minio/mc:latest" }
+      ? {
+          garage: GARAGE_FIXTURE_IMAGE,
+          "garage-init": GARAGE_FIXTURE_MC_IMAGE,
+        }
       : {}),
   };
 }
@@ -549,24 +575,24 @@ export async function freePort(): Promise<number> {
   throw new Error("Unable to reserve a test listener port outside the ephemeral range");
 }
 
-async function waitForMinio(endpoint: string): Promise<void> {
+async function waitForGarage(endpoint: string): Promise<void> {
   await waitFor(
     async () => {
-      const response = await fetch(`${endpoint}/minio/health/ready`, {
+      const response = await fetch(endpoint, {
         signal: AbortSignal.timeout(2_000),
       }).catch(() => null);
-      return response?.ok === true;
+      return response !== null;
     },
     { timeoutMs: 90_000, intervalMs: 500 },
   );
 }
 
-async function bootstrapMinioBucket(projectName: string, composeFile: string): Promise<void> {
+async function bootstrapGarageCors(projectName: string, composeFile: string): Promise<void> {
   let lastResult: Awaited<ReturnType<typeof runCommand>> | null = null;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const composeFiles = await composeFileArgs(composeFile);
     lastResult = await runCommand(
-      ["docker", "compose", "-p", projectName, ...composeFiles, "run", "--rm", "minio-init"],
+      ["docker", "compose", "-p", projectName, ...composeFiles, "run", "--rm", "garage-init"],
       { timeoutMs: 60_000 },
     );
     if (lastResult.exitCode === 0) {
@@ -575,7 +601,7 @@ async function bootstrapMinioBucket(projectName: string, composeFile: string): P
     await Bun.sleep(attempt * 1_000);
   }
   throw new Error(
-    `minio bucket bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`,
+    `garage CORS bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`,
   );
 }
 
@@ -660,32 +686,34 @@ ${
 }
 ${
   options.objectStorage
-    ? `  minio:
-    image: minio/minio:latest
+    ? `  garage:
+    image: ${GARAGE_FIXTURE_IMAGE}
     pull_policy: never
-    command: ["server", "/data", "--console-address", ":9001"]
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_FIXTURE_ACCESS_KEY_ID}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_FIXTURE_SECRET_ACCESS_KEY}
+      GARAGE_DEFAULT_BUCKET: ${OBJECT_STORAGE_FIXTURE_BUCKET}
     ports:
-      - "127.0.0.1:${ports.minio}:9000"
-      - "127.0.0.1:${ports.minioConsole}:9001"
+      - "127.0.0.1:${ports.minio}:3900"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      test: ["CMD", "/garage", "status"]
       interval: 2s
       timeout: 5s
       retries: 40
+      start_period: 10s
 
-  minio-init:
-    image: minio/mc:latest
+  garage-init:
+    image: ${GARAGE_FIXTURE_MC_IMAGE}
     pull_policy: never
     # Keep this one-shot bootstrap out of the initial compose-up. The harness
-    # runs it explicitly after MinIO is healthy; including it here as well both
-    # creates the bucket twice and can race concurrent image pulls before the
-    # Docker daemon has committed the mc tag.
+    # runs it explicitly after Garage answers S3; including it here as well can
+    # race concurrent image pulls before the Docker daemon has committed the mc tag.
     profiles: ["bootstrap"]
     depends_on:
-      minio:
+      garage:
         condition: service_healthy
     environment:
       HTTP_PROXY: ""
@@ -694,13 +722,15 @@ ${
       http_proxy: ""
       https_proxy: ""
       all_proxy: ""
-      NO_PROXY: "localhost,127.0.0.1,minio"
-      no_proxy: "localhost,127.0.0.1,minio"
+      NO_PROXY: "localhost,127.0.0.1,garage"
+      no_proxy: "localhost,127.0.0.1,garage"
+    volumes:
+      - ./cors.xml:/cors.xml:ro
     entrypoint: ["/bin/sh", "-c"]
     command: >
       "for i in $$(seq 1 30); do
-         mc alias set local http://minio:9000 minioadmin minioadmin &&
-         mc mb --ignore-existing local/opengeni-files &&
+         mc alias set local http://garage:3900 ${GARAGE_FIXTURE_ACCESS_KEY_ID} ${GARAGE_FIXTURE_SECRET_ACCESS_KEY} &&
+         mc cors set local/${OBJECT_STORAGE_FIXTURE_BUCKET} /cors.xml &&
          exit 0;
          sleep 2;
        done;

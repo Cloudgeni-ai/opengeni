@@ -1,5 +1,6 @@
 export * from "./scripted-model";
 export * from "./compose";
+export * from "./object-storage-fixture";
 export * from "./shared-pg";
 export * from "./process";
 export * from "./sse";
