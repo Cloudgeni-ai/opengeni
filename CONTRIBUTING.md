@@ -70,7 +70,7 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies). Then merge `production` → `main` with a merge commit so daily work is not stranded. Squash remains allowed on PRs into `main`.
 
-**Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. Bootstrap the pointer once with `git push origin origin/main:refs/heads/production` before the first official cut; that is not a cluster deploy.
+**Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. The `production` pointer already exists; do not recreate it and do not force-push.
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 

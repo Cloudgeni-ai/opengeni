@@ -702,9 +702,8 @@ rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
 `production` → `main`. Official cuts: dispatch `open-version-pr.yml` on `main`
 (or `VERSION_PR_ON_PUSH=true`), merge that Version PR, promote, then
 `workflow_dispatch` candidate/acceptance/publication. Official source ancestry
-is `origin/production`. Bootstrap the pointer once with
-`git push origin origin/main:refs/heads/production` before the first official
-cut.
+is `origin/production`. The `production` pointer already exists; do not
+recreate it and do not force-push.
 
 Protect `production`: no force-push; merge commits only (disable squash and
 rebase-and-merge); required checks `Admit production PR head` and
