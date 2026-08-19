@@ -10,6 +10,7 @@ import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
+import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
 
@@ -113,6 +114,12 @@ export async function saveNewSessionDraftInTransaction(
     options: NewSessionDraftOptions;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
+    /**
+     * May this caller use the owner-only managed personal-workspace exception?
+     * See `PersonalWorkspaceOwnerException` in `@opengeni/db`. Absent means the
+     * historical bare-membership fence, unchanged.
+     */
+    personalWorkspaceOwnerException?: boolean;
   },
 ): Promise<NewSessionDraftRow> {
   if (input.requireWorkspaceMembership !== false) {
@@ -131,7 +138,26 @@ export async function saveNewSessionDraftInTransaction(
       )
       .for("key share")
       .limit(1);
-    if (!membership) throw new NewSessionDraftAccessError();
+    // The owner of a managed personal workspace never has a membership row there
+    // (migration 0219 raises on one), so the bare probe above would 403 the
+    // composer inside the one workspace they always belong to. Ask the canonical
+    // resolver instead of re-deriving that rule — it runs on this same
+    // transaction handle, and there is no membership row for removeWorkspaceMember()
+    // to delete in a personal workspace, so nothing is lost by taking no
+    // `FOR KEY SHARE` on this path.
+    if (
+      !membership &&
+      !(
+        input.personalWorkspaceOwnerException === true &&
+        (await subjectHasLiveWorkspaceAuthorityInScope(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+        }))
+      )
+    ) {
+      throw new NewSessionDraftAccessError();
+    }
   }
   await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
   const current = await getNewSessionDraftInTransaction(db, { ...input, lock: true });

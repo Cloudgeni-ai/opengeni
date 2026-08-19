@@ -128,6 +128,47 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### Seams that fence on a `workspace_memberships` row
+
+Because the personal workspace has no membership row, any seam that re-derives
+*"does this subject still hold workspace authority here"* from a bare
+`workspace_memberships` probe denies the one human who always belongs.
+`subjectHasLiveWorkspaceAuthorityInScope` (`packages/db/src/workspace-authority.ts`)
+is the single implementation of the corrected rule: a membership row whose
+owning organization membership is active, **or** an active organization
+membership whose `personal_workspace_id` is exactly this workspace. Only the
+membership's own pointer counts as stated authority — nothing is inferred from
+`created_by`, connection attribution, a default workspace, a resource name, or
+current access.
+
+Two properties keep it owner-only, and both are structural rather than
+conventions:
+
+1. **It never sets `opengeni.subject_id`.** It runs on the caller's already
+   scoped transaction and raises if the requested subject differs from the
+   subject that scope authenticated, so it cannot be used as an
+   arbitrary-subject oracle. The exported
+   `subjectHasLiveWorkspaceAuthority` in `@opengeni/db` *does* set that GUC from
+   its own argument and therefore **is** such an oracle — see its doc comment;
+   never pass it a request-derived subject.
+2. **The API layer must positively assert canonical managed-cookie
+   provenance.** Session listing, session pins, and the composer draft take an
+   explicit `personalWorkspaceOwnerException` flag that defaults to absent, and
+   the API supplies it from `AccessGrantAuthorization.canonicalManagedHumanSession`.
+   That value is stamped only inside the one branch of `resolveAccessContext`
+   that verified a Better Auth cookie, so bearer/delegated principals, API keys,
+   service initiators, and account or organization administrators fail closed —
+   including any authentication path added later, which is absent from the stamp
+   by default rather than by an exclusion list.
+
+Known remaining seams with the bare-membership defect, both SECURITY DEFINER and
+therefore only fixable by migration: `transition_session_visibility` (0225) and
+`fork_session_content` (0289) require a `workspace_memberships` row for the
+actor in the target/source/destination workspace. Each needs the same disjunct
+0258 already uses — `IF actor_membership.personal_workspace_id IS DISTINCT FROM
+<workspace> THEN <require the membership row> END IF` — around its existing
+check. Neither has a production caller today.
+
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
 capability with a fixed schema-plus-`pg_catalog` search path, PUBLIC execution

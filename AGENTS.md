@@ -90,6 +90,16 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   personal-workspace pointer converge through the lifecycle SECURITY DEFINER
   seam. Bearer/delegated principals, API keys, and account or organization
   administrators receive no personal-workspace access through that exception.
+  Because that workspace has no `workspace_memberships` row, a seam that fences
+  on one denies its owner: `subjectHasLiveWorkspaceAuthorityInScope`
+  (`packages/db/src/workspace-authority.ts`) is the single implementation of the
+  corrected rule, it never sets `opengeni.subject_id` and raises if the requested
+  subject differs from the transaction's authenticated scope, and every caller
+  must additionally assert canonical managed-cookie provenance through
+  `AccessGrantAuthorization.canonicalManagedHumanSession` — never a shape check
+  on the grant, which a delegated token controls. The exported
+  `subjectHasLiveWorkspaceAuthority` sets that GUC from its own argument and is
+  an arbitrary-subject oracle: never pass it a request-derived subject.
   The four authority/grant tables remain FORCE-RLS with zero direct app DML;
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.

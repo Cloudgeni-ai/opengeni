@@ -394,6 +394,11 @@ export * from "./integration-facets";
 export * from "./insights";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
+export * from "./workspace-authority";
+import {
+  accountIdInRlsScope,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -17457,14 +17462,34 @@ export async function getSessionAuthorityEpoch(
 }
 
 /**
- * Mint-time live-authority recheck for a human viewer subject (0281). True
- * when the subject currently holds workspace authority the same way the
- * route-time access builder derives it: a `workspace_memberships` row whose
- * owning organization membership (when one exists) is active, or an active
- * organization membership whose personal-workspace pointer is exactly this
- * workspace (managed personal workspaces deliberately have no membership
- * row). Never infers authority any other way; a deleted membership row and a
- * suspended/revoked organization membership are both false.
+ * Live-authority recheck for one exact subject, resolving its own RLS scope
+ * (originally the 0281 stream-token mint recheck). See
+ * {@link subjectHasLiveWorkspaceAuthorityInScope} for the authority rule itself.
+ *
+ * # DANGER: this function is an ARBITRARY-SUBJECT ORACLE. Read before calling.
+ *
+ * It sets `opengeni.subject_id` **from its own `subjectId` argument** and then
+ * answers the personal-workspace question under that scope. The SECURITY
+ * DEFINER seam it consults (`list_self_organization_memberships`) compares the
+ * requested subject against that GUC — which this function just set to the
+ * caller's parameter — so the seam's `42501` guard is satisfied for **whatever
+ * subject the caller names**. It is therefore NOT "owner-only by construction";
+ * it is owner-only only if the caller can prove the subject is its own.
+ *
+ * **Passing a request-derived subject here is a vulnerability.** A delegated
+ * bearer token, an embedding host, or any other caller that chooses its own
+ * `subjectId` claim can use this function to resolve a different human's
+ * personal workspace and be told `true`.
+ *
+ * Call it ONLY with a subject the caller is already entitled to ask about:
+ * a subject authenticated out of band, or the frozen owner of a delegation the
+ * caller already holds. If the subject reached you from a request, you want
+ * {@link subjectHasLiveWorkspaceAuthorityInScope} instead — it refuses to set
+ * the subject GUC and asserts that the subject matches the transaction's
+ * already-applied, authenticated scope, so it cannot name a third party.
+ *
+ * A follow-up will migrate this function's remaining call sites to the in-scope
+ * variant and then lock this one down or delete it.
  */
 export async function subjectHasLiveWorkspaceAuthority(
   db: Database,
@@ -17475,34 +17500,7 @@ export async function subjectHasLiveWorkspaceAuthority(
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, input.subjectId);
-      const [membershipRow] = await rawRows<{ present: number }>(
-        scopedDb,
-        sql`select 1 as present from workspace_memberships
-          where subject_id = ${input.subjectId}
-            and workspace_id = ${input.workspaceId}
-          limit 1`,
-      );
-      const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
-        scopedDb,
-        sql`select list_self_organization_memberships(${input.subjectId}) as result`,
-      );
-      const organizationMemberships = OrganizationMember.array().parse(
-        organizationMembershipResult?.result ?? [],
-      );
-      const selfOrganizationMembership = organizationMemberships.find(
-        (organizationMembership) => organizationMembership.organizationId === input.accountId,
-      );
-      if (membershipRow) {
-        // Mirror the access builder's inactive-organization filter: a
-        // persisted membership row is dead while its organization membership
-        // is suspended/revoked. A subject with no organization membership at
-        // all (legacy/standalone) keeps its persisted row's authority.
-        return !selfOrganizationMembership || selfOrganizationMembership.status === "active";
-      }
-      return (
-        selfOrganizationMembership?.status === "active" &&
-        selfOrganizationMembership.personalWorkspaceId === input.workspaceId
-      );
+      return await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, input);
     },
   );
 }
@@ -26756,7 +26754,30 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   /** Materialize a continuation snapshot. Disable for legacy one-page array reads. */
   materializeSnapshot?: boolean | undefined;
   authorizationScope?: SessionAuthorizationListScope | undefined;
+  /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
+  personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
 };
+
+/**
+ * Whether the caller may use the owner-only managed personal-workspace
+ * exception on this request.
+ *
+ * A managed human's personal workspace has NO `workspace_memberships` row
+ * (migration 0219 raises on one), so a bare membership fence denies the one
+ * human who always belongs. The `organization_memberships.personal_workspace_id`
+ * pointer is their whole grant, and
+ * {@link subjectHasLiveWorkspaceAuthorityInScope} is the single resolver for it.
+ *
+ * The flag exists because `subjectId` alone cannot carry the distinction
+ * `AGENTS.md` requires. The exception is for "the canonical managed-cookie
+ * (Better Auth) session" only — "Bearer/delegated principals, API keys, and
+ * account or organization administrators receive no personal-workspace access
+ * through that exception" — but a host-signed delegated bearer chooses its own
+ * `subjectId` claim and could name the owner. So the API layer must state this
+ * positively, from `grantIsCanonicalManagedHumanSession` (`@opengeni/core`).
+ * Omitted/false keeps the historical bare-membership fence exactly.
+ */
+export type PersonalWorkspaceOwnerException = boolean;
 
 export class SessionPinVersionConflictError extends Error {
   constructor(readonly current: Pick<Session, "pinned" | "pinnedAt" | "pinVersion">) {
@@ -27362,7 +27383,27 @@ export async function listSessionsForSubject(
         // serialization. That is sound: member-removal cleanup already purges a
         // removed subject's pins and snapshots, and any snapshot a never-member
         // subject writes is bounded by TTL expiry.
-        if (!membership && options.subjectId.startsWith("user:")) {
+        //
+        // The one human who is authorized WITHOUT a membership row is the owner
+        // of a managed personal workspace: migration 0219 raises if that
+        // workspace ever gets one, so the pointer on their own organization
+        // membership is the whole grant. Ask the canonical resolver rather than
+        // re-deriving that rule here — it runs on this same transaction handle,
+        // so the shared personal-state fence above still serializes it against
+        // member removal. Gated on the caller's canonical managed-cookie
+        // assertion; see PersonalWorkspaceOwnerException.
+        if (
+          !membership &&
+          options.subjectId.startsWith("user:") &&
+          !(
+            options.personalWorkspaceOwnerException === true &&
+            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+              accountId: await accountIdInRlsScope(tx),
+              workspaceId,
+              subjectId: options.subjectId,
+            }))
+          )
+        ) {
           throw new SessionListAccessError();
         }
 
@@ -27778,6 +27819,8 @@ export async function setSessionPin(
     sessionId: string;
     pinned: boolean;
     expectedVersion?: number | undefined;
+    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(
@@ -27800,7 +27843,24 @@ export async function setSessionPin(
             ),
           )
           .limit(1);
-        if (!membership) {
+        // The owner of a managed personal workspace never has a membership row
+        // there (migration 0219 raises on one), so a bare probe would deny every
+        // pin inside their own workspace. Defer to the canonical resolver, on
+        // this same transaction handle so the exclusive personal-state fence
+        // above still serializes it with member removal. Gated on the caller's
+        // canonical managed-cookie assertion; see
+        // PersonalWorkspaceOwnerException.
+        if (
+          !membership &&
+          !(
+            input.personalWorkspaceOwnerException === true &&
+            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+              accountId: await accountIdInRlsScope(tx),
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+            }))
+          )
+        ) {
           throw new SessionPinAccessError();
         }
         const [session] = await tx
