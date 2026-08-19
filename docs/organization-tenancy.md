@@ -826,6 +826,116 @@ rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
 
+The phase's executable gate is the read-only parity seam (migration 0298):
+
+```bash
+bun run db:check-tenancy-parity --organization-id <uuid>
+  [--evidence-limit <0-50>] [--observation-window-days <1-365>]
+```
+
+It prints one machine-readable report and exits `0` when every gate passed,
+`1` when at least one gate failed, and `2` when the command could not run. Like
+the inventory seam it is strictly read-only - its only writes are the claim and
+release of its own transaction-local private capability row, it holds its own
+capability separate from 0285's so the inventory seam gains no new visibility,
+and it rejects a cross-organization request. **It never repairs, widens, or
+resolves an ambiguity; a reported mismatch is never resolved toward user
+authority.**
+
+The report has three deliberately distinct parts.
+
+**Gates** are invariants that must be zero. Each carries an evidentiary
+`basis`: `constraint`/`trigger` gates shadow an enforcement the physical schema
+already provides, while `runtime` gates are the ones nothing in the schema
+prevents and therefore carry the real evidence about a cutover. Failures come
+with bounded row UUIDs as evidence - never subjects, names, keys, or values -
+and an explicit `truncated` flag.
+
+- organization/membership/workspace consistency: an active membership
+  identifies a personal workspace, that workspace belongs to the same
+  organization, and it is claimed by at most one membership;
+- a managed personal workspace carries **no** `workspace_memberships` row - the
+  owner-only grant is a derived access projection, and a persisted row there is
+  exactly how membership CRUD and the subject-membership fallback would widen it
+  into delegable access;
+- stable authority uniqueness: the physical unique index is per
+  (account, membership, kind, resource), so two *different* memberships can
+  still claim one resource. That ambiguity is reported, never resolved;
+- zero partial delegations, plus a live owning membership, a non-revoked
+  authority, and a session fence that is never ahead of the session it fences;
+- session owner provenance is complete, paired, in-organization, and still
+  names its owning membership's subject;
+- provider-account collision rules: the `(provider, provider_account)` unique
+  index makes a duplicate binding impossible, so a collision is recorded by
+  disputing the existing binding **and both identities**. A disputed binding
+  whose identity is still usable is a collision that never fenced its identity;
+  an identity's `active_login_binding_id` must also be its own binding (the FK
+  proves existence, never ownership);
+- the shadow scope comparison: legacy effective scope is workspace for every
+  resource, so every connection, Variable Set, Rig, Connected Machine, or
+  Document whose *proposed* effective scope is `user` must have an active
+  authority owned by an active membership. Without one there is no reachable
+  user resolution - it must fall back to workspace or deny.
+
+**Lanes** are legacy populations, not corruption: a non-zero lane blocks a
+cutover (`cutoverReady`) without failing the invariants. Every lane must
+therefore have a *reachable* zero, or the cutover gate is structurally
+unreachable rather than merely unmet. A lane is `drainable` only when a backfill
+can actually take it to zero; a lane over immutable history is `observation`
+and is reported over a bounded recent window, where the honest signal is "the
+lane stopped being exercised".
+
+They are the 0285 inventory populations plus these refinements.
+`sessionsAttributableButUnattributed` is the *drainable* subset of ownerless
+sessions - those whose creating subject today's `guard_session_authority_write`
+fence would attribute. Three lanes are `observation` because their tables are
+immutable history whose all-time count can never drain:
+
+- `connectionUseLegacyResolutionsInWindow` - `connection_use_audit_facts` are
+  append-only audit rows.
+- `workspaceWriterAdmissionsLegacyUnattributedInWindow` and
+  `workspaceWriterProcessesLegacyUnattributedInWindow` -
+  `sandbox_workspace_mutation_admissions` and `sandbox_retained_processes` are
+  settled by `UPDATE` and never deleted, and 0277's one-shot attribution
+  backfill only reached rows whose actor was a turn (`actor_kind` /
+  `owner_actor_kind` = `'turn'`). Every pre-0277 `direct:` or `process:`
+  admission therefore keeps the `legacy_unattributed` sentinel permanently, so
+  a single such row would otherwise pin `cutoverReady` to false forever.
+
+`connectionsLegacyUser` is the opposite case and is deliberately *not* bounded
+today: 0256's `guard_connection_authority_write` still actively mints
+`legacy_user` for any **new** connection whose subject holds no active
+organization membership, and no migration upgrades an existing `legacy_user`
+row to `user`. It is drainable only *after* the organization-membership
+backfill lands and stops the mint, which is why it names that owner.
+
+Documents and Codex credentials are consumed as gate inputs only; their repair
+is owned elsewhere and this program never writes a second reclassification for
+either.
+
+The checker **cannot run against a read replica.** Its capability row is
+claimed and released with `INSERT`/`DELETE` inside the calling transaction, so
+a read-only standby (or an explicit `SET TRANSACTION READ ONLY`) fails with
+`25006: cannot execute DELETE in a read-only transaction`. Point it at a
+writable primary; it is still read-only with respect to every table it
+inspects.
+
+**Unverifiable** properties are named explicitly rather than emitted as a
+counter that could never reach zero:
+
+- Variable Sets, Rigs, and Connected Machines have no legacy discriminator.
+  `authority_scope` defaults to `workspace` and the `*_authority_shape_check`
+  constraints *require* `authority_id IS NULL` for organization/workspace scope,
+  so a never-classified legacy row and a deliberately workspace-owned row are
+  byte-identical. Any "unclassified" counter for them is structurally
+  `total − userScoped`. (Documents are the exception that *does* have a
+  discriminator: `authority_kind = 'personal' AND authority_id IS NULL`.)
+- `workspace_shared` is the permanent correct visibility for a shared session,
+  not a legacy marker.
+- A null session owner is legitimate forever for API-key, delegated, and
+  service-created sessions and for creators with no active membership; only the
+  attributable subset above is drainable.
+
 `packages/db/test/organization-isolation-evidence.test.ts` is the executed
 cross-organization evidence suite for this phase. Against a real PostgreSQL
 database, driven as the genuine non-superuser `NOBYPASSRLS` `opengeni_app`
