@@ -242,6 +242,46 @@ async function callback(
 }
 
 describe("Google Drive OAuth isolation proof", () => {
+  test("a state minted by another flow cannot be presented to this callback", async () => {
+    // This state carries no ownership field and no provider identity, and its
+    // return path is byte-identical to `/workspaces/<ws>/capabilities` - a path
+    // the MCP OAuth start signs from caller input. Without an exact flow kind, a
+    // caller's own MCP state reached this callback and passed its personal-owner
+    // fence. Same subject and connections:write is rechecked, so never an
+    // escalation, but the state was not bound to the flow that minted it.
+    const authority = await freshAuthority();
+    const google = providerDouble();
+    const started = await start(authority, google.fetch);
+    expect(started.status).toBe(200);
+    const state = new URL(
+      ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+    const payload = readSignedState(state, STATE_SECRET) as Record<string, unknown>;
+    expect(payload.kind).toBe("google_drive_oauth");
+
+    const { kind: _dropped, ...foreignFlow } = payload;
+    for (const candidate of [foreignFlow, { ...foreignFlow, kind: "atlassian_oauth" }]) {
+      const refused = await callback(google.fetch, createSignedState(STATE_SECRET, candidate));
+      expect(refused.status).toBe(302);
+      expect(refused.headers.get("location")).toContain("google_drive=error");
+      expect(refused.headers.get("location")).toContain("reason=http_400");
+    }
+    // Refused before any provider traffic, and nothing was written.
+    expect(google.requests).toHaveLength(0);
+    expect(
+      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
+        (candidate) => candidate.providerDomain === "googleapis.com",
+      ),
+    ).toEqual([]);
+
+    // Positive control: the same payload with its own kind restored connects.
+    const accepted = await callback(
+      google.fetch,
+      createSignedState(STATE_SECRET, { ...foreignFlow, kind: "google_drive_oauth" }),
+    );
+    expect(accepted.headers.get("location")).toContain("google_drive=connected");
+  });
+
   test("a legacy in-flight state cannot land a personal owner through the callback", async () => {
     // Google Drive is personal-only: the callback always writes
     // `subjectId: state.subjectId`. The start route admits only a managed human
