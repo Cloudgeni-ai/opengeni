@@ -100,10 +100,7 @@ function expectedContext(env, suppliedEvent) {
   invariant(env.GITHUB_EVENT_NAME === "pull_request_target", "unexpected workflow event");
   invariant(env.GITHUB_REPOSITORY === CONTRACT.repository, "unexpected repository");
   const baseRef = assertString(env.GITHUB_BASE_REF, "GITHUB_BASE_REF");
-  invariant(
-    CONTRACT.admissionBaseBranches.includes(baseRef),
-    "unexpected base branch",
-  );
+  invariant(CONTRACT.admissionBaseBranches.includes(baseRef), "unexpected base branch");
   invariant(env.GITHUB_REF === `refs/heads/${baseRef}`, "unexpected workflow ref");
   invariant(
     env.GITHUB_WORKFLOW_REF ===

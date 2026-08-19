@@ -520,7 +520,9 @@ describe("release image workflow contract", () => {
     const requireBake = apiSteps.find(
       (step) => step.name === "Require complete exact-SHA canary agent bake",
     );
-    expect(requireBake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
+    expect(requireBake?.if).toBe(
+      "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    );
     expect(requireBake?.run).toContain("x86_64-unknown-linux-musl aarch64-unknown-linux-musl");
     expect(requireBake?.run).toContain('test -s "$asset.minisig"');
     expect(apiSteps.indexOf(bake!)).toBeLessThan(
@@ -574,7 +576,11 @@ describe("release image workflow contract", () => {
         expect(aggregateResult(...results)).not.toBe(0);
       }
     }
-    expect(images.match(/push: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/g)).toHaveLength(7);
+    expect(
+      images.match(
+        /push: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/g,
+      ),
+    ).toHaveLength(7);
     expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);

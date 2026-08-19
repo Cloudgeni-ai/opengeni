@@ -159,7 +159,9 @@ function fixture(options: FixtureOptions = {}) {
         disabled: false,
         private: false,
       };
-    } else if (path === `/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.admissionBaseBranch}`) {
+    } else if (
+      path === `/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.admissionBaseBranch}`
+    ) {
       value = {
         ref: `refs/heads/${CONTRACT.admissionBaseBranch}`,
         object: {
