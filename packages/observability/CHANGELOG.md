@@ -1,5 +1,21 @@
 # @opengeni/observability
 
+## 0.8.0
+
+### Minor Changes
+
+- 747222a: Add content-free compatibility-lane telemetry for the organization-tenancy migration. `opengeni_tenancy_compatibility_lane_uses_total{lane}` counts live uses of a bounded legacy lane - a `legacy_user` connection resolved for accepted use, a workspace-scope connection ref with no connection id taking the pre-snapshot resolution, and a `/workspace` mutation refused `authority_unattributed`. The closed lane set is `TENANCY_COMPATIBILITY_LANES`; the lane name is the only label, an unreviewed name is ignored instead of minting a series, every lane is published at zero on startup so a dormant lane is distinguishable from an unwired one, and a registry failure is swallowed so counting can never change an authorization or credential outcome. This is a use rate, deliberately not a burndown gauge: `docs/organization-tenancy.md` records why none of the tenancy compatibility populations is drainable on the current write paths, and which lanes are intentionally left uninstrumented.
+
+### Patch Changes
+
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+
 ## 0.7.11
 
 ### Patch Changes
