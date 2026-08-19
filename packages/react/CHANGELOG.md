@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 2.0.1
+
+### Patch Changes
+
+- 21728f0: Preserve in-progress structured human-input answers when live session updates refresh the same pending request.
+
 ## 2.0.0
 
 ### Minor Changes
