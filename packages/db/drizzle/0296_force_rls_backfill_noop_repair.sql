@@ -86,50 +86,106 @@ SET LOCAL statement_timeout = '10min';
 -- authority and raises 23514 on any change. Disabling it is transactional DDL
 -- behind the ACCESS EXCLUSIVE lock this statement takes, so no concurrent
 -- writer ever observes the table without its binding trigger.
-ALTER TABLE "connections" DISABLE TRIGGER "connections_authority_binding";
+-- 0256's immutability trigger may not exist yet: several migration tests
+-- pre-seed schema_migrations to replay a partial chain (0184/0190/0241/0249/
+-- 0264 do this), so migrate() reaches 0296 on a database that never applied
+-- 0256. Guard both the disable and the re-enable on catalog presence rather
+-- than assuming the trigger is there.
+DO $connections_authority_binding_off$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger trg
+    JOIN pg_class rel ON rel.oid = trg.tgrelid
+    WHERE rel.relname = 'connections'
+      AND trg.tgname = 'connections_authority_binding'
+      AND NOT trg.tgisinternal
+  ) THEN
+    ALTER TABLE "connections" DISABLE TRIGGER "connections_authority_binding";
+  END IF;
+END $connections_authority_binding_off$;
 ALTER TABLE "connections" NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE "enrollments" NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE "organization_memberships" NO FORCE ROW LEVEL SECURITY;
 
-UPDATE "connections"
-SET "origin_workspace_id" = "workspace_id"
-WHERE "origin_workspace_id" IS NULL
-  AND "authority_scope" = 'workspace';
-
-UPDATE "enrollments"
-SET "origin_workspace_id" = "workspace_id"
-WHERE "origin_workspace_id" IS NULL
-  AND "authority_scope" = 'workspace';
-
-UPDATE "organization_memberships" membership
-SET "role" = 'owner'
-FROM "managed_accounts" account
-WHERE account.id = membership.account_id
-  AND account.external_source = 'better-auth:user'
-  AND membership.subject_id = 'user:' || account.external_id
-  AND membership.role <> 'owner';
-
-DO $force_rls_backfill_noop_repair_verify$
+-- Precondition guard. `origin_workspace_id` / `authority_scope` are added by
+-- 0256 and 0262, and the self-organization role by 0263. Several migration
+-- tests pre-seed schema_migrations receipts to simulate an older database
+-- (0184/0190/0241/0249/0264 all do this), which makes migrate() SKIP those
+-- migrations while still reaching this one - so the columns this file repairs
+-- may genuinely be absent. A deployment replaying a partial chain hits the
+-- same shape. Repair only what exists; a missing column means there is
+-- nothing that could have silently no-opped.
+DO $force_rls_backfill_noop_repair$
 DECLARE
-  unrepaired_connections bigint;
-  unrepaired_enrollments bigint;
-  unrepaired_memberships bigint;
+  has_connection_origin boolean;
+  has_enrollment_origin boolean;
+  has_membership_role boolean;
+  unrepaired_connections bigint := 0;
+  unrepaired_enrollments bigint := 0;
+  unrepaired_memberships bigint := 0;
 BEGIN
-  SELECT count(*) INTO unrepaired_connections
-  FROM connections
-  WHERE origin_workspace_id IS NULL AND authority_scope = 'workspace';
+  has_connection_origin := EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'connections' AND column_name = 'origin_workspace_id'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'connections' AND column_name = 'authority_scope'
+  );
+  has_enrollment_origin := EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'enrollments' AND column_name = 'origin_workspace_id'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'enrollments' AND column_name = 'authority_scope'
+  );
+  has_membership_role := EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'organization_memberships' AND column_name = 'role'
+  );
 
-  SELECT count(*) INTO unrepaired_enrollments
-  FROM enrollments
-  WHERE origin_workspace_id IS NULL AND authority_scope = 'workspace';
+  IF has_connection_origin THEN
+    EXECUTE $sql$
+      UPDATE "connections" SET "origin_workspace_id" = "workspace_id"
+      WHERE "origin_workspace_id" IS NULL AND "authority_scope" = 'workspace'
+    $sql$;
+    EXECUTE $sql$
+      SELECT count(*) FROM connections
+      WHERE origin_workspace_id IS NULL AND authority_scope = 'workspace'
+    $sql$ INTO unrepaired_connections;
+  END IF;
 
-  SELECT count(*) INTO unrepaired_memberships
-  FROM organization_memberships membership
-  JOIN managed_accounts account ON account.id = membership.account_id
-  WHERE account.external_source = 'better-auth:user'
-    AND membership.subject_id = 'user:' || account.external_id
-    AND membership.role <> 'owner';
+  IF has_enrollment_origin THEN
+    EXECUTE $sql$
+      UPDATE "enrollments" SET "origin_workspace_id" = "workspace_id"
+      WHERE "origin_workspace_id" IS NULL AND "authority_scope" = 'workspace'
+    $sql$;
+    EXECUTE $sql$
+      SELECT count(*) FROM enrollments
+      WHERE origin_workspace_id IS NULL AND authority_scope = 'workspace'
+    $sql$ INTO unrepaired_enrollments;
+  END IF;
 
+  IF has_membership_role THEN
+    EXECUTE $sql$
+      UPDATE "organization_memberships" membership SET "role" = 'owner'
+      FROM "managed_accounts" account
+      WHERE account.id = membership.account_id
+        AND account.external_source = 'better-auth:user'
+        AND membership.subject_id = 'user:' || account.external_id
+        AND membership.role <> 'owner'
+    $sql$;
+    EXECUTE $sql$
+      SELECT count(*) FROM organization_memberships membership
+      JOIN managed_accounts account ON account.id = membership.account_id
+      WHERE account.external_source = 'better-auth:user'
+        AND membership.subject_id = 'user:' || account.external_id
+        AND membership.role <> 'owner'
+    $sql$ INTO unrepaired_memberships;
+  END IF;
+
+  -- The verification still runs inside the owner-only NO FORCE window, so a
+  -- future regression of this class fails loudly here rather than reporting
+  -- success. Skipped lanes contribute 0 because they had nothing to repair.
   IF unrepaired_connections > 0
     OR unrepaired_enrollments > 0
     OR unrepaired_memberships > 0
@@ -140,9 +196,20 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
 END
-$force_rls_backfill_noop_repair_verify$;
+$force_rls_backfill_noop_repair$;
 
 ALTER TABLE "organization_memberships" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "enrollments" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "connections" FORCE ROW LEVEL SECURITY;
-ALTER TABLE "connections" ENABLE TRIGGER "connections_authority_binding";
+DO $connections_authority_binding_on$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger trg
+    JOIN pg_class rel ON rel.oid = trg.tgrelid
+    WHERE rel.relname = 'connections'
+      AND trg.tgname = 'connections_authority_binding'
+      AND NOT trg.tgisinternal
+  ) THEN
+    ALTER TABLE "connections" ENABLE TRIGGER "connections_authority_binding";
+  END IF;
+END $connections_authority_binding_on$;

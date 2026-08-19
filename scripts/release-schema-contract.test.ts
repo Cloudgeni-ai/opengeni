@@ -523,8 +523,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0296_force_rls_backfill_noop_repair.sql")) {
         return includesActivation
-          ? "71fcfd90e961ceaf15e10765442da539809b9a39041bb6d9c4caa453ce02020e"
-          : "c92993a5ae5fb2b73d3ab12a8316dfba6ade08331f2fd7c0581c5753d36db4dd";
+          ? "a5b537ecee5c9411aa019513f7e8b45a7f9b32b5f607536e49aabf31576d3567"
+          : "896bfd78feb0c82651066bbf93e20bb38a723e162ecdb608b1214ef38947f256";
       }
       if (migrations.has("0295_retire_legacy_standing_memory_mode.sql")) {
         return includesActivation
