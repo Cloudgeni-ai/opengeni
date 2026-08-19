@@ -426,6 +426,30 @@ the same human may have separate memberships in multiple organizations, and
 each membership and its resources retain their existing organization-local
 foreign-key and access constraints.
 
+## Context-bootstrap tables outside RLS
+
+`workspaces`, `workspace_memberships`, and `auth_identities` carry an
+`account_id`, grant the runtime role full DML, and deliberately have no
+row-level security. They are the tables the authentication and access layer
+reads to *establish* the organization context that every RLS predicate then
+depends on, so an `account_id = current_account_id()` predicate over them is
+circular for the first two and type-incoherent for the third — `auth_identities`
+holds Better Auth's provider subject string in `account_id`, not a tenant id,
+and Better Auth queries it over its own connection pool that never carries an
+OpenGeni GUC. Consequently a query that reached the database layer without going
+through the access layer can read another organization's workspace and
+membership *metadata*, though never its content: every content table remains
+FORCE RLS and genuinely isolated.
+
+This is a reasoned exemption rather than an oversight, and it is attested by
+`packages/db/test/non-rls-authority-tables.test.ts` — which also pins the three
+dormant capability policies already stored on `workspace_memberships`, because
+enabling RLS on that table would make them the entire admission set and fail
+every membership read closed. Adding a table to `NON_RLS_RUNTIME_TABLES` is a
+tenancy decision; update that test and the analysis in
+[`design/organization-tenancy-non-rls-authority-tables-2026-08-18.md`](design/organization-tenancy-non-rls-authority-tables-2026-08-18.md)
+in the same change.
+
 ## Legacy behavior
 
 Existing resources retain their current workspace foreign keys and RLS. Slice
@@ -1099,10 +1123,49 @@ deliberately inert" for exactly what is live and why the rest is held back.
 
 Remaining activation work is therefore the *product* half plus its
 prerequisites: an authorized API/SDK/UI surface for visibility mutation and
-independent fork, cancellation semantics, cache/pin stripping (notably
-`session_list_snapshots`, whose bare `uuid[]` cache is not covered by the
-restrictive policies), and owner-only grants before enabling personal
-attachment to shared sessions.
+independent fork, cancellation semantics, and owner-only grants before
+enabling personal attachment to shared sessions.
+
+Cache and pin stripping is delivered by migration
+`0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
+`session_visibility_isolation` by enumerating relations that carry a foreign key
+to `sessions.id`, so it reached 70 relations but could not reach
+`session_list_snapshots.ordinary_session_ids` — a bare `uuid[]` with no foreign
+key. 0301 closes both halves of that gap:
+
+- A cached list page is stripped at the transition, not filtered on the read
+  path. An `AFTER UPDATE OF visibility` trigger on `sessions` replaces the
+  transitioned identity with the reserved all-zero UUID in every *other*
+  subject's live snapshot for that workspace; the owner's own page is left
+  intact because the session is still visible to them. Replacing rather than
+  removing the slot keeps snapshot cardinality and every in-flight cursor offset
+  byte-stable, so a stale continuation still returns the same page it would have
+  returned when the hidden row was merely filtered out by RLS. A RESTRICTIVE
+  predicate over the array was rejected: a snapshot holds up to 5,000 ids and a
+  subject up to 32 live snapshots, so it would cost up to 160,000 per-element
+  visibility calls on the hot first-page read while also making the row
+  undeletable. The trigger writes other subjects' rows under 0225's existing
+  transaction-local `session_visibility_write_capabilities` capability — a row
+  only the schema owner can mint and which the runtime role can neither read nor
+  forge — so the strip does not depend on the migration owner being a
+  superuser.
+- A stale personal pin stays removable by the member who created it.
+  PostgreSQL applies SELECT policies to a `DELETE` that reads any column, so a
+  command-scoped `FOR DELETE` exemption is impossible; the RESTRICTIVE policy's
+  USING side instead carries an explicit `subject_id =
+  current_subject_id()` escape. That discloses nothing new — the pre-existing
+  permissive `workspace_isolation` policy already limits every visible pin to
+  its own subject, and a pin row's only session-derived field is an id that
+  subject supplied. The WITH CHECK side keeps the strict predicate, so a member
+  still cannot pin, or flip `pinned` on, a session they cannot see, and INSERT
+  cannot become a session-existence oracle through the foreign key. The pin row
+  is deliberately retained rather than deleted: it is durable personal intent,
+  it is inert in every product projection while the session is private, and it
+  becomes meaningful again if the owner re-shares.
+
+Severity was bounded: `transition_session_visibility` still has no product
+caller, so this is a correctness fix ahead of activation rather than a live
+exposure.
 
 ### G. Retire
 
