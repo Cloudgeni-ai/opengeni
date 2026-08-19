@@ -842,9 +842,9 @@ temporal:
       drop:
         - ALL
 
-# Embedded MinIO for disposable conformance stacks and the persistent non-HA
-# single-machine profile. Multi-node deployments should use Azure Blob, AWS S3,
-# GCS, or another external object store.
+# Embedded MinIO for disposable conformance stacks and an explicit opt-in
+# object-storage fixture. Multi-node deployments should use Azure Blob, AWS S3,
+# GCS, or another external object store. Enable at most one of garage or minio.
 minio:
   enabled: false
   priorityClassName: ""
@@ -877,6 +877,54 @@ minio:
     nodePort: null
   persistence:
     enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# Embedded Garage for local Compose, the persistent non-HA single-machine
+# profile, and local-Kubernetes smoke. This is the same fixture class as MinIO:
+# not production HA object storage. Chart default remains off. Enable at most
+# one of garage or minio. The image has no shell; garage.toml is mounted.
+garage:
+  enabled: false
+  priorityClassName: ""
+  image:
+    repository: dxflrs/garage
+    tag: v2.3.0
+    digest: sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+    pullPolicy: IfNotPresent
+  mcImage:
+    repository: minio/mc
+    tag: RELEASE.2025-08-13T08-35-41Z
+    pullPolicy: IfNotPresent
+  auth:
+    accessKey: GK0123456789abcdef0123456789abcdef
+    secretKey: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    rpcSecret: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    existingSecret: ""
+    accessKeyKey: GARAGE_ACCESS_KEY_ID
+    secretKeyKey: GARAGE_SECRET_ACCESS_KEY
+    rpcSecretKey: GARAGE_RPC_SECRET
+  bucket: opengeni-files
+  publicEndpoint: ""
+  sandboxEndpoint: ""
+  service:
+    apiPort: 3900
+  # Optional one-port edge service. Keep RPC/admin/web private; this exposes
+  # only the signed object API.
+  edgeService:
+    enabled: false
+    type: ClusterIP
+    nodePort: null
+  persistence:
+    enabled: true
+    metaSize: 1Gi
     size: 20Gi
     storageClassName: ""
   resources:

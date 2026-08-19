@@ -283,6 +283,11 @@ export function useSessionCapabilities(
           })
           .catch((cause) => {
             if (!cancelled) {
+              if (isSandboxOwnershipDisabledError(cause)) {
+                setState("on-demand");
+                setError(null);
+                return;
+              }
               setState("error");
               setError(cause instanceof Error ? cause : new Error(String(cause)));
             }
@@ -453,6 +458,11 @@ export function useSessionCapabilities(
         }
       } catch (cause) {
         if (cancelled) return;
+        if (isSandboxOwnershipDisabledError(cause)) {
+          setState("on-demand");
+          setError(null);
+          return;
+        }
         if (cause instanceof OpenGeniApiError && cause.status === 403) {
           setState("error");
           setError(new Error("not permitted to view this session's sandbox"));
@@ -523,4 +533,12 @@ export function useSessionCapabilities(
     viewerId: identityMatches ? viewerId : null,
     renegotiate,
   };
+}
+
+function isSandboxOwnershipDisabledError(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    error.message.includes("sandbox ownership is not enabled")
+  );
 }

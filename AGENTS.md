@@ -29,7 +29,7 @@ Manual equivalent:
 2. Start infrastructure:
 
    ```bash
-   docker compose up -d postgres nats temporal minio minio-init
+   docker compose up -d postgres nats temporal garage garage-init
    bun run db:migrate
    bun run db:provision-roles
    ```
@@ -72,7 +72,7 @@ Default URLs:
 
 `bun run dev` is per-worktree: Compose project = directory basename (main checkout dir `opengeni` → `opengeni-main`; override with `OPENGENI_COMPOSE_PROJECT`), free host ports (ignore copied `.env` port pins unless `OPENGENI_PIN_PORTS=1`), rewrite loopback URLs including `nats://`, write `.env.runtime`. `bun run dev:*` / `db:*` source `.env` then `.env.runtime`. Do not reuse another worktree’s host ports. Sandbox image build skips when `OPENGENI_SANDBOX_BACKEND=none`.
 
-MinIO is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. Production deployments should use provider-native storage instead of deploying MinIO manually: `azure-blob` for Azure Blob, `aws-s3` for AWS S3, and `gcs` for Google Cloud Storage.
+Garage is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. MinIO remains an explicit opt-in (`OPENGENI_OBJECT_STORAGE_FIXTURE=minio` or Helm `minio.enabled`). Production deployments should use provider-native storage instead of deploying Garage or MinIO manually: `azure-blob` for Azure Blob, `aws-s3` for AWS S3, and `gcs` for Google Cloud Storage.
 
 ## Architecture Notes
 
@@ -99,7 +99,12 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   capability-fenced direct-write trigger, and visibility-aware reads, but its
   `transition_session_visibility` and `fork_session_content` lifecycle functions
   are deliberately uncalled outside the `packages/db` test lane, so every
-  production session stays `workspace_shared`. Do not add the first caller
+  production session stays `workspace_shared`. Owner derivation reads STATED
+  authority only: an active membership's own `personal_workspace_id` pointer or
+  an explicit `workspace_memberships` row (migration 0302). Never widen it to a
+  default workspace, `created_by`, or current access, and never let an
+  unresolved owner inside an active membership's personal workspace fall back to
+  a silent NULL. Do not add the first caller
   without the activation prerequisites (cache/pin stripping, cancellation,
   owner-only grants) and an update to
   `test/session-visibility-contract-surface.test.ts`. An organization-wide
@@ -293,4 +298,4 @@ Canonical organization-tenancy authority activation is the same one-way shape, p
 
 Keep provider resource inventories, cleanup notes, cloud account identifiers, private endpoints, generated credentials, kubeconfigs, Terraform state, plans, local tfvars, service-account keys, and access keys in private operator-controlled storage outside the repository.
 
-Use official upstream charts/operators or managed services for production platform services. OpenGeni's chart should own OpenGeni API, web, worker, migrations, and integration resources. Built-in Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local, CI, and smoke verification only; do not present them as lightweight production alternatives.
+Use official upstream charts/operators or managed services for production platform services. OpenGeni's chart should own OpenGeni API, web, worker, migrations, and integration resources. Built-in Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local, CI, and smoke verification only; do not present them as lightweight production alternatives.

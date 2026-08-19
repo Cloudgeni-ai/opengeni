@@ -128,6 +128,25 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+Because that workspace has no membership row, migration 0225's session write
+fence could never attribute a session created there and minted a NULL owner
+instead. Migration
+`0302_personal_workspace_session_ownership.sql` repairs it: the fence now
+accepts an active membership's own `personal_workspace_id` pointer as an
+alternative to the `workspace_memberships` row, the same stated-authority shape
+0258 already uses for personal Documents. It is authority read from the
+authority row, not inference from `created_by`, a default workspace, or current
+access; the ordinary shared-workspace path is unchanged, and the pointer is 1:1
+through `organization_memberships_personal_workspace_idx`. The disjunct is
+restricted to `user:%` subjects, matching the lifecycle gate in 0219/0263, so
+the write path never attributes a subject 0297's classifier calls
+`external_lane_owns_row`. A subject-created session that still resolves to no
+owner inside an active membership's personal workspace now raises SQLSTATE
+`55000` instead of silently writing NULL; service, API-key, unanchored, and
+suspended-member sessions remain legitimately ownerless. Rows already durable
+before 0302 remain the existing `bun run db:backfill-session-ownership` seam's
+job.
+
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
 capability with a fixed schema-plus-`pg_catalog` search path, PUBLIC execution
