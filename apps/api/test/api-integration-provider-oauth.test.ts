@@ -22,6 +22,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
+import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -252,6 +253,30 @@ async function start(
   );
   const body = (await response.json()) as { authorizationUrl?: string; error?: unknown };
   return { response, authorizationUrl: body.authorizationUrl ?? "", body };
+}
+
+/**
+ * The exact state an older deployment would have signed: a real state minted by
+ * the (now fenced) start route, re-signed with the `personalOwnerVerified`
+ * claim removed. Re-signing the genuine payload keeps every other field —
+ * definition fingerprint, PKCE verifier, nonce — valid, so the callback's
+ * refusal can only come from the missing claim.
+ */
+async function legacyProviderOAuthState(
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  payload: { definitionId: string; ownership: string; personalOwnerVerified?: boolean },
+): Promise<string> {
+  const started = await start(providerFixture(), workspace, {
+    definitionId: payload.definitionId,
+    ownership: payload.ownership,
+  });
+  const raw = new URL(started.authorizationUrl).searchParams.get("state")!;
+  const decoded = readSignedState(raw, STATE_SECRET) as Record<string, unknown>;
+  const { personalOwnerVerified: _dropped, ...withoutClaim } = decoded;
+  return createSignedState(STATE_SECRET, {
+    ...withoutClaim,
+    ...(payload.personalOwnerVerified === true ? { personalOwnerVerified: true } : {}),
+  });
 }
 
 async function callback(
@@ -528,7 +553,29 @@ describe("API Integration provider OAuth", () => {
     ).toEqual([]);
   }, 60_000);
 
-  test("an omitted ownership takes the documented workspace default, not personal", async () => {
+  test("an omitted ownership is refused rather than silently picking either value", async () => {
+    if (!available) return;
+    // Resolving an omission to `personal` was the original defect. Resolving it
+    // to `workspace` is the opposite defect: an executed probe confirmed it
+    // flips a newly connected Outlook mailbox from subject-scoped to
+    // workspace-shared. Both Definitions are exercised, because the Microsoft
+    // family is where the widening would actually hurt.
+    for (const definition of [
+      GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+      MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+    ]) {
+      const workspace = await freshWorkspace();
+      const fixture = providerFixture();
+      const started = await start(fixture, workspace, { definitionId: definition.id });
+      expect(started.response.status).toBe(422);
+      expect(JSON.stringify(started.body)).toContain("ownership is required");
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
+    }
+  }, 60_000);
+
+  test("an explicit workspace ownership still connects and owns no subject", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
@@ -538,6 +585,7 @@ describe("API Integration provider OAuth", () => {
     });
     const started = await start(fixture, workspace, {
       definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "workspace",
     });
     expect(started.response.status).toBe(200);
     const connected = await callback(
@@ -553,9 +601,61 @@ describe("API Integration provider OAuth", () => {
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
     ).filter((connection) => connection.providerDomain === "www.googleapis.com");
     expect(connections).toHaveLength(1);
-    // Workspace-owned means no owner subject: the caller never asked for a
-    // personal Connection, so none was minted under their subject.
     expect(connections[0]!.subjectId).toBeNull();
+  }, 60_000);
+
+  test("a legacy in-flight state cannot land a personal owner through the callback", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "google-refresh-token",
+    });
+    // Mint the exact state an older deployment would have signed: personal
+    // ownership with no `personalOwnerVerified` claim. This is the rolling-
+    // deploy window the callback fence exists to close - the start route is
+    // already fenced, so nothing else can produce this shape.
+    const legacyState = await legacyProviderOAuthState(workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+    });
+    const refused = await callback(
+      fixture,
+      legacyState,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    const location = new URL(refused.headers.get("location")!);
+    expect(location.searchParams.get("integration_oauth")).toBe("error");
+    expect(location.searchParams.get("reason")).toBe("connection_conflict");
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toEqual([]);
+
+    // The same state shape with the claim present is accepted, so the fence is
+    // the claim and not some unrelated rejection of a hand-minted state.
+    const verifiedState = await legacyProviderOAuthState(workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+      personalOwnerVerified: true,
+    });
+    const accepted = await callback(
+      fixture,
+      verifiedState,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
+    expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
+      "success",
+    );
+    const connections = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(connections).toHaveLength(1);
+    expect(connections[0]!.subjectId).toBe(workspace.subjectId);
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {
@@ -585,7 +685,7 @@ describe("API Integration provider OAuth", () => {
     const allowed = await start(
       fixture,
       workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id },
+      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
       "service",
     );
     expect(allowed.response.status).toBe(200);

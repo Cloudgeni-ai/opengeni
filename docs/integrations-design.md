@@ -53,35 +53,66 @@ Decisions baked in:
 
 **Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
 
-An **omitted** ownership resolves through the resolved provider profile's declared
-default (`defaultOwnershipFor`, §5.2.2): workspace, unless the profile's
-`allowedOwnership` is personal-only. No flow may fall back to `personal` on its
-own — that inverts the doctrine for every caller that did not spell ownership
-out, and the web app always sends an explicit choice, so such a fallback is
-reachable only by direct API/SDK callers.
+**An omitted ownership is never guessed.** The MCP OAuth start keeps its
+documented behaviour: it resolves through the resolved provider profile's
+declared default (`defaultOwnershipFor`, §5.2.2) — workspace, unless the
+profile's `allowedOwnership` is personal-only. The Integration Definition OAuth
+start (`provider-oauth.ts`) instead **refuses** an ambiguous omission with a
+422, because both possible fallbacks are defects there: `personal` (what it used
+to do) inverts the doctrine for every caller that did not spell ownership out,
+and `workspace` silently flips a newly connected Outlook mailbox, Drive, or
+OneDrive from subject-scoped to workspace-shared. A profile that allows exactly
+one ownership is unambiguous and still resolves, so Gmail and hosted Slack MCP
+are unaffected, as is a reconnect (which takes the existing row's ownership).
+No flow may fall back to `personal` on its own.
 
 **Only a managed human may own a personal connection**
 (`apps/api/src/connection-ownership.ts`). An API key, the shared `configured:`
-key, a service principal, an agent attempt, and any principal whose grant
-subject is not its authenticated subject are refused with an explicit **422**
-before a connection is created — never silently downgraded to workspace
-ownership, which a personal-only profile (Gmail, hosted Slack MCP) forbids
-outright. Two independent facts require it: personal execution resolves only
-through the immutable delegation snapshot frozen on a *human's* causal turn or
-scheduled task, and `bind_connection_authority` (migration 0256) can mint the
-`user` authority scope only for a subject holding an active organization
-membership, so a machine-owned personal row lands on the `legacy_user`
-compatibility lane that no delegation snapshot can select. `principalKind` is
-the trusted signal (the delegated-token contract forbids a `human_session`
-claim from carrying serviceInitiator or exact agent-attempt authority); the
-`api_key:`/`configured:` subject-prefix check is belt-and-braces, and it is also
-the only signal an OAuth *callback* has, since a callback carries signed state
-rather than a live principal. Unknown provenance fails closed.
+key, a service principal, an agent attempt, a grant that fails
+`contextIntegrity`, and any principal whose grant subject is not its
+authenticated subject are refused with an explicit **422** before a connection
+is created — never silently downgraded to workspace ownership, which a
+personal-only profile (Gmail, hosted Slack MCP) forbids outright. Two
+independent facts require it: personal execution resolves only through the
+immutable delegation snapshot frozen on a *human's* causal turn or scheduled
+task, and `bind_connection_authority` (migration 0256) can mint the `user`
+authority scope only for a subject holding an active organization membership, so
+a machine-owned personal row lands on the `legacy_user` compatibility lane and
+can never become a real organization-scoped authority.
+
+`principalKind` is the trusted allow-list: exactly `human_session` passes and
+unknown provenance fails closed. The delegated-token contract forbids a
+`human_session` claim from carrying `serviceInitiator` or exact agent-attempt
+authority. The predicate matches `requireConnectionAuthorityOwner`'s, including
+its `contextIntegrity` anti-substitution invariant; only the status differs
+(422 rejects an unavailable *ownership value*, 403 rejects a caller claiming to
+*be* the owner).
+
+A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`)
+is defence-in-depth against a delegation-secret holder signing a human claim
+over an OpenGeni-minted machine subject. It is deliberately **not** an
+allow-list of human subjects: `docs/embedding.md` states that `subjectId`
+"remains opaque to OpenGeni" and that hosts must not have the kind inferred from
+a subject-id prefix, so a trusted embedding host legitimately signs
+`human_session` over a non-`user:` subject. `connection-ownership.test.ts`
+enumerates every machine subject OpenGeni mints and asserts each is rejected, so
+a new machine namespace fails that test rather than silently passing the list.
+
+**OAuth callbacks enforce a signed claim, not a subject shape.** A callback
+carries signed state and no live principal, so it cannot re-evaluate
+`principalKind`. Every start path that may persist a personal owner therefore
+stamps a `personalOwnerVerified` claim into its HMAC-signed state, and all five
+callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
+Google Drive, Atlassian, and social — require it. A state minted before the
+claim existed simply lacks it and fails closed, which closes the one
+`oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
+MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
+machine-owned row.
 
 The two personal-only first-party connectors (`google-drive/install`,
 `atlassian/install`) carry no ownership field at all and always write
-`subject_id = <caller>`, so their start routes apply the same fence directly and
-their callbacks re-check the state subject's shape.
+`subject_id = <caller>`, so their start routes apply the principal fence
+directly.
 
 ## 3. Credential encryption
 

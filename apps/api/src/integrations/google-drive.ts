@@ -89,8 +89,10 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
-  isPersonalConnectionOwnerSubject,
   personalOnlyConnectionPrincipalMessage,
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -117,6 +119,8 @@ type GoogleDriveOAuthState = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Signed proof that a live managed human started this personal-only flow. */
+  personalOwnerVerified: boolean;
   returnPath: string;
   encryptedPkceVerifier: string;
   capability: "source_read" | "publish";
@@ -254,6 +258,9 @@ export async function startGoogleDriveOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    // The route admits only a managed human, so reaching here is the proof; the
+    // callback has no live principal and enforces exactly this claim.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: GOOGLE_DRIVE_RETURN_PATH(input.workspaceId),
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
     capability: input.payload.capability,
@@ -1990,6 +1997,7 @@ function readGoogleDriveOAuthState(
     accountId,
     workspaceId,
     subjectId,
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     returnPath,
     encryptedPkceVerifier: requiredString(
       payload.encryptedPkceVerifier,
@@ -2008,9 +2016,15 @@ async function requireGoogleDriveCallbackGrant(
 ): Promise<void> {
   // This connector is personal-only by construction: its start request carries
   // no ownership and the callback always writes `subjectId: state.subjectId`.
-  // A state minted by a machine principal before the start-side fence existed
-  // must not land a machine-owned personal Connection.
-  if (!isPersonalConnectionOwnerSubject(state.subjectId)) {
+  // A state minted before the start-side principal fence existed carries no
+  // `personalOwnerVerified` claim and must not land a personal Connection.
+  if (
+    !personalOwnerStateAccepted({
+      ownership: "personal",
+      subjectId: state.subjectId,
+      personalOwnerVerified: state.personalOwnerVerified,
+    })
+  ) {
     throw new HTTPException(422, {
       message: personalOnlyConnectionPrincipalMessage("Google Drive"),
     });

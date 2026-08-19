@@ -60,8 +60,10 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
-  isPersonalConnectionOwnerSubject,
   personalOnlyConnectionPrincipalMessage,
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import {
   integrationBaseUrl,
@@ -81,6 +83,8 @@ type AtlassianOAuthState = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Signed proof that a live managed human started this personal-only flow. */
+  personalOwnerVerified: boolean;
   returnPath: string;
   connectionId?: string;
   connectionVersion?: number;
@@ -126,6 +130,9 @@ export async function startAtlassianOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    // The route admits only a managed human, so reaching here is the proof; the
+    // callback has no live principal and enforces exactly this claim.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: ATLASSIAN_RETURN_PATH(input.workspaceId),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
@@ -1499,6 +1506,7 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
     accountId,
     workspaceId,
     subjectId,
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     returnPath,
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
@@ -1509,9 +1517,15 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
 async function requireCallbackGrant(deps: ApiRouteDeps, state: AtlassianOAuthState): Promise<void> {
   // This connector is personal-only by construction: its start request carries
   // no ownership and the callback always writes `subjectId: state.subjectId`.
-  // A state minted by a machine principal before the start-side fence existed
-  // must not land a machine-owned personal Connection.
-  if (!isPersonalConnectionOwnerSubject(state.subjectId)) {
+  // A state minted before the start-side principal fence existed carries no
+  // `personalOwnerVerified` claim and must not land a personal Connection.
+  if (
+    !personalOwnerStateAccepted({
+      ownership: "personal",
+      subjectId: state.subjectId,
+      personalOwnerVerified: state.personalOwnerVerified,
+    })
+  ) {
     throw new HTTPException(422, {
       message: personalOnlyConnectionPrincipalMessage("Atlassian"),
     });

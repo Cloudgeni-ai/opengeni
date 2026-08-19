@@ -16,7 +16,10 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
-import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import {
+  assertPersonalConnectionOwnerPrincipal,
+  isPersonalConnectionOwnerPrincipal,
+} from "../connection-ownership";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
@@ -108,6 +111,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     // The contract already defaults this request to workspace ownership; an
     // explicit personal choice still needs a human who can own it.
+    const personalOwnershipAllowed = isPersonalConnectionOwnerPrincipal(access);
     if (payload.ownership === "personal") {
       assertPersonalConnectionOwnerPrincipal(access);
     }
@@ -118,6 +122,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
+        personalOwnershipAllowed,
         requestUrl: c.req.url,
         payload,
       },

@@ -242,6 +242,46 @@ async function callback(
 }
 
 describe("Google Drive OAuth isolation proof", () => {
+  test("a legacy in-flight state cannot land a personal owner through the callback", async () => {
+    // Google Drive is personal-only: the callback always writes
+    // `subjectId: state.subjectId`. The start route admits only a managed human
+    // and stamps `personalOwnerVerified` into the signed state; a state minted
+    // by an older deployment carries no such claim, which is the rolling-deploy
+    // window this fence exists to close. Note `subject-a` is a host-opaque
+    // subject that passes the subject-shape check, so only the claim can be
+    // doing the work here.
+    const authority = await freshAuthority();
+    const google = providerDouble();
+    const started = await start(authority, google.fetch);
+    expect(started.status).toBe(200);
+    const state = new URL(
+      ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+    const payload = readSignedState(state, STATE_SECRET) as Record<string, unknown>;
+    expect(payload.personalOwnerVerified).toBe(true);
+
+    const { personalOwnerVerified: _dropped, ...legacyPayload } = payload;
+    const refused = await callback(google.fetch, createSignedState(STATE_SECRET, legacyPayload));
+    expect(refused.status).toBe(302);
+    expect(refused.headers.get("location")).toContain("google_drive=error");
+    expect(refused.headers.get("location")).toContain("reason=http_422");
+    // No provider call and no row: the refusal happens before token exchange.
+    expect(google.requests).toHaveLength(0);
+    expect(
+      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
+        (candidate) => candidate.providerDomain === "googleapis.com",
+      ),
+    ).toEqual([]);
+
+    // The same hand-minted state with the claim restored is accepted, so the
+    // fence is the claim itself and not some unrelated state rejection.
+    const accepted = await callback(
+      google.fetch,
+      createSignedState(STATE_SECRET, { ...legacyPayload, personalOwnerVerified: true }),
+    );
+    expect(accepted.headers.get("location")).toContain("google_drive=connected");
+  });
+
   test("binds PKCE and exact redirects, and rejects signed redirect/reconnect confusion", async () => {
     const authority = await freshAuthority();
     const google = providerDouble();

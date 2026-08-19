@@ -4,34 +4,68 @@
 
 Stop silently creating personal Connections when the caller never asked for one.
 
-`POST /v1/workspaces/:workspaceId/integrations/oauth/start` resolved an omitted
-`ownership` to `personal`, inverting the documented workspace-owned default for
-every caller that did not spell it out. It now takes the resolved provider
-profile's default (`defaultOwnershipFor`) — workspace for every curated Google
-and Microsoft Definition — and applies that profile's `allowedOwnership` fence,
-matching the MCP OAuth start. The web app already sends an explicit ownership,
-so only direct API/SDK callers change behaviour.
+**Breaking for direct API/SDK callers of
+`POST /v1/workspaces/:workspaceId/integrations/oauth/start`.** That endpoint
+resolved an omitted `ownership` to `personal`, inverting the documented
+workspace-owned default. It no longer guesses: when the resolved provider
+profile allows both ownerships, an omitted value is now a **422** and the caller
+must choose. Resolving the omission to `workspace` instead was rejected
+deliberately — an executed probe confirmed it flips a newly connected Outlook
+mailbox (and Drive/OneDrive) from subject-scoped to workspace-shared, which is a
+real narrow-to-broad widening, and this change must only narrow or make
+explicit. A profile that allows exactly one ownership (Gmail, hosted Slack MCP)
+is unambiguous and still resolves, and a reconnect keeps the existing
+Connection's ownership. The web app always sends an explicit ownership and is
+unaffected. The MCP OAuth start keeps its existing, already-correct
+`defaultOwnershipFor` behaviour.
 
-Personal ownership is now restricted to a managed human on every create path
-(MCP OAuth start, Integration Definition OAuth start, manual `POST
-/connections`, first-party social OAuth start, and the personal-only Google
-Drive and Atlassian install routes, plus their callbacks). An API key, the
-shared `configured:` key, a service principal, an agent attempt, or a principal
-substituting another subject now gets an explicit **422** instead of a
-machine-owned personal Connection. That is a refusal, never a silent downgrade —
-Gmail and Slack's hosted MCP are personal-only and must not become
-workspace-owned. `principalKind` is the trusted signal, with an
-`api_key:`/`configured:` subject-prefix check as belt-and-braces and as the only
-signal an OAuth callback (signed state, no live principal) has.
+Personal ownership is now restricted to a managed human on every path that mints
+a new personal owner: MCP OAuth start, Integration Definition OAuth start,
+manual `POST /connections`, first-party social OAuth start, and the
+personal-only Google Drive and Atlassian install routes. An API key, the shared
+`configured:` key, a service principal, an agent attempt, a grant that fails
+`contextIntegrity`, or a principal substituting another subject now gets an
+explicit **422** instead of a machine-owned personal Connection. That is a
+refusal, never a silent downgrade — Gmail and Slack's hosted MCP are
+personal-only and must not become workspace-owned. The predicate now matches the
+pre-existing `requireConnectionAuthorityOwner` exactly, including its
+`contextIntegrity` anti-substitution invariant; only the status code differs
+(422 rejects an unavailable ownership *value*, 403 rejects a caller claiming to
+*be* the owner).
 
-No data migration and no schema change. Existing personal Connections owned by a
-machine subject are untouched: they already sit on the `legacy_user` authority
-lane (`bind_connection_authority` can mint the `user` scope only for a subject
-with an active organization membership), they remain listable and readable, and
-runtime resolution through a frozen delegation snapshot is unchanged. The one
-behaviour they lose is interactive OAuth *reconnect* under the same non-human
-principal, which now 422s; stored refresh-token renewal through the credential
-broker is unaffected. Operators can survey the population read-only with:
+An OAuth callback carries signed state, not a live principal, so it cannot
+re-evaluate `principalKind`. Every start path that may persist a personal owner
+now stamps a `personalOwnerVerified` claim into its HMAC-signed state, and **all
+five** callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
+Google Drive, Atlassian, and social — require it. A state minted before the
+claim existed lacks it and fails closed, which closes the one `oauthStateTtlMs`
+in-flight window across a rolling deploy and is why the MCP callback's legacy
+`?? "personal"` decode can no longer land a machine-owned row.
+
+**`configured` product-access-mode deployments lose personal Connections
+entirely** (Gmail, hosted Slack MCP, Google Drive, Atlassian), because the
+shared configured key resolves to `principalKind: "configured_key"` and its
+subject comes from a caller-supplied `x-opengeni-subject` header that proves
+nothing. This is intended: a shared operator key cannot give the per-human
+consent a personal Connection represents. `local` mode is unaffected — its
+bootstrap `dev` subject is a `human_session` and genuinely is the sole operator.
+
+No schema change and no data migration. Existing personal Connections owned by a
+machine subject already sit on the `legacy_user` authority lane
+(`bind_connection_authority` mints the `user` scope only for a subject with an
+active organization membership), they remain listable and readable, and — unlike
+an earlier description of this change — they **are** runtime-resolvable today:
+`personalConnectionDelegationSourceForGrant` returns a subject source for an
+`api_key` grant, so an api_key-owned Connection still resolves for that api_key.
+Credential-broker refresh-token renewal is untouched.
+
+What they lose is any **re-consent path**: interactive OAuth start now 422s, the
+callback fence 422s, and migration 0256 makes the owner column immutable, so the
+owner cannot be converted in place. When such a Connection's stored refresh
+token finally fails, the remediation is to create a replacement Connection as
+workspace-owned (or personal, connected by the human who should own it) and
+repoint the capability at it; the stale row can then be revoked. Operators
+should survey the population before upgrading:
 
 ```sql
 select coalesce(authority_scope, '(pre-0256)') as scope,

@@ -510,6 +510,150 @@ describe("connections routes", () => {
     );
   });
 
+  test("the MCP OAuth callback refuses a legacy in-flight personal state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      scopesSupported: ["documents:read"],
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "mcp.example.com",
+            mcpUrl: mcp.url,
+            ownership: "personal",
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { state: string };
+      const payload = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(payload.ownership).toBe("personal");
+      expect(payload.personalOwnerVerified).toBe(true);
+
+      // An older deployment signed no `personalOwnerVerified` claim, and the
+      // legacy decode reads a missing `ownership` as "personal". The callback
+      // has no live principal, so the signed claim is what it enforces.
+      const { personalOwnerVerified: _dropped, ...legacyPayload } = payload;
+      const refused = await publicApp(client.db, {
+        webBaseUrl: "http://127.0.0.1:3000",
+      }).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(
+          createSignedState(STATE_SECRET, legacyPayload),
+        )}`,
+      );
+      expect(refused.status).toBe(302);
+      const refusedLocation = refused.headers.get("location")!;
+      expect(refusedLocation).toContain("integration_oauth=error");
+      expect(refusedLocation).toContain("stage=state_verify");
+      // Refused before any provider traffic, and no row was written.
+      expect(as.tokenRequests).toHaveLength(0);
+      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
+        [],
+      );
+
+      // Positive control: the identical hand-minted state with the claim
+      // restored gets past state_verify, so the claim is the only difference.
+      const accepted = await publicApp(client.db, {
+        webBaseUrl: "http://127.0.0.1:3000",
+      }).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(
+          createSignedState(STATE_SECRET, { ...legacyPayload, personalOwnerVerified: true }),
+        )}`,
+      );
+      const acceptedLocation = accepted.headers.get("location")!;
+      expect(acceptedLocation).toContain("integration_oauth=success");
+      expect(acceptedLocation).toContain("ownership=personal");
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("the Atlassian callback refuses a legacy in-flight state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // Atlassian is personal-only and its callback fence runs before the OAuth
+    // client settings are needed, so no Atlassian client config is required to
+    // reach it. `subject-a` is host-opaque and passes the subject-shape check,
+    // so only the missing claim can produce the refusal.
+    const legacyState = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
+    });
+    const refused = await publicApp(client.db, {
+      webBaseUrl: "http://127.0.0.1:3000",
+    }).request(
+      `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(legacyState)}`,
+      // This callback path is not on the deployment perimeter's exempt list.
+      { headers: { "x-opengeni-access-key": "deployment-key" } },
+    );
+    expect(refused.status).toBe(302);
+    expect(refused.headers.get("location")).toContain("atlassian=error");
+    expect(refused.headers.get("location")).toContain("reason=http_422");
+    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
+      [],
+    );
+  });
+
+  test("social OAuth start and callback both refuse a machine personal owner", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // Start fence: a non-human principal explicitly asking for personal.
+    const refusedStart = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/social/oauth/start`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(
+            workspace,
+            "subject-a",
+            ["connections:write", "workspace:read"],
+            "service",
+          ),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ provider: "x", ownership: "personal" }),
+      },
+    );
+    expect(refusedStart.status).toBe(422);
+    expect(await refusedStart.text()).toContain("requires an authenticated human");
+
+    // Callback fence: a legacy in-flight personal state carries no claim. The
+    // fence runs before the grant re-check and before any provider traffic.
+    const legacyState = createSignedState(STATE_SECRET, {
+      kind: "social_oauth",
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      ownership: "personal",
+      provider: "x",
+      scopes: ["tweet.read"],
+      returnPath: "/integrations",
+    });
+    const refusedCallback = await publicApp(client.db, {
+      webBaseUrl: "http://127.0.0.1:3000",
+    }).request(`/v1/social/oauth/callback?code=abc&state=${encodeURIComponent(legacyState)}`);
+    expect(refusedCallback.status).toBe(302);
+    expect(refusedCallback.headers.get("location")).toContain("social_oauth=error");
+    expect(refusedCallback.headers.get("location")).toContain("reason=not_authorized");
+  });
+
   test("a non-human principal cannot own a personal connection on any create path", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -2226,6 +2370,8 @@ describe("connections routes", () => {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: "subject-a",
+      ownership: "personal",
+      personalOwnerVerified: true,
       providerDomain: "token-redirect.example.com",
       mcpUrl: `${origin}/mcp`,
       resource: `${origin}/mcp`,
@@ -2308,6 +2454,8 @@ describe("connections routes", () => {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: "subject-a",
+      ownership: "personal",
+      personalOwnerVerified: true,
       providerDomain: "verify-redirect.example.com",
       mcpUrl: `${origin}/mcp`,
       resource: `${origin}/mcp`,
@@ -2406,6 +2554,8 @@ describe("connections routes", () => {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
         subjectId: "subject-a",
+        ownership: "personal",
+        personalOwnerVerified: true,
         providerDomain: `operator-${index}.example.com`,
         resource: mcp.url,
         requestedScopes: [],
