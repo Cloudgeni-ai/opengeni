@@ -1,5 +1,11 @@
 # @opengeni/config
 
+## 0.17.1
+
+### Patch Changes
+
+- 81d2da0: Pin billed GPT-5.6 Sol/Terra/Luna to Codex's 272k/258.4k/244.8k context catalog instead of the 1.05M deployment default.
+
 ## 0.17.0
 
 ### Minor Changes
