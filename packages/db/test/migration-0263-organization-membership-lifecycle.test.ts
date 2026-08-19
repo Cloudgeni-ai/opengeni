@@ -260,6 +260,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       metadata: {},
       createdBy: { kind: "subject" as const, subjectId: fixture.targetSubject },
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none" as const,
     };
 
@@ -810,6 +812,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: ownerSubject },
       subjectId: ownerSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const targetOwnedSession = await createSession(client.db, {
@@ -821,6 +825,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const initiatedTurnId = crypto.randomUUID();
@@ -1004,6 +1010,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const approvalSession = await createSession(client.db, {
@@ -1015,6 +1023,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const recoveringSession = await createSession(client.db, {
@@ -1026,6 +1036,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const capacitySession = await createSession(client.db, {
@@ -1037,6 +1049,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const privateTransition = await transitionSessionVisibility(client.db, {
@@ -1274,6 +1288,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: targetSubject },
       subjectId: targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await transitionSessionVisibility(client.db, {
@@ -2322,6 +2338,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: fixture.targetSubject },
       subjectId: fixture.targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await shared.admin`
@@ -2370,6 +2388,8 @@ describe("migration 0263 organization membership lifecycle", () => {
       createdBy: { kind: "subject", subjectId: fixture.targetSubject },
       subjectId: fixture.targetSubject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const recordingId = crypto.randomUUID();

@@ -16,6 +16,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     resources: [],
     model: "model-x",
     reasoningEffort: "medium",
+    latencyMode: "standard",
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,
@@ -49,6 +50,32 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
       revision: request.expectedRevision + 1,
       updatedAt: new Date().toISOString(),
     }),
+    submitComposerDraft: async (workspaceId: string, sessionId: string, request: any) => {
+      const result =
+        request.delivery === "steer"
+          ? await target.steerMessage(workspaceId, sessionId, request)
+          : {
+              accepted: await target.sendMessage(workspaceId, sessionId, request),
+              turn: fakeTurn({ prompt: request.text }),
+            };
+      return {
+        ...result,
+        draft: {
+          revision: request.expectedDraftRevision + 1,
+          text: "",
+          annotations: [],
+          resources: [],
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          latencyMode: request.latencyMode,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        },
+        interruptionCount: "interruptionCount" in result ? (result.interruptionCount ?? 0) : 0,
+        replay: "replay" in result ? (result.replay ?? false) : false,
+      };
+    },
     ...partial,
   } as SessionClientLike;
   if (!partial.fsListBatch) {

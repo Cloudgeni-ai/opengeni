@@ -20,6 +20,7 @@ import {
   newSessionDraftToolsProvided,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
+  seedNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -63,6 +64,7 @@ function draftInput(
     toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
+    latencyMode: "standard" | "priority" | "fast";
     options: NewSessionDraftOptions;
   }> = {},
 ) {
@@ -77,6 +79,7 @@ function draftInput(
     toolsProvided: overrides.toolsProvided ?? false,
     model: overrides.model ?? "scripted-model",
     reasoningEffort: overrides.reasoningEffort ?? ("low" as const),
+    latencyMode: overrides.latencyMode ?? ("standard" as const),
     options: overrides.options ?? {},
   };
 }
@@ -109,6 +112,8 @@ async function createUninitializedSession(context: Awaited<ReturnType<typeof fix
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
 }
@@ -302,6 +307,48 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toBeInstanceOf(NewSessionDraftConflictError);
     expect((rejected[0]!.reason as NewSessionDraftConflictError).currentRevision).toBe(1);
+  });
+
+  test("rejects same-revision create content that is not the exact saved draft", async () => {
+    const context = await fixture();
+    const saved = await saveDraft(context, 0, {
+      text: "exact outside composer",
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+    });
+
+    await expect(
+      withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
+        db.transaction((tx) =>
+          seedNewSessionDraftInTransaction(tx, {
+            workspaceId: context.grant.workspaceId!,
+            subjectId: context.subjectId,
+            expectedRevision: saved.revision,
+            expectedSnapshot: {
+              text: saved.text,
+              resources: [],
+              tools: [],
+              toolsProvided: false,
+              model: "different-model",
+              reasoningEffort: "high",
+              latencyMode: "priority",
+              options: {},
+            },
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      name: "NewSessionDraftConflictError",
+      currentRevision: saved.revision,
+    });
+    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+      revision: saved.revision,
+      text: "exact outside composer",
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+    });
   });
 
   test("turns only an exact accepted revision into a safe seed after durable initialization", async () => {

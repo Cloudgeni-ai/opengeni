@@ -469,6 +469,8 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         resources: [],
         metadata: {},
         model: "codex/gpt-5.6-sol",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
       });
       await sql.begin(async (tx) => {
@@ -1246,6 +1248,8 @@ async function createFixture(
       createdBy: { kind: "subject", subjectId: subject },
       subjectId: subject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
       variableSetId: directVariableSet!.id,
       rigId: options.directOnly ? null : rig!.id,

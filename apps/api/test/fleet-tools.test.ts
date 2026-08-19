@@ -186,6 +186,8 @@ async function seedFleet(
     resources: [],
     metadata: {},
     model: "gpt-test",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: opts.sandboxBackend ?? "modal",
   });
   const enrollment = await createEnrollment(db, {
@@ -338,6 +340,8 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId },
       subjectId,

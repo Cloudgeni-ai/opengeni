@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 2.0.0
+
+### Minor Changes
+
+- 1c78ed0: Separate new-session and established-session composer policy authority. Exact draft submission now atomically freezes queued-turn text, resources, model, reasoning, and latency, then rotates the server draft; queue Edit restores that exact snapshot and stale revisions surface as conflicts instead of silent rebases.
+
+### Patch Changes
+
+- 5dc88ef: Terminalize attached Chrome Browser/Computer sessions when the device connection generation changes, stop Reconnect from retrying the stale placement, and physically stop ScreenCaptureKit helpers so replayd cannot accumulate.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+  - @opengeni/sdk@2.0.0
+
 ## 1.2.0
 
 ### Minor Changes

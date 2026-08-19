@@ -25,7 +25,7 @@ Migration `0199_workspace_learning_policy.sql` adds four FORCE-RLS tables:
 
 Revision creation does not activate a policy. Activation and rollback require an exact authenticated human actor, expected current revision, expected activation version, and operation fingerprint. A rollback target must have been active previously. Direct head/event writes are not a supported or authorized activation path.
 
-Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable existing Memory injection, `memory_search`, `memory_save`, or `memory_correct` behavior.
+Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable `memory_search`.
 
 ## Effective resolution and governed evaluation
 

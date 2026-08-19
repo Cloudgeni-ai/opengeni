@@ -96,10 +96,9 @@ describe("ComputerSession route discipline", () => {
     expect(placement).toContain("enrollment.connectionInstanceId");
     expect(placement).toContain("buildSelfhostedBackendSession({");
     expect(placement).toContain("new NatsControlRpc(");
-    expect(placement).toMatch(
-      /assertPlacementInstance\(\s*expectedPlacementInstanceId,\s*device\.connectionGeneration,?\s*\)/u,
-    );
-    expect(placement).toContain("placementInstanceId: device.connectionGeneration");
+    expect(placement).toContain("attachedEndPlacementInstanceId(");
+    expect(placement).toContain("device.connectionGeneration");
+    expect(source).toContain('operation === "computer.end" && expectedPlacementInstanceId');
   });
 
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {

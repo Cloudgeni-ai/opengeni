@@ -353,15 +353,11 @@ function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
   const { timeline, events, sessionStatus, connectionState } = sessionEvents;
   // Host-exposed models for the composer's <ModelPicker>; preselect the
   // deployment default once it loads, then let the operator switch.
-  const { models, defaultModel } = useAvailableModels();
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
-  const model = selectedModel ?? defaultModel ?? undefined;
-  // Thread the chosen model into every send via sendExtras (evaluated at send
-  // time so it always reflects the current selection).
+  const { models } = useAvailableModels();
   const composer = useComposer(MANAGER_SESSION_ID, {
-    sendExtras: () => (model ? { model } : {}),
     effectiveControl: session?.effectiveControl,
   });
+  const model = composer.policy?.model;
   const status = sessionStatus ?? session?.status ?? null;
   const realtimeStatus = status ?? "idle";
   const effectiveControl = session?.effectiveControl ?? ACTIVE_CONTROL;
@@ -411,7 +407,7 @@ function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
           commandContext={commandContext}
           models={models}
           selectedModel={model}
-          onSelectModel={setSelectedModel}
+          onSelectModel={composer.setModel}
           actionsStart={
             <SessionRealtimeControl
               sessionId={MANAGER_SESSION_ID}

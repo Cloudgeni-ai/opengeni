@@ -475,7 +475,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         policy: {
           model: "test-model",
           reasoningEffort: "low",
-          latencyMode: "standard",
+          latencyMode: "standard" as const,
           tools: [],
           sandboxBackend: "none",
         },
@@ -602,6 +602,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     expect(session.initialMessage).toBe(initialMessage);
@@ -1201,6 +1203,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const started = await initializeSessionStartAtomically(app.db, {

@@ -129,6 +129,8 @@ async function seedWarmModalBox(
     resources: [],
     metadata: {},
     model: "m",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
   });
   const sandboxGroupId = created.sandboxGroupId;
@@ -404,6 +406,8 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
       resources: [],
       metadata: {},
       model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const session = await getSession(db, workspaceId, created.id);

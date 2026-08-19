@@ -1,14 +1,9 @@
-import type { KnowledgeMemoryKind, WorkspaceMemoryPromptMode } from "@opengeni/contracts";
+import type { KnowledgeMemoryKind, HistoricalMemoryPromptMode } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceSubjectRls } from "./database";
 import { fromPostgresLosslessText } from "./lossless-json";
-import {
-  renderWorkspaceMemoryBlock,
-  selectWorkspaceMemoryBlockRecords,
-  WORKSPACE_MEMORY_BLOCK_EMPTY,
-  type MemoryBlockRecord,
-} from "./memory-domain";
+import { selectWorkspaceMemoryBlockRecords, type MemoryBlockRecord } from "./memory-domain";
 
 export type CompanyBrainContextAttemptClaims = Readonly<{
   accountId: string;
@@ -35,7 +30,7 @@ export type CompanyBrainContextSelectionReceipt = Readonly<{
   acceptedAt: string;
   sessionRole: "root" | "child";
   memoryEnabled: boolean;
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   companyProfileIncluded: boolean;
   instructionPolicyEntryHash: string;
   preferenceDescriptorHash: string | null;
@@ -69,7 +64,7 @@ export type CompanyBrainContextReceiptInspection = Readonly<{
   createdAt: string;
   sessionRole: "root" | "child";
   memoryEnabled: boolean;
-  memoryPromptMode: WorkspaceMemoryPromptMode;
+  memoryPromptMode: HistoricalMemoryPromptMode;
   companyProfileIncluded: boolean;
   instructionPolicyEntryHash: string;
   preferenceDescriptorHash: string | null;
@@ -325,10 +320,12 @@ export async function resolveCompanyBrainContextSelection(
   if (selectWorkspaceMemoryBlockRecords(memoryRecords).length !== memoryRecords.length) {
     throw new Error("Company Brain context selection exceeded its frozen prompt budget");
   }
-  const workspaceMemory =
-    !first.memory_enabled || first.memory_prompt_mode === "retrieval_only"
-      ? null
-      : (renderWorkspaceMemoryBlock(memoryRecords) ?? WORKSPACE_MEMORY_BLOCK_EMPTY);
+  // Memory V1's standing block is retired. Retrieval-only composition is the
+  // only mode, so nothing is injected into the prompt: an agent reads the
+  // workspace's records through `memory_search` when it needs them, rather
+  // than receiving them unbidden on every turn. Historical receipts keep the
+  // mode they recorded; this is about what gets composed now.
+  const workspaceMemory = null;
 
   return {
     receipt: {

@@ -47,6 +47,8 @@ function sessionInput(
     resources: [],
     metadata: {},
     model: "depth-policy-test",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none" as const,
     ...extra,
   };
@@ -224,11 +226,11 @@ describe("nested-agent depth database admission", () => {
       await tx.execute(sql`select pg_sleep(0.1)`);
       const rows = await tx.execute(sql<{ id: string }>`
         insert into sessions (
-          account_id, workspace_id, initial_message, model, sandbox_backend,
+          account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode, sandbox_backend,
           sandbox_group_id, create_idempotency_key, tool_policy
         ) values (
           ${workspace.accountId}, ${workspace.workspaceId}, 'old writer',
-          'depth-policy-test', 'none', gen_random_uuid(), ${key},
+          'depth-policy-test', 'medium', 'standard', 'none', gen_random_uuid(), ${key},
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
         returning id`);
@@ -307,11 +309,11 @@ describe("nested-agent depth database admission", () => {
     // ledger winner, with no raw unique violation and no session artifact.
     const sessionRows = await admin<{ id: string }[]>`
       insert into sessions (
-        account_id, workspace_id, initial_message, model, sandbox_backend,
+        account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode, sandbox_backend,
         sandbox_group_id, create_idempotency_key, tool_policy
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'old success',
-        'depth-policy-test', 'none', gen_random_uuid(), ${key},
+        'depth-policy-test', 'medium', 'standard', 'none', gen_random_uuid(), ${key},
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
       )
       returning id`;
@@ -341,11 +343,11 @@ describe("nested-agent depth database admission", () => {
     // rather than raise 23514.
     const duplicateRows = await admin<{ id: string }[]>`
       insert into sessions (
-        account_id, workspace_id, initial_message, model, sandbox_backend,
+        account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode, sandbox_backend,
         sandbox_group_id, parent_session_id, create_idempotency_key, tool_policy
       ) values (
         ${workspace.accountId}, ${workspace.workspaceId}, 'duplicate',
-        'depth-policy-test', 'none', gen_random_uuid(), ${deepestParent.id}, ${key},
+        'depth-policy-test', 'medium', 'standard', 'none', gen_random_uuid(), ${deepestParent.id}, ${key},
         jsonb_build_object(
           'mode', 'explicit',
           'inheritedFromSessionId', ${deepestParent.id}::uuid

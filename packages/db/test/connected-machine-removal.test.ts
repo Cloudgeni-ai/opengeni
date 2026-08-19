@@ -242,6 +242,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "selfhosted",
     });
     await admin`update sessions set title = 'Machine home session' where id = ${session.id}`;
@@ -317,6 +319,8 @@ describe("connected machine removal lifecycle", () => {
       toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
       metadata: {},
       model: "gpt-5",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     await admin`
@@ -442,6 +446,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     const routed = await setActiveSandbox(db, {
@@ -459,6 +465,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     await admin`update sessions set title = 'Second routed session' where id = ${secondSession.id}`;

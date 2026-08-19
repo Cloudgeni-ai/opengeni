@@ -121,6 +121,8 @@ describe("Postgres editable artifact authority", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const artifactId = nextId();
@@ -1852,6 +1854,8 @@ describe("Postgres editable artifact authority", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const attemptId = crypto.randomUUID();

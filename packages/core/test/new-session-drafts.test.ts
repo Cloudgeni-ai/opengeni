@@ -83,6 +83,7 @@ describe("core new-session draft hydration", () => {
       resources: [],
       model: "scripted-model",
       reasoningEffort: "high" as const,
+      latencyMode: "priority" as const,
       options: {},
     };
 
