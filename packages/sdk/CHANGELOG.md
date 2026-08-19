@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 2.0.1
+
+### Patch Changes
+
+- 6f61d6e: Mint public `wss` live-view proxy URLs behind TLS terminators. Drain existing sandbox leases even when ownership is off. Treat ownership-disabled stream-capabilities as no live sandbox.
+
 ## 2.0.0
 
 ### Major Changes
