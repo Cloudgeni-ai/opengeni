@@ -1324,19 +1324,26 @@ mod tests {
         assert_eq!(data_total(&frames), 8192, "exactly one window was emitted");
         job.no_frame_for(Duration::from_millis(200)).await;
 
-        // Pipe (64 KiB) + window are full: the producer must be blocked well
-        // short of its 200 iterations, and stay parked while we withhold acks.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Same shape as the overshoot test: assert against the pump's own
+        // watermark rather than the producer's fork rate. An 8192-byte window
+        // with <=4096-byte frames admits two in-window frames plus one
+        // overshoot. This test has ~3.7x more timing margin than the overshoot
+        // one (18 iterations to park rather than 66), so it has not flaked in
+        // CI - but the defect is identical and it does fail under heavier load.
+        let gated_at = job.watermark.load(Ordering::Relaxed);
+        assert!(gated_at <= 3, "the pump read past the window: {gated_at}");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            job.watermark.load(Ordering::Relaxed),
+            gated_at,
+            "the pump must stop reading while credit is withheld"
+        );
+
+        // End-to-end: the producer is blocked in write(2), not finished.
         let parked_at = lines(&progress_path);
         assert!(
             parked_at < 200,
             "producer must be far from done: {parked_at}"
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            lines(&progress_path),
-            parked_at,
-            "producer is blocked in write(2) while credit is withheld"
         );
 
         // Credit returns: the child un-blocks and finishes all 200 writes.
@@ -1632,18 +1639,36 @@ mod tests {
         assert_eq!(first.body.payload_len(), 1024);
         job.no_frame_for(Duration::from_millis(200)).await;
 
-        // Gate closed: the producer parks (pipe full) despite allowance 512.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The gate's own witness. The watermark is the highest seq the pump has
+        // ever appended, so it counts reads off the pipe directly. A 1536-byte
+        // window with <=1024-byte frames admits at most two in-window frames
+        // plus the one overshoot, so a closed gate pins the watermark at or
+        // below 3 no matter how fast the producer can fork.
+        //
+        // This is deliberately not a line-count comparison. `progress.txt`
+        // measures the PRODUCER, which does not park when the gate closes - it
+        // keeps running until it has filled the 64 KiB pipe, roughly 64 more
+        // fork+exec of `head`. Latching a line count at a fixed delay and
+        // requiring it to be final assumes those spawns finish inside that
+        // delay, which is false on a contended runner. Worse, a full E3
+        // regression makes the producer run to completion BEFORE the first
+        // sample, so both samples read 200 and the equality passes: the old
+        // check was simultaneously flaky and blind to the regression it named.
+        let gated_at = job.watermark.load(Ordering::Relaxed);
+        assert!(gated_at <= 3, "the pump read past the window: {gated_at}");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            job.watermark.load(Ordering::Relaxed),
+            gated_at,
+            "the overshoot frame must close the read gate (E3 regression)"
+        );
+
+        // End-to-end: the producer is throttled, not finished. Slowness only
+        // makes this more true, so it cannot flake.
         let parked_at = lines(&progress_path);
         assert!(
             parked_at < 200,
             "producer must be far from done: {parked_at}"
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            lines(&progress_path),
-            parked_at,
-            "the overshoot frame must close the read gate (E3 regression)"
         );
 
         // Credit resumes: catch-up sends the retained overshoot frame first,
