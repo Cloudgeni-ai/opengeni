@@ -51,8 +51,7 @@ export function resolveInteractionFrameProxyRequestUrl(input: {
   const protocol =
     forwardedProto === "https" ? "https:" : forwardedProto === "http" ? "http:" : request.protocol;
   const forwardedHost = firstForwardedValue(input.forwardedHost);
-  const host =
-    forwardedHost && isSafeForwardedHost(forwardedHost) ? forwardedHost : request.host;
+  const host = forwardedHost && isSafeForwardedHost(forwardedHost) ? forwardedHost : request.host;
   try {
     return new URL(`${protocol}//${host}/`).toString();
   } catch {
