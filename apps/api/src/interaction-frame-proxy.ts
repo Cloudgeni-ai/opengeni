@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
+import { canonicalPublicOrigin } from "@opengeni/config";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import type {
   ApiWebSocketConnection,
@@ -31,8 +32,40 @@ export type InteractionFrameProxyAttachment = Readonly<{
   protocols: readonly string[];
 }>;
 
+/** Public origin the browser can open. TLS-terminating reverse proxies make
+ * `requestUrl` `http://127.0.0.1` / the API container; that would mint `ws://`
+ * and Chrome blocks it from an `https://` console. */
+export function resolveInteractionFrameProxyRequestUrl(input: {
+  requestUrl: string;
+  publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  forwardedProto?: string | null | undefined;
+  forwardedHost?: string | null | undefined;
+}): string {
+  const publicOrigin =
+    canonicalPublicOrigin(input.publicBaseUrl) ??
+    (input.webBaseUrl?.startsWith("https://") ? canonicalPublicOrigin(input.webBaseUrl) : null);
+  if (publicOrigin) return `${publicOrigin}/`;
+  const request = new URL(input.requestUrl);
+  const forwardedProto = firstForwardedValue(input.forwardedProto)?.toLowerCase();
+  const protocol =
+    forwardedProto === "https" ? "https:" : forwardedProto === "http" ? "http:" : request.protocol;
+  const forwardedHost = firstForwardedValue(input.forwardedHost);
+  const host =
+    forwardedHost && isSafeForwardedHost(forwardedHost) ? forwardedHost : request.host;
+  try {
+    return new URL(`${protocol}//${host}/`).toString();
+  } catch {
+    return request.toString();
+  }
+}
+
 export function createInteractionFrameProxyAttachment(input: {
   requestUrl: string;
+  publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  forwardedProto?: string | null | undefined;
+  forwardedHost?: string | null | undefined;
   rootSecret: string;
   upstreamUrl: string;
   upstreamProtocols: readonly string[];
@@ -48,7 +81,15 @@ export function createInteractionFrameProxyAttachment(input: {
     expiresAt: Date.parse(input.expiresAt),
   });
   const token = encryptGrant(grant, input.rootSecret);
-  const url = new URL(input.requestUrl);
+  const url = new URL(
+    resolveInteractionFrameProxyRequestUrl({
+      requestUrl: input.requestUrl,
+      publicBaseUrl: input.publicBaseUrl,
+      webBaseUrl: input.webBaseUrl,
+      forwardedProto: input.forwardedProto,
+      forwardedHost: input.forwardedHost,
+    }),
+  );
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = INTERACTION_FRAME_PROXY_PATH;
   url.search = "";
@@ -312,6 +353,16 @@ function normalizedOrigin(value: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+function firstForwardedValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const part = value.split(",")[0]?.trim() ?? "";
+  return part.length > 0 ? part : null;
+}
+
+function isSafeForwardedHost(host: string): boolean {
+  return host.length > 0 && host.length <= 253 && !/[\s/@?#\\]/.test(host);
 }
 
 function binaryMessage(value: unknown): Uint8Array | null {
