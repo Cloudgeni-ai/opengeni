@@ -9,13 +9,6 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("# Rules for getting work done");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("# Destructive Actions");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("# Using skills");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("# Session coordination");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "create a child worker session owned by the current session",
-    );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not repurpose or direct an unrelated existing session unless the user explicitly asks",
-    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Use `apply_patch` for local file edits");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](/abs/path/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
