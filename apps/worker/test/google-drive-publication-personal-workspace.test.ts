@@ -11,6 +11,7 @@ import {
   createConnection,
   createDb,
   ensureManagedAccessForUser,
+  getConnectionMetadata,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -145,6 +146,67 @@ describe("Google Drive publication in a managed human's personal workspace", () 
         client.db,
         { accountId: owner.accountId, workspaceId: owner.personalWorkspaceId },
         [{ ...owner.delegation, ownerSubjectId: intruder.subjectId }],
+      ),
+    ).toBeNull();
+  }, 180_000);
+
+  // The test above is denied downstream by connection ownership, so it stays
+  // green even with the authority probe bypassed entirely. This one isolates
+  // the probe: the connection genuinely BELONGS to the intruder and sits in the
+  // owner's personal workspace, so `getConnection` succeeds and the ONLY fence
+  // left is the workspace-authority probe.
+  test("an intruder-owned connection in another's personal workspace is denied by the authority probe alone", async () => {
+    if (!client) return;
+    const owner = await seedOwnerWithDriveConnection();
+    const intruder = await seedOwnerWithDriveConnection();
+
+    const planted = await createConnection(client.db, {
+      accountId: owner.accountId,
+      workspaceId: owner.personalWorkspaceId,
+      subjectId: intruder.subjectId,
+      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: Buffer.from("token"),
+      grantedScopes: [GOOGLE_DRIVE_FILE_SCOPE],
+      metadata: {
+        credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+        credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+        googlePermissionId: "permission-planted",
+        googleEmail: "planted@example.test",
+        googleDisplayName: null,
+        verifiedAt: "2026-08-14T00:00:00.000Z",
+        accessMode: "file_only",
+        outputDestination: destination,
+      },
+      createdBySubjectId: intruder.subjectId,
+    });
+    const plantedDelegation: McpPersonalConnectionDelegation = {
+      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+      connectionId: planted.id,
+      ownerSubjectId: intruder.subjectId,
+      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      outputDestination: destination,
+    };
+
+    // Control: with the probe forced true the row IS reachable, proving every
+    // downstream check passes and the probe is the only fence under test.
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        client.db,
+        { accountId: owner.accountId, workspaceId: owner.personalWorkspaceId },
+        [plantedDelegation],
+        { getConnection: getConnectionMetadata, getMembership: async () => true },
+      ),
+    ).not.toBeNull();
+
+    // Real resolver: denied by the probe.
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        client.db,
+        { accountId: owner.accountId, workspaceId: owner.personalWorkspaceId },
+        [plantedDelegation],
       ),
     ).toBeNull();
   }, 180_000);

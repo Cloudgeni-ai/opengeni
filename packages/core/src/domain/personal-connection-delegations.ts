@@ -21,7 +21,7 @@ import {
   listConnectionsMetadata,
   listSocialConnections,
   resolvePersonalConnectionAuthoritySelectionOrigin,
-  subjectHasLiveWorkspaceAuthority,
+  namedSubjectHasLiveWorkspaceAuthority,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -52,23 +52,31 @@ export type PersonalConnectionDelegationSource =
  * personal connection silently disappeared inside the owner's own private
  * workspace.
  *
- * `subjectHasLiveWorkspaceAuthority` is the single canonical resolver for this
- * question and already models both halves - the membership row and the
- * organization membership's `personal_workspace_id` pointer. It is owner-only
- * by construction (see its doc comment in `@opengeni/db`): the only fact its
- * pointer branch can return is "subject X owns personal workspace W" for the
- * exact X asked about, so it cannot widen an administrator, API key, service,
- * or delegated bearer into someone else's personal workspace.
+ * `namedSubjectHasLiveWorkspaceAuthority` models both halves - the membership
+ * row and the organization membership's `personal_workspace_id` pointer - but
+ * it is an **oracle, not an authorization**: it answers for whatever subject it
+ * is handed and cannot establish who the caller is (see its doc comment in
+ * `@opengeni/db`). Every use is safe only because *this* module has already
+ * established entitlement to ask, locally:
  *
- * The subjects asked about here are exactly the two this seam is entitled to
- * ask about: the authorizing grant's own subject at freeze time, and the
- * frozen `ownerSubjectId` of a delegation the caller already holds.
+ * - at freeze time the subject is `source.subjectId`, and
+ *   `personalConnectionDelegationSourceForGrant` admits only a grant whose
+ *   `subjectId` came from a real authenticated principal - agent-attempt,
+ *   service, service-initiated, and **delegated/bearer** grants are all
+ *   collapsed to `{kind:"none"}` before they can reach here, because a
+ *   delegated grant's subject is unvalidated signed-token payload; and
+ * - on the `*ForGrant` paths the subject is the frozen `ownerSubjectId` of a
+ *   delegation already persisted for the workspace the caller is already
+ *   authorized in.
+ *
+ * Do not pass any other subject through this helper. A subject that was merely
+ * looked up, guessed, or supplied by a caller is not entitled.
  */
 async function ownerStillBelongsToWorkspace(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<boolean> {
-  return await subjectHasLiveWorkspaceAuthority(db, input);
+  return await namedSubjectHasLiveWorkspaceAuthority(db, input);
 }
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 export type AuthorizedAtlassianConnection = {
@@ -100,7 +108,17 @@ export function personalConnectionDelegationSourceForGrant(
   if (
     grant.principalKind === "agent_attempt" ||
     grant.principalKind === "service" ||
-    grant.serviceInitiator
+    grant.serviceInitiator ||
+    // A delegated bearer's grant is built entirely from signed token payload
+    // (`delegatedAccessContext`); no database row binds its `subjectId` or
+    // `workspaceId` to anything. It is therefore never an entitled subject for
+    // the owner-only personal-workspace pointer, which CLAUDE.md reserves for
+    // the canonical managed-cookie session: "Bearer/delegated principals, API
+    // keys, and account or organization administrators receive no
+    // personal-workspace access through that exception." Before the pointer
+    // existed this was moot - `getWorkspaceGrant` returned null for a personal
+    // workspace regardless - so the filter belongs with the pointer.
+    grant.metadata?.delegated === true
   ) {
     return { kind: "none" };
   }
@@ -557,7 +575,7 @@ export function withFrozenPersonalConnectionDelegations(input: {
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   /**
    * Does the frozen delegation owner still hold workspace authority? Supply
-   * the canonical `subjectHasLiveWorkspaceAuthority` resolver, never a bare
+   * the canonical `namedSubjectHasLiveWorkspaceAuthority` resolver, never a bare
    * `workspace_memberships` lookup: a managed human's personal workspace has
    * no membership row, so a bare lookup revokes the owner's own connections.
    */

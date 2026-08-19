@@ -717,7 +717,12 @@ export async function validatedScheduledTaskUpdate(input: {
     });
     update.personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
-      workspaceId: input.existing.workspaceId,
+      // Both halves of the authority question come from ONE object. The task was
+      // loaded with `getScheduledTask(db, grant.workspaceId, ...)`, so this is
+      // the same workspace as `input.existing.workspaceId`; taking it from the
+      // grant means the workspace can never drift from the `accountId` that
+      // `personalConnectionDelegationSourceForGrant` reads off the same grant.
+      workspaceId: input.grant.workspaceId,
       settings: runtimeSettings,
       tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
       source: personalConnectionDelegationSourceForGrant(input.grant),

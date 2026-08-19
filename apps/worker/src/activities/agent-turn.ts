@@ -72,7 +72,7 @@ import {
   settleCodexCredentialFailover,
   upsertSandboxSessionEnvelope,
   setSessionLastInputTokensForTurnAttempt,
-  subjectHasLiveWorkspaceAuthority,
+  namedSubjectHasLiveWorkspaceAuthority,
   sumUsageQuantity,
   heartbeatLeaseHolder,
   readLease,
@@ -8115,7 +8115,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
         const existing = delegatedMembershipChecks.get(subjectId);
         if (existing) return await existing;
-        const check = subjectHasLiveWorkspaceAuthority(db, {
+        const check = namedSubjectHasLiveWorkspaceAuthority(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId,

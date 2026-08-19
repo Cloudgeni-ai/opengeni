@@ -22,7 +22,7 @@ import {
   getConnectionMetadata,
   prepareConnectorActionApproval,
   requireFile,
-  subjectHasLiveWorkspaceAuthority,
+  namedSubjectHasLiveWorkspaceAuthority,
   type ConnectorActionAttemptIdentity,
   type ConnectorActionInvocation,
   type Database,
@@ -63,7 +63,7 @@ export type GoogleDrivePublicationPorts = {
    * 0219), so a bare join denies the owner publication inside their own
    * private workspace.
    */
-  getMembership: typeof subjectHasLiveWorkspaceAuthority;
+  getMembership: typeof namedSubjectHasLiveWorkspaceAuthority;
   readMaterialization: typeof readAuthorizedEditableArtifactMaterialization;
   requireFile: typeof requireFile;
   prepare: typeof prepareConnectorActionApproval;
@@ -74,7 +74,7 @@ export type GoogleDrivePublicationPorts = {
 
 const defaultPorts: GoogleDrivePublicationPorts = {
   getConnection: getConnectionMetadata,
-  getMembership: subjectHasLiveWorkspaceAuthority,
+  getMembership: namedSubjectHasLiveWorkspaceAuthority,
   readMaterialization: readAuthorizedEditableArtifactMaterialization,
   requireFile,
   prepare: prepareConnectorActionApproval,

@@ -17457,41 +17457,56 @@ export async function getSessionAuthorityEpoch(
 }
 
 /**
- * THE canonical live-workspace-authority resolver for one exact subject.
+ * ORACLE, NOT AN AUTHORIZATION. Answers "does the subject you *named* hold live
+ * workspace authority here" for **any** subject the caller cares to name. It
+ * does not, and cannot, establish who the caller is.
  *
- * `getWorkspaceGrant` is a bare `workspace_memberships` join and is therefore
- * NOT a complete authority answer: a managed human's personal workspace
- * deliberately has no row in that table (migration 0219 raises on one), so its
- * owner's access is the `organization_memberships.personal_workspace_id`
- * pointer instead. Every seam that needs "does this subject still hold
- * workspace authority here" must call this function rather than re-deriving
- * the rule, so the owner-only personal-workspace exception has exactly one
- * implementation.
+ * **Read this before calling.** The personal-workspace half reads
+ * `list_self_organization_memberships`, whose SECURITY DEFINER guard raises
+ * `42501` when the requested subject differs from `opengeni.subject_id`. That
+ * guard looks like a caller check and is not one: this function *sets that GUC
+ * from its own `subjectId` argument* one statement below, using an ordinary
+ * `set_config` any `opengeni_app` connection may issue. The predicate therefore
+ * only verifies that the caller supplied the same value twice. Proven against
+ * real Postgres as `opengeni_app` with RLS engaged: a process that never
+ * authenticated as anyone read a victim's complete organization-membership row,
+ * including the private `personalWorkspaceId`, and got `true` back for that
+ * victim's personal workspace.
  *
- * True when the subject currently holds workspace authority the same way the
- * route-time access builder derives it: a `workspace_memberships` row whose
- * owning organization membership (when one exists) is active, or an active
- * organization membership whose personal-workspace pointer is exactly this
- * workspace. Never infers authority any other way; a deleted membership row
- * and a suspended/revoked organization membership are both false.
+ * So the safety of every use here is **caller discipline, established
+ * locally** - never a property of this function. A call site is only correct if
+ * it has *independently* proven the caller is entitled to ask about that exact
+ * subject. In practice that means one of:
  *
- * **Owner-only by construction.** The personal-workspace half reads
- * `list_self_organization_memberships`, a SECURITY DEFINER seam that raises
- * `42501` unless the requested subject is exactly the transaction's own
- * subject GUC. The only fact it can ever return is "subject X owns personal
- * workspace W", for the X named in the call - so no account/organization
- * administrator, API key, service, or delegated bearer can reach a different
- * human's personal workspace through it, whatever subject a caller supplies.
- * Callers must still keep the exception off the request principal's own
- * authorization path: pass only a subject the caller is entitled to ask about
- * (its own canonical managed-cookie subject, or the frozen owner of a
- * delegation it already holds).
+ * - the subject is the authenticated request principal's own subject, taken
+ *   from an already-authorized grant (and not a delegated/bearer grant, whose
+ *   `subjectId` is unvalidated token payload - see
+ *   `personalConnectionDelegationSourceForGrant`); or
+ * - the subject is the frozen `ownerSubjectId` of a delegation the caller
+ *   already holds for the workspace it is already authorized in.
+ *
+ * Passing an attacker-influenced or merely looked-up subject is a
+ * vulnerability, not a policy decision. Prefer plumbing the caller's own
+ * identity down to the call site over widening what this oracle is asked.
+ *
+ * What it computes: `true` when the named subject holds workspace authority the
+ * same way the route-time access builder derives it - a `workspace_memberships`
+ * row whose owning organization membership (when one exists) is active, or an
+ * active organization membership whose `personal_workspace_id` pointer is
+ * exactly this workspace (a managed personal workspace deliberately has no
+ * membership row; migration 0219 raises on one). It infers authority no other
+ * way: a deleted membership row and a suspended/revoked organization membership
+ * are both false. `getWorkspaceGrant` answers a different question - a *grant
+ * with permissions* for a request principal - and is not interchangeable.
  *
  * Non-`user:` subjects (API keys, services, configured/local principals) can
  * never own an organization membership, so they short-circuit to the plain
  * membership answer instead of tripping the seam's `42501`.
+ *
+ * The prior `opengeni.subject_id` is restored before returning, so probing a
+ * subject cannot leak it into the rest of a caller's transaction.
  */
-export async function subjectHasLiveWorkspaceAuthority(
+export async function namedSubjectHasLiveWorkspaceAuthority(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<boolean> {
@@ -17499,39 +17514,60 @@ export async function subjectHasLiveWorkspaceAuthority(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, input.subjectId);
-      const [membershipRow] = await rawRows<{ present: number }>(
+      // Probing a named subject must not redefine who the REST of a caller's
+      // transaction runs as. `withRlsContext` restores only account/workspace,
+      // and SET LOCAL survives savepoint release, so restore the subject here.
+      const [priorSubjectRow] = await rawRows<{ subject_id: string | null }>(
         scopedDb,
-        sql`select 1 as present from workspace_memberships
-          where subject_id = ${input.subjectId}
-            and workspace_id = ${input.workspaceId}
-          limit 1`,
+        sql`select current_setting('opengeni.subject_id', true) as subject_id`,
       );
-      if (!input.subjectId.startsWith("user:")) {
-        return Boolean(membershipRow);
+      const priorSubjectId = priorSubjectRow?.subject_id ?? "";
+      try {
+        return await probeNamedSubjectWorkspaceAuthority(scopedDb, input);
+      } finally {
+        await scopedDb.execute(
+          sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+        );
       }
-      const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
-        scopedDb,
-        sql`select list_self_organization_memberships(${input.subjectId}) as result`,
-      );
-      const organizationMemberships = OrganizationMember.array().parse(
-        organizationMembershipResult?.result ?? [],
-      );
-      const selfOrganizationMembership = organizationMemberships.find(
-        (organizationMembership) => organizationMembership.organizationId === input.accountId,
-      );
-      if (membershipRow) {
-        // Mirror the access builder's inactive-organization filter: a
-        // persisted membership row is dead while its organization membership
-        // is suspended/revoked. A subject with no organization membership at
-        // all (legacy/standalone) keeps its persisted row's authority.
-        return !selfOrganizationMembership || selfOrganizationMembership.status === "active";
-      }
-      return (
-        selfOrganizationMembership?.status === "active" &&
-        selfOrganizationMembership.personalWorkspaceId === input.workspaceId
-      );
     },
+  );
+}
+
+async function probeNamedSubjectWorkspaceAuthority(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  await setSubjectRlsContext(scopedDb, input.subjectId);
+  const [membershipRow] = await rawRows<{ present: number }>(
+    scopedDb,
+    sql`select 1 as present from workspace_memberships
+      where subject_id = ${input.subjectId}
+        and workspace_id = ${input.workspaceId}
+      limit 1`,
+  );
+  if (!input.subjectId.startsWith("user:")) {
+    return Boolean(membershipRow);
+  }
+  const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
+    scopedDb,
+    sql`select list_self_organization_memberships(${input.subjectId}) as result`,
+  );
+  const organizationMemberships = OrganizationMember.array().parse(
+    organizationMembershipResult?.result ?? [],
+  );
+  const selfOrganizationMembership = organizationMemberships.find(
+    (organizationMembership) => organizationMembership.organizationId === input.accountId,
+  );
+  if (membershipRow) {
+    // Mirror the access builder's inactive-organization filter: a persisted
+    // membership row is dead while its organization membership is
+    // suspended/revoked. A subject with no organization membership at all
+    // (legacy/standalone) keeps its persisted row's authority.
+    return !selfOrganizationMembership || selfOrganizationMembership.status === "active";
+  }
+  return (
+    selfOrganizationMembership?.status === "active" &&
+    selfOrganizationMembership.personalWorkspaceId === input.workspaceId
   );
 }
 
