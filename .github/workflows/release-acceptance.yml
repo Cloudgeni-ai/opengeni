@@ -95,9 +95,9 @@ jobs:
           }
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || exit 1
           [ "$(git -C .release/controller rev-parse HEAD)" = "$CONTROLLER_SHA" ] || exit 1
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "accepted source is not an ancestor of current main" >&2
+          git fetch --no-tags origin production
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "accepted source is not an ancestor of current production; promote main first" >&2
             exit 1
           }
 

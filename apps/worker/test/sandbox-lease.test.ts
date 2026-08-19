@@ -511,8 +511,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const result = await reapSandboxLeases();
     const metrics = await observability.prometheusMetrics();
 
-    expect(result).toMatchObject({ examined: 0, terminated: 0 });
-    expect(spy.calls).toHaveLength(0);
+    expect(result.metered).toBe(0);
+    expect(result.forceDrained).toBe(0);
     for (const domain of [
       "leases",
       "checkpoint_artifacts",
@@ -525,6 +525,37 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       );
     }
   });
+
+  test("ownership-off still terminates drainable leases created by interaction attach", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 1,
+      expiresInMs: -1_000,
+      instanceId: "box-ownership-off-drain",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: false,
+      sandboxLeaseReaperPeriodMs: 30_000,
+    });
+    const observability = createObservability(settings, { component: "worker-test" });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(settings, observability),
+      { terminateBox: spy.fn },
+    );
+    const result = await reapSandboxLeases();
+    expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
+    expect(result.terminated).toBeGreaterThanOrEqual(1);
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+  }, 60_000);
 
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
     if (!available) return;

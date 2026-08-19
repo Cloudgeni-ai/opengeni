@@ -206,13 +206,13 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain(">.env.runtime");
   });
 
-  test("host services use selected loopback MinIO while sandboxes keep compose DNS", async () => {
+  test("host services use selected loopback Garage while sandboxes keep compose DNS", async () => {
     const source = await Bun.file(scriptPath).text();
     const hostInternalEndpoint =
       'export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT}"';
-    const sandboxEndpoint = 'export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"';
+    const sandboxEndpoint = 'export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://garage:3900"';
 
-    expect(source).toContain('default_internal_object_endpoint="http://minio:9000"');
+    expect(source).toContain('default_internal_object_endpoint_garage="http://garage:3900"');
     expect(source).toContain(hostInternalEndpoint);
     expect(source).toContain(sandboxEndpoint);
     expect(source).toContain(
@@ -220,8 +220,8 @@ describe("local artifact runtime stack contract", () => {
     );
     expect(source.indexOf(hostInternalEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source.indexOf(sandboxEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
-    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=minioadmin");
-    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin");
+    expect(source).toContain('GARAGE_FIXTURE_ACCESS_KEY_ID="GK0123456789abcdef0123456789abcdef"');
+    expect(source).toContain("docker compose up -d postgres nats temporal garage garage-init");
   });
 
   test("keeps worker MCP on worktree loopback while Modal may use a public edge", async () => {

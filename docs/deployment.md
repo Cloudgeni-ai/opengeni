@@ -56,7 +56,7 @@ machine. Kubernetes is used only as the process, restart, volume, and upgrade
 supervisor. It is not an autoscaling or failover layer in this profile.
 
 The profile renders one API, web, control worker, turn worker, relay, Postgres,
-Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
+Temporal, NATS, and Garage process. It disables HPAs, disruption budgets, and
 topology spreading. Container resource requests and limits are omitted, so a
 busy role may use otherwise-idle CPU and memory on the machine.
 
@@ -113,17 +113,17 @@ one-port NodePort services are the complete private-edge surface:
 | `30081`  | API            | API, SSE, enrollment, and agent distribution |
 | `30222`  | NATS websocket | enrolled-machine command/event transport     |
 | `30443`  | relay          | live terminal/desktop byte streams           |
-| `30900`  | MinIO API      | signed browser file transfer only            |
+| `30900`  | Garage S3 API  | signed browser file transfer only            |
 
-The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
+The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
-websocket, relay, and MinIO API their own private TLS ports. Set
-`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
+websocket, relay, and Garage S3 API their own private TLS ports. Set
+`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
@@ -139,7 +139,8 @@ are not an additional user-facing gateway.
 Create the four Secrets before installation:
 
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
-- `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
+- `opengeni-garage`: `GARAGE_ACCESS_KEY_ID`, `GARAGE_SECRET_ACCESS_KEY`,
+  `GARAGE_RPC_SECRET`, and the `garage.toml` file (the image has no shell);
 - `opengeni-runtime`: the restricted `opengeni_app`
   `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
@@ -161,8 +162,9 @@ kubectl create namespace opengeni --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n opengeni create secret generic opengeni-postgres \
   --from-env-file=.agent/generated/single-node/secrets/postgres.env
 
-kubectl -n opengeni create secret generic opengeni-minio \
-  --from-env-file=.agent/generated/single-node/secrets/minio.env
+kubectl -n opengeni create secret generic opengeni-garage \
+  --from-env-file=.agent/generated/single-node/secrets/garage.env \
+  --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml
 
 kubectl -n opengeni create secret generic opengeni-runtime \
   --from-env-file=.agent/generated/single-node/secrets/runtime.env
@@ -217,7 +219,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Future versions use the same second command with a new official chart/image
-version or digest. Postgres and MinIO PVCs remain attached. Database migrations
+version or digest. Postgres and Garage PVCs remain attached. Database migrations
 are forward-only: if the migration gate fails, the old application stays in
 place; after a migration succeeds, roll the application forward unless the
 older image is explicitly proven compatible with the new schema.
@@ -229,7 +231,7 @@ Failure behavior is intentionally uneven:
 - a turn worker can restart while queued work remains in Temporal/Postgres;
 - NATS stores no authoritative history, but losing it disconnects enrolled
   machines and pauses their command path as well as live fanout;
-- MinIO owns uploaded file bytes;
+- Garage owns uploaded file bytes;
 - Temporal owns durable orchestration state;
 - Postgres owns the durable product record and database migration ledger.
 
@@ -504,12 +506,12 @@ explicit blocking gates. The canonical configuration, retry, observability, and
 acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
 `deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
 
-For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
+For private in-cluster Garage behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
 bun run deployment:conformance -- \
   --base-url http://127.0.0.1:18080 \
-  --object-connect-to opengeni-minio:9000:127.0.0.1:19000
+  --object-connect-to opengeni-garage:3900:127.0.0.1:19000
 ```
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
@@ -633,7 +635,7 @@ Current profiles:
 ## Local Docker Compose
 
 `bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
 integrations catalog, builds the sandbox image, and starts the API, control and
 turn workers, artifact materializer, artifact outbox dispatcher, and web. The
 two artifact roles receive distinct generated least-privilege database logins
@@ -656,7 +658,7 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -688,6 +690,28 @@ Image builds default to `linux/amd64`, matching the Azure AKS reference node poo
 For production Helm releases, pin API, worker, web, and migration images by digest as well as tag. The chart renders images as `repository:tag@sha256:...` when `image.digest` is set, which keeps tags readable while making the deployed artifact immutable.
 
 ## Verified public release
+
+`main` is the daily integration branch and remains GitHub's default branch.
+`production` is the official source pointer in this repository; it is not a
+live-cluster deploy. Staging is a manual pin of already-baked
+`canary-sha-<commit>` images from any `main` SHA
+(`.github/workflows/staging-canary-dispatch.yml`). Merging `main` does not
+auto-deploy staging. Promote with a GitHub PR base `production` / compare
+`main` and **Create a merge commit** (never squash, never GitHub
+rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
+`production` → `main`. Official cuts: dispatch `open-version-pr.yml` on `main`
+(or `VERSION_PR_ON_PUSH=true`), merge that Version PR, promote, then
+`workflow_dispatch` candidate/acceptance/publication. Official source ancestry
+is `origin/production`. Bootstrap the pointer once with
+`git push origin origin/main:refs/heads/production` before the first official
+cut.
+
+Protect `production`: no force-push; merge commits only (disable squash and
+rebase-and-merge); required checks `Admit production PR head` and
+`Current-base source admission` (skip-success aggregate so promote PRs from
+live `main` stay mergeable). Drop `Current-base source admission` from the
+`main` ruleset; Version PRs still receive that named check from trusted
+`ci.yml` dispatch.
 
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
@@ -891,11 +915,14 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The legacy context name is retained for
-the repository ruleset, but the check admits the immutable provider event head
-against the PR's provider merge-base tree; it does not require the event base
-to equal continuously moving `main`. The base-owned workflow/helper SHA must
-remain in protected `main` ancestry, and the provider base/head/repository,
+`Current-base source admission` check. Version PRs receive that named check
+from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
+hotfix-into-production only; its required-check name stays on a skip-success
+report job so promote PRs from live `main` remain mergeable. The check admits
+the immutable provider event head against the PR's provider merge-base tree; it
+does not require the event base to equal continuously moving `main`. The
+base-owned workflow/helper SHA must remain in protected `production` ancestry
+for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
 and terminal head identity remain fail-closed. Exact-head review stays bound to
 the candidate. The merge authority separately performs the fresh latest-main
@@ -946,8 +973,8 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest.
-Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
-SHA-configured images and records that tag in the dogfood receipt. The
+Protected main CI uses the separate `canary-sha-<source>` namespace for its
+SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
 produce different digests from the same source tree.
@@ -1033,7 +1060,7 @@ application/chart/image bytes to pair with a newer coherent package publication
 without floating to registry `latest`, inventing source ownership, or attempting
 to publish superseded package versions.
 
-After staging, production, and the 72-hour canary have consumed those exact
+After staging and production have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
@@ -1048,13 +1075,14 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. The canary row is bound to the same
-source tree, exact chart bytes, and complete API/migration/worker/web/relay/
-sandbox digest map as candidate, staging, and production; a source-only canary
-claim fails closed. Acceptance requires the accepted source to remain an
-ancestor of current `main`, but does not require it to remain the current tip:
-compatible reviewed work can continue to merge during the canary window without
-freezing `main` or invalidating an otherwise unchanged proven train. No
+before validating every schema-v2 row. A 72-hour production soak row is
+optional evidence, not a publish gate; when present it is still bound to the
+same source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production. Acceptance requires
+the accepted source to remain an ancestor of current `production`, but does not
+require it to remain the current tip: compatible reviewed work can continue to
+merge to `main` during an official train without freezing daily integration or
+invalidating an otherwise unchanged proven train. No
 dispatcher can select an evidence URL, hash, repository, workflow path, or
 artifact name.
 
@@ -1227,7 +1255,7 @@ helm template opengeni deploy/helm/opengeni \
   --set postgres.enabled=true \
   --set temporal.enabled=true \
   --set nats.enabled=true \
-  --set minio.enabled=true \
+  --set garage.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
 
@@ -1254,17 +1282,17 @@ Then run conformance through port-forwards:
 
 ```bash
 kubectl -n opengeni-local port-forward svc/opengeni-local-api 28080:8000
-kubectl -n opengeni-local port-forward svc/opengeni-local-minio 29000:9000
+kubectl -n opengeni-local port-forward svc/opengeni-local-garage 29000:3900
 
 OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- \
   --base-url http://127.0.0.1:28080 \
-  --object-connect-to opengeni-local-minio:9000:127.0.0.1:29000
+  --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
-The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
 

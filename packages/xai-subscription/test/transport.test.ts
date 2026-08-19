@@ -273,6 +273,112 @@ describe("SuperGrok subscription fetch", () => {
     });
   });
 
+  test("maps HTTP-200 SuperGrok capacity SSE terminals to a retryable 429 without leaking the body into audit", async () => {
+    const durable: XaiModelRequestEvent[] = [];
+    const wrapped = xaiSubscriptionFetch(async () => {
+      return new Response(
+        `data: ${JSON.stringify({
+          type: "error",
+          message:
+            "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+        })}\n\n`,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "prov-sse-capacity",
+          },
+        },
+      );
+    });
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "request-sse-capacity",
+        onModelRequestEvent: (event) => {
+          durable.push(event);
+        },
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    let caught: unknown;
+    try {
+      await reader.read();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      name: "XaiSubscriptionStreamingTerminalError",
+      message:
+        "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+      code: "rate_limit_exceeded",
+      eventType: "error",
+      requestId: "request-sse-capacity",
+      status: 429,
+    });
+    expect(isXaiSubscriptionTransportError(caught)).toBe(true);
+    expect(JSON.stringify(durable)).not.toContain("high demand");
+  });
+
+  test("does not map isolated high-demand wording onto the SuperGrok capacity waiter", async () => {
+    const wrapped = xaiSubscriptionFetch(async () => {
+      return new Response(
+        `data: ${JSON.stringify({
+          type: "error",
+          code: "response_error",
+          message: "This feature is paused due to high demand policy.",
+        })}\n\n`,
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "prov-sse-high-demand-policy",
+          },
+        },
+      );
+    });
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        nextRequestId: () => "request-sse-high-demand-policy",
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const reader = response.body!.getReader();
+    let caught: unknown;
+    try {
+      await reader.read();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      name: "XaiSubscriptionStreamingTerminalError",
+      message: "This feature is paused due to high demand policy.",
+      code: "response_error",
+      status: 502,
+    });
+  });
+
   test("keeps a healthy hosted-search continuation streaming to its terminal response", async () => {
     const encoder = new TextEncoder();
     const wrapped = xaiSubscriptionFetch(
