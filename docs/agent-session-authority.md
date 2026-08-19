@@ -72,6 +72,13 @@ can Pause or Cancel the old work themselves. A future explicit, user-authorized
 handoff may grant one named takeover without restoring ambient lateral agent
 authority.
 
-Canonical implementation: `packages/core/src/session-authorization.ts`,
+The non-bypassable operational prompt tells the agent to use session tools for
+user-requested session management, and to spawn a child worker for a subtask
+rather than hijacking an unrelated existing session. The prompt does not widen
+authority; the relationship policy above remains the enforcement boundary. A
+leaf turn without those tools continues the work itself.
+
+Canonical implementation: `packages/runtime/src/operational-instructions.ts`,
+`packages/core/src/session-authorization.ts`,
 `packages/db/src/session-control.ts`, `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, and `apps/api/src/mcp/server.ts`.

@@ -254,6 +254,68 @@ describe("HumanInputForm async host boundary", () => {
     expect(document.activeElement).toBe(mounted.container.querySelector("textarea"));
   });
 
+  test("preserves an in-progress answer when the same request is refreshed", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request,
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const textarea = mounted.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(textarea, "Keep this answer while the session updates.");
+      const reactPropsKey = Object.keys(textarea!).find((key) => key.startsWith("__reactProps$"));
+      expect(reactPropsKey).toBeDefined();
+      const onChange = (
+        textarea as unknown as Record<
+          string,
+          { onChange?: (event: { target: HTMLTextAreaElement }) => void }
+        >
+      )[reactPropsKey!]!.onChange;
+      expect(typeof onChange).toBe("function");
+      onChange!({ target: textarea! });
+    });
+    expect(textarea?.value).toBe("Keep this answer while the session updates.");
+
+    await mounted.rerender(
+      createElement(HumanInputForm, {
+        request: {
+          ...request,
+          questions: request.questions.map((question) => ({
+            ...question,
+            options: [...question.options],
+          })),
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+
+    const refreshedTextarea = mounted.container.querySelector<HTMLTextAreaElement>("textarea");
+    expect(refreshedTextarea).toBe(textarea);
+    expect(refreshedTextarea?.value).toBe("Keep this answer while the session updates.");
+
+    await mounted.rerender(
+      createElement(HumanInputForm, {
+        request: {
+          ...request,
+          id: "request-form-next",
+          questions: request.questions.map((question) => ({
+            ...question,
+            prompt: "A different durable request",
+          })),
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("");
+    expect(mounted.container.textContent).toContain("A different durable request");
+  });
+
   test("HumanInputSurface shows one pending request at a time with progress", async () => {
     const base = {
       workspaceId: "workspace-1",
