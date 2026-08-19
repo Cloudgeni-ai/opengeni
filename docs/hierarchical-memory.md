@@ -148,24 +148,26 @@ write surfaces until a later contract/runtime slice adopts typed selectors. The
 workspace setting `memoryPromptMode` controls how that store reaches the
 model:
 
-- absent or `retrieval_only` (the default since migration 0271)
-  removes the broad standing pinned/recency block from every agent prompt;
-- an explicit `legacy_standing` opt-out preserves the old working-set block,
-  agent search behavior, and the legacy `memory_save` agent tool for rollback;
-  under the default mode `memory_save` is not registered and durable agent
-  writes go through `remember` and task-note promotion (`memory_search` and
-  `memory_correct` remain);
-- in `retrieval_only`, first-party agent `memory_search` excludes legacy
-  `kind = preference` rows, while authorized human search, audit, correction,
-  export, and the canonical rows remain unchanged;
-- in `retrieval_only`, child sessions omit the company profile from governance
-  composition, but roots retain it and all children retain mandatory instruction
-  policy plus always-visible structured preference and Skill descriptors.
+- composition is always `retrieval_only`: no standing pinned/recency block is
+  injected into any agent prompt. An agent reads the store through
+  `memory_search` when it needs it, rather than receiving it unbidden;
+- durable agent writes go through `remember` (explicit user-directed) and
+  task-note promotion (the agent's own findings). The Memory V1 agent writes
+  `memory_save` and `memory_correct` are retired; `memory_search` remains;
+- first-party agent `memory_search` excludes legacy `kind = preference` rows,
+  while authorized human search, audit, correction, export, and the canonical
+  rows remain unchanged;
+- child sessions omit the company profile from governance composition, but
+  roots retain it and all children retain mandatory instruction policy plus
+  always-visible structured preference and Skill descriptors.
 
-This setting is stored in the existing workspace settings JSON, defaults to
-`retrieval_only`, and can be rolled back per workspace by setting
-`legacy_standing` without a database migration. Both modes read the same
-`knowledge_memories` rows; only prompt composition differs. It does not
+The setting remains in the workspace settings JSON with the single value
+`retrieval_only`. The former `legacy_standing` opt-out is retired: a workspace
+that stored it keeps the stored value in its passthrough settings bag, where it
+no longer means anything, and already accepted turns keep the mode they
+recorded because those snapshots are immutable facts about what was composed.
+Agent prompts no longer read `knowledge_memories` unbidden; the rows are
+unchanged and still reachable through search. It does not
 create session notes, select typed scopes, change memory writes, or activate
 observations as policy. The structured preference registry remains the only
 active preference authority, and workspace instruction policies remain the only

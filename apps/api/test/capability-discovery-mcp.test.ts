@@ -171,6 +171,8 @@ async function seedAttempt(): Promise<{
     tools: [],
     metadata: {},
     model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     firstPartyMcpPermissions: ["workspace:read"],
     firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],

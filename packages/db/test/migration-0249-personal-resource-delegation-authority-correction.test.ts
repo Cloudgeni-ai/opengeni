@@ -311,6 +311,8 @@ async function createFixture(
       createdBy: { kind: "subject", subjectId },
       subjectId,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
       variableSetId: variableSet!.id,
       firstPartyMcpTools: [],

@@ -111,6 +111,8 @@ async function createPolicySession(
     tools: [],
     metadata: input.metadata ?? {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
     ...(input.policyRole ? { policyRole: input.policyRole } : {}),
   });
@@ -720,6 +722,8 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       metadata: {},
       createdBy: { kind: "subject", subjectId, label: "Claim snapshot human" },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const started = await initializeSessionStartAtomically(client.db, {

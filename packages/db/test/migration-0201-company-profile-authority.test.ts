@@ -307,6 +307,8 @@ describe("migration 0201 company-profile authority", () => {
       tools: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const acceptedAt = new Date();

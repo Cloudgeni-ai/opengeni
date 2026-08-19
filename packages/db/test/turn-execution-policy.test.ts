@@ -99,6 +99,8 @@ async function fixture(metadata: Record<string, unknown> = {}): Promise<Fixture>
     resources: [],
     metadata: {},
     model: acceptedPolicy.productModelId,
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const submitted = await withWorkspaceSubjectRls(

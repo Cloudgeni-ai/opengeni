@@ -56,6 +56,8 @@ async function sessionFixture() {
     tools: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return { grant, session };

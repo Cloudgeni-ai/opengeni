@@ -1,5 +1,46 @@
 # @opengeni/api-router
 
+## 1.0.0
+
+### Major Changes
+
+- 2cb04e0: Retire Memory V1's standing prompt block and its agent writes. `memoryPromptMode` is now always `retrieval_only`: no pinned/recency working set is injected into any agent prompt, and the `legacy_standing` rollback opt-out can no longer be selected. The `memory_save` and `memory_correct` first-party tools are removed; durable agent writes go through `remember` (explicit user-directed) and task-note promotion (the agent's own findings), while `memory_search` remains so an agent can still read what a workspace knows.
+
+  Nothing is rewritten or deleted: `knowledge_memories` rows, human REST/UI audit, search, correction, export, and the Memory Slack publication path are unchanged. A workspace that stored `legacy_standing` keeps the stored value in its passthrough settings bag, where it simply stops meaning anything, and already accepted turns keep the mode they recorded because those snapshots are immutable facts about what was composed. Migration 0295 changes no data; it reports whether anything was still relying on the mode rather than assuming it was unused.
+
+### Patch Changes
+
+- Updated dependencies [5dc88ef]
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [f4afa19]
+- Updated dependencies [d581eef]
+- Updated dependencies [994a743]
+- Updated dependencies [a7df809]
+- Updated dependencies [51123b4]
+- Updated dependencies [8583779]
+- Updated dependencies [a99ef33]
+- Updated dependencies [79ee99b]
+- Updated dependencies [368ee6c]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [747222a]
+- Updated dependencies [7bc1cd1]
+- Updated dependencies [6d22ab5]
+  - @opengeni/db@2.0.0
+  - @opengeni/contracts@2.0.0
+  - @opengeni/core@1.5.0
+  - @opengeni/runtime@1.1.2
+  - @opengeni/config@0.17.0
+  - @opengeni/observability@0.8.0
+  - @opengeni/documents@0.6.5
+  - @opengeni/events@0.3.119
+  - @opengeni/artifact-tool@0.3.1
+  - @opengeni/codemode@0.4.9
+  - @opengeni/github@0.4.64
+  - @opengeni/storage@0.2.101
+
 ## 0.33.1
 
 ### Patch Changes

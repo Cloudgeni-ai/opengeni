@@ -76,6 +76,8 @@ describe("BrowserSession API Docker canary", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "docker",
       });
       const settings = testSettings({

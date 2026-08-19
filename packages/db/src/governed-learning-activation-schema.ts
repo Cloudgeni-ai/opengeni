@@ -49,6 +49,10 @@ export const governedLearningActivationReceipts = pgTable(
     destinationNewContentHash: text("destination_new_content_hash").notNull(),
     destinationNewVersion: bigint("destination_new_version", { mode: "number" }).notNull(),
     destinationEventId: uuid("destination_event_id").notNull(),
+    // Added by migration 0272 alongside human-confirmed activation; the schema
+    // file had not caught up.
+    authorityKind: text("authority_kind").notNull().default("automatic"),
+    humanInputRequestId: uuid("human_input_request_id"),
     effectiveAt: timestamp("effective_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

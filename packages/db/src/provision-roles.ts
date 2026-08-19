@@ -568,6 +568,23 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0291's classification assertion seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and it lives in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches it. (Its inner capability predicate
+    -- IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.verify_organization_resource_classification(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.verify_organization_resource_classification(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0297's session ownership seams have the same shape: their own
     -- conditional GRANT block is skipped whenever opengeni_app does not yet
     -- exist, and they live in the data schema rather than opengeni_private, so
@@ -663,6 +680,21 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0289 creates this definer accessor before opengeni_app may
+    -- exist, so its migration-time GRANT is skipped on the supported
+    -- migrate-then-provision order. Re-converge it here.
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_activation_authority(uuid,uuid[])',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_activation_authority(uuid, uuid[]) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

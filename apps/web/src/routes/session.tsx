@@ -80,8 +80,11 @@ import {
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
-import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
-import { resolveSessionComposerModel } from "@/lib/session-model";
+import {
+  effortOptionsForModel,
+  findPickerRow,
+  runnableLatencyModesForModel,
+} from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
@@ -96,13 +99,12 @@ import {
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
-  isIntelligenceEffort,
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
+import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const LazySessionInspector = lazy(() =>
@@ -952,7 +954,6 @@ function SessionChatPane(props: {
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
   const repositories = useFollowUpRepositories(props.session);
-  const { effortForSession, latencyMode } = context;
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
@@ -976,29 +977,6 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  // Session-scoped pick (seeded from durable session.model). Prefer that
-  // durable id before ensure/draft hydrate — never flash the deployment default
-  // (wrong provider) on an open Codex session. On remote_v2, never keep a stale
-  // non-Codex override over the durable Codex model.
-  const requestedModel = context.modelForSession(props.session.id, props.session.model);
-  const model = resolveSessionComposerModel({
-    requested: requestedModel,
-    durableSessionModel: props.session.model,
-    codexCompactionMode: props.session.codexCompactionMode,
-  });
-  const reasoningEffort = effortForSession(props.session.id);
-  const {
-    setModelForSession,
-    setEffortForSession,
-    ensureModelForSession,
-    ensureEffortForSession,
-    setLatencyMode,
-  } = context;
-  // Once the operator touches the picker, draft reloads must not stomp it.
-  const pickerTouchedRef = useRef(false);
-  useEffect(() => {
-    pickerTouchedRef.current = false;
-  }, [props.session.id]);
   const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
@@ -1007,83 +985,6 @@ function SessionChatPane(props: {
   const launchRealtime = launch.realtime;
   const launchKey = composerLaunchSearchKey(launch);
   const appliedLaunchKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!launchKey || appliedLaunchKeyRef.current === launchKey) return;
-    const hasPolicy = Boolean(launchModel || launchEffort || launchLatency);
-    if (!hasPolicy) {
-      appliedLaunchKeyRef.current = launchKey;
-      return;
-    }
-    appliedLaunchKeyRef.current = launchKey;
-    pickerTouchedRef.current = true;
-    if (launchModel) setModelForSession(props.session.id, launchModel);
-    if (launchEffort) setEffortForSession(props.session.id, launchEffort);
-    if (launchLatency) setLatencyMode(launchLatency);
-    void navigate({
-      to: "/workspaces/$workspaceId/sessions/$sessionId",
-      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
-      search: composerLaunchSearchAfterPolicyApply({
-        model: launchModel,
-        effort: launchEffort,
-        latency: launchLatency,
-        realtime: launchRealtime,
-      }),
-      replace: true,
-    });
-  }, [
-    launchEffort,
-    launchLatency,
-    launchModel,
-    launchRealtime,
-    launchKey,
-    navigate,
-    props.session.id,
-    props.session.workspaceId,
-    setEffortForSession,
-    setLatencyMode,
-    setModelForSession,
-  ]);
-  // Seed once from durable session facts so open sessions never inherit the
-  // mutable new-session composer picks. Draft apply / picker writes still win.
-  useEffect(() => {
-    if (pickerTouchedRef.current) return;
-    ensureModelForSession(props.session.id, props.session.model);
-    const metaEffort = props.session.metadata.reasoningEffort;
-    if (isIntelligenceEffort(metaEffort)) {
-      ensureEffortForSession(props.session.id, metaEffort);
-    }
-    // Seed latency from durable session metadata until the composer draft
-    // applies (draft wins). Avoids flashing the global leftover/standard mode.
-    const metaLatency = props.session.metadata.latencyMode;
-    if (metaLatency === "fast" || metaLatency === "priority" || metaLatency === "standard") {
-      setLatencyMode(metaLatency);
-    }
-  }, [
-    setLatencyMode,
-    ensureEffortForSession,
-    ensureModelForSession,
-    props.session.id,
-    props.session.metadata.latencyMode,
-    props.session.metadata.reasoningEffort,
-    props.session.model,
-  ]);
-  // Drop a stale non-Codex override so the picker selection matches send.
-  useEffect(() => {
-    if (model === requestedModel) return;
-    setModelForSession(props.session.id, model);
-  }, [model, requestedModel, props.session.id, setModelForSession]);
-  // Catalog-backed effort legality: snap sticky effort when the selected model
-  // cannot run it (e.g. after reconnect or catalog refresh).
-  useEffect(() => {
-    const row = findPickerRow(modelCatalog.rows, model);
-    if (!row?.selectable) {
-      return;
-    }
-    const coerced = coerceReasoningEffortForModel(row.catalog, reasoningEffort);
-    if (coerced !== reasoningEffort) {
-      setEffortForSession(props.session.id, coerced);
-    }
-  }, [model, modelCatalog.rows, props.session.id, reasoningEffort, setEffortForSession]);
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;
@@ -1183,34 +1084,15 @@ function SessionChatPane(props: {
       selectableToolIds,
     ],
   );
-  const applyComposerSettings = useCallback(
-    (draft: ComposerDraft) => {
-      // Initial hydrate only. A later draft reload (or a fetch that raced the
-      // picker) must not undo an in-session model/effort change; autosave
-      // persists the picker into the draft.
-      if (pickerTouchedRef.current) {
-        return;
-      }
-      setModelForSession(props.session.id, draft.model);
-      setEffortForSession(props.session.id, draft.reasoningEffort);
-      setLatencyMode(draft.latencyMode ?? "standard");
-    },
-    [setLatencyMode, props.session.id, setEffortForSession, setModelForSession],
-  );
+  const composerPolicyValidRef = useRef(false);
   const composer = useComposer(props.session.id, {
     events: props.events,
-    sendExtras: () => {
-      return {
-        resources: [...attachments.readyResources, ...repositories.pendingResources],
-        model,
-        reasoningEffort,
-        latencyMode,
-      };
-    },
-    sendBlocked: () => attachments.hasUnresolved || repositories.error !== null,
+    sendExtras: () => ({
+      resources: [...attachments.readyResources, ...repositories.pendingResources],
+    }),
+    sendBlocked: () =>
+      attachments.hasUnresolved || repositories.error !== null || !composerPolicyValidRef.current,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
-    onDraftApplied: applyComposerSettings,
-    isPolicyTouched: () => pickerTouchedRef.current,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
@@ -1223,6 +1105,80 @@ function SessionChatPane(props: {
       repositories.commitSent(input.resources ?? []);
     },
   });
+  const composerPolicy = composer.policy;
+  const composerDraftLoading = composer.draftLoading;
+  const setComposerModel = composer.setModel;
+  const setComposerReasoningEffort = composer.setReasoningEffort;
+  const setComposerLatencyMode = composer.setLatencyMode;
+  const hasComposerPolicy = composerPolicy !== null;
+  const model = composerPolicy?.model ?? props.session.model;
+  const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
+  const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
+  const selectedPolicyRow = findPickerRow(modelCatalog.rows, model);
+  const matchesFrozenSessionPolicy = Boolean(
+    composerPolicy &&
+    composerPolicy.model === props.session.model &&
+    composerPolicy.reasoningEffort === props.session.reasoningEffort &&
+    composerPolicy.latencyMode === props.session.latencyMode,
+  );
+  const catalogComboValid = Boolean(
+    selectedPolicyRow?.selectable &&
+    (props.session.codexCompactionMode !== "remote_v2" ||
+      selectedPolicyRow.catalog.source === "codex") &&
+    effortOptionsForModel(selectedPolicyRow.catalog).includes(reasoningEffort) &&
+    (latencyMode === "standard" ||
+      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
+  );
+  const composerPolicyValid = Boolean(
+    composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
+  );
+  const composerPolicyError =
+    composerPolicy && !modelCatalog.loading && !composerPolicyValid
+      ? "Choose a model, reasoning level, and speed supported by this session."
+      : null;
+  composerPolicyValidRef.current = composerPolicyValid;
+
+  useEffect(() => {
+    if (
+      !launchKey ||
+      appliedLaunchKeyRef.current === launchKey ||
+      composerDraftLoading ||
+      !hasComposerPolicy
+    ) {
+      return;
+    }
+    const hasPolicy = Boolean(launchModel || launchEffort || launchLatency);
+    appliedLaunchKeyRef.current = launchKey;
+    if (!hasPolicy) return;
+    if (launchModel) setComposerModel(launchModel);
+    if (launchEffort) setComposerReasoningEffort(launchEffort);
+    if (launchLatency) setComposerLatencyMode(launchLatency);
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      search: composerLaunchSearchAfterPolicyApply({
+        model: launchModel,
+        effort: launchEffort,
+        latency: launchLatency,
+        realtime: launchRealtime,
+      }),
+      replace: true,
+    });
+  }, [
+    composerDraftLoading,
+    hasComposerPolicy,
+    launchEffort,
+    launchKey,
+    launchLatency,
+    launchModel,
+    launchRealtime,
+    navigate,
+    props.session.id,
+    props.session.workspaceId,
+    setComposerLatencyMode,
+    setComposerModel,
+    setComposerReasoningEffort,
+  ]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
     const acceptedClientEventIds = new Set(
       props.events
@@ -1564,24 +1520,15 @@ function SessionChatPane(props: {
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
-                  disabled={composer.sending}
+                  disabled={composer.sending || composer.draftLoading || !hasComposerPolicy}
                   loading={modelCatalog.loading || composer.draftLoading}
-                  error={modelCatalog.error}
+                  error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}
                   menuSide="top"
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
-                  onModelChange={(value) => {
-                    pickerTouchedRef.current = true;
-                    context.setModelForSession(props.session.id, value);
-                  }}
-                  onEffortChange={(value) => {
-                    pickerTouchedRef.current = true;
-                    context.setEffortForSession(props.session.id, value);
-                  }}
-                  onLatencyModeChange={(value) => {
-                    pickerTouchedRef.current = true;
-                    context.setLatencyMode(value);
-                  }}
+                  onModelChange={composer.setModel}
+                  onEffortChange={composer.setReasoningEffort}
+                  onLatencyModeChange={composer.setLatencyMode}
                 />
                 <SessionToolPicker
                   menuSide="top"

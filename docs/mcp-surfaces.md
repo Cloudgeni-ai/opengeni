@@ -17,8 +17,6 @@ page exists so you pick the right one in one read.
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
-- `memory_save` — legacy Memory V1 write; registered only when the workspace opts into the `legacy_standing` rollback mode. Under the default retrieval-only mode agents use `remember` (explicit user-directed) or task notes plus `task_note_promote_*` (their own findings) instead.
-- `memory_correct` — archive or supersede an incorrect/outdated workspace memory by id.
 - `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
 
 These tools are session-scoped: they register only when the delegated bearer carries
