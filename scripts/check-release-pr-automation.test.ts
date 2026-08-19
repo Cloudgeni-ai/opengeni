@@ -198,6 +198,16 @@ function releasePushEnv(overrides: Record<string, string> = {}) {
   };
 }
 
+function openVersionPrEnv(overrides: Record<string, string> = {}) {
+  return releasePushEnv({
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_WORKFLOW_REF:
+      `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
+      `${RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath}@refs/heads/main`,
+    ...overrides,
+  });
+}
+
 function automationCiEnv(overrides: Record<string, string> = {}) {
   return {
     GITHUB_API_URL: RELEASE_AUTOMATION_CONTRACT.apiUrl,
@@ -295,6 +305,27 @@ describe("Version PR dispatch identity", () => {
     const fixture = dispatchFixture();
     const result = await validateVersionPrDispatch({
       env: releasePushEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toEqual({ prNumber: pullNumber, headSha, baseSha });
+    const dispatch = fixture.requests.find((request) => request.method === "POST");
+    expect(dispatch?.body).toEqual({
+      ref: "main",
+      inputs: {
+        automation_pr_number: String(pullNumber),
+        automation_head_sha: headSha,
+        automation_base_sha: baseSha,
+        source_release_run_id: String(runId),
+        source_release_run_attempt: String(runAttempt),
+      },
+    });
+  });
+
+  test("dispatches trusted main CI from the manual Open Version PR workflow", async () => {
+    const fixture = dispatchFixture();
+    const result = await validateVersionPrDispatch({
+      env: openVersionPrEnv(),
       fetchImpl: fixture.fetchImpl,
       logger: { log() {} },
     });
@@ -438,6 +469,7 @@ function admissionFixture(
     sourceAdmissionConclusion?: string;
     sourceConclusion?: string | null;
     sourceEvent?: string;
+    sourcePath?: string;
     sourceStatus?: string;
     pullBaseSha?: string;
     pullBaseTreeSha?: string;
@@ -512,7 +544,7 @@ function admissionFixture(
         event: options.sourceEvent ?? "push",
         status: options.sourceStatus ?? "completed",
         conclusion: options.sourceConclusion === undefined ? "success" : options.sourceConclusion,
-        path: RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
+        path: options.sourcePath ?? RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
         head_branch: "main",
         head_sha: baseSha,
         repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
@@ -647,15 +679,28 @@ describe("automation CI admission", () => {
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
-  test("rejects a source run that was not an exact push-triggered Release run", async () => {
-    const fixture = admissionFixture({ sourceEvent: "workflow_dispatch" });
+  test("rejects a source run that is not a trusted Version PR producer", async () => {
+    const fixture = admissionFixture({ sourceEvent: "pull_request" });
     await expect(
       validateVersionPrCiAdmission({
         env: automationCiEnv(),
         fetchImpl: fixture.fetchImpl,
         logger: { log() {} },
       }),
-    ).rejects.toThrow("source Release run was not triggered by a push");
+    ).rejects.toThrow("source run is not a trusted Version PR producer");
+  });
+
+  test("admits a workflow_dispatch Open Version PR producer run", async () => {
+    const fixture = admissionFixture({
+      sourceEvent: "workflow_dispatch",
+      sourcePath: RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath,
+    });
+    const result = await validateVersionPrCiAdmission({
+      env: automationCiEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
   });
 
   test("rejects a failed source Release run", async () => {
