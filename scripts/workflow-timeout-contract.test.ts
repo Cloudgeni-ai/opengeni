@@ -20,7 +20,7 @@ type Job = Readonly<{
   "timeout-minutes"?: number;
 }>;
 
-type Step = Readonly<{ run?: string; uses?: string; "timeout-minutes"?: number }>;
+type Step = Readonly<{ run?: string; uses?: string; "timeout-minutes"?: unknown }>;
 
 async function workflowFiles(): Promise<readonly string[]> {
   const entries = await readdir(workflowDir);
@@ -123,26 +123,42 @@ describe("workflow timeout contract", () => {
         let inner = 0;
         let usesBoundedInstall = false;
         for (const step of job.steps ?? []) {
-          const run = String(step.run ?? "");
+          // Shell comments are prose, not budgets: a line that mentions
+          // `timeout 3600` in passing must not be read as an hour of work.
+          const run = String(step.run ?? "").replace(/(^|\s)#[^\n]*/gu, "$1");
           // Both `--flag N` and `--flag=N` spellings.
           for (const m of run.matchAll(/--timeout-seconds[\s=]+(\d+)/gu))
             inner += Number(m[1]) / 60;
           for (const m of run.matchAll(/--timeout[\s=]+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
-          // A bare coreutils `timeout 3600 ...` bounds the step just as much as
-          // a test-runner flag does.
-          for (const m of run.matchAll(/(?:^|[\s;&|(])timeout\s+(?:-\S+\s+)*(\d+)(?![\w.])/gu)) {
-            inner += Number(m[1]) / 60;
-          }
-          for (const m of run.matchAll(/(?:^|[\s;&|(])timeout\s+(?:-\S+\s+)*(\d+)m(?![\w.])/gu)) {
-            inner += Number(m[1]);
+          // A bare coreutils `timeout 3600 ...` bounds the step as much as a
+          // test-runner flag does. Anchored to a command position - start of
+          // line or after a shell separator - so prose inside an `echo` is not
+          // read as a budget. Leading options are consumed explicitly: `-k` and
+          // `-s` take a value, and a greedy `-\S+` would read the SIGKILL grace
+          // as the duration. Suffixes follow coreutils: bare is seconds.
+          const suffixMinutes: Record<string, number> = {
+            "": 1 / 60,
+            s: 1 / 60,
+            m: 1,
+            h: 60,
+            d: 1440,
+          };
+          const bareTimeout =
+            /(?:^|[;&|(])[^\S\n]*timeout\s+(?:(?:-[ks]\s*\S+|--kill-after=\S+|--signal=\S+|--preserve-status|--foreground|-v|--verbose)\s+)*(\d+(?:\.\d+)?)([smhd]?)(?![\w.])/gmu;
+          for (const m of run.matchAll(bareTimeout)) {
+            inner += Number(m[1]) * (suffixMinutes[m[2] ?? ""] ?? 1 / 60);
           }
           // A step-level timeout-minutes is an upper bound on that step and
           // must fit inside the job cap exactly like any other declared budget.
           const stepCap = step["timeout-minutes"];
           if (typeof stepCap === "number") inner += stepCap;
-          // An expression-valued budget cannot be checked statically. Fail
-          // closed rather than silently treating it as zero.
-          if (/--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(run)) {
+          // A budget that is only known at runtime cannot be checked
+          // statically. Fail closed rather than silently counting it as zero.
+          const expressionBudget =
+            /--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(run) ||
+            /(?:^|[;&|(])[^\S\n]*timeout\s+\$\{\{/mu.test(run) ||
+            (stepCap !== undefined && typeof stepCap !== "number");
+          if (expressionBudget) {
             violations.push(
               `${file}:${name} declares an expression-valued timeout that cannot be verified statically`,
             );
