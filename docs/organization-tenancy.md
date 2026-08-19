@@ -312,6 +312,79 @@ memberships for the subject and derives role-bounded account plus owner-only
 personal-workspace grants; inactive organizations disappear on the next
 request.
 
+### Lock order: organization fence before the canonical workspace prefix (0299)
+
+The membership lifecycle spans an entire organization, so it must agree with
+every ordinary workspace writer about lock order. Migration
+`0299_organization_membership_lock_order.sql` fixes the one place
+where it did not.
+
+**What was wrong.** `prepare_organization_membership_protocol_settlements`, the
+wrapped `organization_membership_command_0263`, and the 0275
+`organization_membership_command` wrapper each opened with `managed_accounts
+... FOR UPDATE` and took the canonical per-workspace prefix
+(`workspace_inference_controls FOR SHARE` -> `workspaces FOR KEY SHARE`) only
+afterwards. An ordinary workspace writer is forced into the opposite order and
+cannot avoid it: it locks its own `workspaces` row first - AGENTS.md's canonical
+event-write prefix, and `transition_session_visibility` (0225) takes that row
+`FOR UPDATE` - and only then reaches `managed_accounts` *implicitly*, through
+the account foreign-key check of a row it inserts. `sessions`,
+`session_events`, `session_turns`, `session_goals`, and
+`session_system_updates` all reference `managed_accounts`, and an FK check takes
+`FOR KEY SHARE` on the referenced row, which conflicts with `FOR UPDATE`:
+
+```
+transition_session_visibility    holds workspaces       waits managed_accounts
+prepare_organization_membership  holds managed_accounts waits workspaces
+```
+
+An administrator suspending or offboarding a member concurrently with any
+ordinary workspace write in the same organization therefore deadlocked (40P01).
+
+**What replaced it.** The organization row lock was doing two unrelated jobs.
+Mutual exclusion between concurrent membership commands for one organization is
+now a transaction-scoped advisory lock,
+`pg_advisory_xact_lock(hashtextextended('organization-membership:<organization
+id>', 0))`, taken by all three entry points. It is re-grantable within one
+transaction, so the wrapper, the preparation seam, and the wrapped 0263 body all
+take it reentrantly inside the single `updateOrganizationMember` transaction,
+and it lives in a lock space no ordinary workspace writer touches, so it can
+never appear in a cycle with a `workspaces`/`managed_accounts` row lock. Proving
+the organization exists and cannot be deleted underneath the command stays a row
+lock, downgraded to `managed_accounts FOR KEY SHARE`, which still blocks DELETE
+and primary-key UPDATE while being compatible with every ordinary writer's FK
+check. This is the same shape migration 0278 already used for the workspace
+membership removal seam.
+
+The lifecycle's first *row* lock is therefore the canonical prefix, and the full
+order is:
+
+```
+advisory 'organization-membership:<organization id>'
+  -> managed_accounts FOR KEY SHARE
+  -> per workspace, in UUID order:
+       workspace_inference_controls FOR SHARE
+       workspaces FOR KEY SHARE
+  -> organization_memberships FOR UPDATE (UUID ordered)
+  -> sessions FOR NO KEY UPDATE -> session_turns FOR UPDATE
+  -> session_turn_attempts FOR UPDATE
+```
+
+**Do not reintroduce a conflicting organization row lock.** Any new
+organization-wide seam that both locks `managed_accounts` more strongly than
+`FOR KEY SHARE` and afterwards touches `workspaces` (directly or through an FK)
+recreates this deadlock. Serialize on the advisory key instead. CAS on
+`organization_memberships.authorization_revision`, the operation-receipt
+idempotency, and every fail-closed authorization check are unchanged by 0299 -
+only lock strength and lock class moved.
+
+`packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
+holds the regression evidence: a deterministic cycle probe, a parallel-load
+probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does
+not move (so an application-level `40P01` replay cannot mask a regression), and
+an exclusion probe that proves a held advisory key genuinely blocks a
+concurrent membership command.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
@@ -441,7 +514,9 @@ user-facing private toggle is not yet safe:
 `test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
 if any product package starts naming either entry point or authorizing either
 operation. The first real caller must land together with an update to this
-section and to that test.
+section and to that test. Later migrations may replace `fork_session_content`
+only to copy newly required session columns (0289 copies typed reasoning and
+latency); they still must not wire a product caller.
 
 ## Referential integrity
 
@@ -549,7 +624,66 @@ human, both owned by their own issues and only counted here). Integers only;
 the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
-<<<<<<< HEAD
+The membership and personal-workspace half of the phase is the operator command
+`bun run db:backfill-organization-memberships --organization-id <uuid>`
+(`--dry-run`, `--limit`, default 25, max 100, `--max-passes`, default 1000,
+`--after-subject-id`). It drains exactly two of those
+counts - `workspaceMemberSubjectsWithoutMembershipAnchor` (humans who held
+workspace access before 0219 and never re-authenticated afterwards, so the
+managed-access hook never provisioned them) and
+`organizationMemberships.activeWithoutPersonalWorkspace`.
+
+Provisioning goes through the existing lifecycle authority, never a second one:
+the driver calls the same shared `ensureManagedHumanPersonalWorkspace` helper
+the Better Auth managed-access hook calls, over 0219's
+`ensure_managed_human_personal_workspace` SECURITY DEFINER capability. The
+driver holds no authority logic and writes no organization-tenancy table
+directly. Migration 0290 adds only the read-only enumeration it was missing -
+`list_organization_membership_backfill_anchors(uuid, text[])` and
+`list_organization_memberships_without_personal_workspace(uuid, integer, text)` -
+because `organization_memberships` is FORCE RLS with zero direct application
+privileges. Both are strictly read-only definer seams over an exact
+organization scope; the new `organization_membership_backfill` lifecycle marker
+is added to that table's policy `USING` clause only, so it is structurally
+incapable of authorizing a write. Every other table the driver reads
+(`workspaces`, `workspace_memberships`, `managed_accounts`, `auth_users`) is an
+ordinary account-scoped application-role read.
+
+A candidate is provisioned only on complete deterministic evidence: a live
+Better Auth login identity for the exact subject, an organization whose own
+external identity *is* that human, and a persisted owner-role workspace
+membership. Anything else is recorded unresolved with a bounded reason code and
+left completely untouched - `missing_login_identity`,
+`organization_identity_mismatch` (the human is a member of someone else's
+organization, where the only provisioning path is 0263 invitation acceptance
+bound to their own authenticated session - a human act, not a backfill),
+`missing_owner_workspace_membership` (workspace access is not ownership), and
+`membership_terminal_status` (reactivating a suspended or revoked anchor is an
+explicit owner-authorized 0263 action). Consequently at most one subject per
+organization is ever backfill-provisionable, which is the honest consequence of
+never inferring authority rather than a limitation to work around.
+
+Each candidate is claimed independently with `FOR UPDATE SKIP LOCKED` on its
+exact owner workspace membership and provisioned in its own transaction, so the
+command is idempotent, resumable, and safe to run repeatedly and concurrently: a
+held claim is reported `contended` and picked up by a later run, never blocked
+on and never double-provisioned. `--dry-run` classifies and writes nothing at
+all.
+
+`--limit` bounds **one pass**, and a pass is a **keyset window**, not a fixed
+one. Both populations are ordered by `subject_id`, each is read `limit`-deep
+from the same exclusive cursor, and the merged window is therefore a true
+prefix of the merged ordered stream - so neither population can starve the
+other, and the pass hands back the `nextCursor` that resumes it. One command
+invocation chains those passes until the stream is exhausted (`drained: true`,
+`lastCursor: null`), bounded by `--max-passes`; a run stopped by that bound
+reports `drained: false` and the `lastCursor` that `--after-subject-id`
+resumes. This is what makes repeated runs *converge*: a subject the driver
+cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
+over an organization with more than `n` `user:`-kind subjects would return the
+same first `n` rows on every pass and never reach subject `n + 1` at all. Durable receipt/unresolved-ledger persistence is the separate backfill
+ledger slice; today the command's structured JSON report is the operator record.
+
 #### Variable Sets, Rigs, and Connected Machines need no data rewrite
 
 These three families are already terminally classified, and the phase D
@@ -604,7 +738,7 @@ matches zero rows and reports success on such a deployment, and only appears to
 work in the test harness, which migrates as a superuser for whom FORCE RLS never
 engages. Any future classification work on these tables must run behind the same
 kind of capability-claiming seam.
-=======
+
 **There is no "unclassified" count for Variable Sets, Rigs, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
@@ -639,7 +773,64 @@ tables - contrast the documents gate, whose
 `authority_kind = 'personal' AND authority_id IS NULL` names a genuine
 post-migration invariant violation (`documents_authority_chk`, 0258) and is
 therefore truthful and drainable.
->>>>>>> origin/main
+
+#### Session ownership (migration 0297)
+
+Sessions are **not** an undifferentiated ownerless backlog. Migration 0225's
+`guard_session_authority_write` trigger already derives session ownership on
+every INSERT, and `session_visibility_isolation` is live. `0285`'s
+`sessions.ownerless` count is therefore the residue of two INSERT-only
+derivation branches - inherit the same-workspace parent's owner pair, otherwise
+resolve the `subject`-kind creator's active organization membership **and** a
+`workspace_memberships` row in that workspace - and not a migration backlog.
+
+`bun run db:backfill-session-ownership --organization-id <uuid> --classify`
+gives one verdict per session. Exactly two populations are deterministically
+repairable, and `--apply` repairs only those:
+
+- **Personal-workspace convergence.** The session's workspace is exactly the
+  `personal_workspace_id` of one active membership (0218's unique
+  `organization_memberships_personal_workspace_idx` makes that a 1:1 anchor)
+  and the session's `created_by_subject_id` is that same membership's subject.
+  Slice B provisions a personal workspace *without* a `workspace_memberships`
+  row, so 0225's second branch cannot reach these rows even today - the
+  population still grows until that derivation is extended, which is a phase F
+  decision and not part of this backfill.
+- **Parent-inheritance closure.** An ownerless session whose same-workspace
+  parent now has an owner pair: branch 1 of the live trigger replayed against
+  durable parent data, which is also what makes the driver resumable.
+
+Everything else is recorded unresolved with a fixed reason code and never
+guessed: `service`-created sessions (`legacy_shape_unrecognized`), non-`user:`
+subjects such as `api_key:` and `configured:` that 0219/0263 can never provision
+an organization anchor for (`external_lane_owns_row`, permanently unrepairable
+and still being minted), creators without a live membership
+(`missing_organization_membership`), a personal-workspace anchor that names a
+different subject than the creator (`ambiguous_candidate_authority`), and - the
+largest refusal - an active managed human's session in an ordinary shared
+workspace (`no_deterministic_evidence`), because replaying 0225's second branch
+retroactively would evaluate **today's** workspace grants against a historical
+session, which is exactly the current-access inference this phase forbids.
+
+The backfill is dry-run by default, bounded by `--limit`, resumable through
+`FOR UPDATE ... SKIP LOCKED`, and idempotent. It writes only the owner pair: it
+never touches `visibility`, `authority_epoch`, or `updated_at`, appends no
+session event, and widens no read - every candidate is necessarily
+`workspace_shared`, which `session_visibility_isolation` short-circuits on.
+
+Its candidate predicate carries the classifier's `created_by_subject_id LIKE
+'user:%'` fence in its own SQL, on both the dry-run count and the `--apply`
+claim. The write path must never be more permissive than the classification
+that authorizes it: `external_lane_owns_row` is called permanently unrepairable
+here, so the seam refuses it by construction rather than relying on 0219/0263
+never having minted a non-`user:` anchor.
+
+Session rows are safe to re-run over - an attributed row stops matching either
+candidate predicate. A `--run-key` ledger is deliberately *not*: each batch
+opens its own `<run-key>:batch-N` receipt and the ledger refuses to re-open a
+settled one, so a repeat under the same key fails on the first settled batch
+instead of overwriting immutable evidence. Resume or repeat with a new
+`--run-key`, or omit it and record nothing.
 
 ### E. Validate
 
@@ -648,6 +839,116 @@ per active membership, stable authority uniqueness, provider-account collision
 rules, session ownership, and zero partial delegations. Add read-only shadow
 comparisons between legacy and proposed effective scopes. No mismatch may fall
 back to user authority.
+
+The phase's executable gate is the read-only parity seam (migration 0298):
+
+```bash
+bun run db:check-tenancy-parity --organization-id <uuid>
+  [--evidence-limit <0-50>] [--observation-window-days <1-365>]
+```
+
+It prints one machine-readable report and exits `0` when every gate passed,
+`1` when at least one gate failed, and `2` when the command could not run. Like
+the inventory seam it is strictly read-only - its only writes are the claim and
+release of its own transaction-local private capability row, it holds its own
+capability separate from 0285's so the inventory seam gains no new visibility,
+and it rejects a cross-organization request. **It never repairs, widens, or
+resolves an ambiguity; a reported mismatch is never resolved toward user
+authority.**
+
+The report has three deliberately distinct parts.
+
+**Gates** are invariants that must be zero. Each carries an evidentiary
+`basis`: `constraint`/`trigger` gates shadow an enforcement the physical schema
+already provides, while `runtime` gates are the ones nothing in the schema
+prevents and therefore carry the real evidence about a cutover. Failures come
+with bounded row UUIDs as evidence - never subjects, names, keys, or values -
+and an explicit `truncated` flag.
+
+- organization/membership/workspace consistency: an active membership
+  identifies a personal workspace, that workspace belongs to the same
+  organization, and it is claimed by at most one membership;
+- a managed personal workspace carries **no** `workspace_memberships` row - the
+  owner-only grant is a derived access projection, and a persisted row there is
+  exactly how membership CRUD and the subject-membership fallback would widen it
+  into delegable access;
+- stable authority uniqueness: the physical unique index is per
+  (account, membership, kind, resource), so two *different* memberships can
+  still claim one resource. That ambiguity is reported, never resolved;
+- zero partial delegations, plus a live owning membership, a non-revoked
+  authority, and a session fence that is never ahead of the session it fences;
+- session owner provenance is complete, paired, in-organization, and still
+  names its owning membership's subject;
+- provider-account collision rules: the `(provider, provider_account)` unique
+  index makes a duplicate binding impossible, so a collision is recorded by
+  disputing the existing binding **and both identities**. A disputed binding
+  whose identity is still usable is a collision that never fenced its identity;
+  an identity's `active_login_binding_id` must also be its own binding (the FK
+  proves existence, never ownership);
+- the shadow scope comparison: legacy effective scope is workspace for every
+  resource, so every connection, Variable Set, Rig, Connected Machine, or
+  Document whose *proposed* effective scope is `user` must have an active
+  authority owned by an active membership. Without one there is no reachable
+  user resolution - it must fall back to workspace or deny.
+
+**Lanes** are legacy populations, not corruption: a non-zero lane blocks a
+cutover (`cutoverReady`) without failing the invariants. Every lane must
+therefore have a *reachable* zero, or the cutover gate is structurally
+unreachable rather than merely unmet. A lane is `drainable` only when a backfill
+can actually take it to zero; a lane over immutable history is `observation`
+and is reported over a bounded recent window, where the honest signal is "the
+lane stopped being exercised".
+
+They are the 0285 inventory populations plus these refinements.
+`sessionsAttributableButUnattributed` is the *drainable* subset of ownerless
+sessions - those whose creating subject today's `guard_session_authority_write`
+fence would attribute. Three lanes are `observation` because their tables are
+immutable history whose all-time count can never drain:
+
+- `connectionUseLegacyResolutionsInWindow` - `connection_use_audit_facts` are
+  append-only audit rows.
+- `workspaceWriterAdmissionsLegacyUnattributedInWindow` and
+  `workspaceWriterProcessesLegacyUnattributedInWindow` -
+  `sandbox_workspace_mutation_admissions` and `sandbox_retained_processes` are
+  settled by `UPDATE` and never deleted, and 0277's one-shot attribution
+  backfill only reached rows whose actor was a turn (`actor_kind` /
+  `owner_actor_kind` = `'turn'`). Every pre-0277 `direct:` or `process:`
+  admission therefore keeps the `legacy_unattributed` sentinel permanently, so
+  a single such row would otherwise pin `cutoverReady` to false forever.
+
+`connectionsLegacyUser` is the opposite case and is deliberately *not* bounded
+today: 0256's `guard_connection_authority_write` still actively mints
+`legacy_user` for any **new** connection whose subject holds no active
+organization membership, and no migration upgrades an existing `legacy_user`
+row to `user`. It is drainable only *after* the organization-membership
+backfill lands and stops the mint, which is why it names that owner.
+
+Documents and Codex credentials are consumed as gate inputs only; their repair
+is owned elsewhere and this program never writes a second reclassification for
+either.
+
+The checker **cannot run against a read replica.** Its capability row is
+claimed and released with `INSERT`/`DELETE` inside the calling transaction, so
+a read-only standby (or an explicit `SET TRANSACTION READ ONLY`) fails with
+`25006: cannot execute DELETE in a read-only transaction`. Point it at a
+writable primary; it is still read-only with respect to every table it
+inspects.
+
+**Unverifiable** properties are named explicitly rather than emitted as a
+counter that could never reach zero:
+
+- Variable Sets, Rigs, and Connected Machines have no legacy discriminator.
+  `authority_scope` defaults to `workspace` and the `*_authority_shape_check`
+  constraints *require* `authority_id IS NULL` for organization/workspace scope,
+  so a never-classified legacy row and a deliberately workspace-owned row are
+  byte-identical. Any "unclassified" counter for them is structurally
+  `total − userScoped`. (Documents are the exception that *does* have a
+  discriminator: `authority_kind = 'personal' AND authority_id IS NULL`.)
+- `workspace_shared` is the permanent correct visibility for a shared session,
+  not a legacy marker.
+- A null session owner is legitimate forever for API-key, delegated, and
+  service-created sessions and for creators with no active membership; only the
+  attributable subset above is drainable.
 
 `packages/db/test/organization-isolation-evidence.test.ts` is the executed
 cross-organization evidence suite for this phase. Against a real PostgreSQL

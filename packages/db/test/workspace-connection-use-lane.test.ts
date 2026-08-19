@@ -69,6 +69,8 @@ async function claimedTurnFixture(): Promise<Fixture> {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(db, {

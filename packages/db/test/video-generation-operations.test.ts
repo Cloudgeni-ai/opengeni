@@ -73,6 +73,8 @@ async function baseFixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(client.db, {

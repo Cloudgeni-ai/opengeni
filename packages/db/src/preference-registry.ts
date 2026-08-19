@@ -22,7 +22,12 @@ import {
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
-import { setSubjectRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
+import {
+  rawRows,
+  setSubjectRlsContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+} from "./database";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -619,6 +624,26 @@ export async function getCurrentPreferenceRegistryGovernanceMetadata(
       )
       .limit(PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT + 1);
 
+    // The receipts table is closed to the runtime role, so the activation
+    // authority is read through its narrow definer accessor rather than joined.
+    const revisionIds = rows.map(({ revision }) => revision.id);
+    const authorityByRevisionId = new Map<string, string>();
+    if (revisionIds.length > 0) {
+      const authorities = await rawRows<{ revision_id: string; authority_kind: string }>(
+        scopedDb,
+        // Passed as one delimited parameter and split server-side: the ids are
+        // internal UUIDs, but building array literals by string concatenation
+        // is not a habit worth having in a query builder.
+        sql`SELECT * FROM preference_registry_activation_authority(
+          ${input.workspaceId}::uuid,
+          string_to_array(${revisionIds.join(",")}, ',')::uuid[]
+        )`,
+      );
+      for (const row of authorities) {
+        authorityByRevisionId.set(row.revision_id, row.authority_kind);
+      }
+    }
+
     const bounded = boundPreferenceRegistryDescriptors(
       rows.map(({ preference, revision }) =>
         PreferenceRegistryDescriptor.parse({
@@ -643,6 +668,7 @@ export async function getCurrentPreferenceRegistryGovernanceMetadata(
               : null,
             trust: revision.trust,
           },
+          activationAuthority: authorityByRevisionId.get(revision.id) ?? null,
           expiresAt: revision.expiresAt ? iso(revision.expiresAt) : null,
           retrievalHandle: `preference://${preference.id}/revisions/${revision.id}?sha256=${revision.contentHash}`,
         }),
@@ -655,6 +681,10 @@ export async function getCurrentPreferenceRegistryGovernanceMetadata(
         contentHash: descriptor.contentHash,
         activeVersion: descriptor.activeVersion,
         scope: descriptor.scope,
+        // Identity-only projection, plus the one governance fact a reader
+        // cannot derive from an identity: whether a human confirmed this or
+        // policy activated it. No content or provenance detail crosses here.
+        activationAuthority: descriptor.activationAuthority,
       })),
       truncated: bounded.truncated,
     };

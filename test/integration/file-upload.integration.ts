@@ -209,6 +209,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
+      latencyMode: "standard",
       options: {},
     };
     const savedDraftResponse = await app.request(

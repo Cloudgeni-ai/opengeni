@@ -153,6 +153,8 @@ async function freshTurn(): Promise<TurnFixture> {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await initializeSessionStartAtomically(db, {

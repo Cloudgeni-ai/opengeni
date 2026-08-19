@@ -33,9 +33,12 @@ const SQL_ENTRY_POINTS = ["transition_session_visibility", "fork_session_content
 const ADAPTER_ENTRY_POINTS = ["transitionSessionVisibility", "forkSessionContent"] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 
-/** Files allowed to name the SQL entry points: definition, grants, posture, adapter. */
+/** Files allowed to name the SQL entry points: origin definition, later body
+ * replacements that only copy newly required session columns, grants, posture,
+ * adapter. Product callers remain forbidden. */
 const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
+  "packages/db/drizzle/0289_session_composer_policy_authority.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
@@ -85,7 +88,7 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
       for (const marker of SQL_ENTRY_POINTS) {
         expect(
           content.includes(marker),
-          `${file} must not name ${marker}; 0225 remains the sole definition and packages/db/src/session-tenancy.ts the sole adapter.`,
+          `${file} must not name ${marker}; 0225 remains the origin definition, later allowlisted migrations may replace only the copied session-column list, and packages/db/src/session-tenancy.ts remains the sole adapter.`,
         ).toBe(false);
       }
     }

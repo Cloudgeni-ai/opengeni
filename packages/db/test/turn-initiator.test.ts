@@ -82,6 +82,8 @@ function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
       ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
     },
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none" as const,
   };
 }
@@ -476,6 +478,7 @@ describe("immutable session turn initiators", () => {
           resources: [],
           model: "scripted-model",
           reasoningEffort: "low",
+          latencyMode: "standard",
         }),
       ),
     );
@@ -533,6 +536,8 @@ describe("immutable session turn initiators", () => {
         }),
       ),
     );
+    if (!resubmitted.draft) throw new Error("editor composer draft was not rotated after resubmit");
+    const editorDraftRevision = resubmitted.draft.revision;
     const steerDraft = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
         editQueuedTurnInTransaction(tx as unknown as typeof db, {
@@ -542,7 +547,7 @@ describe("immutable session turn initiators", () => {
           turnId: steerSource.turnId,
           subjectId: editor,
           expectedTurnVersion: 1,
-          expectedDraftRevision: 0,
+          expectedDraftRevision: editorDraftRevision,
           replaceDraft: false,
           actor: { type: "human", subjectId: editor },
           operationKey: crypto.randomUUID(),

@@ -14,7 +14,6 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
-  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -78,8 +77,6 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  MEMORY_CORRECT_TOOL_DESCRIPTION,
-  MEMORY_SAVE_TOOL_DESCRIPTION,
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
@@ -102,11 +99,7 @@ import {
   listTaskNotes,
   replaceTaskNote,
 } from "@opengeni/db";
-import {
-  appendAndPublishEvents,
-  appendAndPublishTurnEventsFenced,
-  publishDurableSessionEvents,
-} from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
@@ -129,13 +122,11 @@ import {
   authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
   nativeConnectionCapabilityRecommendations,
-  correctWorkspaceMemoryWithSlackPublication,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
-  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -377,6 +368,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
+  // Retired: never registered, so these are never consulted. The map must stay
+  // total over the tool-name union, which still carries both names so that
+  // previously written scheduled-task snapshots keep parsing.
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
   preference_registry_summary: {
@@ -3240,11 +3234,6 @@ function scheduledTaskUpdateChangesState(
   return false;
 }
 
-function memoryPreview(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
-}
-
 export function memorySlackPublicationActor(
   actor: Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>,
   sessionId: string,
@@ -3271,24 +3260,10 @@ function registerMemoryTools(
   json: JsonResult,
   promptMode: WorkspaceMemoryPromptMode,
 ): void {
-  const publicationActor = async () => {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-    return memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null);
-  };
-  const publicationInputSchema = z4.object({
-    importance: z4.enum(["major", "normal", "minor"]),
-    audience: z4.literal("workspace"),
-    slackMode: z4.enum(["auto", "review", "never"]),
-    shareSummary: z4.string().trim().min(1).max(4_096),
-  });
-
   server.registerTool(
     "memory_search",
     {
-      description:
-        promptMode === "retrieval_only"
-          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded from this tool because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`
-          : MEMORY_SEARCH_TOOL_DESCRIPTION,
+      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded from this tool because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
@@ -3311,207 +3286,10 @@ function registerMemoryTools(
       }),
   );
 
-  // Memory V1 writes are retired from the default retrieval-only surface:
-  // explicit user-directed knowledge goes through `remember`, agent findings
-  // through task notes and governed promotion. The legacy standing mode keeps
-  // the tool only as the rollback path.
-  if (promptMode === "legacy_standing") {
-    server.registerTool(
-      "memory_save",
-      {
-        description: MEMORY_SAVE_TOOL_DESCRIPTION,
-        inputSchema: {
-          text: z4.string().min(1),
-          kind: MemoryKindSchema,
-          confidence: z4.number().min(0).max(1).optional(),
-          replaces_id: z4.string().min(1).optional(),
-          slack_publication: publicationInputSchema.optional(),
-        },
-      },
-      async ({ text, kind, confidence, replaces_id, slack_publication }) => {
-        const principal = slack_publication ? await publicationActor() : null;
-        const result = await saveWorkspaceMemoryWithSlackPublication(
-          deps.db,
-          {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            sessionId,
-            text,
-            kind,
-            ...(confidence !== undefined ? { confidence } : {}),
-            ...(replaces_id ? { replacesId: replaces_id } : {}),
-            origin: "agent",
-          },
-          slack_publication
-            ? {
-                distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-                actor: principal!.actor,
-                ownerLabel: principal!.ownerLabel,
-              }
-            : null,
-          deps.getDocumentServices().embedder,
-        );
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "memory.saved",
-            payload: {
-              memoryId: result.memory.id,
-              kind: result.memory.kind,
-              preview: memoryPreview(result.memory.text),
-              deduped: result.deduped,
-              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
-            },
-          },
-        ]);
-        const changed = !result.deduped || result.updated || result.superseded !== null;
-        const outcome =
-          result.updated || result.superseded !== null
-            ? "updated"
-            : result.deduped
-              ? "unchanged"
-              : "created";
-        return json(
-          mcpMutationReceipt({
-            operation: "memory_save",
-            committed: true,
-            outcome,
-            changed,
-            resource: {
-              type: "knowledge_memory",
-              id: result.memory.id,
-              state: result.memory.status,
-            },
-            relatedResources: result.superseded
-              ? [
-                  {
-                    type: "knowledge_memory",
-                    id: result.superseded.id,
-                    state: result.superseded.status,
-                  },
-                ]
-              : undefined,
-            timestamp: result.memory.updatedAt,
-            idempotency: { status: "not_supported" },
-            warnings: !result.embedded
-              ? ["Memory committed without a vector embedding; keyword search remains available."]
-              : [],
-            facts: {
-              deduped: result.deduped,
-              dedupeReason: result.dedupeReason,
-              updatedInPlace: result.updated,
-              embedded: result.embedded,
-              slackPublicationDecision: result.slackPublication.decision?.eligible
-                ? "eligible"
-                : (result.slackPublication.decision?.reason ?? "not_requested"),
-              slackPublicationId:
-                result.slackPublication.enqueue?.kind === "enqueued" ||
-                result.slackPublication.enqueue?.kind === "replayed"
-                  ? result.slackPublication.enqueue.publication.id
-                  : null,
-              slackPublicationState:
-                result.slackPublication.enqueue?.kind === "enqueued" ||
-                result.slackPublication.enqueue?.kind === "replayed"
-                  ? result.slackPublication.enqueue.publication.state
-                  : null,
-            },
-          }),
-        );
-      },
-    );
-  }
-
-  server.registerTool(
-    "memory_correct",
-    {
-      description: MEMORY_CORRECT_TOOL_DESCRIPTION,
-      inputSchema: {
-        id: z4.string().min(1),
-        reason: z4.string().min(1).optional(),
-        replacement_text: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ id, reason, replacement_text, slack_publication }) => {
-      const principal = slack_publication ? await publicationActor() : null;
-      const result = await correctWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          id,
-          ...(reason ? { reason } : {}),
-          ...(replacement_text ? { replacementText: replacement_text } : {}),
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: principal!.actor,
-              ownerLabel: principal!.ownerLabel,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.corrected",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            action: result.action,
-            ...(reason ? { reason: memoryPreview(reason) } : {}),
-            ...(result.replacement
-              ? {
-                  replacementMemoryId: result.replacement.id,
-                  replacementPreview: memoryPreview(result.replacement.text),
-                }
-              : {}),
-          },
-        },
-      ]);
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_correct",
-          committed: true,
-          outcome: "updated",
-          changed: true,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.replacement
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.replacement.id,
-                  state: result.replacement.status,
-                },
-              ]
-            : undefined,
-          timestamp: (result.replacement ?? result.memory).updatedAt,
-          idempotency: { status: "not_supported" },
-          facts: {
-            correctionAction: result.action,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
+  // Memory V1 writes are retired. Explicit user-directed knowledge goes
+  // through `remember`; an agent's own findings go through task notes and
+  // governed promotion. `memory_search` stays: reading the existing record
+  // set is still how an agent recalls what a workspace already knows.
 }
 
 // Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
@@ -4364,7 +4142,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

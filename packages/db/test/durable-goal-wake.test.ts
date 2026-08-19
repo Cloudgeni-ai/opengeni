@@ -83,6 +83,8 @@ async function runningGoalFixture(
         tools: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
       })
     : null;
@@ -96,6 +98,8 @@ async function runningGoalFixture(
     metadata: {},
     createdBy: { kind: "subject", subjectId: grant.subjectId },
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
     personalConnectionDelegations,
   });
@@ -201,7 +205,7 @@ function materialize(ctx: GoalFixture) {
     policy: {
       model: "scripted-model",
       reasoningEffort: "low",
-      latencyMode: "standard",
+      latencyMode: "standard" as const,
       tools: [],
       sandboxBackend: "none",
     },
@@ -390,6 +394,8 @@ describe("durable active-goal wake", () => {
       metadata: {},
       createdBy: { kind: "subject", subjectId: grant.subjectId },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const initialized = await initializeSessionStartAtomically(client.db, {

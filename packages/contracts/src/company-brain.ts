@@ -33,6 +33,9 @@ export const CompanyBrainContextReceipt = z
     createdAt: z.string().datetime(),
     sessionRole: z.enum(["root", "child"]),
     memoryEnabled: z.boolean(),
+    // Snapshots are immutable: a turn accepted before the standing block was
+    // retired recorded `legacy_standing` and still reads back that way. This
+    // is a historical fact about that turn, not a mode anyone can select.
     memoryPromptMode: z.enum(["legacy_standing", "retrieval_only"]),
     companyProfileIncluded: z.boolean(),
     instructionPolicyEntryHash: z.string().regex(/^[0-9a-f]{64}$/u),

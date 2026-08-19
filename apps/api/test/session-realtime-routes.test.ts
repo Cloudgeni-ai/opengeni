@@ -143,6 +143,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {

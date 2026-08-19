@@ -260,6 +260,9 @@ export const workspaceInstructionPolicyOnboardingProposals = pgTable(
       sql`coalesce(${table.roleKey}, '')`,
       table.sourceId,
       table.sourceVersion,
+      // One proposal per source per baseline: a rebaselined successor is
+      // admissible, a duplicate against the same baseline is not.
+      table.baselineActivationVersion,
     ),
     workspaceTimeline: index(
       "workspace_instruction_policy_onboarding_proposals_workspace_time_idx",

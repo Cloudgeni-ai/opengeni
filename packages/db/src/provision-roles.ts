@@ -610,6 +610,35 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0297's session ownership seams have the same shape: their own
+    -- conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and they live in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches them. (Their inner capability
+    -- predicate IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.classify_organization_session_ownership(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.classify_organization_session_ownership(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.backfill_organization_session_ownership(uuid,integer,boolean,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.backfill_organization_session_ownership(uuid, integer, boolean, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to
@@ -676,6 +705,21 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.preference_registry_get_or_create_snapshot(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0289 creates this definer accessor before opengeni_app may
+    -- exist, so its migration-time GRANT is skipped on the supported
+    -- migrate-then-provision order. Re-converge it here.
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_activation_authority(uuid,uuid[])',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_activation_authority(uuid, uuid[]) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

@@ -598,6 +598,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         tools: [{ kind: "mcp", id: "opengeni" }],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
     const existing = await existingResponder("existing incident responder");
@@ -656,6 +658,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
     const existing = await workspaceDefaultResponder("existing workspace-default responder");
@@ -703,6 +707,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const reusable = await createSession(client.db, {
@@ -712,6 +718,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const tasks = [
@@ -809,6 +817,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
             tools: [{ kind: "mcp", id: "opengeni" }],
             metadata: {},
             model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
             sandboxBackend: "none",
           })
         : null;
@@ -1158,6 +1168,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
       rigVersionId: promoted.version.id,
@@ -1271,6 +1283,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
       rigVersionId: frozen.version.id,

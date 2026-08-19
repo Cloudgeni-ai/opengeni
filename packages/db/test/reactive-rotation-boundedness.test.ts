@@ -54,6 +54,8 @@ async function seedSession(ws: { accountId: string; workspaceId: string }): Prom
     resources: [],
     metadata: {},
     model: "gpt",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "modal",
   });
   return id;

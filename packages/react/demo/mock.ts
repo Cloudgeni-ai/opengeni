@@ -135,6 +135,8 @@ import type {
   SessionQueueSnapshot,
   SessionControlResponse,
   SessionStatus,
+  SubmitComposerDraftRequest,
+  SubmitComposerDraftResponse,
   SessionTurn,
   SiteAuthConnection,
   SiteAuthConnectionListOptions,
@@ -566,6 +568,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       revision: currentDraft.revision + 1,
       text: "",
       resources: [],
+      annotations: [],
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -688,6 +691,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       resources: turn.resources,
       model: turn.model,
       reasoningEffort: turn.reasoningEffort,
+      latencyMode: "standard",
       sourceTurnId: turn.id,
       sourceTurnVersion: turn.version,
       updatedAt: new Date().toISOString(),
@@ -719,6 +723,7 @@ export class MockOpenGeniClient implements SessionClientLike {
         resources: [],
         model: "gpt-5.2",
         reasoningEffort: "medium",
+        latencyMode: "standard",
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: null,
@@ -741,6 +746,45 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
     this.drafts.set(sessionId, draft);
     return draft;
+  }
+
+  async submitComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    request: SubmitComposerDraftRequest,
+  ): Promise<SubmitComposerDraftResponse> {
+    const current = await this.getComposerDraft(workspaceId, sessionId);
+    if (current.revision !== request.expectedDraftRevision) {
+      throw new Error("Composer draft changed");
+    }
+    const message: SendMessageInput = {
+      text: request.text,
+      annotations: request.annotations ?? [],
+      resources: request.resources,
+      model: request.model,
+      reasoningEffort: request.reasoningEffort,
+      latencyMode: request.latencyMode,
+      clientEventId: request.clientEventId,
+      expectedDraftRevision: request.expectedDraftRevision,
+      ...(request.controlEtag ? { controlEtag: request.controlEtag } : {}),
+      ...(request.modelContext ? { modelContext: request.modelContext } : {}),
+      ...(request.mcpCredentialUpdates
+        ? { mcpCredentialUpdates: request.mcpCredentialUpdates }
+        : {}),
+    };
+    const result =
+      request.delivery === "steer"
+        ? await this.steerMessage(workspaceId, sessionId, message)
+        : {
+            accepted: await this.sendMessage(workspaceId, sessionId, message),
+            turn: fabricateTurn(sessionId, 1, request.text),
+          };
+    return {
+      ...result,
+      draft: await this.getComposerDraft(workspaceId, sessionId),
+      interruptionCount: "interruptionCount" in result ? (result.interruptionCount ?? 0) : 0,
+      replay: "replay" in result ? (result.replay ?? false) : false,
+    };
   }
 
   async setWorkspaceInferenceState() {
@@ -3332,6 +3376,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       createdBy: { kind: "subject", subjectId: "user:demo" },
       createdByContext: {},
       model: "gpt-5.2",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       workingDir: null,
       sandboxOs: "linux",
