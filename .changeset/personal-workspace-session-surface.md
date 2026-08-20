@@ -1,5 +1,5 @@
 ---
-"@opengeni/db": patch
+"@opengeni/db": major
 "@opengeni/core": patch
 ---
 
@@ -11,4 +11,4 @@ A managed human's personal workspace deliberately has no `workspace_memberships`
 
 **The authorization is not that resolver.** Neither it nor the exported `namedSubjectHasLiveWorkspaceAuthority` establishes who the caller is — both answer "does subject X hold authority here". The one thing that authorizes the exception is `AccessGrantAuthorization.canonicalManagedHumanSession`, stamped only inside the branch of `resolveAccessContext` that verified a Better Auth cookie. Inspecting the grant would not do: a delegated bearer chooses its own `principalKind`, `metadata.delegated`, `serviceInitiator`, and `subjectId`. Bearer/delegated principals, API keys, service initiators, same-organization co-members, organization admins and owners, and account administrators all fail closed, as does any authentication path added later.
 
-The public helper is renamed `subjectHasLiveWorkspaceAuthority` → `namedSubjectHasLiveWorkspaceAuthority`, and it now restores `opengeni.subject_id` after probing (`withRlsContext` restores account/workspace but not subject, so the probed subject leaked out of the savepoint). The **major** changeset declaring that breaking rename lives in #1638, which introduced it; this PR adopts the name so the two do not conflict at merge.
+The public helper is renamed `subjectHasLiveWorkspaceAuthority` → `namedSubjectHasLiveWorkspaceAuthority`, and it now restores `opengeni.subject_id` after probing (`withRlsContext` restores account/workspace but not subject, so the probed subject leaked out of the savepoint). This changeset declares the required `@opengeni/db` **major** at the first PR that lands the breaking rename; the companion connection-authority change retains its own `@opengeni/core` major for its separate public break.
