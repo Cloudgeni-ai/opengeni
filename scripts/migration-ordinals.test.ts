@@ -439,6 +439,53 @@ describe("migration ordinal CLIs", () => {
     expect(after.stdout).toContain("[migration-ordinals] ok");
   });
 
+  test("check-migration-ordinals also fails closed against origin/production", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "migration-ordinals-production-"));
+    scratch.push(dir);
+    const upstream = join(dir, "upstream.git");
+    const root = join(dir, "work");
+    await mkdir(root, { recursive: true });
+    await git(root, "init", "-q", "-b", "main");
+    await git(root, "config", "user.email", "test@example.com");
+    await git(root, "config", "user.name", "test");
+    await mkdir(join(root, "packages/db/drizzle"), { recursive: true });
+    await writeFile(
+      join(root, "packages/db/drizzle/0001_first.sql"),
+      "-- deployment-mode: rolling\nselect 1;\n",
+    );
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "-m", "base");
+    await git(root, "clone", "-q", "--bare", root, upstream);
+    await git(root, "remote", "add", "origin", upstream);
+    await git(root, "push", "-q", "origin", "HEAD:refs/heads/production");
+    await writeFile(
+      join(root, "packages/db/drizzle/0002_main.sql"),
+      "-- deployment-mode: rolling\nselect 2;\n",
+    );
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "-m", "main took 0002");
+    await git(root, "push", "-q", "origin", "HEAD:refs/heads/main");
+    await git(root, "fetch", "-q", "origin");
+    await git(root, "checkout", "-q", "-b", "hotfix/ordinal", "origin/production");
+    await writeFile(
+      join(root, "packages/db/drizzle/0002_hotfix.sql"),
+      "-- deployment-mode: rolling\nselect 22;\n",
+    );
+    await git(root, "add", "-A");
+    await git(root, "commit", "-q", "-m", "hotfix took 0002");
+
+    const againstProduction = await run(root, [
+      "bun",
+      join(scripts, "check-migration-ordinals.ts"),
+      "--base",
+      "origin/production",
+    ]);
+    expect(againstProduction.code).toBe(1);
+    expect(againstProduction.stderr).toContain(
+      "ordinal 0002 of 0002_hotfix.sql is already used on origin/main by 0002_main.sql",
+    );
+  });
+
   test("after merging main, only this migration's companion is renamed and the sibling is untouched", async () => {
     const { root } = await fixtureRepo();
     await git(root, "merge", "-q", "--no-edit", "origin/main");

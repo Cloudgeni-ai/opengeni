@@ -113,9 +113,9 @@ jobs:
             echo "release controller checkout differs from controller_sha" >&2
             exit 1
           }
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "release candidate source must remain in current main ancestry" >&2
+          git fetch --no-tags origin production
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "release candidate source must remain in current production ancestry; promote main first" >&2
             exit 1
           }
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then

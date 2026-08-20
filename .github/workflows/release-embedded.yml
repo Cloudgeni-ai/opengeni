@@ -267,14 +267,14 @@ jobs:
             echo "unexpected embedded release workflow identity: $GITHUB_WORKFLOW_REF" >&2
             exit 1
           }
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "source_sha must be reachable from current main" >&2
+          git fetch --no-tags origin production
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "source_sha must be reachable from origin/production; promote main first" >&2
             exit 1
           }
           if [ -n "$PACKAGE_SOURCE_SHA" ]; then
-            git merge-base --is-ancestor "$PACKAGE_SOURCE_SHA" origin/main || {
-              echo "package_source_sha must be reachable from current main" >&2
+            git merge-base --is-ancestor "$PACKAGE_SOURCE_SHA" origin/production || {
+              echo "package_source_sha must be reachable from origin/production; promote main first" >&2
               exit 1
             }
           fi

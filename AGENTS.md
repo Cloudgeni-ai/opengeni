@@ -175,7 +175,7 @@ Three principles here are load-bearing and easy to break by accident:
 - **Codex opaque-artifact rejection preserves durable truth.** Only the recognized HTTP-400 encrypted-content rejection family may invalidate provider artifacts. Under the canonical attempt locks, identify the exact active opaque history-row IDs and latest current-turn RunState receipt that participated in the rejected request, mark only those candidates provider-invalid, preserve their durable content/provenance, and recover the same logical turn through a temporary view that removes unusable opaque identities (and omits unusable remote-compaction blobs). If that exact candidate set invalidates nothing, fail instead of retrying an equivalent request. Never delete history, hot-swap credentials, or classify a generic 400 into this path.
 - **Codex Apps authority is separate from inference.** The deployment flag only enables the feature. Execution additionally requires exactly one explicit workspace designation; null means no Apps tools and there is no active/pinned/allocator/static-credential fallback. The Apps credential is independent of inference model, billing subscription, quota, cooldown, leases, pins, capacity, and rotation. Only its current human owner with `connections:write` (or admin-equivalent scope) may designate it; any managed human with that scope may clear it. Recheck the exact designation, active connection, owner membership, and owner scope immediately before every Apps request. Reconnect never transfers ownership, and disconnect clears the designation atomically. See `docs/mcp-surfaces.md`.
 - **All-exhausted Codex capacity is a durable same-turn wait, not queue or user-message recovery.** When no allocator-enabled subscription is available for an admitted Codex turn, the worker atomically closes only the exact attempt as `waiting_capacity`, preserves that nonterminal turn and the session's active-turn pointer, and persists one session waiter (with an optional active-goal version fence). The workflow waits on its authoritative reset timer or a revisioned capacity signal, reconstructs the wait after restart/`continueAsNew`, then moves that exact turn to `recovering` after row-locked allocator re-evaluation and claims it with a new attempt. Pause leaves the waiter intact for Resume to reconstruct; Steer, cancellation, and other semantic fence changes supersede it cleanly. It never creates a queue row or synthetic input, polls with model turns, duplicates inference, independently settles/requeues the blocked turn, or consumes a reset/boost entitlement. See [`docs/codex-subscription-rotation.md`](docs/codex-subscription-rotation.md).
-- **SuperGrok/xAI authority is explicit and its capacity wait is the same durable protocol.** Workspace scope is the default shared pool; user scope is explicit/private and frozen on the exact accepted causal turn or scheduled task. Never infer it from the session creator, current browser user, worker, or another subject's active account, and never introduce a consent prompt or ambient-user fallback. Definitive marked 401/403/429 failures may quarantine only the exact leased credential and atomically preserve the same logical turn behind the provider-tagged waiter; ambiguous 5xx/partial streams must not walk the pool. HTTP 200 SSE `error` / `response.failed` / `response.error` / `response.incomplete` terminals are intercepted in the SuperGrok transport: persist the bounded exact provider message on `turn.failed`, keep request lifecycle audit metadata-only, and do not put that text on stdout/OTEL. See [`docs/supergrok-subscription.md`](docs/supergrok-subscription.md).
+- **SuperGrok/xAI authority is explicit and its capacity wait is the same durable protocol.** Workspace scope is the default shared pool; user scope is explicit/private and frozen on the exact accepted causal turn or scheduled task. Never infer it from the session creator, current browser user, worker, or another subject's active account, and never introduce a consent prompt or ambient-user fallback. Definitive marked 401/403/429 failures may quarantine only the exact leased credential and atomically preserve the same logical turn behind the provider-tagged waiter; HTTP 200 SSE capacity/rate-limit terminals (overload codes, or the observed Grok sentence "currently at capacity due to high demand") are the same marked-429 refusal and must enter that waiter instead of `turn.failed`. Isolated "high demand"/"overloaded" wording is not enough. Ambiguous 5xx/partial streams must not walk the pool. Other HTTP 200 SSE `error` / `response.failed` / `response.error` / `response.incomplete` terminals are intercepted in the SuperGrok transport: persist the bounded exact provider message on `turn.failed`, keep request lifecycle audit metadata-only, and do not put that text on stdout/OTEL. See [`docs/supergrok-subscription.md`](docs/supergrok-subscription.md).
 - **Sandbox warming is bounded and tracked.** A provider instance id must be persisted on the warming lease immediately after create returns, before readiness/setup. A turn waiting on another worker's warming lease is bounded by `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default 600000) and fails clearly on backend capacity/create timeout instead of heartbeating forever. Rig verification reuses this canonical lease lifecycle, accepts only a clean spawner, and is gated by `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED` (default off); never restore the legacy unleased verifier. Every failed or expired warming invalidation advances the lease epoch before exposing cold/draining, permanently fencing late non-abortable provider-create callbacks from a successor acquisition. The Modal orphan sweep must immediately re-read durable attribution before terminate and fail closed when that read is inconclusive.
 - **Modal checkpoints and finite deadlines are one maintenance-cutover protocol.** Migration 0138 may run only with every `opengeni_app` API/control/turn session stopped; after it commits, never start an older image. Every returned native snapshot is registered immediately as an immutable provider-bound artifact, publication rotates only exact current/previous lease references, and bounded global GC owns every unreferenced candidate/current/previous artifact even after parent deletion. Restore must consume the current receipt and compare its provider binding against the exact authenticated client embedded in the created session before hydration; a separately resolved ambient Modal client is not authority. Modal native restore never uses tar/inode/tree equivalence. Provider deadlines are stamped at create, new work is fenced once rotation is requested, and each global rotation/claim/recovery pass remains batch-bounded.
 - **Every persistable `/workspace` writer uses one durable turn/direct/process authority.** Before a provider operation that may change the durable workspace, one transaction binds the exact session group, warm lease epoch, provider and pinned route to either the canonical turn-attempt holder, an API request UUID with holder `direct:<request UUID>`, or an exact retained-process UUID with holder `process:<process UUID>`, then increments `workspace_generation` and inserts its admission row. Every admission and retained process also freezes its authority tuple (migration 0277): causal initiator, initiating human, the organization-membership grant identity with observed revision, and the session tenancy epoch/visibility/owner - a turn copies its accepted frozen snapshot, a direct request resolves its principal through the tenant-fenced `resolve_workspace_writer_grant_identity` seam, and a retained process inherits its parent admission verbatim. A revoked/suspended grant or an unattributed pre-0277 tenancy half fails a NEW mutation closed (`authority_revoked` / `authority_unattributed`) before any generation is consumed, but never terminates or re-owns the running provider process. A yielded process promotes its parent admission and process holder atomically and keeps both live until exact exit/loss proof; direct and process holders never inherit the turn-quiescence fallback and block capture themselves. Ordinary turn finalization drains every registered yielded shell before capture even when no Pause/Steer receipt is required. A bounded global reconciliation may inspect direct owners or closed exact attempts after finalizer/worker death, but owner state, age, timeout, and claim expiry never prove exit: only exact provider exit/loss proof is checkpointed before the same full-identity-fenced settlement. Unknown/running/mismatched observations preserve all blockers; reconciliation never terminates a provider instance or snapshots a workspace. Definitive provider loss atomically marks only active processes on the exact lost lease epoch/provider as lost, rejects every matching open admission, closes matching PTYs, removes only their process holders, and then advances the lease epoch; unrelated or terminal rows remain untouched. The exact provider promise is physically settled whether it resolves or rejects; resolved output must separately pass the matching authority/lease/provider/route fences. Capture publishes complete only when the closed write set has no blocker and `archive_generation === workspace_generation`. Never replay an admitted operation whose provider outcome may be ambiguous.
@@ -205,27 +205,26 @@ the new runtime.
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
 the latest protected branch. Create the branch from current `main` initially,
-then keep the exact head frozen while CI, review, and merge admission run.
+then keep the exact head frozen while CI and review run. Ordinary PRs into
+`main` use focused impact CI; freeze-head source admission runs only for
+`hotfix/*` PRs into `production`.
 
 - A protected-branch advance alone is **not** a source revision, does not
   invalidate a head-bound review, and must not produce another candidate label.
-  “Current-main compatible” means that the frozen candidate's patch and
+  “Current-main compatible” means that the frozen head's patch and
   resulting merge tree have been checked against current `main`; it does not
   mean that current `main` must be an ancestor of the candidate head.
-- When `main` moves, leave the source branch untouched. Re-run the base-owned
-  Source Admission check when needed, inspect provider mergeability, and have
-  the merge authority prove the fresh latest-main conflict, patch-equivalence,
-  protected-path, migration/generated-file, and targeted compatibility checks.
-  The source admission contract deliberately accepts immutable stale-event
-  heads while protected `main` advances.
+- When `main` moves, leave the source branch untouched. Inspect provider
+  mergeability and have the merge authority prove the fresh latest-main
+  conflict, patch-equivalence, protected-path, migration/generated-file, and
+  targeted compatibility checks. Do not merge or rebase unrelated `main`
+  commits into the branch solely to make it look current.
 - Mutate the candidate only for a source defect, an actual merge conflict, or a
   material semantic incompatibility that requires source changes. Record that
-  reason explicitly. A conflict-free merge or rebase performed only to include
-  unrelated `main` commits is prohibited.
+  reason explicitly.
 - A structured release-review artifact that explicitly binds a reviewed base
   may need replacement evidence when that selected base identity changes. That
-  evidence refresh stays on the same candidate head; it is not permission to
-  merge or rebase `main` into the source branch.
+  evidence refresh stays on the same candidate head.
 - Watchers and continuation goals must say “verify compatibility without source
   mutation.” They must never direct a source owner to “reconcile again” merely
   because `main` advanced. Candidate/version numbers count substantive source
@@ -235,10 +234,14 @@ then keep the exact head frozen while CI, review, and merge admission run.
   repair revisions, pause for an explicit incident/scope review before creating
   another source revision.
 
-See the executable moving-main admission contract in
+Promote `main` → `production` with a merge-commit PR (never squash / never
+GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
+admission; see `CONTRIBUTING.md` § Release / Publishing.
+
+See the hotfix admission contract in
 `.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,
-and `scripts/check-source-admission.test.ts`. Do not weaken it by reintroducing
-an exact-current-main ancestry requirement in prompts, goals, documentation, or
+and `scripts/check-source-admission.test.ts`. Do not reintroduce an
+exact-current-tip ancestry requirement in prompts, goals, documentation, or
 operator procedure.
 
 ## Keeping these notes current

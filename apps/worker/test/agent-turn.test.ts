@@ -4797,6 +4797,30 @@ describe("transient provider error classifier", () => {
     expect(
       classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
     ).toBeNull();
+    expect(
+      classifyXaiCredentialFailure(
+        new XaiSubscriptionStreamingTerminalError({
+          message:
+            "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+          code: "response_error",
+          eventType: "error",
+          status: 502,
+        }),
+      ),
+    ).toEqual({
+      kind: "rate_limit",
+      cooldownMs: 60_000,
+    });
+    expect(
+      classifyXaiCredentialFailure(
+        new XaiSubscriptionStreamingTerminalError({
+          message: "Our servers are currently overloaded. Please try again later.",
+          code: "response_error",
+          eventType: "error",
+          status: 502,
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
@@ -4846,6 +4870,23 @@ describe("transient provider error classifier", () => {
       error: "SECRET rate limited",
       code: "rate_limit_exceeded",
       retryable: true,
+    });
+    expect(
+      agentRunFailurePayload(
+        new XaiSubscriptionStreamingTerminalError({
+          message:
+            "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+          code: "rate_limit_exceeded",
+          eventType: "error",
+          status: 429,
+        }),
+      ),
+    ).toMatchObject({
+      error:
+        "The model is currently at capacity due to high demand. Please try again in a few minutes.",
+      code: "rate_limit_exceeded",
+      retryable: true,
+      lastEventType: "error",
     });
   });
 
