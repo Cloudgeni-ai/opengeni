@@ -1163,6 +1163,17 @@ audit reads may return it, so it is never a secret boundary.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
+   Model-visible tool results stay at or below 1 MiB. Overflow is a successful
+   tool: exact serialized bytes become a workspace File, a current-turn copy
+   lands at `/workspace/tool-results/<operationId>.json` when compute is
+   active, and history/events keep the compact `{ sandboxPath, fileId,
+   byteSize, mediaType }` receipt. Later turns do not rematerialize; retrieve
+   old bytes through Files MCP plus shell. Spill write failure is a bounded
+   `result_too_large` error and never puts the huge payload in history.
+   Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
+   `session_attempt_codemode_calls` is unchanged. See
+   `packages/runtime/src/tool-result-spill.ts` and
+   `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    User attachments use a separate one-turn delivery rule. The accepted user
    row stores private stable file references beside the message. Only that
    triggering turn resolves metadata, optionally inlines supported bytes, and

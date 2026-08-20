@@ -22,10 +22,16 @@ export function VoiceInputPreferenceRow({
 
   async function toggle() {
     if (!canManage || saving || !available) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     setSaving(true);
     try {
-      await context.updateWorkspaceSettings(workspaceId, { voiceInput: { enabled: !enabled } });
-      toast.success(!enabled ? "Voice input enabled" : "Voice input disabled");
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        voiceInput: { enabled: !enabled },
+      });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success(!enabled ? "Voice input enabled" : "Voice input disabled");
+      }
     } finally {
       setSaving(false);
     }

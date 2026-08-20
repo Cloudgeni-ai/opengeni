@@ -10,10 +10,30 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
 import { Button } from "@/components/ui/button";
+import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { useAppContext } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
+import {
+  updateWorkspaceOwnedState,
+  workspaceOwnedValue,
+  type WorkspaceOwnedState,
+} from "@/lib/workspace-owned-state";
+import {
+  beginWorkspaceOperationUnlessBlocked,
+  type WorkspaceOperationIdentity,
+} from "@/lib/workspace-transition";
 import type { SlackUserLinkAccessRequest } from "@/types";
+
+type SlackAccessState = {
+  request: SlackUserLinkAccessRequest | null;
+  error: string | null;
+  busy: boolean;
+};
+
+function emptySlackAccessState(): SlackAccessState {
+  return { request: null, error: null, busy: false };
+}
 
 export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspaceName: string }) {
   return (
@@ -31,94 +51,197 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const {
     accessKeyVersion,
-    resetSessionView,
+    captureWorkspaceInvocation,
+    clearSlackLinkContinuation,
+    client,
+    ownsWorkspaceInvocation,
+    preparePendingSlackLink,
     resetWorkspaceIntegrations,
+    refreshWorkspace,
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
     refreshWorkspaceMcpServers,
   } = context;
-  const previousWorkspaceId = useRef<string | null>(null);
-  const [slackAccessRequest, setSlackAccessRequest] = useState<SlackUserLinkAccessRequest | null>(
-    null,
+  const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
+    () => ({ workspaceId, value: emptySlackAccessState() }),
   );
-  const [slackAccessError, setSlackAccessError] = useState<string | null>(null);
-  const [slackAccessBusy, setSlackAccessBusy] = useState(false);
-  useGitHubHistoryRefresh(workspaceId, activeWorkspaceId !== null, refreshGitHub);
+  const slackOperationSequence = useRef(0);
+  const activeSlackOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const slackMutationBusy = useRef(false);
+  if (activeSlackOperation.current?.transition.workspaceId !== workspaceId) {
+    activeSlackOperation.current = null;
+  }
+  const slackAccess = workspaceOwnedValue(ownedSlackAccess, workspaceId, emptySlackAccessState());
+  const slackAccessRequest = slackAccess.request;
+  const slackAccessError = slackAccess.error;
+  const slackAccessBusy = slackAccess.busy;
+  const updateSlackAccess = useCallback(
+    (ownedWorkspaceId: string, update: (value: SlackAccessState) => SlackAccessState) => {
+      setOwnedSlackAccess((current) =>
+        updateWorkspaceOwnedState(current, ownedWorkspaceId, update),
+      );
+    },
+    [],
+  );
+  const beginSlackOperation = useCallback(
+    (options?: { polling?: boolean }): WorkspaceOperationIdentity | null => {
+      const accepted = captureWorkspaceInvocation(workspaceId);
+      if (!accepted) return null;
+      const started = beginWorkspaceOperationUnlessBlocked(
+        slackOperationSequence.current,
+        accepted,
+        options?.polling === true && slackMutationBusy.current,
+      );
+      if (!started) return null;
+      slackOperationSequence.current = started.sequence;
+      activeSlackOperation.current = started.operation;
+      return started.operation;
+    },
+    [captureWorkspaceInvocation, workspaceId],
+  );
+  const ownsSlackOperation = useCallback(
+    (operation: WorkspaceOperationIdentity): boolean =>
+      activeSlackOperation.current?.id === operation.id &&
+      ownsWorkspaceInvocation(workspaceId, operation.transition),
+    [ownsWorkspaceInvocation, workspaceId],
+  );
+  const workspaceStateReady = context.workspaceStateOwnerId === workspaceId;
+  useGitHubHistoryRefresh(
+    workspaceId,
+    activeWorkspaceId !== null && workspaceStateReady,
+    refreshGitHub,
+  );
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
 
+  useEffect(() => {
+    activeSlackOperation.current = null;
+    slackMutationBusy.current = false;
+    setOwnedSlackAccess({ workspaceId, value: emptySlackAccessState() });
+  }, [context.accessKeyVersion, workspaceId]);
+
   const refreshSlackAccess = useCallback(
-    async (request: SlackUserLinkAccessRequest) => {
-      const next = await context.client.getSlackUserLinkAccess(workspaceId, request.id);
-      setSlackAccessRequest(next);
+    async (request: SlackUserLinkAccessRequest, options?: { polling?: boolean }) => {
+      const operation = beginSlackOperation(options);
+      if (!operation) return null;
+      let next: SlackUserLinkAccessRequest;
+      try {
+        next = await client.getSlackUserLinkAccess(workspaceId, request.id);
+      } catch (error) {
+        if (ownsSlackOperation(operation)) {
+          updateSlackAccess(workspaceId, (current) => ({
+            ...current,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        return null;
+      }
+      if (!ownsSlackOperation(operation)) return null;
+      updateSlackAccess(workspaceId, (current) => ({ ...current, request: next }));
       if (next.status === "completed") {
         toast.success("Slack identity linked", {
           description: "You can return to Slack and invoke OpenGeni again.",
         });
-        await context.refreshWorkspace(workspaceId);
-        context.clearSlackLinkContinuation();
+        await refreshWorkspace(workspaceId);
+        if (!ownsSlackOperation(operation)) return null;
+        clearSlackLinkContinuation();
       }
       return next;
     },
-    [context, workspaceId],
+    [
+      beginSlackOperation,
+      clearSlackLinkContinuation,
+      client,
+      ownsSlackOperation,
+      refreshWorkspace,
+      updateSlackAccess,
+      workspaceId,
+    ],
   );
 
   useEffect(() => {
     if (!hasSlackLinkContinuation) return;
     let disposed = false;
-    setSlackAccessError(null);
-    void context
-      .preparePendingSlackLink(workspaceId)
+    const operation = beginSlackOperation();
+    if (!operation) return;
+    updateSlackAccess(workspaceId, (current) => ({ ...current, error: null }));
+    void preparePendingSlackLink(workspaceId)
       .then(async (request) => {
-        if (disposed || !request) return;
-        setSlackAccessRequest(request);
+        if (disposed || !request || !ownsSlackOperation(operation)) return;
+        updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
         if (request.status === "completed") {
           toast.success("Slack identity linked", {
             description: "You can return to Slack and invoke OpenGeni again.",
           });
-          await context.refreshWorkspace(workspaceId);
-          context.clearSlackLinkContinuation();
+          await refreshWorkspace(workspaceId);
+          if (disposed || !ownsSlackOperation(operation)) return;
+          clearSlackLinkContinuation();
         }
       })
       .catch((error) => {
-        if (disposed) return;
-        setSlackAccessError(error instanceof Error ? error.message : String(error));
+        if (disposed || !ownsSlackOperation(operation)) return;
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : String(error),
+        }));
       });
     return () => {
       disposed = true;
+      if (activeSlackOperation.current?.id === operation.id) {
+        activeSlackOperation.current = null;
+      }
     };
-  }, [context, hasSlackLinkContinuation, workspaceId]);
+  }, [
+    beginSlackOperation,
+    clearSlackLinkContinuation,
+    hasSlackLinkContinuation,
+    ownsSlackOperation,
+    preparePendingSlackLink,
+    refreshWorkspace,
+    updateSlackAccess,
+    workspaceId,
+  ]);
 
   useEffect(() => {
-    if (slackAccessRequest?.status !== "pending") return;
+    if (slackAccessBusy || slackAccessRequest?.status !== "pending") return;
     const interval = window.setInterval(() => {
-      void refreshSlackAccess(slackAccessRequest).catch((error) => {
-        setSlackAccessError(error instanceof Error ? error.message : String(error));
-      });
+      void refreshSlackAccess(slackAccessRequest, { polling: true });
     }, 3_000);
     return () => window.clearInterval(interval);
-  }, [refreshSlackAccess, slackAccessRequest]);
+  }, [refreshSlackAccess, slackAccessBusy, slackAccessRequest]);
 
   async function requestAccess() {
     if (!slackAccessRequest || slackAccessRequest.status !== "prepared") return;
-    setSlackAccessBusy(true);
+    const operation = beginSlackOperation();
+    if (!operation) return;
+    slackMutationBusy.current = true;
+    updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
     try {
-      setSlackAccessRequest(
-        await context.client.requestSlackUserLinkWorkspaceAccess(
-          workspaceId,
-          slackAccessRequest.id,
-          {
-            expectedVersion: slackAccessRequest.version,
-            idempotencyKey: crypto.randomUUID(),
-          },
-        ),
+      const request = await client.requestSlackUserLinkWorkspaceAccess(
+        workspaceId,
+        slackAccessRequest.id,
+        {
+          expectedVersion: slackAccessRequest.version,
+          idempotencyKey: crypto.randomUUID(),
+        },
       );
+      if (!ownsSlackOperation(operation)) return;
+      updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
       toast.success("Access request sent");
     } catch (error) {
-      setSlackAccessError(error instanceof Error ? error.message : String(error));
+      if (ownsSlackOperation(operation)) {
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
     } finally {
-      setSlackAccessBusy(false);
+      if (ownsSlackOperation(operation)) {
+        activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
+        updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
+      }
     }
   }
 
@@ -129,36 +252,46 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     ) {
       return;
     }
-    setSlackAccessBusy(true);
+    const operation = beginSlackOperation();
+    if (!operation) return;
+    slackMutationBusy.current = true;
+    updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
     try {
-      await context.client.cancelSlackUserLinkAccess(workspaceId, slackAccessRequest.id, {
+      await client.cancelSlackUserLinkAccess(workspaceId, slackAccessRequest.id, {
         expectedVersion: slackAccessRequest.version,
         idempotencyKey: crypto.randomUUID(),
       });
-      context.clearSlackLinkContinuation();
+      if (!ownsSlackOperation(operation)) return;
+      clearSlackLinkContinuation();
+      if (!ownsSlackOperation(operation)) return;
       await navigate({ to: "/", replace: true });
     } catch (error) {
-      setSlackAccessError(error instanceof Error ? error.message : String(error));
+      if (ownsSlackOperation(operation)) {
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
     } finally {
-      setSlackAccessBusy(false);
+      if (ownsSlackOperation(operation)) {
+        activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
+        updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
+      }
     }
   }
 
   useEffect(() => {
-    if (!activeWorkspaceId) {
+    if (!activeWorkspaceId || !workspaceStateReady) {
       return;
     }
     const abortController = new AbortController();
-    if (previousWorkspaceId.current !== workspaceId) {
-      resetSessionView();
-    }
-    previousWorkspaceId.current = workspaceId;
     resetWorkspaceIntegrations();
     setSelectedRepoIds(new Set());
     setSelectedRepoRefs({});
     void refreshGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
-      if (!isAbortError(error)) {
+      if (!abortController.signal.aborted && !isAbortError(error)) {
         toast.error("Failed to load workspace MCP tools", { description: String(error) });
       }
     });
@@ -168,12 +301,24 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     activeWorkspaceId,
     refreshGitHub,
     refreshWorkspaceMcpServers,
-    resetSessionView,
     resetWorkspaceIntegrations,
     setSelectedRepoIds,
     setSelectedRepoRefs,
+    workspaceStateReady,
     workspaceId,
   ]);
+
+  if (!workspaceStateReady) {
+    return (
+      <WorkspaceTenantBoundary
+        workspaceId={workspaceId}
+        stateOwnerWorkspaceId={context.workspaceStateOwnerId}
+        prepareTransition={context.prepareWorkspaceTransition}
+      >
+        {null}
+      </WorkspaceTenantBoundary>
+    );
+  }
 
   if (!activeWorkspace) {
     if (hasSlackLinkContinuation || slackAccessRequest || slackAccessError) {

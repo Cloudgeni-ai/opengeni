@@ -78,6 +78,8 @@ function appContext(permissions: string[]): Record<string, unknown> {
     client: {},
     accessContext: accessContext(permissions),
     workspaces: [{ id: WORKSPACE_ID, settings: {} }],
+    captureWorkspaceInvocation: (workspaceId: string) => ({ workspaceId, revision: 1 }),
+    ownsWorkspaceInvocation: () => true,
     updateWorkspaceSettings: async () => null,
   };
 }
@@ -351,6 +353,7 @@ describe("Slack reaction shortcut enablement", () => {
     }));
     const updateWorkspaceSettings = mock(async () => true);
     mutableContext.current = {
+      ...appContext(["workspace:admin"]),
       client: { listOpenGeniSlackReactionChannels: listChannels },
       accessContext: accessContext(["workspace:admin"]),
       workspaces: [

@@ -87,11 +87,15 @@ export function SwitcherBlock() {
 
   async function toggleWorkspaceControl() {
     if (!activeWorkspace || controlBusy) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(activeWorkspace.id);
+    if (!acceptedTransition) return;
     const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
     setControlBusy(true);
     try {
-      await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
-      toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
+      if (updated && context.ownsWorkspaceInvocation(activeWorkspace.id, acceptedTransition)) {
+        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      }
     } catch (error) {
       toast.error(`Couldn't ${action} the workspace`, {
         description: error instanceof Error ? error.message : String(error),
@@ -111,6 +115,8 @@ export function SwitcherBlock() {
     if (!name || !dialog) {
       return;
     }
+    const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+    if (!acceptedTransition) return;
     setBusy(true);
     try {
       if (dialog === "create") {
@@ -121,6 +127,7 @@ export function SwitcherBlock() {
         if (!created) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success(`Workspace ${created.name} created`);
         rail.openWorkspace(created.id);
       } else {
@@ -128,6 +135,7 @@ export function SwitcherBlock() {
         if (!renamed) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success("Workspace renamed");
       }
       setDialog(null);
@@ -189,6 +197,7 @@ export function SwitcherBlock() {
       >
         <button
           type="button"
+          aria-label={`Workspace: ${activeWorkspace?.name ?? "none"}. Switch workspace`}
           className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
         >
           <Avatar size="sm" className="rounded-md">
@@ -255,6 +264,7 @@ function OrgLine(props: {
         {props.orgs.map((org) => (
           <DropdownMenuItem
             key={org.accountId}
+            aria-current={org.accountId === props.activeAccountId ? "true" : undefined}
             onSelect={() => {
               if (org.accountId !== props.activeAccountId) {
                 rail.openOrg(org.accountId);
@@ -317,7 +327,11 @@ function WorkspaceMenu(props: {
       >
         <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
         {props.workspaces.map((workspace) => (
-          <DropdownMenuItem key={workspace.id} onSelect={() => props.onSelect(workspace.id)}>
+          <DropdownMenuItem
+            key={workspace.id}
+            aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
+            onSelect={() => props.onSelect(workspace.id)}
+          >
             <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
               {workspaceInitial(workspace)}
             </span>
