@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { renderPersonalWorkspaceAccessibilityFixture } from "../../apps/web/test/personal-workspace-accessibility-fixture";
@@ -6,15 +7,97 @@ import { renderPersonalWorkspaceAccessibilityFixture } from "../../apps/web/test
 describe("Personal workspace accessibility in Chromium", () => {
   let browser: Browser;
   let page: Page;
+  let switcherPage: Page;
+  let web: StartedProcess;
 
   beforeAll(async () => {
+    const port = await freePort();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    web = await startProcess(
+      [
+        "bun",
+        "run",
+        "vite",
+        "dev",
+        ".",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(port),
+        "--strictPort",
+      ],
+      {
+        cwd: `${new URL("../..", import.meta.url).pathname}/apps/web`,
+        ready: async () =>
+          (
+            await fetch(`${baseUrl}/test/active-organization-switcher.html`, {
+              signal: AbortSignal.timeout(2_000),
+            }).catch(() => null)
+          )?.ok === true,
+        timeoutMs: 45_000,
+      },
+    );
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage();
     await page.setContent(renderPersonalWorkspaceAccessibilityFixture());
-  });
+    switcherPage = await browser.newPage();
+    await switcherPage.goto(`${baseUrl}/test/active-organization-switcher.html`, {
+      waitUntil: "networkidle",
+    });
+  }, 60_000);
 
   afterAll(async () => {
-    await browser?.close();
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+  }, 30_000);
+
+  test("unnamed organizations stay identifiable when expanded, collapsed, and switched", async () => {
+    const expanded = switcherPage.getByRole("region", {
+      name: "Expanded organization switcher",
+    });
+    const collapsed = switcherPage.getByRole("region", {
+      name: "Collapsed organization switcher",
+    });
+
+    const firstTrigger = expanded.getByRole("button", {
+      name: "Org 11111111. Switch organization",
+      exact: true,
+    });
+    expect(await firstTrigger.isVisible()).toBe(true);
+    expect(await firstTrigger.textContent()).toContain("Org 11111111");
+    expect(
+      await collapsed
+        .getByRole("button", {
+          name: "Org 11111111. Workspace: Atlas. Switch workspace",
+          exact: true,
+        })
+        .count(),
+    ).toBe(1);
+
+    await firstTrigger.click();
+    const firstItem = switcherPage.getByRole("menuitem", { name: "Org 11111111", exact: true });
+    const secondItem = switcherPage.getByRole("menuitem", { name: "Org aaaaaaaa", exact: true });
+    expect(await firstItem.getAttribute("aria-current")).toBe("true");
+    expect(await secondItem.getAttribute("aria-current")).toBeNull();
+
+    await secondItem.click();
+    await expanded
+      .getByRole("button", {
+        name: "Org aaaaaaaa. Switch organization",
+        exact: true,
+      })
+      .waitFor();
+    expect(await expanded.textContent()).toContain("Org aaaaaaaa");
+    expect(
+      await collapsed
+        .getByRole("button", {
+          name: "Org aaaaaaaa. Workspace: Beacon. Switch workspace",
+          exact: true,
+        })
+        .count(),
+    ).toBe(1);
+    expect(await switcherPage.getByTestId("active-account-id").textContent()).toBe(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
   });
 
   test("the generic badge exposes Personal workspace through the accessibility tree", async () => {
