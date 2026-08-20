@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import {
   apiKeyConnectionRef,
   apiKeyCredential,
@@ -33,7 +34,6 @@ import {
   registryResultsForQuery,
   resolveSheetItem,
   socialConnectionsForOwnership,
-  sortConnectorsForPresentation,
   sortFeaturedFirst,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,

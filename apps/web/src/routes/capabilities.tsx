@@ -39,6 +39,7 @@ import {
   CapabilityDiscoveryControls,
   EnabledCapabilitiesSection,
 } from "@/components/capabilities/capability-catalog-sections";
+import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
 import {
   CapabilityDetailSheet,
@@ -102,7 +103,6 @@ import {
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
-  sortConnectorsForPresentation,
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
