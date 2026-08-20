@@ -130,6 +130,41 @@ describe("local MCP bridge kit", () => {
     ]);
   });
 
+  test("describes the physical origin selected by an absolute OpenAPI path key", async () => {
+    const revision = compileOpenApiRevision(
+      {
+        openapi: "3.1.0",
+        info: { title: "Absolute path API", version: "1" },
+        servers: [{ url: "https://api.example.com/v1/" }],
+        paths: {
+          "https://other.example/admin": {
+            get: {
+              operationId: "other-admin",
+              responses: { "200": { description: "OK" } },
+            },
+          },
+        },
+      },
+      { definitionId: "absolute-path-api" },
+    );
+    let requestedUrl = "";
+    const server = createOpenApiMcpServer({
+      revision,
+      authority: { accountId: "account-1", workspaceId: "workspace-1" },
+      transport: directIntegrationTransport(async (request) => {
+        requestedUrl = request.toString();
+        return Response.json({ ok: true });
+      }),
+    });
+
+    await server.callTool(revision.tools[0]!.id, {});
+    expect(requestedUrl).toBe("https://other.example/admin");
+    if (!isLocalMcpBridgeServer(server)) throw new Error("expected local bridge");
+    expect(server.bridge.destinations).toEqual([
+      { origin: "https://other.example", pathPrefix: "/" },
+    ]);
+  });
+
   test("does not advertise Connection authority without the credential resolver pair", () => {
     const revision = compileOpenApiRevision(
       {

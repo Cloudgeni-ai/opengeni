@@ -337,10 +337,19 @@ export function createOpenApiMcpServer(options: OpenApiServerOptions): MCPServer
 function openApiBridgeDestinations(revision: OpenApiRevision) {
   const destinations = new Map<string, { origin: string; pathPrefix: string }>();
   for (const binding of Object.values(revision.bindings)) {
-    const url = new URL(binding.serverUrl);
+    let url: URL;
+    try {
+      url = resolveOperationPathUrl(binding, binding.pathTemplate);
+    } catch {
+      // Descriptor creation must not become a validation boundary for a
+      // revision the existing compiler accepted. Invocation will retain its
+      // ordinary typed failure if a concrete path remains unresolvable.
+      url = new URL(binding.serverUrl);
+    }
     // OpenAPI paths may legally resolve `..` segments outside a server base
-    // path. Root is the narrowest truthful static prefix for every operation
-    // on this frozen origin; the transport remains the actual network gate.
+    // path or name an absolute URL on another origin. Root is the narrowest
+    // truthful static prefix for the frozen operation destination; the
+    // transport remains the actual network gate.
     destinations.set(url.origin, { origin: url.origin, pathPrefix: "/" });
   }
   return [...destinations.values()].sort((left, right) =>
@@ -718,14 +727,18 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     }
     return encodeURIComponent(scalarString(value));
   });
-  const base = new URL(binding.serverUrl);
-  const url = new URL(
-    path.replace(/^\//, ""),
-    base.toString().endsWith("/") ? base : new URL(`${base}/`),
-  );
+  const url = resolveOperationPathUrl(binding, path);
   const query = objectValue(args.query);
   for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
   return url;
+}
+
+function resolveOperationPathUrl(binding: OpenApiOperationBinding, path: string): URL {
+  const base = new URL(binding.serverUrl);
+  return new URL(
+    path.replace(/^\//, ""),
+    base.toString().endsWith("/") ? base : new URL(`${base}/`),
+  );
 }
 
 function buildOperationHeaders(
