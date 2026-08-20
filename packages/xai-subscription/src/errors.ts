@@ -80,6 +80,32 @@ export type XaiSubscriptionStreamingTerminalInfo = {
   diagnosticTruncated: boolean;
 };
 
+const XAI_SUBSCRIPTION_RATE_LIMIT_CODES = new Set([
+  "rate_limit_exceeded",
+  "too_many_requests",
+  "overloaded_error",
+  "server_overloaded",
+  "capacity_exceeded",
+  "resource_exhausted",
+]);
+
+// Message fallback is the observed Grok HTTP-200 SSE capacity sentence only.
+// Isolated "high demand" / "overloaded" / "rate limit" text is not enough: a
+// false-positive arms the durable same-turn waiter with no give-up.
+const XAI_SUBSCRIPTION_RATE_LIMIT_MESSAGE =
+  /the model is currently at capacity due to high demand/i;
+
+export function isXaiSubscriptionRateLimitDiagnostic(input: {
+  code?: string | null;
+  message?: string | null;
+  status?: number | null;
+}): boolean {
+  if (input.status === 429) return true;
+  const code = (input.code ?? "").trim().toLowerCase();
+  if (XAI_SUBSCRIPTION_RATE_LIMIT_CODES.has(code)) return true;
+  return XAI_SUBSCRIPTION_RATE_LIMIT_MESSAGE.test(input.message ?? "");
+}
+
 export function classifyXaiSubscriptionStreamingTerminalError(
   error: unknown,
 ): XaiSubscriptionStreamingTerminalInfo | null {

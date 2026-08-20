@@ -135,22 +135,39 @@ jobs:
             "../opengeni-computer-native-${{ matrix.target }}"
           file "../${{ matrix.asset }}"
 
-      - name: Build interaction helpers (Linux musl)
+      # Linux interaction helpers must be OS-native glibc, matching Mac's host libc
+      # join. The agent itself stays static musl (portable parent). Bun's musl
+      # compile is dynamically linked against /lib/ld-musl-*.so.1, which Ubuntu,
+      # Fedora, Arch, and NixOS do not ship, so connected-machine browser sessions
+      # fail with ENOENT/driver_failed. A static musl parent can exec a glibc child.
+      - name: Build interaction helpers (Linux glibc)
         if: matrix.kind == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
-            x86_64-*) bun_target=bun-linux-x64-musl; browser_arch=x64 ;;
-            aarch64-*) bun_target=bun-linux-arm64-musl; browser_arch=arm64 ;;
+            x86_64-*) bun_target=bun-linux-x64; browser_arch=x64 ;;
+            aarch64-*) bun_target=bun-linux-arm64; browser_arch=arm64 ;;
             *) echo "unsupported Linux interaction target" >&2; exit 1 ;;
           esac
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
+          interp="$(readelf -l "opengeni-browserd-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
+          case "$interp" in
+            /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
+            *)
+              echo "::error::linux browserd must use the glibc dynamic linker; got ${interp:-<missing>}" >&2
+              exit 1
+              ;;
+          esac
+          if readelf -d "opengeni-browserd-${{ matrix.target }}" | grep -F 'libc.musl'; then
+            echo "::error::linux browserd must not link musl libc" >&2
+            exit 1
+          fi
           OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
           OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
-          OPENGENI_BROWSERD_TARGET_MUSL=true \
+          OPENGENI_BROWSERD_TARGET_MUSL=false \
           OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}" \
             bun packages/browserd/scripts/stage-agent-browser.ts
           mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}" .
