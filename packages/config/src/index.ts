@@ -4949,6 +4949,16 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/files`;
 }
 
+const MODAL_DESKTOP_IMAGE_DIGEST_REF = /@sha256:[0-9a-f]{64}$/i;
+
+function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
+  if (settings.modalImageId) return true;
+  return (
+    typeof settings.modalImageRef === "string" &&
+    MODAL_DESKTOP_IMAGE_DIGEST_REF.test(settings.modalImageRef)
+  );
+}
+
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   const allowedFirstPartyMcpTools = new Set(
@@ -5443,6 +5453,20 @@ function validateSettings(settings: Settings): void {
   // negotiateCapabilities degrades the desktop cell). This keeps a desktop-
   // configured deployment bootable (headless + Channel-A still work) instead of
   // crashing the whole API on a missing secret.
+  if (
+    settings.sandboxDesktopEnabled &&
+    settings.sandboxBackend === "modal" &&
+    !["local", "test"].includes(settings.environment)
+  ) {
+    if (!isDigestPinnedModalDesktopImage(settings)) {
+      throw new Error(
+        "OPENGENI_MODAL_IMAGE_REF must be digest-pinned (registry/name@sha256:…) when " +
+          "OPENGENI_SANDBOX_BACKEND=modal and OPENGENI_SANDBOX_DESKTOP_ENABLED=true. " +
+          "Computer/Browser need docker/desktop.Dockerfile, not the official headless " +
+          "opengeni-sandbox image. Helm desktop.imageRef writes this pin.",
+      );
+    }
+  }
   if (settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined) {
     console.warn(
       "[opengeni] OPENGENI_SANDBOX_DESKTOP_ENABLED=true but neither OPENGENI_STREAM_TOKEN_SECRET nor " +

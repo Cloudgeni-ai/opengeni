@@ -66,8 +66,9 @@ config:
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
   # sandbox workspace (the desktop/Channel-A feature rollout) is ON for preview. The
   # HMAC secret OPENGENI_STREAM_TOKEN_SECRET lives in the opengeni-runtime
-  # secret (preview GitHub env), and OPENGENI_MODAL_IMAGE_REF is injected at
-  # deploy time via --set to the desktop image ref built by build-preview.
+  # secret (preview GitHub env). Pin docker/desktop.Dockerfile with
+  # --set desktop.imageRef=<registry>/opengeni-desktop@sha256:... — never the
+  # official headless opengeni-sandbox image. Helm fails closed without a digest.
   OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true"
   OPENGENI_SANDBOX_LAZY_PROVISION: "true"
   OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED: "false"

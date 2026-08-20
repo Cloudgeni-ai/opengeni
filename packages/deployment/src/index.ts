@@ -134,8 +134,8 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
 //     artifacts carry explicit operator values in the runtime Secret; the
 //     Secret is the authoritative managed-production source because it is the
 //     final envFrom source for API and worker workloads.
-//   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; it
-//     is injected at deploy time (--set) when a desktop image ref is built.
+//   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; Helm
+//     desktop.imageRef is the digest pin that overwrites it for Modal Computer/Browser.
 export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_STREAM_TOKEN_SECRET",
   "OPENGENI_STREAM_CONTROL_ENABLED",

@@ -16,7 +16,9 @@
 # on EVERY apt layer — the full xfce4 tree pulls tzdata, whose interactive debconf
 # blocks the builder forever otherwise.
 #
-# The CI push of this image to GHCR is P-Deploy, NOT this PR.
+# Official release BOM is the headless opengeni-sandbox image. This desktop
+# box is a sibling: `.github/workflows/publish-desktop-image.yml` on main, and
+# Helm `desktop.imageRef` is the digest pin written to OPENGENI_MODAL_IMAGE_REF.
 FROM scratch AS lightpanda-assets
 
 ADD --checksum=sha256:5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 https://github.com/lightpanda-io/browser/releases/download/0.3.5/lightpanda-x86_64-linux /lightpanda-x86_64-linux
