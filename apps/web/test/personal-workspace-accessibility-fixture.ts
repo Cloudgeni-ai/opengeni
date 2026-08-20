@@ -3,7 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
 import { WorkspaceMenuItemContent } from "../src/components/rail/switcher-block";
-import { managedSelfContextIdentity } from "../src/lib/managed-self-context";
+import {
+  WorkspaceScopeMenu,
+  WorkspaceScopeNavigationContent,
+  type ScopeNavigationLink,
+} from "../src/components/rail/workspace-scope-nav";
+import {
+  managedSelfContextIdentity,
+  type ManagedSelfContext,
+} from "../src/lib/managed-self-context";
 import type { Workspace } from "../src/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -43,6 +51,38 @@ const selfContext = {
 };
 
 export function renderPersonalWorkspaceAccessibilityFixture(): string {
+  const scope = {
+    organizationId,
+    organizationLabel: "Northstar",
+    workspaceId: personalWorkspaceId,
+    workspaceLabel: "Roadmap",
+    workspaceKind: "personal" as const,
+    personalWorkspaceId,
+  };
+  const links: ScopeNavigationLink[] = [
+    {
+      href: `/workspaces/${personalWorkspaceId}/organization`,
+      label: "Northstar",
+      description: "Organization administration",
+    },
+    {
+      href: `/workspaces/${personalWorkspaceId}/settings`,
+      label: "Roadmap",
+      description: "Personal workspace settings",
+    },
+    {
+      href: `/workspaces/${personalWorkspaceId}/sessions`,
+      label: "Personal",
+      description: "Current owner-only workspace",
+    },
+  ];
+  const resources: ScopeNavigationLink[] = [
+    {
+      href: `/workspaces/${personalWorkspaceId}/variable-sets`,
+      label: "Variable sets",
+      description: "Organization, Workspace, or Only me",
+    },
+  ];
   return renderToStaticMarkup(
     createElement(
       "main",
@@ -55,6 +95,37 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           workspace: personalWorkspace,
           activeWorkspaceId: "another-workspace",
           managedSelfContext: selfContext,
+        }),
+      ),
+      createElement(
+        "div",
+        { id: "suspended-personal-menuitem", role: "menuitem" },
+        createElement(WorkspaceMenuItemContent, {
+          workspace: personalWorkspace,
+          activeWorkspaceId: "another-workspace",
+          managedSelfContext: {
+            ...selfContext,
+            memberships: [{ ...selfContext.memberships[0], status: "suspended" }],
+          } as unknown as ManagedSelfContext,
+        }),
+      ),
+      createElement(
+        "section",
+        { id: "desktop-scope-navigation" },
+        createElement(WorkspaceScopeMenu, {
+          scope,
+          links,
+          resources,
+          collapsed: false,
+        }),
+      ),
+      createElement(
+        "section",
+        { id: "mobile-scope-navigation", style: { width: "320px" } },
+        createElement(WorkspaceScopeNavigationContent, {
+          scope,
+          links,
+          resources,
         }),
       ),
     ),

@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
   resolveAuthorizedSessionWorkspace,
   sessionDeepLinkReturnPath,
   shouldRedirectSessionDeepLink,
   type SessionReadGrant,
 } from "./session-deep-link";
+import type { AccessContext } from "@/types";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -35,6 +37,46 @@ function reader(
 }
 
 describe("workspace-less session deep-link resolver", () => {
+  test("derives probe ids only from exact listed workspace/current grant intersections", () => {
+    const currentSubject = "user:current";
+    const currentAccount = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const otherAccount = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const listed = [
+      { id: "11111111-1111-4111-8111-111111111111", accountId: currentAccount },
+      { id: "22222222-2222-4222-8222-222222222222", accountId: currentAccount },
+      { id: "33333333-3333-4333-8333-333333333333", accountId: currentAccount },
+    ];
+    const context = {
+      mode: "managed",
+      subjectId: currentSubject,
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: listed[0]!.id,
+          accountId: currentAccount,
+          subjectId: currentSubject,
+          permissions: ["sessions:read"],
+        },
+        {
+          workspaceId: listed[1]!.id,
+          accountId: currentAccount,
+          subjectId: "user:stale",
+          permissions: ["sessions:read"],
+        },
+        {
+          workspaceId: listed[2]!.id,
+          accountId: otherAccount,
+          subjectId: currentSubject,
+          permissions: ["workspace:admin"],
+        },
+      ],
+      defaultAccountId: currentAccount,
+      defaultWorkspaceId: listed[0]!.id,
+    } as AccessContext;
+
+    expect(authorizedSessionReadWorkspaceIds(context, listed)).toEqual([listed[0]!.id]);
+  });
+
   test("redirect resolution uses only authorized session-read workspace paths", async () => {
     const calls: string[] = [];
     const result = await resolveAuthorizedSessionWorkspace(
@@ -139,5 +181,32 @@ describe("workspace-less session deep-link resolver", () => {
     );
 
     expect(result.status).toBe("error");
+  });
+
+  test("intersects recovery probes with the current workspace list and skips the stale route", async () => {
+    const calls: string[] = [];
+    const result = await resolveAuthorizedSessionWorkspace(
+      reader(
+        {
+          "workspace-a": { id: SESSION_ID },
+          "workspace-b": { id: SESSION_ID },
+          "workspace-c": { id: SESSION_ID },
+        },
+        calls,
+      ),
+      [
+        grant("workspace-a", ["sessions:read"]),
+        grant("workspace-b", ["sessions:read"]),
+        grant("workspace-c", ["sessions:read"]),
+      ],
+      SESSION_ID,
+      {
+        excludeWorkspaceId: "workspace-a",
+        authorizedWorkspaceIds: ["workspace-a", "workspace-c"],
+      },
+    );
+
+    expect(result).toEqual({ status: "resolved", workspaceId: "workspace-c" });
+    expect(calls).toEqual([`workspace-c/${SESSION_ID}`]);
   });
 });

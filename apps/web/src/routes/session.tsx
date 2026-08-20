@@ -127,6 +127,12 @@ const LazyCodexRealtimeControl = lazy(() =>
   })),
 );
 
+const LazySessionUnavailableRoute = lazy(() =>
+  import("@/routes/session-unavailable").then(({ SessionUnavailableRoute }) => ({
+    default: SessionUnavailableRoute,
+  })),
+);
+
 export function SessionRoute({
   workspaceId,
   sessionId,
@@ -479,17 +485,9 @@ export function SessionRoute({
   if (!session) {
     if (loadError) {
       return isApiErrorStatus(loadError, 404) ? (
-        <ProblemPanel
-          title="Session not found in this workspace"
-          description="The session ID is not available under the workspace in the URL."
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
+        <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
+          <LazySessionUnavailableRoute workspaceId={workspaceId} sessionId={sessionId} />
+        </Suspense>
       ) : (
         <ProblemPanel
           title="Unable to open session"
