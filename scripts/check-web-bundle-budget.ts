@@ -54,10 +54,12 @@ const budgets = {
   // The next full-KiB raw envelope is 2,066,432 (2,018 KiB); the unchanged
   // 574,464 gzip (561 KiB) envelope continues to bound the measured gzip graph.
   // The managed personal-resource create/composer controls plus current main
-  // measured 1,484,426 initial raw, 2,077,674 direct-session raw, and 577,450
-  // direct-session gzip bytes on macOS/arm64. Their next full-KiB envelopes are
-  // 1,450, 2,029, and 564 KiB respectively; all unrelated graph and per-file
-  // caps stay fixed.
+  // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
+  // macOS/arm64. The final uncertain-Send reconciliation repair measured
+  // 2,077,807 direct-session raw bytes in the exact production build, so its
+  // next full-KiB envelope is 2,030 KiB (2,078,720 bytes). The 1,450 KiB
+  // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
+  // graph and per-file cap, stay fixed.
   initialRaw: 1450 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -65,7 +67,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2029 * kib,
+  directSessionRaw: 2030 * kib,
   directSessionGzip: 564 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
