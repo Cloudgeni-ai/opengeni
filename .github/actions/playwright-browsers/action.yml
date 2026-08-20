@@ -98,6 +98,7 @@ runs:
         PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
         ATTEMPT_TIMEOUT_SECONDS: ${{ inputs.attempt-timeout-seconds }}
         ATTEMPTS: ${{ inputs.attempts }}
+        KILL_AFTER_SECONDS: "15"
       run: |
         set -uo pipefail
         only_shell=""
@@ -112,7 +113,7 @@ runs:
           # `|| status=$?` guard the first failing attempt aborts the script,
           # so the retry, the warnings, and the error summary never run.
           status=0
-          timeout --kill-after=15s "${ATTEMPT_TIMEOUT_SECONDS}s" \
+          timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s" \
             bun x playwright install --with-deps ${only_shell} ${PLAYWRIGHT_BROWSERS} || status=$?
           echo "::endgroup::"
           if [ "${status}" -eq 0 ]; then

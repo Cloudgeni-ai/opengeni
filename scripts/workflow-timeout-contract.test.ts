@@ -9,6 +9,11 @@ const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/
 const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
 const MAX_TIMEOUT_MINUTES = 120;
 const JOB_SETUP_ALLOWANCE_MINUTES = 1;
+const AMBIGUOUS_SHELL_TEXT = "\0";
+const ASSEMBLY_FRAGMENT_WINDOW = 24;
+const TIMEOUT_SPELLINGS = ["timeout", "gtimeout", "--timeout", "--timeout-seconds"] as const;
+const ATTEMPT_TIMEOUT_INPUT = "${{ inputs.attempt-timeout-seconds }}";
+const ATTEMPTS_INPUT = "${{ inputs.attempts }}";
 
 type Step = Readonly<{
   name?: string;
@@ -29,8 +34,19 @@ type Workflows = Readonly<Record<string, Workflow>>;
 
 type PlaywrightAction = Readonly<{
   inputs?: Readonly<Record<string, Readonly<{ default?: unknown }>>>;
-  runs?: Readonly<{ steps?: readonly Readonly<{ name?: string; run?: string }>[] }>;
+  runs?: Readonly<{
+    steps?: readonly Readonly<{
+      name?: string;
+      env?: Readonly<Record<string, unknown>>;
+      run?: string;
+    }>[];
+  }>;
 }>;
+
+type MutablePlaywrightAction = {
+  inputs: Record<string, { default?: unknown }>;
+  runs: { steps: Array<{ name?: string; env?: Record<string, unknown>; run?: string }> };
+};
 
 type StepIdentity = Readonly<{
   file: string;
@@ -144,6 +160,59 @@ function positiveNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
+function ambiguousShellProjection(source: string): string {
+  return source
+    .replace(
+      /\$'((?:\\[\s\S]|[^']){0,128})'/gu,
+      (_whole, body: string) =>
+        AMBIGUOUS_SHELL_TEXT +
+        body.replace(/\\(?:x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|[\s\S])/gu, AMBIGUOUS_SHELL_TEXT) +
+        AMBIGUOUS_SHELL_TEXT,
+    )
+    .replace(/\$\{[^}\r\n]{0,128}\}/gu, AMBIGUOUS_SHELL_TEXT)
+    .replace(/\$\([^\r\n)]{0,128}\)/gu, AMBIGUOUS_SHELL_TEXT)
+    .replace(/;\s*[A-Za-z_][A-Za-z0-9_]*\s*\+=/gu, AMBIGUOUS_SHELL_TEXT)
+    .replace(/\$[A-Za-z_][A-Za-z0-9_]*/gu, AMBIGUOUS_SHELL_TEXT)
+    .replace(/["']/gu, "");
+}
+
+function hasAmbiguousTimeoutAssembly(source: string): boolean {
+  const projection = ambiguousShellProjection(source);
+  for (const ambiguity of projection.matchAll(/\0+/gu)) {
+    const index = ambiguity.index;
+    if (index === undefined) continue;
+    const left =
+      /(?:--)?[A-Za-z-]+$/u.exec(
+        projection.slice(Math.max(0, index - ASSEMBLY_FRAGMENT_WINDOW), index),
+      )?.[0] ?? "";
+    const right =
+      /^(?:--)?[A-Za-z-]+/u.exec(
+        projection.slice(index + ambiguity[0].length, index + ASSEMBLY_FRAGMENT_WINDOW),
+      )?.[0] ?? "";
+    for (const target of TIMEOUT_SPELLINGS) {
+      for (
+        let leftLength = 0;
+        leftLength <= Math.min(left.length, target.length);
+        leftLength += 1
+      ) {
+        const prefix = leftLength === 0 ? "" : left.slice(-leftLength);
+        if (leftLength > 0 && !target.startsWith(prefix)) continue;
+        for (
+          let rightLength = 0;
+          rightLength <= Math.min(right.length, target.length - leftLength);
+          rightLength += 1
+        ) {
+          const suffix = right.slice(0, rightLength);
+          if (leftLength + rightLength >= 4 && (rightLength === 0 || target.endsWith(suffix))) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * This is deliberately lexical, not a shell parser. It joins line continuations
  * and removes quote/backslash spelling noise so known timeout words cannot hide,
@@ -154,9 +223,19 @@ function hasTimeoutSpelling(source: string): boolean {
     .replace(/\\\r?\n/gu, "")
     .replace(/\\(?=[A-Za-z-])/gu, "")
     .replace(/["']/gu, "");
-  return /(^|[^A-Za-z0-9_])(?:gtimeout|timeout|--timeout(?:-seconds)?)(?=$|[^A-Za-z0-9_])/u.test(
-    normalized,
-  );
+  if (
+    /(^|[^A-Za-z0-9_])(?:gtimeout|timeout|--timeout(?:-seconds)?)(?=$|[^A-Za-z0-9_])/u.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+
+  // This bounded ambiguity projection is not shell evaluation. It collapses
+  // nearby expansions, ANSI escapes, and append-shaped text to one marker, then
+  // asks whether that marker could complete a known spelling. It never decodes
+  // the middle, follows a variable, or infers an inner duration.
+  return hasAmbiguousTimeoutAssembly(source);
 }
 
 async function loadWorkflows(): Promise<Workflows> {
@@ -177,26 +256,53 @@ async function loadPlaywrightAction(): Promise<PlaywrightAction> {
   return Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as PlaywrightAction;
 }
 
+function mutablePlaywrightAction(action: PlaywrightAction): MutablePlaywrightAction {
+  return structuredClone(action) as MutablePlaywrightAction;
+}
+
+function mutableInstallStep(action: MutablePlaywrightAction) {
+  const step = action.runs.steps.find(
+    (candidate) => candidate.name === "Install pinned Playwright browsers",
+  );
+  if (!step?.env || !step.run) throw new Error("missing Playwright install fixture");
+  return step;
+}
+
 function playwrightBoundMinutes(
   action: PlaywrightAction,
   caller: Step,
 ): Readonly<{ minutes: number | null; reason?: string }> {
+  const install = action.runs?.steps?.find(
+    (step) => step.name === "Install pinned Playwright browsers",
+  );
+  if (install?.env?.ATTEMPT_TIMEOUT_SECONDS !== ATTEMPT_TIMEOUT_INPUT) {
+    return { minutes: null, reason: "Playwright attempt timeout input is not bound to runtime" };
+  }
+  if (install.env.ATTEMPTS !== ATTEMPTS_INPUT) {
+    return { minutes: null, reason: "Playwright attempts input is not bound to runtime" };
+  }
+  const grace = Number(install.env.KILL_AFTER_SECONDS);
+  if (!Number.isFinite(grace) || grace < 0) {
+    return { minutes: null, reason: "Playwright kill grace is not statically numeric" };
+  }
+  const command = String(install.run ?? "").replace(/\\\r?\n\s*/gu, " ");
+  if (
+    !/\btimeout --kill-after="\$\{KILL_AFTER_SECONDS\}s" "\$\{ATTEMPT_TIMEOUT_SECONDS\}s"(?:\s|$)/u.test(
+      command,
+    )
+  ) {
+    return { minutes: null, reason: "Playwright timeout command is not bound to runtime inputs" };
+  }
   const duration = Number(
     caller.with?.["attempt-timeout-seconds"] ?? action.inputs?.["attempt-timeout-seconds"]?.default,
   );
   const attempts = Number(caller.with?.attempts ?? action.inputs?.attempts?.default);
-  const install = action.runs?.steps?.find(
-    (step) => step.name === "Install pinned Playwright browsers",
-  )?.run;
-  const graceMatch = /--kill-after=(\d+(?:\.\d+)?)s/u.exec(String(install ?? ""));
-  const grace = Number(graceMatch?.[1]);
   if (
     !Number.isFinite(duration) ||
     duration <= 0 ||
     !Number.isSafeInteger(attempts) ||
     attempts <= 0 ||
-    !Number.isFinite(grace) ||
-    grace < 0
+    !Number.isFinite(grace)
   ) {
     return { minutes: null, reason: "Playwright install budget is not statically numeric" };
   }
@@ -335,7 +441,10 @@ describe("workflow timeout contract", () => {
     expect(inlineInstalls).toEqual([]);
 
     const action = await readFile(playwrightActionPath, "utf8");
-    expect(action).toContain("timeout --kill-after=15s");
+    expect(action).toContain('KILL_AFTER_SECONDS: "15"');
+    expect(action).toContain(
+      'timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s"',
+    );
     expect(action).toContain("playwright install --with-deps");
     expect(action).toContain("actions/cache/restore@");
     expect(action).toContain("actions/cache/save@");
@@ -442,6 +551,21 @@ describe("workflow timeout contract", () => {
       'timeout "${{ env.BUDGET }}" job',
       'bun test --timeout="${{ env.BUDGET }}"',
       'bun test --timeout-seconds="${{ env.BUDGET }}"',
+      "time$''out 10h job",
+      "time$'\\x6f'ut 10h job",
+      "$'time\\x6fut' 10h job",
+      "EMPTY=; time${EMPTY}out 10h job",
+      'cmd=time; cmd+=out; "$cmd" 10h job',
+      'time$(printf "")out 10h job',
+      "gtime$''out 10h job",
+      "gtime$'\\x6f'ut 10h job",
+      "bun test --time${EMPTY}out 720000",
+      "bun test --time$'\\x6f'ut-seconds 720",
+      'flag=--time; flag+=out-seconds; bun test "$flag" 720',
+      "ti$''meout 10h job",
+      "gti${EMPTY}meout 10h job",
+      'bun test --timeo$(printf "")ut 720000',
+      'flag=--ti; flag+=meout-seconds; bun test "$flag" 720',
     ];
     for (const probe of probes) {
       expect(inspectWorkflowCaps(syntheticWorkflow(probe), action).violations.length, probe).toBe(
@@ -483,27 +607,40 @@ describe("workflow timeout contract", () => {
     const action = await loadPlaywrightAction();
     expect(inspectWorkflowCaps(workflows, action).violations).toEqual([]);
 
-    const tooLong = structuredClone(action) as {
-      inputs: Record<string, { default?: unknown }>;
-    } & PlaywrightAction;
+    const tooLong = mutablePlaywrightAction(action);
     tooLong.inputs["attempt-timeout-seconds"] = { default: "1006" };
     expect(inspectWorkflowCaps(workflows, tooLong).violations.length).toBeGreaterThan(0);
 
-    const tooMany = structuredClone(action) as {
-      inputs: Record<string, { default?: unknown }>;
-    } & PlaywrightAction;
+    const tooMany = mutablePlaywrightAction(action);
     tooMany.inputs.attempts = { default: "2" };
     expect(inspectWorkflowCaps(workflows, tooMany).violations.length).toBeGreaterThan(0);
 
-    const tooMuchGrace = structuredClone(action) as {
-      runs: { steps: Array<{ name?: string; run?: string }> };
-    } & PlaywrightAction;
-    const install = tooMuchGrace.runs.steps.find(
-      (step) => step.name === "Install pinned Playwright browsers",
-    );
-    if (!install?.run) throw new Error("missing Playwright install fixture");
-    install.run = install.run.replace("--kill-after=15s", "--kill-after=121s");
+    const tooMuchGrace = mutablePlaywrightAction(action);
+    const install = mutableInstallStep(tooMuchGrace);
+    install.env.KILL_AFTER_SECONDS = "121";
     expect(inspectWorkflowCaps(workflows, tooMuchGrace).violations.length).toBeGreaterThan(0);
+
+    for (const literal of ["900", "1006"]) {
+      const unbound = mutablePlaywrightAction(action);
+      const step = mutableInstallStep(unbound);
+      step.env.ATTEMPT_TIMEOUT_SECONDS = literal;
+      expect(inspectWorkflowCaps(workflows, unbound).violations.length, literal).toBeGreaterThan(0);
+    }
+
+    const literalDuration = mutablePlaywrightAction(action);
+    const literalStep = mutableInstallStep(literalDuration);
+    literalStep.run = literalStep.run.replace('"${ATTEMPT_TIMEOUT_SECONDS}s"', '"900s"');
+    expect(inspectWorkflowCaps(workflows, literalDuration).violations.length).toBeGreaterThan(0);
+
+    const literalGrace = mutablePlaywrightAction(action);
+    const literalGraceStep = mutableInstallStep(literalGrace);
+    literalGraceStep.run = literalGraceStep.run.replace('"${KILL_AFTER_SECONDS}s"', '"15s"');
+    expect(inspectWorkflowCaps(workflows, literalGrace).violations.length).toBeGreaterThan(0);
+
+    const literalAttempts = mutablePlaywrightAction(action);
+    const literalAttemptsStep = mutableInstallStep(literalAttempts);
+    literalAttemptsStep.env.ATTEMPTS = "1";
+    expect(inspectWorkflowCaps(workflows, literalAttempts).violations.length).toBeGreaterThan(0);
   });
 
   // The runner executes `shell: bash` steps as
@@ -551,6 +688,7 @@ describe("workflow timeout contract", () => {
           PLAYWRIGHT_ONLY_SHELL: "false",
           ATTEMPT_TIMEOUT_SECONDS: "360",
           ATTEMPTS: "2",
+          KILL_AFTER_SECONDS: "15",
         },
         stdout: "pipe",
         stderr: "pipe",
