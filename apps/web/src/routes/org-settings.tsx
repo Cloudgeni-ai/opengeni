@@ -12,12 +12,15 @@ import {
   LockIcon,
   RefreshCwIcon,
   SettingsIcon,
-  UsersIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import {
+  OrganizationPeopleSection,
+  OrganizationRetentionSection,
+} from "@/components/organization-admin";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -30,15 +33,33 @@ import {
 } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import {
+  beginOrganizationAdminOperation,
+  organizationAdminIdentityKey,
+  organizationAdminOperationSlot,
+  ownsOrganizationAdminOperation,
+  type OrganizationAdminIdentity,
+  type OrganizationAdminOperationLane,
+  type OrganizationAdminOperation,
+  type OrganizationAdminOperationSlot,
+  type OrganizationAdminSection,
+} from "@/lib/organization-admin";
 import { hasAccountPermission } from "@/lib/permissions";
-import type { BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
+import type {
+  BillingEntitlementsResponse,
+  BillingSummary,
+  OrganizationMembershipRole,
+  UsageEvent,
+} from "@/types";
 
 export function OrgSettingsRoute({
   workspaceId,
   checkout,
+  section = "overview",
 }: {
   workspaceId: string;
   checkout?: "success" | "cancelled";
+  section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
   const client = context.client;
@@ -50,56 +71,124 @@ export function OrgSettingsRoute({
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
+  const [billingOwnerKey, setBillingOwnerKey] = useState("");
   const [billingError, setBillingError] = useState<Error | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
   const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
+  const [entitlementsOwnerKey, setEntitlementsOwnerKey] = useState("");
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
+  const [busyOwnerKey, setBusyOwnerKey] = useState("");
   const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
   const canReadBilling =
     canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
-  const canManageMembers = hasAccountPermission(context.accessContext, accountId, "members:manage");
   const accountGrant =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const usage = useBillingUsage({
-    ...(accountId ? { accountId } : {}),
-    workspaceId,
-    enabled: canReadBilling && Boolean(accountId),
-  });
+  const actorRole: OrganizationMembershipRole | null =
+    accountGrant?.role === "owner" ||
+    accountGrant?.role === "admin" ||
+    accountGrant?.role === "member"
+      ? accountGrant.role
+      : null;
+  const adminIdentity = useMemo<OrganizationAdminIdentity>(
+    () => ({
+      principalGeneration: context.accessKeyVersion,
+      subjectId: context.accessContext.subjectId,
+      organizationId: accountId,
+      workspaceId,
+    }),
+    [accountId, context.accessContext.subjectId, context.accessKeyVersion, workspaceId],
+  );
+  const identityKey = organizationAdminIdentityKey(adminIdentity);
+  const identityRef = useRef<OrganizationAdminIdentity | null>(adminIdentity);
+  identityRef.current = adminIdentity;
+  const billingSequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
+  const billingOperationRef = useRef(
+    new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>(),
+  );
+  const claimBillingOperation = useCallback(
+    (resource: "billing" | "entitlements", lane: OrganizationAdminOperationLane) => {
+      const slot = organizationAdminOperationSlot(resource, lane);
+      const operation = beginOrganizationAdminOperation({
+        identity: adminIdentity,
+        resource,
+        lane,
+        previousSequence: billingSequenceRef.current.get(slot) ?? 0,
+      });
+      billingSequenceRef.current.set(slot, operation.sequence);
+      billingOperationRef.current.set(slot, operation);
+      return operation;
+    },
+    [adminIdentity],
+  );
+  const ownsBillingOperation = useCallback(
+    (operation: OrganizationAdminOperation) =>
+      ownsOrganizationAdminOperation({
+        currentIdentity: identityRef.current,
+        currentOperation:
+          billingOperationRef.current.get(
+            organizationAdminOperationSlot(operation.resource, operation.lane),
+          ) ?? null,
+        accepted: operation,
+      }),
+    [],
+  );
+  useEffect(() => {
+    const activeOperations = billingOperationRef.current;
+    identityRef.current = adminIdentity;
+    return () => {
+      identityRef.current = null;
+      activeOperations.clear();
+    };
+  }, [adminIdentity]);
 
   const refreshBilling = useCallback(async () => {
     if (!accountId || !canReadBilling) {
       setBilling(null);
+      setBillingOwnerKey(identityKey);
       setBillingError(null);
       return;
     }
+    const operation = claimBillingOperation("billing", "read");
+    setBillingOwnerKey(identityKey);
+    setBilling(null);
     setBillingLoading(true);
     try {
-      setBilling(await client.getBilling({ accountId }));
+      const result = await client.getBilling({ accountId });
+      if (!ownsBillingOperation(operation)) return;
+      setBilling(result);
       setBillingError(null);
     } catch (error) {
+      if (!ownsBillingOperation(operation)) return;
       setBilling(null);
       setBillingError(error instanceof Error ? error : new Error(String(error)));
     } finally {
-      setBillingLoading(false);
+      if (ownsBillingOperation(operation)) setBillingLoading(false);
     }
-  }, [accountId, canReadBilling, client]);
+  }, [accountId, canReadBilling, claimBillingOperation, client, identityKey, ownsBillingOperation]);
 
   const refreshEntitlements = useCallback(async () => {
     if (!accountId || !canReadBilling) {
       setEntitlements(null);
+      setEntitlementsOwnerKey(identityKey);
       setEntitlementsError(null);
       return;
     }
+    const operation = claimBillingOperation("entitlements", "read");
+    setEntitlementsOwnerKey(identityKey);
+    setEntitlements(null);
     try {
-      setEntitlements(await client.getBillingEntitlements({ accountId }));
+      const result = await client.getBillingEntitlements({ accountId });
+      if (!ownsBillingOperation(operation)) return;
+      setEntitlements(result);
       setEntitlementsError(null);
     } catch (error) {
+      if (!ownsBillingOperation(operation)) return;
       setEntitlements(null);
       setEntitlementsError(error instanceof Error ? error : new Error(String(error)));
     }
-  }, [accountId, canReadBilling, client]);
+  }, [accountId, canReadBilling, claimBillingOperation, client, identityKey, ownsBillingOperation]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshBilling(), refreshEntitlements()]);
@@ -124,21 +213,32 @@ export function OrgSettingsRoute({
   }, [checkout]);
 
   async function startCheckout(amountUsd: number) {
+    const operation = claimBillingOperation("billing", "mutation");
+    setBusyOwnerKey(identityKey);
     setBusy(true);
     try {
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
       });
+      if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
     } catch (error) {
+      if (!ownsBillingOperation(operation)) return;
       toast.error("Checkout failed", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setBusy(false);
+      if (ownsBillingOperation(operation)) setBusy(false);
     }
   }
+
+  const visibleBilling = billingOwnerKey === identityKey ? billing : null;
+  const visibleBillingError = billingOwnerKey === identityKey ? billingError : null;
+  const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
+  const visibleEntitlements = entitlementsOwnerKey === identityKey ? entitlements : null;
+  const visibleEntitlementsError = entitlementsOwnerKey === identityKey ? entitlementsError : null;
+  const visibleBusy = busyOwnerKey === identityKey && busy;
 
   return (
     <ContentPage width="standard">
@@ -172,132 +272,200 @@ export function OrgSettingsRoute({
           }
         />
 
-        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-sm font-medium">Organization name</h2>
-              <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
-              <p className="mt-1 text-xs text-fg-subtle">
-                Organization roles govern administration and billing. They do not grant access to a
-                member's Personal workspace or content.
-              </p>
-            </div>
-            <Button asChild type="button" variant="ghost" size="sm">
-              <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
-                <SettingsIcon className="size-3.5" />
-                {personal ? "Personal workspace" : "Workspace"}
-                {personal ? <PersonalWorkspaceBadge decorative /> : null}
+        <nav
+          aria-label="Organization settings sections"
+          className="flex flex-wrap gap-1 rounded-lg border border-border bg-surface p-1"
+        >
+          {(
+            [
+              ["overview", "Overview"],
+              ["people", "People & invitations"],
+              ["retention", "Retention"],
+              ["billing", "Billing"],
+            ] as const
+          ).map(([target, label]) => (
+            <Button
+              key={target}
+              asChild
+              type="button"
+              variant={section === target ? "secondary" : "ghost"}
+              size="sm"
+            >
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: target }}
+                aria-current={section === target ? "page" : undefined}
+              >
+                {label}
               </Link>
             </Button>
-          </div>
-        </section>
+          ))}
+        </nav>
 
-        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-medium">Credits</h2>
-              <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
-                {billing ? (
-                  `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
-                ) : !canReadBilling || !accountId ? (
-                  "You don't have permission to view billing."
-                ) : billingError ? (
-                  "Couldn't load your balance"
-                ) : billingLoading ? (
-                  <>
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                    Loading balance…
-                  </>
-                ) : (
-                  "Billing balance unavailable"
-                )}
-              </p>
-            </div>
-            <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
-              {billing?.mode ?? "unknown"}
-            </span>
-          </div>
-          {billingError ? (
-            <LoadErrorState
-              title="Couldn't load the billing balance"
-              error={billingError}
-              onRetry={() => void refreshBilling()}
-            />
-          ) : null}
-          {billing?.mode === "stripe" && canManageBilling ? (
-            <div className="grid gap-2">
-              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <label className="grid gap-1">
-                  <span className="sr-only">Credit amount</span>
-                  <input
-                    className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-fg-muted"
-                    inputMode="decimal"
-                    min="5"
-                    max="10000"
-                    step="0.01"
-                    value={topupAmount}
-                    onChange={(event) => setTopupAmount(event.target.value)}
-                  />
-                </label>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy || !validTopupAmount(topupAmount)}
-                  onClick={() => void startCheckout(Number(topupAmount))}
-                >
-                  Add credits
+        {section === "overview" ? (
+          <>
+            <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-medium">Organization overview</h2>
+                  <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
+                  <p className="mt-1 text-xs text-fg-subtle">
+                    Your organization role is {actorRole ?? "unavailable"}. Organization roles
+                    govern administration and billing; they never grant access to another
+                    member&apos;s Personal workspace or personal content.
+                  </p>
+                </div>
+                <span className="rounded-full border border-border px-2 py-1 text-xs capitalize text-fg-muted">
+                  {actorRole ?? "role unavailable"}
+                </span>
+              </div>
+            </section>
+            <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-medium">Workspace access</h2>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    Shared-workspace membership and permissions are separate from organization
+                    authority.
+                  </p>
+                </div>
+                <Button asChild type="button" variant="secondary" size="sm">
+                  <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
+                    <SettingsIcon className="size-3.5" />
+                    {personal ? "Your Personal workspace" : "Current workspace access"}
+                    {personal ? <PersonalWorkspaceBadge decorative /> : null}
+                  </Link>
                 </Button>
               </div>
-              <div className="flex flex-wrap gap-2">
-                {[25, 100, 500, 1000].map((amount) => (
-                  <Button
-                    key={amount}
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => setTopupAmount(amount.toFixed(2))}
-                  >
-                    {formatMoneyMicros(amount * 1_000_000, "usd")}
-                  </Button>
-                ))}
+              <p className="text-xs text-fg-subtle">
+                Organization administration does not expose private sessions, credentials,
+                Connections, or personal resources. Personal workspaces remain owner-only.
+              </p>
+            </section>
+          </>
+        ) : null}
+
+        {section === "people" ? (
+          <OrganizationPeopleSection
+            key={identityKey}
+            client={client}
+            identity={adminIdentity}
+            actorRole={actorRole}
+            managedSession={context.clientConfig.auth.mode === "managedSession"}
+            onAuthorityChanged={context.revalidatePrincipalAccess}
+          />
+        ) : null}
+
+        {section === "retention" ? (
+          <OrganizationRetentionSection
+            key={identityKey}
+            client={client}
+            identity={adminIdentity}
+            actorRole={actorRole}
+            managedSession={context.clientConfig.auth.mode === "managedSession"}
+          />
+        ) : null}
+
+        {section === "billing" ? (
+          <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-medium">Credits</h2>
+                <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
+                  {visibleBilling ? (
+                    `${formatMoneyMicros(visibleBilling.balance.balanceMicros, visibleBilling.balance.currency)} available`
+                  ) : !canReadBilling || !accountId ? (
+                    "You don't have permission to view billing."
+                  ) : visibleBillingError ? (
+                    "Couldn't load your balance"
+                  ) : visibleBillingLoading ? (
+                    <>
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                      Loading balance…
+                    </>
+                  ) : (
+                    "Billing balance unavailable"
+                  )}
+                </p>
               </div>
-              <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
+              <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
+                {visibleBilling?.mode ?? "unknown"}
+              </span>
             </div>
-          ) : (
-            <p className="text-xs text-fg-subtle">
-              Credit checkout is available when Stripe billing is enabled for this deployment.
-            </p>
-          )}
-        </section>
+            {visibleBillingError ? (
+              <LoadErrorState
+                title="Couldn't load the billing balance"
+                error={visibleBillingError}
+                onRetry={() => void refreshBilling()}
+              />
+            ) : null}
+            {visibleBilling?.mode === "stripe" && canManageBilling ? (
+              <div className="grid gap-2">
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <label className="grid gap-1">
+                    <span className="sr-only">Credit amount</span>
+                    <input
+                      className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-fg-muted"
+                      inputMode="decimal"
+                      min="5"
+                      max="10000"
+                      step="0.01"
+                      value={topupAmount}
+                      onChange={(event) => setTopupAmount(event.target.value)}
+                    />
+                  </label>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={visibleBusy || !validTopupAmount(topupAmount)}
+                    onClick={() => void startCheckout(Number(topupAmount))}
+                  >
+                    Add credits
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[25, 100, 500, 1000].map((amount) => (
+                    <Button
+                      key={amount}
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={visibleBusy}
+                      onClick={() => setTopupAmount(amount.toFixed(2))}
+                    >
+                      {formatMoneyMicros(amount * 1_000_000, "usd")}
+                    </Button>
+                  ))}
+                </div>
+                <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
+              </div>
+            ) : (
+              <p className="text-xs text-fg-subtle">
+                Credit checkout is available when Stripe billing is enabled for this deployment.
+              </p>
+            )}
+          </section>
+        ) : null}
 
-        <EntitlementsSection
-          enabled={canReadBilling && Boolean(accountId)}
-          entitlements={entitlements}
-          error={entitlementsError}
-          onRetry={() => void refreshEntitlements()}
-        />
+        {section === "billing" ? (
+          <EntitlementsSection
+            enabled={canReadBilling && Boolean(accountId)}
+            entitlements={visibleEntitlements}
+            error={visibleEntitlementsError}
+            onRetry={() => void refreshEntitlements()}
+          />
+        ) : null}
 
-        <UsageSection
-          enabled={canReadBilling && Boolean(accountId)}
-          loading={usage.loading}
-          error={usage.error}
-          usage={usage.usage}
-          onRefresh={() => void usage.refresh()}
-        />
-
-        <MembersSection
-          workspaceId={workspaceId}
-          canManage={canManageMembers}
-          subjectLabel={
-            accountGrant?.subjectLabel ??
-            context.accessContext.subjectLabel ??
-            context.accessContext.subjectId
-          }
-          role={accountGrant?.role ?? null}
-          personalWorkspace={personal}
-        />
+        {section === "billing" ? (
+          <BillingUsageSection
+            key={identityKey}
+            accountId={accountId}
+            workspaceId={workspaceId}
+            enabled={canReadBilling && Boolean(accountId)}
+          />
+        ) : null}
       </section>
     </ContentPage>
   );
@@ -485,59 +653,20 @@ function UsageSection(props: {
   );
 }
 
-/** Members: the caller's standing in the org, with a pointer to per-workspace
- *  member management. Access is granted per workspace (the workspace_memberships
- *  model), so the editable roster lives in Workspace settings → People with
- *  access; this read-only card stays honest by showing only the caller. */
-function MembersSection(props: {
-  workspaceId: string;
-  canManage: boolean;
-  subjectLabel: string;
-  role: string | null;
-  personalWorkspace: boolean;
-}) {
+/** Keyed by exact principal/org/workspace identity so hook-owned usage cannot flash across tenants. */
+function BillingUsageSection(props: { accountId: string; workspaceId: string; enabled: boolean }) {
+  const usage = useBillingUsage({
+    ...(props.accountId ? { accountId: props.accountId } : {}),
+    workspaceId: props.workspaceId,
+    enabled: props.enabled,
+  });
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <UsersIcon className="size-3.5 text-brand" />
-            Members
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">Who can act in this organization.</p>
-        </div>
-        {!props.personalWorkspace ? (
-          <Button asChild type="button" variant="secondary" size="sm">
-            <Link
-              to="/workspaces/$workspaceId/settings"
-              params={{ workspaceId: props.workspaceId }}
-            >
-              <UsersIcon className="size-3.5" />
-              Current workspace access
-            </Link>
-          </Button>
-        ) : (
-          <PersonalWorkspaceBadge />
-        )}
-      </div>
-      <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{props.subjectLabel}</div>
-          <div className="mt-0.5 truncate text-xs text-fg-subtle">
-            You{props.role ? ` · ${props.role}` : ""}
-          </div>
-        </div>
-        <span className="shrink-0 rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
-          {props.role ?? "member"}
-        </span>
-      </div>
-      <p className="text-xs text-fg-subtle">
-        Organization roles control tenant administration, not personal content.
-        {props.personalWorkspace
-          ? " This page was opened from your owner-only Personal workspace."
-          : " Access to this shared workspace is managed separately in Workspace settings."}
-        {props.canManage ? "" : " Only organization admins can change organization-level roles."}
-      </p>
-    </section>
+    <UsageSection
+      enabled={props.enabled}
+      loading={usage.loading}
+      error={usage.error}
+      usage={usage.usage}
+      onRefresh={() => void usage.refresh()}
+    />
   );
 }

@@ -206,6 +206,8 @@ export type AppContextValue = {
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
+  /** Reload grants, workspaces, and managed self-membership from the cookie. */
+  revalidatePrincipalAccess: () => void;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
@@ -1658,6 +1660,10 @@ export function RootRouteComponent() {
   const contextAddManualRepository = useLatestCallback(addManualRepository);
   const contextForgetAccessKey = useLatestCallback(forgetAccessKey);
   const contextHandleManagedSignOut = useLatestCallback(handleManagedSignOut);
+  const revalidatePrincipalAccess = useCallback(
+    () => setAccessKeyVersion((version) => version + 1),
+    [],
+  );
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
   const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
@@ -1745,6 +1751,7 @@ export function RootRouteComponent() {
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
+          revalidatePrincipalAccess,
           createWorkspace: contextCreateWorkspace,
           renameWorkspace: contextRenameWorkspace,
           setWorkspaceInferenceControl: contextSetWorkspaceInferenceControl,
@@ -1809,6 +1816,7 @@ export function RootRouteComponent() {
     slackLinkContinuationWorkspaceId,
     latencyMode,
     reasoningEffort,
+    revalidatePrincipalAccess,
     refreshGitHub,
     refreshWorkspace,
     refreshWorkspaceMcpServers,
