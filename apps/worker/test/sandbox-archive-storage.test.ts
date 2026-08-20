@@ -4,8 +4,11 @@ import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
   collectWorkspaceArchiveObjectKeys,
+  deleteUnpublishedWorkspaceArchiveObject,
   deleteWorkspaceArchiveObjectKeys,
   putTarWorkspaceArchiveObject,
+  putVersion1TarArchiveOrInline,
+  WorkspaceArchiveObjectStorageRequiredError,
 } from "../src/sandbox-archive-storage";
 
 function fakeStorage() {
@@ -87,5 +90,78 @@ describe("workspace archive object storage", () => {
     expect(keys.size).toBe(2);
     await deleteWorkspaceArchiveObjectKeys(storage, [ref.key]);
     expect(objects.has(ref.key)).toBe(false);
+  });
+
+  test("OpenSandbox tar persist fails closed without object storage", async () => {
+    const bytes = new TextEncoder().encode("portable-tar");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const capturedAt = 1_900_000_000_000;
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:${capturedAt}:${sha256}`,
+      archiveSha256: sha256,
+      archiveBytes: bytes.length,
+      capturedAt: new Date(capturedAt).toISOString(),
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256,
+        entryCount: 1,
+        fileCount: 1,
+        totalFileBytes: bytes.length,
+      },
+    };
+    await expect(
+      putVersion1TarArchiveOrInline({
+        backend: "opensandbox",
+        objectStorage: null,
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        archive: { bytes, descriptor, base64: Buffer.from(bytes).toString("base64") },
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceArchiveObjectStorageRequiredError);
+    const inlined = await putVersion1TarArchiveOrInline({
+      backend: "docker",
+      objectStorage: null,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+      archive: { bytes, descriptor, base64: Buffer.from(bytes).toString("base64") },
+    });
+    expect(inlined.workspaceArchiveRef).toBeUndefined();
+    expect(inlined.workspaceArchive.length).toBeGreaterThan(0);
+  });
+
+  test("deletes an unpublished object after persist throws", async () => {
+    const { objects, storage } = fakeStorage();
+    const bytes = new TextEncoder().encode("orphan-tar");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const capturedAt = 1_900_000_000_001;
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:${capturedAt}:${sha256}`,
+      archiveSha256: sha256,
+      archiveBytes: bytes.length,
+      capturedAt: new Date(capturedAt).toISOString(),
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256,
+        entryCount: 1,
+        fileCount: 1,
+        totalFileBytes: bytes.length,
+      },
+    };
+    const published = await putVersion1TarArchiveOrInline({
+      backend: "opensandbox",
+      objectStorage: storage,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+      archive: { bytes, descriptor, base64: Buffer.from(bytes).toString("base64") },
+    });
+    expect(published.workspaceArchive).toBe("");
+    expect(objects.has(published.workspaceArchiveRef!.key)).toBe(true);
+    await deleteUnpublishedWorkspaceArchiveObject(storage, published.workspaceArchiveRef);
+    expect(objects.has(published.workspaceArchiveRef!.key)).toBe(false);
   });
 });

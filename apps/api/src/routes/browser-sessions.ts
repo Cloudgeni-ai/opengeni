@@ -184,7 +184,7 @@ import {
   deriveBrowserViewGrantToken,
   deriveComputerSessionControllerTokens,
 } from "../browser-controller-authority";
-import { controllerCacheAllowsHostFetch, withCachedController } from "../controller-data-plane";
+import { controllerCacheAllowsHostFetch, controllerCachedUrlIsUsable, shouldPersistControllerDataPlaneUrl, withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -2864,7 +2864,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       (lease.liveness !== "warm" && lease.liveness !== "draining") ||
       lease.instanceId !== binding.placementInstanceId ||
       !lease.controllerDataPlaneUrl ||
-      !controllerCacheAllowsHostFetch(lease.controllerDataPlaneUrl)
+      (lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) ||
+      !controllerCachedUrlIsUsable(lease.controllerDataPlaneUrl)
     ) {
       return null;
     }
@@ -2890,8 +2891,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
       return placement;
     }
+    if (
+      placement.lease.backend === "opensandbox" &&
+      deps.settings.openSandboxSignedEndpoints
+    ) {
+      if (!placement.lease.controllerDataPlaneUrl) return placement;
+      const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId,
+        expectedEpoch: placement.lease.leaseEpoch,
+        expectedInstanceId: placement.lease.instanceId,
+        controllerDataPlaneUrl: null,
+      });
+      return lease ? { ...placement, lease } : placement;
+    }
     const endpoint = await placement.session.resolveExposedPort(BROWSER_CONTROL_PORT);
     const url = buildStreamUrl(endpoint);
+    if (
+      !shouldPersistControllerDataPlaneUrl({
+        backend: placement.lease.backend,
+        signedEndpoints: deps.settings.openSandboxSignedEndpoints,
+        url,
+      })
+    ) {
+      return placement;
+    }
     const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -2920,7 +2945,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const cachedUrl = placement.lease?.controllerDataPlaneUrl;
     return await withCachedController({
       cachedUrl:
-        sandboxGroupId && cachedUrl && controllerCacheAllowsHostFetch(cachedUrl)
+        sandboxGroupId &&
+        cachedUrl &&
+        !(
+          placement.lease?.backend === "opensandbox" &&
+          routeDeps.settings.openSandboxSignedEndpoints
+        ) &&
+        controllerCachedUrlIsUsable(cachedUrl)
           ? cachedUrl
           : null,
       createCachedClient: (url) =>

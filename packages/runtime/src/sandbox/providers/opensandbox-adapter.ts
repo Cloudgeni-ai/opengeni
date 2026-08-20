@@ -470,6 +470,9 @@ export class OpenSandboxSession {
   readonly backendId = "opensandbox" as const;
   readonly state: OpenSandboxSessionState;
   private readonly options: OpenSandboxClientOptions;
+  get requireHostFetchController(): boolean {
+    return this.options.signedEndpoints === true;
+  }
   private provider: ProviderSandbox | null = null;
   private startPromise: Promise<ProviderSandbox> | null = null;
   private archiveLimits: SandboxArchiveLimits | null | undefined;

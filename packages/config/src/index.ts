@@ -900,8 +900,9 @@ const SettingsSchema = z.object({
   openSandboxSignedEndpoints: EnvBoolean.default(false),
   openSandboxSignedEndpointTtlSeconds: z.coerce.number().int().min(60).max(3_600).default(600),
   openSandboxChannelBPublicBaseUrl: z.string().url().optional(),
-  // Explicit override for JPEG/RFB interaction attachments. Unset means
-  // OpenSandbox uses the API frame-proxy unless signed endpoints are on.
+  // Emergency hatch only: force JPEG/RFB through the API frame-proxy even when
+  // signed endpoints are on (M2 subprotocol failure). Unset means OpenSandbox
+  // uses the frame-proxy unless signed endpoints are on.
   openSandboxInteractionFrameProxy: EnvBoolean.optional(),
   openSandboxPoolRef: z
     .string()
@@ -2065,6 +2066,34 @@ export const SANDBOX_REQUIRED_ENV: Record<
 /** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
 export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBackend>): string[] {
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
+}
+
+function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolean {
+  switch (settings.objectStorageBackend) {
+    case "azure-blob":
+      return Boolean(
+        settings.objectStorageAzureConnectionString ||
+          (settings.objectStorageAzureAccountName && settings.objectStorageAzureAccountKey),
+      );
+    case "gcs":
+      return Boolean(
+        settings.objectStorageGcsCredentialsJson ||
+          settings.objectStorageGcsKeyFilename ||
+          settings.objectStorageGcsProjectId,
+      );
+    case "aws-s3":
+      return true;
+    case "s3-compatible":
+      return Boolean(
+        settings.objectStorageEndpoint &&
+          settings.objectStorageAccessKeyId &&
+          settings.objectStorageSecretAccessKey,
+      );
+    default: {
+      const _exhaustive: never = settings.objectStorageBackend;
+      return _exhaustive;
+    }
+  }
 }
 
 function optional(name: string): string | undefined {
@@ -5411,6 +5440,11 @@ function validateSettings(settings: Settings): void {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
       throw new Error(
         "OPENGENI_OPENSANDBOX_IMAGE must be an immutable OCI reference ending in @sha256:<64 hex characters>",
+      );
+    }
+    if (!objectStorageConfiguredForWorkspaceArchives(settings)) {
+      throw new Error(
+        "OPENGENI_SANDBOX_BACKEND=opensandbox requires configured object storage for portable /workspace archives",
       );
     }
   }

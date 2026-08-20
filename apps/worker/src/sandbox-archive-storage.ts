@@ -1,10 +1,19 @@
+import type { ObjectStorage } from "@opengeni/storage";
 import {
   parseWorkspaceArchiveObjectRef,
   workspaceArchiveObjectKey,
   type WorkspaceArchiveDescriptor,
   type WorkspaceArchiveObjectRef,
 } from "@opengeni/contracts";
-import type { ObjectStorage } from "@opengeni/storage";
+
+export class WorkspaceArchiveObjectStorageRequiredError extends Error {
+  readonly code = "workspace_archive_object_storage_required" as const;
+
+  constructor(backend: string) {
+    super(`${backend} workspace archives require object storage`);
+    this.name = "WorkspaceArchiveObjectStorageRequiredError";
+  }
+}
 
 export function collectWorkspaceArchiveObjectKeys(
   resumeState: Record<string, unknown> | null | undefined,
@@ -50,6 +59,54 @@ export async function putTarWorkspaceArchiveObject(input: {
     bytes: input.archive.descriptor.archiveBytes,
     backend: input.objectStorage.backend,
   };
+}
+
+export async function putVersion1TarArchiveOrInline(input: {
+  backend: string;
+  objectStorage?: ObjectStorage | null | undefined;
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  archive: {
+    bytes: Uint8Array;
+    descriptor: WorkspaceArchiveDescriptor;
+    base64: string;
+  };
+}): Promise<{
+  workspaceArchive: string;
+  workspaceArchiveRef?: WorkspaceArchiveObjectRef;
+}> {
+  if (input.archive.descriptor.version !== 1) {
+    return { workspaceArchive: input.archive.base64 };
+  }
+  if (input.backend === "opensandbox" && !input.objectStorage) {
+    throw new WorkspaceArchiveObjectStorageRequiredError("opensandbox");
+  }
+  if (!input.objectStorage) {
+    return { workspaceArchive: input.archive.base64 };
+  }
+  return {
+    workspaceArchive: "",
+    workspaceArchiveRef: await putTarWorkspaceArchiveObject({
+      objectStorage: input.objectStorage,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      archive: { bytes: input.archive.bytes, descriptor: input.archive.descriptor },
+    }),
+  };
+}
+
+export async function deleteUnpublishedWorkspaceArchiveObject(
+  objectStorage: ObjectStorage | null | undefined,
+  ref: WorkspaceArchiveObjectRef | undefined,
+): Promise<void> {
+  if (!objectStorage || !ref) return;
+  try {
+    await objectStorage.deleteObject(ref.key);
+  } catch {
+    console.error("unpublished workspace archive object delete failed", { key: ref.key });
+  }
 }
 
 export async function deleteWorkspaceArchiveObjectKeys(

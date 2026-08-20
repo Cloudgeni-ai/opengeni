@@ -82,8 +82,9 @@ import type { ObjectStorage } from "@opengeni/storage";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   collectWorkspaceArchiveObjectKeys,
+  deleteUnpublishedWorkspaceArchiveObject,
   deleteWorkspaceArchiveObjectKeys,
-  putTarWorkspaceArchiveObject,
+  putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
 
 // Re-exported for callers that just want the ack-kind union.
@@ -788,6 +789,9 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // of the exact admission gate; a late callback cannot release a successor.
     const captureAndPublish = (async (): Promise<boolean> => {
       let candidate: { id: string } | null = null;
+      let workspaceArchiveRef: Awaited<
+        ReturnType<typeof putVersion1TarArchiveOrInline>
+      >["workspaceArchiveRef"];
       try {
         const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs, {
           requestId: claimed.claim.providerRequestId,
@@ -798,16 +802,19 @@ export async function maybePersistWarmWorkspaceSnapshot(
         const priorKeys = collectWorkspaceArchiveObjectKeys(
           (priorLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
         );
-        let workspaceArchiveRef: Awaited<ReturnType<typeof putTarWorkspaceArchiveObject>> | undefined;
-        if (archive.descriptor.version === 1 && services.objectStorage) {
-          workspaceArchiveRef = await putTarWorkspaceArchiveObject({
-            objectStorage: services.objectStorage,
-            accountId: ids.accountId,
-            workspaceId: ids.workspaceId,
-            sandboxGroupId: ids.sandboxGroupId,
-            archive: { bytes: archive.bytes, descriptor: archive.descriptor },
-          });
-        }
+        const published = await putVersion1TarArchiveOrInline({
+          backend: lease.backend,
+          objectStorage: services.objectStorage,
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          archive: {
+            bytes: archive.bytes,
+            descriptor: archive.descriptor,
+            base64: archive.base64,
+          },
+        });
+        workspaceArchiveRef = published.workspaceArchiveRef;
         const { wrote } = await persistWarmSnapshot(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
@@ -819,16 +826,21 @@ export async function maybePersistWarmWorkspaceSnapshot(
           expectedInstanceId: instanceId,
           expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
           captureId,
-          workspaceArchive: workspaceArchiveRef ? "" : archive.base64,
+          workspaceArchive: published.workspaceArchive,
           workspaceArchiveMeta: archive.descriptor,
-          ...(workspaceArchiveRef ? { workspaceArchiveRef } : {}),
+          ...(published.workspaceArchiveRef
+            ? { workspaceArchiveRef: published.workspaceArchiveRef }
+            : {}),
           checkpointArtifactId: candidate?.id ?? null,
           minIntervalMs: force ? 0 : intervalMs,
           capturedAtMs,
         });
-        if (workspaceArchiveRef && services.objectStorage) {
+        if (published.workspaceArchiveRef && services.objectStorage) {
           if (!wrote) {
-            await services.objectStorage.deleteObject(workspaceArchiveRef.key).catch(() => undefined);
+            await deleteUnpublishedWorkspaceArchiveObject(
+              services.objectStorage,
+              published.workspaceArchiveRef,
+            );
           } else {
             const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
             const afterKeys = collectWorkspaceArchiveObjectKeys(
@@ -845,6 +857,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
         }
         return wrote;
       } catch (error) {
+        await deleteUnpublishedWorkspaceArchiveObject(services.objectStorage, workspaceArchiveRef);
         if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {

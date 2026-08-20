@@ -182,6 +182,48 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("signed Channel B never falls back to in-box curl when mint fails", async () => {
+    let execCalls = 0;
+    const session: BrowserControlPlacementSession = {
+      requireHostFetchController: true,
+      resolveExposedPort: async () => {
+        throw new Error("getSignedEndpoint failed");
+      },
+      exec: async () => {
+        execCalls += 1;
+        throw new Error("must not fall back to in-box curl");
+      },
+    };
+    const client = new BrowserControlClient(session, { adminToken });
+    await expect(client.addAllowedOrigins(["https://app.opengeni.test"])).rejects.toBeInstanceOf(
+      BrowserControlTransportError,
+    );
+    expect(execCalls).toBe(0);
+  });
+
+  test("signed Channel B never curls a lifecycle proxy URL", async () => {
+    let execCalls = 0;
+    const session: BrowserControlPlacementSession = {
+      requireHostFetchController: true,
+      resolveExposedPort: async () => ({
+        host: "127.0.0.1",
+        port: 18090,
+        tls: false,
+        path: `/v1/sandboxes/${randomUUID()}/proxy/7682`,
+        query: "",
+      }),
+      exec: async () => {
+        execCalls += 1;
+        throw new Error("must not fall back to in-box curl");
+      },
+    };
+    const client = new BrowserControlClient(session, { adminToken });
+    await expect(client.addAllowedOrigins(["https://app.opengeni.test"])).rejects.toThrow(
+      "signed Channel B cannot use the lifecycle proxy",
+    );
+    expect(execCalls).toBe(0);
+  });
+
   test("serializes bounded remote-provider launch authority without returning it", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "provider-controller-1";

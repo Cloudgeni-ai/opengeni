@@ -1737,7 +1737,7 @@ describe("backend-gated sandbox required-credential validation", () => {
     }
   });
 
-  test("opensandbox requires private API connection data and an immutable image only when active", () => {
+  test("opensandbox requires private API connection data, an immutable image, and object storage when active", () => {
     expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "opensandbox" }, () => getSettings())).toThrow(
       "OPENGENI_OPENSANDBOX_BASE_URL is required",
     );
@@ -1746,7 +1746,21 @@ describe("backend-gated sandbox required-credential validation", () => {
       OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
       OPENGENI_OPENSANDBOX_API_KEY: "test-key",
       OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minio",
+      OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
     };
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "opensandbox",
+          OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+          OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+          OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/requires configured object storage/);
     expect(() => withEnv(active, () => getSettings())).not.toThrow();
     expect(withEnv(active, () => getSettings()).openSandboxUseServerProxy).toBe(true);
     expect(withEnv(active, () => getSettings()).openSandboxSignedEndpoints).toBe(false);
@@ -2012,6 +2026,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         OPENGENI_OPENSANDBOX_API_KEY: "test-key",
         OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"b".repeat(64)}`,
         OPENGENI_OPENSANDBOX_TTL_SECONDS: "60",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minio",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
       },
       () => getSettings(),
     );

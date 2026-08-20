@@ -135,8 +135,9 @@ import {
 import type { ObjectStorage } from "@opengeni/storage";
 import {
   collectWorkspaceArchiveObjectKeys,
+  deleteUnpublishedWorkspaceArchiveObject,
   deleteWorkspaceArchiveObjectKeys,
-  putTarWorkspaceArchiveObject,
+  putVersion1TarArchiveOrInline,
 } from "../sandbox-archive-storage";
 
 export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
@@ -2192,10 +2193,11 @@ async function terminateDrainableBox(
         (lease.resumeState as Record<string, unknown> | null | undefined) ?? null,
       );
       let workspaceArchiveRef:
-        | Awaited<ReturnType<typeof putTarWorkspaceArchiveObject>>
+        | Awaited<ReturnType<typeof putVersion1TarArchiveOrInline>>["workspaceArchiveRef"]
         | undefined;
-      if (archiveMetadata.version === 1 && objectStorage) {
-        workspaceArchiveRef = await putTarWorkspaceArchiveObject({
+      try {
+        const published = await putVersion1TarArchiveOrInline({
+          backend: lease.backend,
           objectStorage,
           accountId,
           workspaceId: row.workspaceId,
@@ -2203,29 +2205,39 @@ async function terminateDrainableBox(
           archive: {
             bytes: Buffer.from(archiveBase64, "base64"),
             descriptor: archiveMetadata,
+            base64: archiveBase64,
           },
         });
-      }
-      result = await persistDrainSnapshot(db, {
-        ...baseInput,
-        workspaceArchive: workspaceArchiveRef ? "" : archiveBase64,
-        workspaceArchiveMeta: archiveMetadata,
-        ...(workspaceArchiveRef ? { workspaceArchiveRef } : {}),
-        ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
-      });
-      if (workspaceArchiveRef && objectStorage) {
-        if (!result.wrote) {
-          await objectStorage.deleteObject(workspaceArchiveRef.key).catch(() => undefined);
-        } else {
-          const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
-          const afterKeys = collectWorkspaceArchiveObjectKeys(
-            (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
-          );
-          await deleteWorkspaceArchiveObjectKeys(
-            objectStorage,
-            [...priorKeys].filter((key) => !afterKeys.has(key)),
-          ).catch(() => undefined);
+        workspaceArchiveRef = published.workspaceArchiveRef;
+        result = await persistDrainSnapshot(db, {
+          ...baseInput,
+          workspaceArchive: published.workspaceArchive,
+          workspaceArchiveMeta: archiveMetadata,
+          ...(published.workspaceArchiveRef
+            ? { workspaceArchiveRef: published.workspaceArchiveRef }
+            : {}),
+          ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
+        });
+        if (published.workspaceArchiveRef && objectStorage) {
+          if (!result.wrote) {
+            await deleteUnpublishedWorkspaceArchiveObject(
+              objectStorage,
+              published.workspaceArchiveRef,
+            );
+          } else {
+            const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
+            const afterKeys = collectWorkspaceArchiveObjectKeys(
+              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+            );
+            await deleteWorkspaceArchiveObjectKeys(
+              objectStorage,
+              [...priorKeys].filter((key) => !afterKeys.has(key)),
+            ).catch(() => undefined);
+          }
         }
+      } catch (error) {
+        await deleteUnpublishedWorkspaceArchiveObject(objectStorage, workspaceArchiveRef);
+        throw error;
       }
     }
     if (!result.wrote && checkpointArtifactId) {

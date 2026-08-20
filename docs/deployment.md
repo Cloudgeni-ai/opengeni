@@ -1488,12 +1488,16 @@ reaping is primary; provider expiry is a leak backstop.
 
 OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
 `/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
-keeps the SHA-256 descriptor plus an object ref. Native OpenSandbox pause/resume,
+keeps the SHA-256 descriptor plus an object ref. Object storage is required when
+this backend is active: missing storage fails closed at boot and on capture rather
+than writing tar bytes into `resume_state`. Native OpenSandbox pause/resume,
 snapshots, and immutable rig-image builds are deliberately not used. A desktop-class box
 image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
 interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
-JSON and streams use signed URI-mode ingress (`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS`)
-rather than the lifecycle `/proxy/` path. The
+JSON and streams use signed URI-mode ingress when
+`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true`. That flag defaults off so ClusterIP-only
+operators keep the lifecycle `/proxy/` path, in-box curl, and API frame-proxy.
+Signed mode never falls back to those compensations. The
 Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
 is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
 exact retained provider command. `runAs` remains unavailable.

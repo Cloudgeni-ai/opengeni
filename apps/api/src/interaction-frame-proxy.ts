@@ -32,9 +32,9 @@ export type InteractionFrameProxyAttachment = Readonly<{
 }>;
 
 /** Docker boxes cannot carry browserd's WebSocket subprotocol grant to the
- * viewer. OpenSandbox uses the API frame-proxy only while Channel B still
- * goes through the lifecycle proxy. Signed URI-mode ingress keeps native
- * subprotocols, matching Modal/Daytona/Blaxel. */
+ * viewer. Unsigned OpenSandbox Channel B still uses the lifecycle proxy, so
+ * it needs the same hatch. Signed URI-mode ingress keeps native subprotocols;
+ * `openSandboxInteractionFrameProxy` is an emergency override only. */
 export function placementUsesInteractionFrameProxy(
   backend: string | null | undefined,
   options?: {

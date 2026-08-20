@@ -658,6 +658,7 @@ describe("OpenSandbox adapter", () => {
       useServerProxy: true,
     });
     const session = await client.create();
+    expect(session.requireHostFetchController).toBe(true);
     expect(fake.createdRequest).toMatchObject({ secureAccess: true });
     const endpoint = await session.resolveExposedPort(6080);
     expect(fake.calls.some((call) => call.startsWith("getSignedEndpoint:sbx-1:6080:"))).toBe(true);

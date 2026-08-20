@@ -132,6 +132,8 @@ export type BrowserControlPlacementSession = {
     maxOutputTokens?: number;
   }) => Promise<string>;
   resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+  /** Signed OpenSandbox Channel B must host-fetch. Never fall through to in-box curl. */
+  requireHostFetchController?: boolean;
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
   ) => Promise<BrowserControlEnsureResponse>;
@@ -890,20 +892,24 @@ export class BrowserControlClient {
     // that actual data plane for control too: one authenticated HTTP request,
     // instead of materializing files and starting curl through the sandbox exec
     // API for every click or key. Connected machines keep their agent transport.
+    const requireHostFetch = this.session.requireHostFetchController === true;
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
         const endpoint = await this.session.resolveExposedPort(this.port);
         // Lifecycle proxies rewrite Authorization, so a host-side Bearer cannot
         // be both the proxy key and the browserd admin token. Native `/` tunnels
-        // and OSEP-0011 signed URIs host-fetch. Prefixed lifecycle JSON uses
-        // in-box loopback curl. A cached controller-only session has no exec, so
-        // host-fetching that prefix would 401; throw a retryable transport error
-        // so the caller invalidates and provisions.
+        // and OSEP-0011 signed URIs host-fetch. Unsigned OpenSandbox still uses
+        // in-box loopback curl on the lifecycle prefix. Signed Channel B never
+        // takes that path. A cached controller-only session has no exec, so
+        // host-fetching a lifecycle prefix would 401; throw a retryable
+        // transport error so the caller invalidates and provisions.
         const hostFetchAllowed = exposedPortAllowsHostFetch(endpoint);
         const canExec = Boolean(this.session.exec || this.session.execCommand);
-        if (!hostFetchAllowed && !canExec) {
+        if (!hostFetchAllowed && (requireHostFetch || !canExec)) {
           throw new BrowserControlTransportError(
-            "cached browser controller endpoint cannot host-fetch a prefixed proxy",
+            requireHostFetch
+              ? "signed Channel B cannot use the lifecycle proxy"
+              : "cached browser controller endpoint cannot host-fetch a prefixed proxy",
           );
         }
         if (hostFetchAllowed) {
@@ -912,6 +918,7 @@ export class BrowserControlClient {
           } catch (error) {
             if (
               retryNativeEndpoint &&
+              !requireHostFetch &&
               error instanceof BrowserControlTransportError
             ) {
               return await this.requestJson(input, false);
@@ -928,16 +935,22 @@ export class BrowserControlClient {
         ) {
           throw error;
         }
-        if (!this.session.exec && !this.session.execCommand) {
+        if (requireHostFetch || (!this.session.exec && !this.session.execCommand)) {
           throw new BrowserControlTransportError(
-            "cached browser controller endpoint is temporarily unavailable",
+            requireHostFetch
+              ? "signed Channel B host-fetch failed"
+              : "cached browser controller endpoint is temporarily unavailable",
             { cause: error },
           );
         }
-        // Port discovery or its transport can fail transiently. The existing
-        // idempotent operation journal makes the private exec fallback safe even
-        // if a mutation reached browserd before its response connection failed.
+        // Unsigned lifecycle placements may fall back to in-box curl when port
+        // discovery fails. Signed Channel B must not; that would restore the
+        // Authorization-rewriting proxy path the signed edge exists to avoid.
       }
+    } else if (requireHostFetch) {
+      throw new BrowserControlTransportError(
+        "signed Channel B requires a host-fetch controller endpoint",
+      );
     }
 
     const controllerPort = await this.controllerPort();
