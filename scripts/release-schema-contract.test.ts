@@ -222,7 +222,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0311_company_scope_and_private_session_create.sql",
       ),
     ).toMatchObject({
-      sha256: "88a490617b0053bb4dba904bbacd33d69e3de5b0f64ff57ef64ddbb395f91e69",
+      sha256: "47a4fc436e69402b2b1cdec15ddd347bc158ba9100257daa07420de1c29fe417",
       deploymentMode: "rolling",
     });
     expect(

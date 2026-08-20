@@ -1232,14 +1232,14 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
-      format('%I.open_private_session_create_capability(uuid,uuid,text)', ${literal(schema)})
+      format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, text) FROM PUBLIC',
+        'REVOKE ALL ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) FROM PUBLIC',
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, text) TO %I',
+        'GRANT EXECUTE ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) TO %I',
         ${literal(schema)}, ${literal(role)}
       );
       EXECUTE format(

@@ -298,7 +298,7 @@ const SESSION_TENANCY_QUIESCENCE_ROUTINE =
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
-  "open_private_session_create_capability(uuid, uuid, text)",
+  "open_private_session_create_capability(uuid, uuid, uuid, text)",
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
@@ -551,6 +551,7 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "preference_registry_snapshots",
+  "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
   "retained_screenshot_artifacts",
   "rig_changes",
@@ -988,6 +989,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
+  "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
   "scheduled_task_connection_authority_snapshots",
   "scheduled_task_personal_resource_authorities",

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createSession,
@@ -8,7 +9,11 @@ import {
   forkSessionContent,
   getSessionEventForSubject,
   getSessionForSubject,
+  nestedPostgresSqlState,
+  openPrivateSessionCreateCapability,
+  setSubjectRlsContext,
   transitionSessionVisibility,
+  withRlsContext,
   type DbClient,
 } from "../src/index";
 
@@ -172,6 +177,80 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         sandboxGroupId: created.session.id,
       });
     }
+  }, 180_000);
+
+  test("private-create authority is target-bound, INSERT-only, and requested visibility is immutable", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const existingSessionId = await ownedSession(human, human.legacyWorkspaceId);
+    const requestedSessionId = crypto.randomUUID();
+
+    let updateState: string | null = null;
+    try {
+      await withRlsContext(
+        client.db,
+        { accountId: human.accountId, workspaceId: human.legacyWorkspaceId },
+        async (tx) => {
+          await setSubjectRlsContext(tx, human.subjectId);
+          await openPrivateSessionCreateCapability(tx, {
+            accountId: human.accountId,
+            workspaceId: human.legacyWorkspaceId,
+            sessionId: requestedSessionId,
+            actorSubjectId: human.subjectId,
+          });
+          await tx.execute(sql`update sessions set visibility = 'user_private'
+            where id = ${existingSessionId}::uuid`);
+        },
+      );
+    } catch (error) {
+      updateState = nestedPostgresSqlState(error);
+    }
+    expect(updateState).toBe("42501");
+
+    let secondInsertState: string | null = null;
+    try {
+      await withRlsContext(
+        client.db,
+        { accountId: human.accountId, workspaceId: human.legacyWorkspaceId },
+        async (tx) => {
+          await setSubjectRlsContext(tx, human.subjectId);
+          await openPrivateSessionCreateCapability(tx, {
+            accountId: human.accountId,
+            workspaceId: human.legacyWorkspaceId,
+            sessionId: requestedSessionId,
+            actorSubjectId: human.subjectId,
+          });
+          const insertRequestedPrivateSession = () =>
+            tx.execute(sql`insert into sessions
+              select (pg_catalog.jsonb_populate_record(
+                null::sessions,
+                to_jsonb(source) || pg_catalog.jsonb_build_object(
+                  'id', ${requestedSessionId}::uuid,
+                  'root_session_id', ${requestedSessionId}::uuid,
+                  'sandbox_group_id', ${requestedSessionId}::uuid,
+                  'visibility', 'user_private',
+                  'create_requested_visibility', 'user_private',
+                  'create_idempotency_key', null
+                )
+              )).*
+              from sessions source where source.id = ${existingSessionId}::uuid`);
+          await insertRequestedPrivateSession();
+          await insertRequestedPrivateSession();
+        },
+      );
+    } catch (error) {
+      secondInsertState = nestedPostgresSqlState(error);
+    }
+    expect(secondInsertState).toBe("55000");
+
+    let immutableState: string | null = null;
+    try {
+      await shared.admin`update sessions set create_requested_visibility = 'user_private'
+        where id = ${existingSessionId}`;
+    } catch (error) {
+      immutableState = nestedPostgresSqlState(error);
+    }
+    expect(immutableState).toBe("42501");
   }, 180_000);
 
   test("subject reads expose tenancy only after the organization's durable activation", async () => {

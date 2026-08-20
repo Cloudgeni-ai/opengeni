@@ -21,9 +21,23 @@ describe("migration 0311 company scope and private session create", () => {
     );
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(source).toContain("CREATE TABLE organization_profile_events");
+    expect(source).toContain("CREATE TABLE private_session_create_capabilities");
     expect(source).toContain("ALTER TABLE organization_profile_events FORCE ROW LEVEL SECURITY");
     expect(source).toContain("ADD COLUMN create_requested_visibility");
     expect(source).toContain("RETURNS TABLE (capability_id uuid, owner_membership_id uuid)");
+    expect(source).toContain("capability.session_id = NEW.id");
+    expect(source).toContain(
+      "RETURNING capability.capability_id INTO private_create_capability_id",
+    );
+    expect(source).toContain("sessions_create_requested_visibility_immutable");
+    expect(source).toContain(
+      "FROM managed_accounts account\n  WHERE account.id = p_account_id FOR SHARE",
+    );
+    expect(source).toContain(
+      "FROM managed_accounts candidate\n  WHERE candidate.id = p_account_id FOR UPDATE",
+    );
+    expect(source).toContain("WITH shared_workspaces AS MATERIALIZED");
+    expect(source).toContain("CROSS JOIN bounds");
     expect(source).toContain("membership.personal_workspace_id = p_workspace_id");
     expect(source).not.toContain("GRANT INSERT ON organization_profile_events");
     expect(source).not.toContain("GRANT UPDATE ON managed_accounts");
@@ -69,7 +83,8 @@ describe("migration 0311 company scope and private session create", () => {
       },
       {
         name: "open_private_session_create_capability",
-        arguments: "p_account_id uuid, p_workspace_id uuid, p_actor_subject_id text",
+        arguments:
+          "p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_actor_subject_id text",
         executable: true,
         searchPath: "search_path=pg_catalog, public, pg_temp",
       },
@@ -81,8 +96,9 @@ describe("migration 0311 company scope and private session create", () => {
         searchPath: "search_path=pg_catalog, public, pg_temp",
       },
     ]);
-    const [posture] = await shared.admin<
+    const posture = await shared.admin<
       Array<{
+        name: string;
         rls: boolean;
         forceRls: boolean;
         appSelect: boolean;
@@ -92,7 +108,8 @@ describe("migration 0311 company scope and private session create", () => {
         policies: number;
       }>
     >`
-      select relation.relrowsecurity as rls,
+      select relation.relname as name,
+        relation.relrowsecurity as rls,
         relation.relforcerowsecurity as "forceRls",
         has_table_privilege('opengeni_app', relation.oid, 'SELECT') as "appSelect",
         has_table_privilege('opengeni_app', relation.oid, 'INSERT') as "appInsert",
@@ -101,15 +118,21 @@ describe("migration 0311 company scope and private session create", () => {
         (select count(*)::integer from pg_policy policy where policy.polrelid = relation.oid)
           as policies
       from pg_class relation
-      where relation.oid = 'organization_profile_events'::regclass`;
-    expect(posture).toEqual({
-      rls: true,
-      forceRls: true,
-      appSelect: false,
-      appInsert: false,
-      appUpdate: false,
-      appDelete: false,
-      policies: 1,
-    });
+      where relation.relname in (
+        'organization_profile_events', 'private_session_create_capabilities'
+      )
+      order by relation.relname`;
+    expect(Array.from(posture)).toEqual(
+      ["organization_profile_events", "private_session_create_capabilities"].map((name) => ({
+        name,
+        rls: true,
+        forceRls: true,
+        appSelect: false,
+        appInsert: false,
+        appUpdate: false,
+        appDelete: false,
+        policies: 1,
+      })),
+    );
   });
 });

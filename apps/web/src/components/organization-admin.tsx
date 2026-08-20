@@ -57,6 +57,13 @@ type OwnedState<Value> = {
 
 type MemberAction = "suspend" | "reactivate" | "offboard";
 
+type PendingOrganizationRename = {
+  ownerKey: string;
+  name: string;
+  expectedUpdatedAt: string;
+  operationId: string;
+};
+
 export function OrganizationOverviewSection(props: {
   client: OpenGeniCoreClient;
   identity: OrganizationAdminIdentity;
@@ -70,6 +77,7 @@ export function OrganizationOverviewSection(props: {
   identityRef.current = props.identity;
   const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
   const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
+  const pendingRenameRef = useRef<PendingOrganizationRename | null>(null);
   const [state, setState] = useState<OwnedState<OrganizationAdministrationOverview | null>>({
     ownerKey: "",
     value: null,
@@ -112,11 +120,14 @@ export function OrganizationOverviewSection(props: {
   useEffect(() => {
     const active = activeRef.current;
     identityRef.current = props.identity;
+    if (pendingRenameRef.current?.ownerKey !== identityKey) {
+      pendingRenameRef.current = null;
+    }
     return () => {
       identityRef.current = null;
       active.clear();
     };
-  }, [props.identity]);
+  }, [identityKey, props.identity]);
 
   const load = useCallback(async () => {
     if (!props.managedSession || !canAdminister || !props.identity.organizationId) {
@@ -130,6 +141,14 @@ export function OrganizationOverviewSection(props: {
         props.identity.organizationId,
       );
       if (!owns(operation)) return;
+      const pendingRename = pendingRenameRef.current;
+      if (
+        pendingRename?.ownerKey === identityKey &&
+        overview.organization.name === pendingRename.name &&
+        overview.organization.updatedAt !== pendingRename.expectedUpdatedAt
+      ) {
+        pendingRenameRef.current = null;
+      }
       setName(overview.organization.name);
       setState({ ownerKey: identityKey, value: overview, loading: false, error: null });
     } catch (error) {
@@ -158,22 +177,39 @@ export function OrganizationOverviewSection(props: {
   ).size;
 
   async function saveName() {
-    if (!overview || !name.trim() || name.trim() === overview.organization.name) {
+    const requestedName = name.trim();
+    if (!overview || !requestedName || requestedName === overview.organization.name) {
       setEditing(false);
       return;
     }
+    const existingAttempt = pendingRenameRef.current;
+    const attempt: PendingOrganizationRename =
+      existingAttempt?.ownerKey === identityKey &&
+      existingAttempt.name === requestedName &&
+      existingAttempt.expectedUpdatedAt === overview.organization.updatedAt
+        ? existingAttempt
+        : {
+            ownerKey: identityKey,
+            name: requestedName,
+            expectedUpdatedAt: overview.organization.updatedAt,
+            operationId: crypto.randomUUID(),
+          };
+    pendingRenameRef.current = attempt;
     const operation = claim("mutation");
     setBusy(true);
     try {
       const organization = await props.client.updateOrganizationName(
         props.identity.organizationId,
         {
-          name: name.trim(),
-          expectedUpdatedAt: overview.organization.updatedAt,
-          operationId: crypto.randomUUID(),
+          name: attempt.name,
+          expectedUpdatedAt: attempt.expectedUpdatedAt,
+          operationId: attempt.operationId,
         },
       );
       if (!owns(operation)) return;
+      if (pendingRenameRef.current?.operationId === attempt.operationId) {
+        pendingRenameRef.current = null;
+      }
       setState((current) =>
         current.ownerKey === identityKey && current.value
           ? { ...current, value: { ...current.value, organization } }
@@ -184,8 +220,19 @@ export function OrganizationOverviewSection(props: {
       await props.onOrganizationChanged();
     } catch (error) {
       if (!owns(operation)) return;
+      const outcomeUnknown =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
+      if (!outcomeUnknown && pendingRenameRef.current?.operationId === attempt.operationId) {
+        pendingRenameRef.current = null;
+      }
       toast.error("Couldn't update organization name", {
-        description: error instanceof Error ? error.message : String(error),
+        description: outcomeUnknown
+          ? "The result is not yet known. Retry Save to reconcile the same request safely."
+          : error instanceof Error
+            ? error.message
+            : String(error),
       });
     } finally {
       if (owns(operation)) setBusy(false);

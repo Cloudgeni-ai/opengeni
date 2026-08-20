@@ -148,7 +148,7 @@ export async function sessionTenancyProductActivated(
 /** Open the exact transaction-local trigger capability used by atomic private create. */
 export async function openPrivateSessionCreateCapability(
   db: Database,
-  input: { accountId: string; workspaceId: string; actorSubjectId: string },
+  input: { accountId: string; workspaceId: string; sessionId: string; actorSubjectId: string },
 ): Promise<{ capabilityId: string; ownerMembershipId: string }> {
   const rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
     db,
@@ -158,6 +158,7 @@ export async function openPrivateSessionCreateCapability(
     from open_private_session_create_capability(
       ${input.accountId}::uuid,
       ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid,
       ${input.actorSubjectId}
     )`,
   );

@@ -26311,6 +26311,7 @@ async function createSessionInTransaction(
     const capability = await openPrivateSessionCreateCapability(tx, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      sessionId: id,
       actorSubjectId: input.subjectId,
     });
     privateCreateCapabilityId = capability.capabilityId;

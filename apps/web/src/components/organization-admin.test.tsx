@@ -275,6 +275,64 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
+  test("retries an outcome-unknown rename with the exact operation id", async () => {
+    const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
+    const uncertain = Object.assign(new Error("response lost"), { outcomeUnknown: true });
+    const updateOrganizationName = mock(async (...args: unknown[]) => {
+      if (updateOrganizationName.mock.calls.length === 1) throw uncertain;
+      const request = args[1] as { name: string };
+      return {
+        ...overview(identityA).organization,
+        name: request.name,
+        updatedAt: "2026-08-20T11:00:00.000Z",
+      };
+    });
+    const client = {
+      getOrganizationAdministrationOverview,
+      updateOrganizationName,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => undefined}
+        />,
+      );
+    });
+    await flush();
+    await act(async () => button(container, "Rename").click());
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing organization name input");
+    await enterText(nameInput, "Acme Research");
+    await act(async () => button(container, "Save").click());
+    await flush();
+    await act(async () => button(container, "Save").click());
+    await flush();
+
+    expect(updateOrganizationName).toHaveBeenCalledTimes(2);
+    const firstRequest = updateOrganizationName.mock.calls[0]?.[1] as {
+      operationId: string;
+    };
+    const secondRequest = updateOrganizationName.mock.calls[1]?.[1] as {
+      operationId: string;
+    };
+    expect(secondRequest.operationId).toBe(firstRequest.operationId);
+    expect(container.textContent).toContain("Acme Research");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("keeps people reads and mutations owned through StrictMode setup cleanup setup", async () => {
     const actor = member(identityA, "strict-actor");
     const secondOwner = { ...member(identityA, "strict-owner-2"), subjectId: "user:owner-2" };
