@@ -83,10 +83,13 @@ can never become a real organization-scoped authority.
 `principalKind` is the trusted allow-list: exactly `human_session` passes and
 unknown provenance fails closed. The delegated-token contract forbids a
 `human_session` claim from carrying `serviceInitiator` or exact agent-attempt
-authority. The predicate matches `requireConnectionAuthorityOwner`'s, including
-its `contextIntegrity` anti-substitution invariant; only the status differs
-(422 rejects an unavailable *ownership value*, 403 rejects a caller claiming to
-*be* the owner).
+authority. This ownership-value helper and `requireConnectionAuthorityOwner`
+share the core checks: `contextIntegrity`, exact authenticated/grant subject
+identity, `principalKind: "human_session"`, and no service-initiator provenance.
+They are intentionally not identical: this helper additionally rejects every
+OpenGeni-reserved machine-subject namespace as defence-in-depth. Start-time
+ownership-value rejection is a 422; the sibling self-owner authority surface
+uses a 403.
 
 A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
 `sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
@@ -126,7 +129,10 @@ Google Drive, Atlassian, and social — require it. A state minted before the
 claim existed simply lacks it and fails closed, which closes the one
 `oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
 MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
-machine-owned row.
+machine-owned row. Callback refusals retain each flow's existing bounded
+redirect/error projection rather than sharing one HTTP status: for example,
+Integration Definition OAuth reports `connection_conflict`, while social OAuth
+reports `not_authorized`.
 
 The two personal-only first-party connectors (`google-drive/install`,
 `atlassian/install`) carry no ownership field at all and always write

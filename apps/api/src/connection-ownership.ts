@@ -115,11 +115,12 @@ export function personalOnlyConnectionPrincipalMessage(label: string): string {
  * `label` names a personal-only connector, whose message must not suggest a
  * workspace-owned alternative that its provider profile forbids.
  *
- * This answers the same question as `requireConnectionAuthorityOwner` with the
- * same predicate but a different status: that helper guards a self-service
- * authority surface where the caller claims to *be* the owner (403 "not you"),
- * while this one rejects an ownership *value* that is unavailable to the
- * caller, alongside `assertOwnershipAllowed`'s existing 422 convention.
+ * This shares that helper's core caller-integrity checks, then additionally
+ * rejects every reserved machine-subject namespace as defence-in-depth. The
+ * sibling guards a self-service authority surface where the caller claims to
+ * *be* the owner (403 "not you"), while this one rejects an ownership *value*
+ * that is unavailable to the caller, alongside `assertOwnershipAllowed`'s
+ * existing 422 convention.
  */
 export function assertPersonalConnectionOwnerPrincipal(
   access: AccessGrantAuthorization,

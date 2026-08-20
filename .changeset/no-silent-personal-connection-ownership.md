@@ -1,5 +1,5 @@
 ---
-"@opengeni/api-router": minor
+"@opengeni/api-router": major
 ---
 
 Stop silently creating personal Connections when the caller never asked for one.
@@ -49,11 +49,14 @@ personal-only Google Drive and Atlassian install routes. An API key, the shared
 `contextIntegrity`, or a principal substituting another subject now gets an
 explicit **422** instead of a machine-owned personal Connection. That is a
 refusal, never a silent downgrade — Gmail and Slack's hosted MCP are
-personal-only and must not become workspace-owned. The predicate now matches the
-pre-existing `requireConnectionAuthorityOwner` exactly, including its
-`contextIntegrity` anti-substitution invariant; only the status code differs
-(422 rejects an unavailable ownership *value*, 403 rejects a caller claiming to
-*be* the owner).
+personal-only and must not become workspace-owned. This helper shares the
+following core checks with the pre-existing `requireConnectionAuthorityOwner`:
+`contextIntegrity`, exact authenticated/grant subject identity,
+`principalKind: "human_session"`, and no service-initiator provenance. This
+ownership-value helper intentionally adds a stricter defence-in-depth rejection
+for OpenGeni's reserved machine-subject namespaces; the predicates are not
+identical. Start-time ownership-value rejection is a 422, while the sibling
+self-owner authority surface uses a 403.
 
 An OAuth callback carries signed state, not a live principal, so it cannot
 re-evaluate `principalKind`. Every start path that may persist a personal owner
@@ -63,6 +66,10 @@ Google Drive, Atlassian, and social — require it. A state minted before the
 claim existed lacks it and fails closed, which closes the one `oauthStateTtlMs`
 in-flight window across a rolling deploy and is why the MCP callback's legacy
 `?? "personal"` decode can no longer land a machine-owned row.
+Callback refusals use each flow's existing bounded redirect/error projection;
+they are not uniformly surfaced as HTTP 422 (for example, Integration
+Definition OAuth reports `connection_conflict` and social OAuth reports
+`not_authorized`).
 
 ## Existing rows
 
@@ -75,13 +82,14 @@ returns a subject source for an `api_key` grant, so an api_key-owned Connection
 still resolves for that api_key. Credential-broker refresh-token renewal is
 untouched.
 
-What they lose is any **re-consent path**: interactive OAuth start now 422s, the
-callback fence 422s, and migration 0256 makes the owner column immutable, so the
-owner cannot be converted in place. When such a Connection's stored refresh
-token finally fails, the remediation is to create a replacement Connection as
-workspace-owned (or personal, connected by the human who should own it),
-repoint the capability at it, then revoke the stale row. Survey the population
-before upgrading:
+What they lose is any **re-consent path**: interactive OAuth start refuses the
+machine principal, callbacks fail closed through their flow-specific
+redirect/error projections, and migration 0256 makes the owner column immutable,
+so the owner cannot be converted in place. When such a Connection's stored
+refresh token finally fails, the remediation is to create a replacement
+Connection as workspace-owned (or personal, connected by the human who should
+own it), repoint the capability at it, then revoke the stale row. Survey the
+population before upgrading:
 
 ```sql
 select coalesce(authority_scope, '(pre-0256)') as scope,
