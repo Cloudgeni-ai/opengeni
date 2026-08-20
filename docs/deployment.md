@@ -736,12 +736,33 @@ account ID plus account type (`User` or `Bot`) wherever merge provenance names
 an actor. The provider login is an audit snapshot only; login spelling, case
 normalization, or an account rename does not replace that stable identity.
 
-Use the exact provider-retained PR base SHA from the pull-request detail
-(`pull.base.sha`) as the reviewed-base identity the verifier reconstructs, not
-the latest SHA currently at the tip of protected `main`. Ordinary protected
-`main` movement after merge is not itself a candidate update and must not
-trigger a source merge/rebase. Do not merge or rebase `main` into the source
-branch solely to refresh evidence.
+Compute the ledger identity digest with the exact provider-retained PR base SHA
+from the pull-request detail (`pull.base.sha`) as `--base`; this is the
+reviewed-base identity that the release verifier reconstructs, not the latest
+SHA currently at the tip of protected `main`:
+
+```bash
+bun scripts/release-review.ts \
+  --base <exact-provider-retained-pull.base.sha> \
+  --head <exact-reviewed-pr-head-sha> \
+  --reviewer <trusted-maintainer-login>
+
+bun scripts/release-review.ts \
+  --base <exact-provider-retained-pull.base.sha> \
+  --head <exact-reviewed-pr-head-sha> \
+  --reviewer <trusted-maintainer-login> \
+  --digest
+```
+
+Regenerate the digest when the candidate head or its provider-retained
+`pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
+Ordinary protected
+`main` movement is not itself a candidate update and must not trigger a source
+merge/rebase. Separately, let the merge authority refresh latest-current-main
+mergeability and material-compatibility evidence on the same candidate head;
+that evidence is not `reviewedBaseSha` and does not require replacing the
+identity digest or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
