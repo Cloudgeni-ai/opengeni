@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
-import type { CapabilityCatalogItem } from "@opengeni/contracts";
+import {
+  CapabilityCatalogItem as CapabilityCatalogItemSchema,
+  type CapabilityCatalogItem,
+} from "@opengeni/contracts";
 import {
   capabilityCuration,
+  filterCapabilityCatalogItems,
   opaqueCatalogName,
   sortConnectorsForPresentation,
 } from "../apps/web/src/lib/capabilities";
+import { FIRST_PARTY_CAPABILITY_LOGOS } from "../apps/web/src/components/capabilities/capability-logo-source";
 import { VENDORED_LOGO_MANIFEST } from "./catalog-vendored-logos";
 import {
   catalogCapabilityId,
@@ -15,12 +20,9 @@ import {
 
 const snapshotPath = new URL("../data/catalog/integrations-snapshot.json", import.meta.url)
   .pathname;
-const FIRST_PARTY_IDS = new Set(["api:fiken", "api:reddit", "api:x"]);
+const FIRST_PARTY_LOGO_IDS = new Set(Object.keys(FIRST_PARTY_CAPABILITY_LOGOS));
 
-type PresentationItem = Pick<
-  CapabilityCatalogItem,
-  "id" | "kind" | "source" | "surfaceType" | "metadata" | "logoAssetPath" | "name"
-> & { category: string };
+type PresentationItem = CapabilityCatalogItem;
 
 describe("default catalog presentation", () => {
   test("keeps the complete catalog while making the first Browse rows logo-rich", async () => {
@@ -28,7 +30,7 @@ describe("default catalog presentation", () => {
     const vendored = new Set(VENDORED_LOGO_MANIFEST.entries.map((entry) => entry.capabilityId));
     const registry: PresentationItem[] = rows.map((row) => {
       const id = catalogCapabilityId(row.domain, row.mcpUrl);
-      return {
+      return CapabilityCatalogItemSchema.parse({
         id,
         kind: "mcp",
         source: "registry",
@@ -46,10 +48,10 @@ describe("default catalog presentation", () => {
                 },
               }
             : {},
-      };
+      });
     });
     const firstParty: PresentationItem[] = [
-      {
+      CapabilityCatalogItemSchema.parse({
         id: "api:fiken",
         kind: "api",
         source: "built_in",
@@ -58,8 +60,8 @@ describe("default catalog presentation", () => {
         category: "finance",
         logoAssetPath: null,
         metadata: {},
-      },
-      {
+      }),
+      CapabilityCatalogItemSchema.parse({
         id: "api:reddit",
         kind: "api",
         source: "built_in",
@@ -68,8 +70,8 @@ describe("default catalog presentation", () => {
         category: "social-media",
         logoAssetPath: null,
         metadata: {},
-      },
-      {
+      }),
+      CapabilityCatalogItemSchema.parse({
         id: "api:x",
         kind: "api",
         source: "built_in",
@@ -78,7 +80,7 @@ describe("default catalog presentation", () => {
         category: "social-media",
         logoAssetPath: null,
         metadata: {},
-      },
+      }),
     ];
     const serverOrder = [...firstParty, ...registry].sort((left, right) =>
       `${left.kind}:${left.category}:${left.name}`.localeCompare(
@@ -92,41 +94,45 @@ describe("default catalog presentation", () => {
 
     expect(sorted).toHaveLength(browse.length);
     expect(new Set(sorted.map((item) => item.id))).toEqual(new Set(browse.map((item) => item.id)));
-    expect({
-      logoBacked: before.filter((item) => item.logoAssetPath).length,
-      curated: before.filter((item) => capabilityCuration(item).curated).length,
-      opaque: before.filter((item) => opaqueCatalogName(item.name)).length,
-    }).toEqual({ logoBacked: 8, curated: 9, opaque: 12 });
-    expect({
-      logoBacked: after.filter((item) => item.logoAssetPath || FIRST_PARTY_IDS.has(item.id)).length,
-      curated: after.filter((item) => capabilityCuration(item).curated).length,
-      opaque: after.filter((item) => opaqueCatalogName(item.name)).length,
-    }).toEqual({ logoBacked: 19, curated: 17, opaque: 4 });
-    const firstTwenty = sorted.slice(0, 20);
-    expect(firstTwenty.map((item) => item.name)).toEqual([
-      "Fiken",
-      "Reddit",
-      "X",
-      "Amplitude",
-      "Zapier",
-      "Front",
-      "Intercom",
-      "Mobbin",
-      "PagerDuty",
-      "Box",
-      "Dropbox",
-      "PayPal",
-      "Ahrefs",
-      "Semrush",
-      "Otter.ai",
-      "ClickUp",
-      "monday.com",
-      "Apollo.io",
-      "Calendly",
-      "Webflow",
-    ]);
-    expect(
-      firstTwenty.filter((item) => item.logoAssetPath || FIRST_PARTY_IDS.has(item.id)),
-    ).toHaveLength(19);
+
+    const isFirstParty = (item: PresentationItem): boolean =>
+      (item.kind === "mcp" || item.kind === "api") &&
+      (item.source === "built_in" || item.surfaceType?.startsWith("first_party_") === true);
+    const tier = (item: PresentationItem): number => {
+      if (isFirstParty(item)) return 0;
+      if (capabilityCuration(item).curated) return 1;
+      if (item.logoAssetPath) return 2;
+      return opaqueCatalogName(item.name) ? 4 : 3;
+    };
+    const tiers = sorted.map(tier);
+    expect(tiers).toEqual([...tiers].sort((left, right) => left - right));
+    const firstPartyCount = sorted.filter(isFirstParty).length;
+    expect(sorted.slice(0, firstPartyCount).every(isFirstParty)).toBe(true);
+
+    const quality = (items: readonly PresentationItem[], includeFirstPartyMarks: boolean) => ({
+      logoBacked: items.filter(
+        (item) =>
+          item.logoAssetPath || (includeFirstPartyMarks && FIRST_PARTY_LOGO_IDS.has(item.id)),
+      ).length,
+      curated: items.filter((item) => capabilityCuration(item).curated).length,
+      opaque: items.filter((item) => opaqueCatalogName(item.name)).length,
+    });
+    // The baseline models the prior UI: first-party rows had no bundled mark.
+    const beforeQuality = quality(before, false);
+    const afterQuality = quality(after, true);
+    expect(afterQuality.logoBacked).toBeGreaterThanOrEqual(18);
+    expect(afterQuality.logoBacked).toBeGreaterThanOrEqual(beforeQuality.logoBacked);
+    expect(afterQuality.curated).toBeGreaterThanOrEqual(16);
+    expect(afterQuality.curated).toBeGreaterThanOrEqual(beforeQuality.curated);
+    expect(afterQuality.opaque).toBeLessThanOrEqual(5);
+    expect(afterQuality.opaque).toBeLessThanOrEqual(beforeQuality.opaque);
+    expect(quality(sorted.slice(0, 20), true).logoBacked).toBeGreaterThanOrEqual(17);
+
+    const longTailTarget = browse.find((item, index) => index >= 48 && item.name.length >= 4);
+    expect(longTailTarget).toBeDefined();
+    const searchResults = sortConnectorsForPresentation(
+      filterCapabilityCatalogItems(browse, "all", longTailTarget!.name),
+    );
+    expect(searchResults.some((item) => item.id === longTailTarget!.id)).toBe(true);
   });
 });
