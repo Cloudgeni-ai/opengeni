@@ -140,4 +140,31 @@ describe("workspace-less session deep-link resolver", () => {
 
     expect(result.status).toBe("error");
   });
+
+  test("intersects recovery probes with the current workspace list and skips the stale route", async () => {
+    const calls: string[] = [];
+    const result = await resolveAuthorizedSessionWorkspace(
+      reader(
+        {
+          "workspace-a": { id: SESSION_ID },
+          "workspace-b": { id: SESSION_ID },
+          "workspace-c": { id: SESSION_ID },
+        },
+        calls,
+      ),
+      [
+        grant("workspace-a", ["sessions:read"]),
+        grant("workspace-b", ["sessions:read"]),
+        grant("workspace-c", ["sessions:read"]),
+      ],
+      SESSION_ID,
+      {
+        excludeWorkspaceId: "workspace-a",
+        authorizedWorkspaceIds: ["workspace-a", "workspace-c"],
+      },
+    );
+
+    expect(result).toEqual({ status: "resolved", workspaceId: "workspace-c" });
+    expect(calls).toEqual([`workspace-c/${SESSION_ID}`]);
+  });
 });

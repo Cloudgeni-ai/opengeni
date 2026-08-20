@@ -214,6 +214,8 @@ describe("fail-closed change impact", () => {
     for (const path of [
       "apps/web/src/components/personal-workspace-badge.tsx",
       "apps/web/src/components/rail/switcher-block.tsx",
+      "apps/web/src/components/rail/workspace-scope-nav.tsx",
+      "apps/web/src/lib/workspace-scope-context.ts",
       "apps/web/test/personal-workspace-accessibility-fixture.ts",
     ]) {
       const plan = createImpactPlan([path]);

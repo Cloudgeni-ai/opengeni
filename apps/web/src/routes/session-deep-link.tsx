@@ -21,6 +21,7 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
       context.client,
       context.accessContext.workspaceGrants,
       sessionId,
+      { authorizedWorkspaceIds: context.workspaces.map((workspace) => workspace.id) },
     ).then((resolution) => {
       if (cancelled) {
         return;
@@ -47,7 +48,13 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [attempt, context.accessContext.workspaceGrants, context.client, sessionId]);
+  }, [
+    attempt,
+    context.accessContext.workspaceGrants,
+    context.client,
+    context.workspaces,
+    sessionId,
+  ]);
 
   if (state === "loading") {
     return <LoadingPanel label="Opening session" />;

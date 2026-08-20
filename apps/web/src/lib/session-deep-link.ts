@@ -51,13 +51,22 @@ export async function resolveAuthorizedSessionWorkspace(
   client: AuthorizedSessionReader,
   grants: readonly SessionReadGrant[],
   sessionId: string,
+  options?: {
+    authorizedWorkspaceIds?: readonly string[];
+    excludeWorkspaceId?: string;
+  },
 ): Promise<SessionDeepLinkResolution> {
   if (!isSessionId(sessionId)) {
     return { status: "not-found" };
   }
 
   let unavailableError: unknown = null;
+  const listedWorkspaceIds = options?.authorizedWorkspaceIds
+    ? new Set(options.authorizedWorkspaceIds)
+    : null;
   for (const workspaceId of sessionReadWorkspaceIds(grants)) {
+    if (workspaceId === options?.excludeWorkspaceId) continue;
+    if (listedWorkspaceIds && !listedWorkspaceIds.has(workspaceId)) continue;
     try {
       await client.getSession(workspaceId, sessionId);
       return { status: "resolved", workspaceId };
