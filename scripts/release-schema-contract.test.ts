@@ -195,7 +195,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0304_personal_workspace_private_session_reads.sql",
       ),
     ).toMatchObject({
-      sha256: "8eebfc6e310006e8e359493bfad98075908958fdcbe38bca0d182444d9994867",
+      sha256: "cdce8c6b6644b07c672918a94c3e0e01f09d771dc33a61e38ec91eec763bf0c1",
       deploymentMode: "rolling",
     });
     expect(

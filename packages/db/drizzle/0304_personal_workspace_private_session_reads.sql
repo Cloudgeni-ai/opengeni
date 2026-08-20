@@ -19,7 +19,7 @@ BEGIN
     LANGUAGE plpgsql
     STABLE
     SECURITY DEFINER
-    SET search_path = %1$I, pg_catalog
+    SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
     DECLARE
       actor_subject_id text := nullif(
