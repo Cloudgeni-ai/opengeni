@@ -69,6 +69,47 @@ export function settleWorkspaceOperation(
   return { active: null, settledCurrent: true };
 }
 
+export type CurrentWorkspaceOperationResult<T> =
+  | { status: "current"; value: T }
+  | { status: "stale" };
+
+/**
+ * Run a request owned by one exact workspace operation. Both fulfillment and
+ * rejection become inert once a newer operation, workspace, or principal owns
+ * the destination UI.
+ */
+export async function runCurrentWorkspaceOperation<T>(input: {
+  activeOperation: () => WorkspaceOperationIdentity | null;
+  currentTransition: () => WorkspaceTransitionIdentity;
+  operation: WorkspaceOperationIdentity;
+  workspaceId: string;
+  request: () => Promise<T>;
+}): Promise<CurrentWorkspaceOperationResult<T>> {
+  try {
+    const value = await input.request();
+    return ownsWorkspaceOperation(
+      input.activeOperation(),
+      input.currentTransition(),
+      input.operation,
+      input.workspaceId,
+    )
+      ? { status: "current", value }
+      : { status: "stale" };
+  } catch (error) {
+    if (
+      !ownsWorkspaceOperation(
+        input.activeOperation(),
+        input.currentTransition(),
+        input.operation,
+        input.workspaceId,
+      )
+    ) {
+      return { status: "stale" };
+    }
+    throw error;
+  }
+}
+
 /**
  * Resolve or reject one non-abortable request only while its route-owned
  * generation is current. A stale rejection becomes an inert null result so a

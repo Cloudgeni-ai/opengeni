@@ -92,4 +92,52 @@ describe("principal transition contract", () => {
     expect(refreshMcp).toContain("runCurrentWorkspaceRequest({");
     expect(refreshMcp).toContain("currentRequestId: () => mcpRefreshId.current");
   });
+
+  test("every asynchronous GitHub mutation is invocation-bound before UI effects", () => {
+    const refresh = sourceBetween("const refreshGitHub", "const refreshWorkspaceMcpServers");
+    expect(refresh).toContain("const acceptedTransition = workspaceTransitionIdentity.current");
+    expect(refresh).toContain("!ownsRefresh()");
+
+    const manifest = sourceBetween(
+      "async function startGitHubAppManifestFlow",
+      "async function disconnectGitHubInstallation",
+    );
+    expect(manifest).toContain("runCurrentWorkspaceOperation({");
+    expect(manifest.indexOf("ownsWorkspaceOperation(")).toBeLessThan(
+      manifest.indexOf("submitGitHubManifest("),
+    );
+
+    const disconnect = sourceBetween(
+      "async function disconnectGitHubInstallation",
+      "function toggleGitHubRepository",
+    );
+    expect(disconnect).toContain("runCurrentWorkspaceOperation({");
+    expect(disconnect.indexOf("ownsWorkspaceOperation(")).toBeLessThan(
+      disconnect.indexOf("await refreshGitHub("),
+    );
+  });
+
+  test("workspace refreshes used by Slack cannot upsert after their route transition", () => {
+    const refreshWorkspace = sourceBetween(
+      "const refreshWorkspace = useCallback",
+      "async function updateWorkspaceSettings",
+    );
+    expect(refreshWorkspace).toContain("captureWorkspaceInvocation(workspaceId)");
+    expect(refreshWorkspace.indexOf("ownsWorkspaceInvocation(")).toBeLessThan(
+      refreshWorkspace.indexOf("setWorkspaces("),
+    );
+  });
+
+  test("ambiguous managed sign-out reconciles the cookie before access reload", () => {
+    const signOut = sourceBetween(
+      "async function handleManagedSignOut()",
+      "const contextAddManualRepository",
+    );
+    expect(signOut).not.toContain("previousAuthSession");
+    expect(signOut).toContain("signOutWithAuthoritativeReconciliation<AuthSession>");
+    expect(signOut).toContain("readSession: fetchAuthSession");
+    expect(signOut.indexOf("setAuthSession(result.session)")).toBeLessThan(
+      signOut.indexOf("setAccessKeyVersion((version) => version + 1)"),
+    );
+  });
 });

@@ -7,6 +7,7 @@ import {
   ownsWorkspaceOperation,
   ownsWorkspaceTransition,
   runCurrentWorkspaceRequest,
+  runCurrentWorkspaceOperation,
   settleWorkspaceOperation,
   type WorkspaceOperationIdentity,
 } from "./workspace-transition";
@@ -93,4 +94,42 @@ describe("workspace transition identity", () => {
       }),
     ).toBeNull();
   });
+
+  for (const lateOutcome of ["resolve", "reject"] as const) {
+    test(`prevents a delayed GitHub mutation ${lateOutcome} from refreshing or redirecting after a switch`, async () => {
+      const transitionA = { workspaceId: "workspace-a", revision: 1 };
+      const started = beginWorkspaceOperation(0, transitionA);
+      let currentTransition = transitionA;
+      let active: WorkspaceOperationIdentity | null = started.operation;
+      let resolveRequest!: (value: string) => void;
+      let rejectRequest!: (error: Error) => void;
+      const request = new Promise<string>((resolve, reject) => {
+        resolveRequest = resolve;
+        rejectRequest = reject;
+      });
+      const result = runCurrentWorkspaceOperation({
+        activeOperation: () => active,
+        currentTransition: () => currentTransition,
+        operation: started.operation,
+        workspaceId: "workspace-a",
+        request: () => request,
+      });
+
+      currentTransition = { workspaceId: "workspace-b", revision: 2 };
+      active = null;
+      if (lateOutcome === "resolve") {
+        resolveRequest("workspace-a result");
+      } else {
+        rejectRequest(new Error("workspace-a failed"));
+      }
+
+      let destinationEffects = 0;
+      const settled = await result;
+      if (settled.status === "current") {
+        destinationEffects += 1;
+      }
+      expect(settled).toEqual({ status: "stale" });
+      expect(destinationEffects).toBe(0);
+    });
+  }
 });
