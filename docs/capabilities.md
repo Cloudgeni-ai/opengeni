@@ -73,6 +73,20 @@ one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
+Reviewed first-party local bridges implement the shared static contract in
+`packages/capabilities/src/mcp-bridge.ts`. They expose a strictly validated
+descriptor with 1-32 exact HTTPS destinations.
+
+The descriptor identifies catalog identity, actual complete Connection/host/no
+credential authority, tool-surface class, destinations, and safe-read-only
+replay policy, but grants no authority. Generic static-adapter selection rejects
+ambiguous matches and keeps provider matching out of the catalog importer,
+OAuth client/profiles, and web row/sheet components. OpenAPI and GraphQL
+Integrations, including Google Drive, keep their existing local MCP adapters and
+do not claim this reviewed static bridge descriptor. Compiler-wide OpenAPI
+destination governance remains separate work. See
+[`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
+
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
 flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
 Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,

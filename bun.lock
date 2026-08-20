@@ -589,6 +589,7 @@
         "@openai/agents-core": "0.14.3",
         "@openai/agents-extensions": "0.14.3",
         "@opengeni/agent-proto": "workspace:*",
+        "@opengeni/capabilities": "workspace:*",
         "@opengeni/codemode": "workspace:*",
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
