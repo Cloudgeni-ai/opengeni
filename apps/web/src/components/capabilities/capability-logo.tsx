@@ -4,11 +4,12 @@ import { capabilityMonogram } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 
 /**
- * A catalog item's logo. Real vendor logos are served from the public,
- * immutably-cached `/v1/catalog-assets/*` route (via `client.catalogAssetUrl`);
- * a missing path or a load error falls back to a calm letter monogram so the
- * grid never shows broken-image glyphs. Lazy-loaded so 1,000+ tiles don't
- * request every logo at once.
+ * A catalog item's logo. Registry vendor logos are served from the public,
+ * immutably-cached `/v1/catalog-assets/*` route (via `client.catalogAssetUrl`),
+ * while the three synthetic first-party rows use web-bundled passive marks. A
+ * missing path or a load error falls back to a calm letter monogram so the grid
+ * never shows broken-image glyphs. Lazy-loaded so 1,000+ tiles don't request
+ * every logo at once.
  */
 export function CapabilityLogo({
   src,

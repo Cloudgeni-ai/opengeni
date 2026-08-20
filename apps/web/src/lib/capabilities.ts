@@ -379,11 +379,13 @@ export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem
 
 /**
  * Curation facts written by the catalog import from `data/catalog/curated.json`.
- * Both are checkable claims, not a security review: `official` means the
- * provider publishes the server on its own domain; `featured` means we chose
- * to promote it. Neither must ever be rendered as "reviewed" or "verified".
+ * `curated` records that a row has a reviewed presentation overlay; `featured`
+ * means we chose to promote it. `official` is the separate evidence-backed
+ * claim that the provider publishes the server on its own domain. None is a
+ * security review and must never be rendered as "reviewed" or "verified".
  */
 export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">): {
+  curated: boolean;
   featured: boolean;
   official: boolean;
 } {
@@ -391,6 +393,7 @@ export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">
   const record =
     raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
   return {
+    curated: record?.curated === true,
     featured: record?.featured === true,
     official: record?.official === true,
   };
@@ -406,6 +409,58 @@ export function sortFeaturedFirst<T extends Pick<CapabilityCatalogItem, "metadat
     (capabilityCuration(item).featured ? featured : rest).push(item);
   }
   return [...featured, ...rest];
+}
+
+/**
+ * Product presentation order for the connector browser. The server catalog is
+ * still complete and search always runs before this sort; this only stops the
+ * initial bounded window from being filled by raw aggregator names before the
+ * reviewed and recognizable connector set.
+ *
+ * The buckets deliberately use provenance/presentation facts, never the
+ * `official` flag as a security signal. Within a bucket the server's stable
+ * order is preserved.
+ */
+export function sortConnectorsForPresentation<
+  T extends Pick<
+    CapabilityCatalogItem,
+    "id" | "kind" | "source" | "surfaceType" | "metadata" | "logoAssetPath" | "name"
+  >,
+>(items: readonly T[]): T[] {
+  return items
+    .map((item, index) => ({ item, index, bucket: connectorPresentationBucket(item) }))
+    .sort((left, right) => left.bucket - right.bucket || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+function connectorPresentationBucket(
+  item: Pick<
+    CapabilityCatalogItem,
+    "kind" | "source" | "surfaceType" | "metadata" | "logoAssetPath" | "name"
+  >,
+): number {
+  if (
+    (item.kind === "mcp" || item.kind === "api") &&
+    (item.source === "built_in" || item.surfaceType?.startsWith("first_party_") === true)
+  ) {
+    return 0;
+  }
+  const curation = capabilityCuration(item);
+  if (curation.featured) return 1;
+  if (curation.curated) return 2;
+  if (item.logoAssetPath) return 3;
+  return opaqueCatalogName(item.name) ? 5 : 4;
+}
+
+/** Raw hostnames, machine ids, and punctuation-led labels belong after names a human can scan. */
+export function opaqueCatalogName(name: string): boolean {
+  const normalized = name.trim();
+  if (!normalized) return true;
+  const letters = normalized.match(/[\p{L}]/gu)?.length ?? 0;
+  if (letters < 2) return true;
+  if (/^[a-z0-9-]+(?:\.[a-z0-9-]+){1,}$/i.test(normalized)) return true;
+  if (/^[a-z0-9]{12,}(?:[-.][a-z0-9]+)*$/i.test(normalized) && /\d/.test(normalized)) return true;
+  return false;
 }
 
 function metadataForSearch(metadata: Record<string, unknown>): Record<string, unknown> {
