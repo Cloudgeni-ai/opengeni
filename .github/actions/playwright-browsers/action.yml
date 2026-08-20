@@ -98,6 +98,7 @@ runs:
         PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
         ATTEMPT_TIMEOUT_SECONDS: ${{ inputs.attempt-timeout-seconds }}
         ATTEMPTS: ${{ inputs.attempts }}
+        KILL_AFTER_SECONDS: "15"
       run: |
         set -uo pipefail
         only_shell=""
@@ -112,7 +113,7 @@ runs:
           # `|| status=$?` guard the first failing attempt aborts the script,
           # so the retry, the warnings, and the error summary never run.
           status=0
-          timeout --kill-after=15s "${ATTEMPT_TIMEOUT_SECONDS}s" \
+          timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s" \
             bun x playwright install --with-deps ${only_shell} ${PLAYWRIGHT_BROWSERS} || status=$?
           echo "::endgroup::"
           if [ "${status}" -eq 0 ]; then
@@ -137,9 +138,13 @@ runs:
     # step. One step is sufficient because it reduces the re-run to a
     # single-browser download, which has never breached the bound - but it does
     # mean a partial set persists for the life of this Playwright version.
-    # A SIGKILLed install can leave a stale __dirlock behind. Playwright only
-    # treats it as stale after ~5 minutes, so baking it into an immutable cache
-    # would tax every later run against this key.
+    # A SIGKILLed install can leave a stale __dirlock behind. Playwright locks
+    # the registry through proper-lockfile passing only retries/onCompromised/
+    # lockfilePath, so the default `stale: 10000` applies - the lock clears
+    # after ~10 seconds, not the ~5 minutes an earlier revision of this comment
+    # claimed. Removing it is therefore cheap hygiene rather than a large
+    # saving: it keeps a lock out of an immutable cache entry and avoids the
+    # onCompromised path entirely.
     - name: Drop stale Playwright dirlock before saving
       if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
       shell: bash
