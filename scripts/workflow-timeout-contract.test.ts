@@ -1,191 +1,207 @@
 import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const workflowDir = resolve(root, ".github/workflows");
+const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/action.yml");
+const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
+const MAX_JOB_TIMEOUT_MINUTES = 120;
 
-// GitHub's default job timeout is 360 minutes. A job that wedges - the observed
-// case is an unbounded `playwright install` whose download stalls - therefore
-// holds a runner slot for six hours. Because GitHub-hosted concurrency is an
-// account-level pool, a handful of wedged jobs stop every other pull request in
-// the repository from being dispatched at all. Every job must bound itself so a
-// hang degrades to one visible, re-runnable failure instead of a repo outage.
-const MAX_TIMEOUT_MINUTES = 120;
-
+type Step = Readonly<{
+  name?: string;
+  run?: string;
+  uses?: string;
+  with?: Readonly<Record<string, unknown>>;
+  "timeout-minutes"?: unknown;
+}>;
 type Job = Readonly<{
   uses?: string;
-  "timeout-minutes"?: number;
+  steps?: readonly Step[];
+  "timeout-minutes"?: unknown;
 }>;
+type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
-type Step = Readonly<{ run?: string; uses?: string }>;
+const EXPECTED_CAPS = [
+  ["ci.yml", "plan", "Install exact dependency tree", 11, "run"],
+  ["ci.yml", "source-contracts", "Profile impacted TypeScript 7 projects", 11, "run"],
+  ["ci.yml", "source-contracts", "Run exactly the explained source guards", 16, "run"],
+  ["ci.yml", "unit-shards", "Unit test shard", 21, "run"],
+  [
+    "ci.yml",
+    "integration-shards",
+    "Run real PostgreSQL, pgvector, Temporal, NATS, and object-storage tests",
+    31,
+    "run",
+  ],
+  ["ci.yml", "e2e-shards", "Run exactly the impacted E2E tests", 13, "run"],
+  ["ci.yml", "package-contracts", "Build client packages (contracts + SDK + React)", 21, "run"],
+  ["ci.yml", "test-suite", "Real workspace capture acceptance", 13, "run"],
+  ["ci.yml", "test-suite", "Recovery integration regressions", 5, "run"],
+  ["ci.yml", "browser-acceptance", "Session pin browser acceptance", 4, "run"],
+  ["ci.yml", "browser-acceptance", "Responsive knowledge surfaces browser acceptance", 6, "run"],
+  ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
+  ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
+  ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
+  ["ci.yml", "browser-acceptance", "Install pinned lane browser runtimes", 17, "action"],
+  ["ci.yml", "package-contracts", "Install Chromium for packed WASM package proof", 17, "action"],
+] as const;
 
-async function workflowFiles(): Promise<readonly string[]> {
-  const entries = await readdir(workflowDir);
-  return entries.filter((entry) => entry.endsWith(".yml") || entry.endsWith(".yaml")).sort();
+const EXPECTED_JOB_BUDGETS = {
+  "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
+  "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
+  "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
+  "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
+  "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
+  "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
+  "ci.yml:browser-acceptance": { stepCaps: 31, needed: 32, jobCap: 35 },
+  "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
+  "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
+} as const;
+
+async function loadWorkflows(): Promise<Record<string, Workflow>> {
+  const files = (await readdir(workflowDir)).filter((entry) => /\.ya?ml$/u.test(entry)).sort();
+  return Object.fromEntries(
+    await Promise.all(
+      files.map(async (file) => [
+        file,
+        Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as Workflow,
+      ]),
+    ),
+  );
+}
+
+function numericCap(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 describe("workflow timeout contract", () => {
-  test("every job bounds itself well below the 360-minute GitHub default", async () => {
-    const files = await workflowFiles();
-    expect(files.length).toBeGreaterThan(0);
-
+  test("all jobs and the exact 13 run plus 3 action steps use static native caps", async () => {
+    const workflows = await loadWorkflows();
+    const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
+    const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
     const violations: string[] = [];
-    for (const file of files) {
-      const parsed = Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as {
-        jobs?: Record<string, Job>;
-      };
-      for (const [name, job] of Object.entries(parsed.jobs ?? {})) {
-        // A reusable-workflow call cannot carry timeout-minutes; the called
-        // workflow's own jobs are covered by this same test.
-        if (job?.uses) continue;
-        const timeout = job?.["timeout-minutes"];
-        if (typeof timeout !== "number") {
-          violations.push(`${file}:${name} has no timeout-minutes`);
+
+    for (const [file, workflow] of Object.entries(workflows)) {
+      for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+        if (job.uses) continue;
+        const jobCap = numericCap(job["timeout-minutes"]);
+        if (jobCap === null || jobCap > MAX_JOB_TIMEOUT_MINUTES) {
+          violations.push(`${file}:${jobName} has an invalid job cap`);
           continue;
         }
-        if (timeout <= 0 || timeout > MAX_TIMEOUT_MINUTES) {
-          violations.push(
-            `${file}:${name} has timeout-minutes ${timeout}, outside 1..${MAX_TIMEOUT_MINUTES}`,
-          );
-        }
-      }
-    }
-    expect(violations).toEqual([]);
-  });
-
-  test("every Playwright install is bounded and cached through the shared action", async () => {
-    const files = await workflowFiles();
-    const inlineInstalls: string[] = [];
-    for (const file of files) {
-      const source = await readFile(resolve(workflowDir, file), "utf8");
-      if (source.includes("playwright install")) {
-        inlineInstalls.push(file);
-      }
-    }
-    // An inline `playwright install` is unbounded: it has no per-attempt wall
-    // clock and no browser cache, which is exactly the wedge this guards.
-    expect(inlineInstalls).toEqual([]);
-
-    const action = await readFile(
-      resolve(root, ".github/actions/playwright-browsers/action.yml"),
-      "utf8",
-    );
-    expect(action).toContain("timeout --kill-after=15s");
-    expect(action).toContain("path: ~/.cache/ms-playwright");
-    // `--with-deps` was previously locked by the four inline call sites. Moving
-    // the command into one shared place removed that lock, so re-assert it here.
-    expect(action).toContain("playwright install --with-deps");
-    // actions/cache's post step is `post-if: success()`, so the combined action
-    // never saves after a bounded failure and a cold key on a degraded network
-    // can never converge. The split restore/save with always() is what makes a
-    // timed-out install genuinely re-runnable.
-    expect(action).toContain("actions/cache/restore@");
-    expect(action).toContain("actions/cache/save@");
-    expect(action).toMatch(
-      /if: \$\{\{ always\(\) && steps\.restore\.outputs\.cache-hit != 'true' \}\}/u,
-    );
-  });
-
-  // A job cap below the job's own declared step budgets is worse than no cap:
-  // the job is CANCELLED rather than failed, and `if: failure()` artifact
-  // uploads do not run on cancellation, so the diagnostics that explain the
-  // hang are destroyed exactly when they are needed.
-  test("no job cap sits below its own declared inner step budgets", async () => {
-    const installBoundMinutes = await (async () => {
-      const action = Bun.YAML.parse(
-        await readFile(resolve(root, ".github/actions/playwright-browsers/action.yml"), "utf8"),
-      ) as { inputs: Record<string, { default?: string }> };
-      const perAttempt = Number(action.inputs["attempt-timeout-seconds"]?.default);
-      const attempts = Number(action.inputs.attempts?.default);
-      expect(Number.isFinite(perAttempt) && Number.isFinite(attempts)).toBe(true);
-      // 15s is the SIGKILL grace in `timeout --kill-after=15s`.
-      return ((perAttempt + 15) * attempts) / 60;
-    })();
-
-    const violations: string[] = [];
-    for (const file of await workflowFiles()) {
-      const parsed = Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as {
-        jobs?: Record<
-          string,
-          { uses?: string; "timeout-minutes"?: number; steps?: readonly Step[] }
-        >;
-      };
-      for (const [name, job] of Object.entries(parsed.jobs ?? {})) {
-        if (job?.uses) continue;
-        const cap = job?.["timeout-minutes"];
-        if (typeof cap !== "number") continue;
-        let inner = 0;
-        let usesBoundedInstall = false;
+        let stepCaps = 0;
         for (const step of job.steps ?? []) {
-          const run = String(step.run ?? "");
-          for (const m of run.matchAll(/--timeout-seconds\s+(\d+)/gu)) inner += Number(m[1]) / 60;
-          for (const m of run.matchAll(/--timeout\s+(\d{5,})/gu)) inner += Number(m[1]) / 60_000;
-          if (String(step.uses ?? "").includes("playwright-browsers")) usesBoundedInstall = true;
+          const cap = numericCap(step["timeout-minutes"]);
+          if (step["timeout-minutes"] !== undefined && cap === null) {
+            violations.push(`${file}:${jobName}:${step.name ?? "unnamed"} has an invalid step cap`);
+          }
+          if (cap === null) continue;
+          stepCaps += cap;
+          const kind = step.run ? "run" : step.uses === PLAYWRIGHT_ACTION ? "action" : null;
+          if (!kind || !step.name) {
+            violations.push(`${file}:${jobName} has a capped step outside the approved corpus`);
+          } else {
+            capped.push([file, jobName, step.name, cap, kind]);
+          }
         }
-        // A job using the bounded install must be checked even with no declared
-        // inner budget, or a browser lane with a small cap and no test budget is
-        // endorsed despite being guaranteed to cancel mid-install.
-        if (inner === 0 && !usesBoundedInstall) continue;
-        // 1 minute covers checkout + toolchain + dependency install.
-        const needed = 1 + inner + (usesBoundedInstall ? installBoundMinutes : 0);
-        if (cap < needed) {
-          violations.push(
-            `${file}:${name} cap ${cap}m is below its own budgets (${needed.toFixed(1)}m needed)`,
-          );
-        }
+        budgets[`${file}:${jobName}`] = { stepCaps, needed: stepCaps + 1, jobCap };
+        if (jobCap < stepCaps + 1) violations.push(`${file}:${jobName} cap is below native steps`);
       }
     }
+
     expect(violations).toEqual([]);
+    const byIdentity = (
+      left: readonly [string, string, string, number, "run" | "action"],
+      right: readonly [string, string, string, number, "run" | "action"],
+    ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
+    expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(13);
+    expect(capped.filter((row) => row[4] === "action")).toHaveLength(3);
+    for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
+      expect(budgets[job], job).toEqual(expected);
+    }
   });
 
-  // The runner executes `shell: bash` steps as
-  // `bash --noprofile --norc -eo pipefail {0}`. That errexit is applied by the
-  // runner and is NOT cleared by a `set -uo pipefail` inside the script, so a
-  // retry loop written without an explicit guard silently becomes one attempt
-  // with no diagnostic output. Assert the real behaviour by running the real
-  // script under the real shell rather than trusting a plain `bash script.sh`.
-  test("the install retry loop survives the runner's errexit shell", async () => {
-    const action = Bun.YAML.parse(
-      await readFile(resolve(root, ".github/actions/playwright-browsers/action.yml"), "utf8"),
-    ) as { runs: { steps: readonly { name?: string; run?: string }[] } };
+  test("the consolidated browser lane and Playwright runtime budget stay structurally bound", async () => {
+    const workflows = await loadWorkflows();
+    const callers = Object.entries(workflows).flatMap(([file, workflow]) =>
+      Object.entries(workflow.jobs ?? {}).flatMap(([job, definition]) =>
+        (definition.steps ?? [])
+          .filter((step) => step.uses === PLAYWRIGHT_ACTION)
+          .map((step) => ({ file, job, step })),
+      ),
+    );
+    expect(callers).toHaveLength(3);
+    expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
+      "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+    );
+
+    const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
+      inputs: Record<string, { default?: unknown }>;
+      runs: { steps: Array<{ name?: string; env?: Record<string, unknown>; run?: string }> };
+    };
+    const install = action.runs.steps.find(
+      (step) => step.name === "Install pinned Playwright browsers",
+    );
+    expect(install?.env).toMatchObject({
+      ATTEMPT_TIMEOUT_SECONDS: "${{ inputs.attempt-timeout-seconds }}",
+      ATTEMPTS: "${{ inputs.attempts }}",
+      KILL_AFTER_SECONDS: "15",
+    });
+    const command = String(install?.run ?? "").replace(/\\\r?\n\s*/gu, " ");
+    expect(command).toContain(
+      'timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s"',
+    );
+    const duration = Number(action.inputs["attempt-timeout-seconds"]?.default);
+    const attempts = Number(action.inputs.attempts?.default);
+    expect(((duration + 15) * attempts) / 60).toBeLessThanOrEqual(17);
+  });
+
+  test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
+    for (const file of Object.keys(await loadWorkflows())) {
+      expect(await readFile(resolve(workflowDir, file), "utf8")).not.toContain(
+        "playwright install",
+      );
+    }
+    const actionSource = await readFile(playwrightActionPath, "utf8");
+    expect(actionSource).toContain("playwright install --with-deps");
+    expect(actionSource).toContain("actions/cache/restore@");
+    expect(actionSource).toContain("actions/cache/save@");
+    expect(actionSource).toContain("rm -rf ~/.cache/ms-playwright/__dirlock");
+
+    const action = Bun.YAML.parse(actionSource) as {
+      runs: { steps: Array<{ name?: string; run?: string }> };
+    };
     const script = action.runs.steps.find(
       (step) => step.name === "Install pinned Playwright browsers",
     )?.run;
     expect(typeof script).toBe("string");
-
     const dir = await mkdtemp(join(tmpdir(), "playwright-install-contract-"));
     try {
       const scriptPath = join(dir, "install.sh");
       const binDir = join(dir, "bin");
       await mkdir(binDir);
       await writeFile(scriptPath, script as string);
-      // `timeout` is GNU-only; stub it so this test runs on any host. The stub
-      // drops the flags and duration, then execs the command.
-      const timeoutStub = [
-        "#!/bin/bash",
-        'while [[ "$1" == --* ]]; do shift; done',
-        "shift",
-        '"$@"',
-        "",
-      ].join("\n");
-      await writeFile(join(binDir, "timeout"), timeoutStub);
-      // Fail every attempt with 124, the exit code GNU timeout uses on expiry.
+      await writeFile(
+        join(binDir, "timeout"),
+        ["#!/bin/bash", 'while [[ "$1" == --* ]]; do shift; done', "shift", '"$@"', ""].join("\n"),
+      );
       const counter = join(dir, "n");
-      const bunStub = [
-        "#!/bin/bash",
-        `n=$(cat ${counter} 2>/dev/null || echo 0)`,
-        "n=$((n+1))",
-        `echo "$n" > ${counter}`,
-        "exit 124",
-        "",
-      ].join("\n");
-      await writeFile(join(binDir, "bun"), bunStub);
+      await writeFile(
+        join(binDir, "bun"),
+        [
+          "#!/bin/bash",
+          `n=$(cat ${counter} 2>/dev/null || echo 0)`,
+          "n=$((n+1))",
+          `echo "$n" > ${counter}`,
+          "exit 124",
+          "",
+        ].join("\n"),
+      );
       await chmod(join(binDir, "timeout"), 0o755);
       await chmod(join(binDir, "bun"), 0o755);
-
       const proc = Bun.spawn(["bash", "--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
         env: {
           ...process.env,
@@ -194,20 +210,17 @@ describe("workflow timeout contract", () => {
           PLAYWRIGHT_ONLY_SHELL: "false",
           ATTEMPT_TIMEOUT_SECONDS: "360",
           ATTEMPTS: "2",
+          KILL_AFTER_SECONDS: "15",
         },
         stdout: "pipe",
         stderr: "pipe",
       });
       const stdout = await new Response(proc.stdout).text();
       expect(await proc.exited).toBe(1);
-
-      // Both attempts must actually run.
-      expect((await readFile(join(dir, "n"), "utf8")).trim()).toBe("2");
-      // And the operator must be told what the bound was, not just "exit 124".
+      expect(await readFile(counter, "utf8")).toBe("2\n");
       expect(stdout).toContain("attempt 1/2");
       expect(stdout).toContain("attempt 2/2");
       expect(stdout).toContain("exceeded 360s and was killed");
-      expect(stdout).toContain("::error::");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -117,6 +117,8 @@
     "check:docs-refs": "bun scripts/check-docs-refs.ts",
     "check:model-pricing": "bun scripts/check-model-pricing.ts",
     "check:public-hygiene": "bun scripts/check-public-repo-hygiene.ts",
+    "check:workflow-graph": "bun scripts/workflow-execution-graph.ts",
+    "workflow-graph:refresh": "bun scripts/workflow-execution-graph.ts --write",
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "migration:renumber": "bun scripts/renumber-migration.ts",
@@ -175,7 +177,8 @@
     "oxlint": "1.73.0",
     "playwright": "^1.61.1",
     "postgres": "^3.4.9",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "yaml": "2.9.0"
   },
   "overrides": {
     "@codemirror/state": "6.7.1",
