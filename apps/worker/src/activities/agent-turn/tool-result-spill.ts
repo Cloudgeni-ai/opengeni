@@ -43,10 +43,7 @@ export type ToolResultSpillDeps = {
   getModelRunSettings: () => Settings;
   getSandboxFileDownloadBackend: () => Settings["sandboxBackend"];
   getPublish: () =>
-    | ((
-        events: Array<{ type: string; payload: unknown }>,
-        immediate?: boolean,
-      ) => Promise<unknown>)
+    | ((events: Array<{ type: string; payload: unknown }>, immediate?: boolean) => Promise<unknown>)
     | null;
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   getResolvedSandbox: () => ResumedTurnSandbox | null;

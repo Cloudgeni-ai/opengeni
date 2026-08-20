@@ -1,7 +1,4 @@
-import type {
-  AttemptToolDefinition,
-  AttemptToolExecutionContext,
-} from "@opengeni/codemode";
+import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
   ToolResultSpilledReceipt,
   type AttemptToolResult as AttemptToolResultValue,

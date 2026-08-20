@@ -65,9 +65,8 @@ mock.module("@opengeni/db", () => ({
   }),
 }));
 
-const { ToolResultSpill, toolResultSpillIdentity } = await import(
-  "../src/activities/agent-turn/tool-result-spill"
-);
+const { ToolResultSpill, toolResultSpillIdentity } =
+  await import("../src/activities/agent-turn/tool-result-spill");
 
 afterAll(() => {
   mock.restore();
@@ -91,7 +90,10 @@ function objectStorage(): ObjectStorage {
   } as ObjectStorage;
 }
 
-function spill(backend: Settings["sandboxBackend"], storage: ObjectStorage | null = objectStorage()) {
+function spill(
+  backend: Settings["sandboxBackend"],
+  storage: ObjectStorage | null = objectStorage(),
+) {
   return new ToolResultSpill({
     db: fakeDb as Database,
     objectStorage: storage,
