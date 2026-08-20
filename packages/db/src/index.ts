@@ -17486,6 +17486,9 @@ export async function getSessionAuthorityEpoch(
  *
  * The authority rule itself lives in that in-scope variant; this is a scope
  * wrapper over it, so there is one implementation.
+ *
+ * The prior `opengeni.subject_id` is restored before returning, so probing a
+ * named subject cannot leak it into the rest of a caller's transaction.
  */
 export async function namedSubjectHasLiveWorkspaceAuthority(
   db: Database,
@@ -17504,12 +17507,25 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
       // a transaction that had no subject leaves it genuinely unset rather than
       // pinning it to a literal empty subject.
       const priorSubjectId = await rlsSubjectIdOrEmpty(scopedDb);
-      await setSubjectRlsContext(scopedDb, input.subjectId);
-      const result = await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, input);
-      await scopedDb.execute(
-        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
-      );
-      return result;
+      let completed = false;
+      try {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+        const result = await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, input);
+        completed = true;
+        return result;
+      } finally {
+        const restore = scopedDb.execute(
+          sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+        );
+        if (completed) {
+          await restore;
+        } else {
+          // A failed statement can leave a caller-owned transaction aborted.
+          // Preserve the original diagnostic rather than replacing it with the
+          // restore's `25P02`; that transaction is unwinding to rollback anyway.
+          await restore.catch(() => undefined);
+        }
+      }
     },
   );
 }

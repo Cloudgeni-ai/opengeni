@@ -163,7 +163,7 @@ describe("personal MCP connection delegation", () => {
         workspaceId: target!.id,
         settings: { mcpServers: [personalServer] },
         tools: [{ kind: "mcp", id: "linear" }],
-        source: { kind: "subject", subjectId },
+        source: { kind: "subject", subjectId, accountId: account!.id },
         authoritySelections: [selection],
       });
       expect(frozen).toEqual([
@@ -184,7 +184,7 @@ describe("personal MCP connection delegation", () => {
         workspaceId: origin!.id,
         settings: { mcpServers: [personalServer] },
         tools: [{ kind: "mcp", id: "linear" }],
-        source: { kind: "subject", subjectId },
+        source: { kind: "subject", subjectId, accountId: account!.id },
         authoritySelections: [
           {
             ...selection,
@@ -211,7 +211,11 @@ describe("personal MCP connection delegation", () => {
           workspaceId: target!.id,
           settings: { mcpServers: [personalServer] },
           tools: [{ kind: "mcp", id: "linear" }],
-          source: { kind: "subject", subjectId: `user:${crypto.randomUUID()}` },
+          source: {
+            kind: "subject",
+            subjectId: `user:${crypto.randomUUID()}`,
+            accountId: account!.id,
+          },
           authoritySelections: [selection],
         }),
       ).rejects.toBeTruthy();
@@ -229,7 +233,11 @@ describe("personal MCP connection delegation", () => {
           workspaceId: target!.id,
           settings: { mcpServers: [personalServer] },
           tools: [{ kind: "mcp", id: "linear" }],
-          source: { kind: "subject", subjectId: ambientAdminSubjectId },
+          source: {
+            kind: "subject",
+            subjectId: ambientAdminSubjectId,
+            accountId: account!.id,
+          },
           authoritySelections: [selection],
         }),
       ).rejects.toBeTruthy();
@@ -286,7 +294,7 @@ describe("personal MCP connection delegation", () => {
           workspaceId: target!.id,
           settings: { mcpServers: [personalServer] },
           tools: [{ kind: "mcp", id: "linear" }],
-          source: { kind: "subject", subjectId },
+          source: { kind: "subject", subjectId, accountId: account!.id },
           authoritySelections: [onceSelection],
         });
       const frozenOnce = await freezeOnce();
@@ -327,7 +335,7 @@ describe("personal MCP connection delegation", () => {
           workspaceId: target!.id,
           settings: { mcpServers: [personalServer] },
           tools: [{ kind: "mcp", id: "linear" }],
-          source: { kind: "subject", subjectId },
+          source: { kind: "subject", subjectId, accountId: account!.id },
           authoritySelections: [selection],
         }),
       ).rejects.toBeTruthy();
@@ -339,15 +347,19 @@ describe("personal MCP connection delegation", () => {
   }, 120_000);
 
   test("uses human/API subjects but copies authority for agent attempts", () => {
+    const humanAccountId = crypto.randomUUID();
     expect(
       personalConnectionDelegationSourceForGrant({
-        accountId: crypto.randomUUID(),
+        accountId: humanAccountId,
         workspaceId: crypto.randomUUID(),
         subjectId: "user:owner",
         principalKind: "human_session",
         permissions: [],
       }),
-    ).toEqual({ kind: "subject", subjectId: "user:owner" });
+      // The grant's organization travels with the subject: the owner-only
+      // personal-workspace pointer lives on an organization membership, so a
+      // subject alone cannot answer "does this human still belong here".
+    ).toEqual({ kind: "subject", subjectId: "user:owner", accountId: humanAccountId });
     expect(
       personalConnectionDelegationSourceForGrant({
         accountId: crypto.randomUUID(),
