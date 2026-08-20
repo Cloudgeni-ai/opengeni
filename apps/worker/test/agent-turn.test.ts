@@ -2823,20 +2823,24 @@ describe("lazy sandbox provisioner single-flight", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
+    const credentialSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run-credentials.ts", import.meta.url),
+    ).text();
     const streamSource = await Bun.file(
       new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     const establishSource = await Bun.file(
       new URL("../src/activities/agent-turn/sandbox-establish.ts", import.meta.url),
     ).text();
-    const resolutionAt = source.indexOf(
+    const resolutionAt = credentialSource.indexOf(
       "const initialRunCredentialMaterial = runCredentialResolver",
     );
-    const modelNoteAt = source.indexOf(
+    const modelNoteAt = credentialSource.indexOf(
       "const runCredentialsNote = initialRunCredentialMaterial",
       resolutionAt,
     );
-    const streamCallAt = source.indexOf("return await runTurnStreamAttempt(", modelNoteAt);
+    const credentialsCallAt = source.indexOf("const runCredentials = await prepareRunCredentials(");
+    const streamCallAt = source.indexOf("return await runTurnStreamAttempt(", credentialsCallAt);
     const turnInputAt = streamSource.indexOf("const prepared = await turnInput(");
     const provisionerAt = establishSource.indexOf(
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
@@ -2849,14 +2853,15 @@ describe("lazy sandbox provisioner single-flight", () => {
       provisionerAt,
       lazyCredentialAttachAt + 500,
     );
-    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", modelNoteAt);
+    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", credentialsCallAt);
 
     expect(resolutionAt).toBeGreaterThan(-1);
     expect(modelNoteAt).toBeGreaterThan(resolutionAt);
-    expect(streamCallAt).toBeGreaterThan(modelNoteAt);
+    expect(credentialsCallAt).toBeGreaterThan(-1);
+    expect(streamCallAt).toBeGreaterThan(credentialsCallAt);
     expect(turnInputAt).toBeGreaterThan(-1);
     expect(provisionerAt).toBeGreaterThan(-1);
-    expect(lazyBindAt).toBeGreaterThan(modelNoteAt);
+    expect(lazyBindAt).toBeGreaterThan(credentialsCallAt);
     expect(streamCallAt).toBeGreaterThan(lazyBindAt);
     expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
     expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
@@ -2869,6 +2874,9 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).text();
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const credentialsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run-credentials.ts", import.meta.url),
     ).text();
     const authorize = governanceSource.indexOf("await resolveSessionAttemptPersonalResources(db");
     const overlappedReads = governanceSource.indexOf(
@@ -2888,10 +2896,14 @@ describe("lazy sandbox provisioner single-flight", () => {
       overlappedReads,
     );
     const governanceCall = source.indexOf("const governance = await prepareGovernanceAndModel({");
-    const imageEnsure = source.indexOf(
+    const credentialsCall = source.indexOf(
+      "const runCredentials = await prepareRunCredentials(",
+      governanceCall,
+    );
+    const imageEnsure = credentialsSource.indexOf(
       "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
     );
-    const gitAssert = source.indexOf(
+    const gitAssert = credentialsSource.indexOf(
       "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
     );
     expect(authorize).toBeGreaterThan(0);
@@ -2900,9 +2912,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(rigRead).toBeGreaterThan(packRead);
     expect(policyRead).toBeGreaterThan(rigRead);
     expect(governanceCall).toBeGreaterThan(-1);
-    expect(imageEnsure).toBeGreaterThan(governanceCall);
+    expect(credentialsCall).toBeGreaterThan(governanceCall);
+    expect(imageEnsure).toBeGreaterThan(-1);
     expect(gitAssert).toBeGreaterThan(imageEnsure);
-    expect(source.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
+    expect(credentialsSource.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
   });
 
   test("lazy git token mint starts before the box establish returns", async () => {
@@ -2935,8 +2948,12 @@ describe("lazy sandbox provisioner single-flight", () => {
     const onDemandAt = establishSource.indexOf('} else if (establishPolicy === "on-demand")');
     const prefetchAt = establishSource.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
     const establishCallAt = source.indexOf("await establishTurnSandbox({");
-    const toolsAt = source.indexOf('phase: "tools"', establishCallAt);
-    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", toolsAt);
+    const toolsCallAt = source.indexOf("const toolRuntime = await prepareTurnToolRuntime(", establishCallAt);
+    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", toolsCallAt);
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    const toolsAt = toolsSource.indexOf('phase: "tools"');
     const provisionerAt = establishSource.indexOf(
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
@@ -2953,8 +2970,9 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(onDemandAt).toBeGreaterThan(-1);
     expect(prefetchAt).toBeGreaterThan(onDemandAt);
     expect(establishCallAt).toBeGreaterThan(-1);
-    expect(toolsAt).toBeGreaterThan(establishCallAt);
-    expect(lazyBindAt).toBeGreaterThan(toolsAt);
+    expect(toolsCallAt).toBeGreaterThan(establishCallAt);
+    expect(lazyBindAt).toBeGreaterThan(toolsCallAt);
+    expect(toolsAt).toBeGreaterThan(-1);
     expect(provisionerAt).toBeGreaterThan(-1);
     expect(joinAt).toBeGreaterThan(provisionerAt);
     expect(prefetchMintAt).toBeGreaterThan(prefetchAt);

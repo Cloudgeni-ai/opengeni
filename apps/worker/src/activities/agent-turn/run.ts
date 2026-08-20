@@ -1,67 +1,18 @@
 import {
-  getScheduledVariableSetExpectedGenerationForAttempt,
-  getSessionRootId,
-  persistAttemptToolCatalog,
-  selectXaiCredentialForUse,
-  materializeXaiCredentialForRun,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  getXaiSessionAccountPin,
-  setXaiSessionAccountPin,
-  getWorkspaceGrant,
-  countSessionHistoryItems,
   setSessionLastInputTokensForTurnAttempt,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
-  getWorkspaceVideoGenerationPolicy,
-  loadWorkspaceVercelAiGatewayCredentialLease,
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
-  prepareConnectorActionApproval,
-  withCodexAppsRequestAuthorization,
 } from "@opengeni/db";
 import { sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   materializeSandboxFileDownloads,
-  materializeRunCredentials,
-  clearRunCredentials,
-  clearRunCredentialsForAttempt,
-  refreshGitCredentialBindingTokenFiles,
-  refreshCodemodeTokenFile,
-  codemodeTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
-  type OpenGeniRuntime,
-  type BuildAgentOptions,
-  type AttemptConnectorActionBinding,
-  type ConnectorActionPolicyHooks,
-  type GitCredentialTokenWriterSession,
-  type NormalizedRunCredentialMaterial,
-  type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
-  type ConnectorAttachmentMaterializationRequest,
-  createFirstPartyInteractionAttemptToolDefinitions,
 } from "@opengeni/runtime";
-import {
-  authorizeGoogleDrivePublicationAttempt,
-  createGoogleDrivePublicationAttemptTool,
-  googleDrivePublicationConnectorCall,
-  resolveGoogleDrivePublicationTarget,
-} from "../google-drive-publication";
-import { connectionTokenResolverForTurn } from "../mcp-credentials";
-import { buildApiIntegrationServersForTurn } from "../api-integrations";
-import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import {
-  allowedFirstPartyMcpToolsForSession,
-  serviceTierForLatencyMode,
-  environmentsEncryptionKeyBytes,
-  WORKSPACE_GATEWAY_PROVIDER_ID,
-  codemodeWorkspaceUrl,
-  resolveModelProvider,
-} from "@opengeni/config";
-import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
 import {
   buildModelResolver,
@@ -71,116 +22,41 @@ import {
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { mergeResourceRefs } from "../common";
 import { xaiSubscriptionRequestStorage } from "@opengeni/xai-subscription";
 import { buildXaiTurnRequestAuthorization } from "../xai-auth";
-import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
-import {
-  defaultSessionMcpServerIds,
-  loadRigDefaultVariableSetEnvironment,
-  mergeRigDefaultVariableSetEnvironment,
-  rigProviderImageContentHash,
-  withFrozenPersonalConnectionDelegations,
-  resolveSessionToolPolicy,
-  videoGenerationCapabilitiesForPolicy,
-} from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
-import {
-  admitVideoGenerationRequest,
-  managedVideoGenerationCredentialLease,
-  xaiVideoGenerationCredentialLease,
-  type VideoGenerationCredentialLease,
-} from "../video-generation-admission";
-import { VideoReferenceInputError } from "../video-reference-staging";
-import {
-  assertGitCredentialRenewalTransportUnchanged,
-  gitCredentialAuthorityForTurn,
-  loadWorkspaceEnvironmentForRunWithCredentials,
-  mintSandboxCodemodeToken,
-  mintRunGitCredentials,
-  mintRunGitCredentialBinding,
-  sandboxEnvironmentForRun,
-  type GitHubTokenMintAuthorization,
-  type MintedRunGitCredentials,
-} from "../environment";
-import { startGitCredentialRenewalLoop } from "../git-credential-renewal";
-import {
-  RUN_CREDENTIAL_EXPIRY_LEAD_MS,
-  startRunCredentialRenewalLoop,
-} from "../run-credential-renewal";
-import {
-  CODEMODE_TOKEN_EXPIRY_LEAD_MS,
-  startCodemodeTokenRenewalLoop,
-} from "../codemode-token-renewal";
-import {
-  bindRunCredentialResolver,
-  runCredentialAuthNeededPayloads,
-  runCredentialModelNote,
-} from "../run-credentials";
-import { withFirstPartyTools } from "../goals";
-import { rigProviderImageSourceImage } from "../packs";
 import { currentActivityContext } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "../types";
-import { type ResumedTurnSandbox } from "../../sandbox-resume";
-import { lazyProvisionEnabled } from "../../sandbox-routing";
 import {
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
   recordModelRequestPhase,
   recordCompanyBrainContributions,
-  recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
-import {
-  modelVisibleCompanyBrainSkillActivations,
-  summarizeCompanyBrainContributions,
-} from "../../model-context-contributions";
+import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
-import { executeGatewayImageGeneration } from "../gateway-image-generation";
-import { executeCodexImageGeneration } from "../codex-image-generation";
-import { resolveImageGenerationReferences } from "../image-generation-references";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
-import { VideoGenerationRejectedResult, type ToolAuthNeededPayload } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { shouldPublishToolAuthNeededForTurn } from "./admission";
 import { codexWorkspaceMetricKey } from "./codex";
-import { unavailableMcpOperationalContext } from "./errors";
 import {
   filterUnmaterializedSandboxFileDownloads,
-  runtimeResourcesForTurn,
   sandboxFileMaterializationOutcome,
-  assertGitHubResourcesRemainAuthorized,
-  assertFileResourcesRemainAuthorized,
-  assertGitHubTokenMintSelectionAuthorized,
   sandboxFileDownloadsForRun,
-  requiresSignedFileResourceDownloads,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
-import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
-import {
-  sandboxEstablishPolicyDecision,
-  ensureTurnModalRegistryImage,
-  sandboxArtifactRuntimeAdmission,
-} from "./sandbox-route";
-import {
-  computerToolModeForTurn,
-  structuredToolTransportForTurn,
-  shouldDeferNonEagerToolPreparation,
-  hostedWebSearchForTurn,
-  connectedSubscriptionImageGenerationAuthority,
-} from "./tool-policy";
+import { waitForTurnOperation } from "./sandbox-provision";
 import { createTurnContext } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
@@ -196,6 +72,9 @@ import {
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
 import { selectXaiTurnCapacity } from "./xai-capacity";
+import { prepareRunCredentials } from "./run-credentials";
+import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
+import { buildTurnAgent } from "./agent-build";
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
@@ -980,145 +859,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactionSummarizerFor,
       } = compactionPrep.ok;
 
-      const turnResources = mergeResourceRefs(session.resources, turn.resources);
-      // Repositories remain durable workspace inputs. File attachments do not:
-      // only files attached to this exact turn enter the sandbox manifest and
-      // eager materialization path. Historical file ids remain in canonical
-      // history/session metadata and are recoverable through the Files MCP.
-      const runtimeResources = runtimeResourcesForTurn(session.resources, turn.resources);
-      // Attach the first-party MCP server to EVERY turn, regardless of how/when
-      // the session was created (API, scheduled task, or a pre-existing session
-      // whose stored tools predate this). The server registration is then
-      // narrowed by the session's exact firstPartyMcpTools selection and
-      // authorization. Idempotent: mergeToolRefs dedupes if already present.
-      // Resolve the durable policy at the turn boundary. Workspace-default
-      // sessions follow the current configured MCP set,
-      // while explicit, inherited-fixed, and legacy sessions remain narrowed
-      // to their stored materialized allow-list.
-      const scheduledEffectiveMcpServerIds = (() => {
-        const value =
-          turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
-            ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
-            : null;
-        return Array.isArray(value) && value.every((id) => typeof id === "string")
-          ? [...new Set(value)].sort()
-          : null;
-      })();
-      const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
-      const resolvedToolPolicy = resolveSessionToolPolicy({
-        toolPolicy: session.toolPolicy,
-        sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
-        availableMcpServerIds: scheduledEffectiveMcpServerIds
-          ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
-          : [...currentMcpServerIds],
-        defaultMcpServerIds:
-          scheduledEffectiveMcpServerIds ??
-          defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+      const toolPolicy = await prepareTurnToolPolicy({
+        input,
+        db,
+        cancellationSignal,
+        connectionCredentials,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        capabilitySettings,
+        runSettings,
+        rigVersion,
+        workspaceRefs,
       });
-      const mcpAvailabilityNote = unavailableMcpOperationalContext({
-        droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
-        droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
-      });
-      const effectivePolicyTools = resolvedToolPolicy.toolRefs;
-      const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-      // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
-      // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
-      // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
-      // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
-      // additionally require the causal human frozen into the admitted turn.
-      const connectionScope = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-      };
-      const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
-      let workspaceVariableSet: Awaited<
-        ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
-      > = null;
-      const rigDefaultEnvironmentValues: Record<string, string> = {};
-      if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0) {
-        const variableSetAuthority = {
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          attemptId: input.attemptId,
-          executionGeneration: turn.executionGeneration,
-          initiator: turn.initiator,
-          initiatingHumanSubjectId: fileAuthoritySubjectId,
-        };
-        // A scheduled attempt may materialize only the exact generation frozen
-        // on its accepted occurrence; ordinary turns resolve to null.
-        const expectedVariableSetGeneration = async (
-          candidateVariableSetId: string,
-        ): Promise<number | null> =>
-          await getScheduledVariableSetExpectedGenerationForAttempt(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
-            initiatingHumanSubjectId: fileAuthoritySubjectId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: turn.executionGeneration,
-            variableSetId: candidateVariableSetId,
-          });
-        workspaceVariableSet = await waitForTurnOperation(
-          (async () =>
-            loadWorkspaceEnvironmentForRunWithCredentials(
-              db,
-              runSettings,
-              connectionScope,
-              session.variableSetId,
-              variableSetAuthority,
-              connectionCredentials?.sandboxSecrets,
-              session.variableSetId && connectionCredentials?.sandboxSecrets
-                ? { expectedGeneration: await expectedVariableSetGeneration(session.variableSetId) }
-                : {},
-            ))(),
-          cancellationSignal,
-          undefined,
-        );
-        // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
-        // variable sets and layer them BELOW the session's own set — the session's
-        // values WIN on any key collision. Loaded through the SAME host-secrets
-        // provider path as the session set (embedded-topology parity). Precedence
-        // WITHIN the rig defaults is listed order (a later set overrides an earlier
-        // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
-        // VERSION is frozen per session, so the SET of default variable sets is
-        // fixed for the session's life — the merged manifest env is therefore stable
-        // across the session's turns (the same guarantee the session's own variable
-        // set already relies on), keeping validateNoEnvironmentDelta empty.
-        Object.assign(
-          rigDefaultEnvironmentValues,
-          await loadRigDefaultVariableSetEnvironment(
-            rigDefaultVariableSetIds,
-            async (rigDefaultVariableSetId) =>
-              await waitForTurnOperation(
-                (async () =>
-                  loadWorkspaceEnvironmentForRunWithCredentials(
-                    db,
-                    runSettings,
-                    connectionScope,
-                    rigDefaultVariableSetId,
-                    variableSetAuthority,
-                    connectionCredentials?.sandboxSecrets,
-                    connectionCredentials?.sandboxSecrets
-                      ? {
-                          expectedGeneration:
-                            await expectedVariableSetGeneration(rigDefaultVariableSetId),
-                        }
-                      : {},
-                  ))(),
-                cancellationSignal,
-                undefined,
-              ),
-          ),
-        );
-      }
-      workspaceRefs.variableSetId = workspaceVariableSet?.id ?? "";
-      // Session set wins collisions with the rig defaults (explicit precedence).
-      const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
-        rigDefaultEnvironmentValues,
-        workspaceVariableSet?.values ?? {},
-      );
+      const {
+        turnResources,
+        runtimeResources,
+        mcpAvailabilityNote,
+        turnTools,
+        connectionScope,
+        workspaceVariableSet,
+        sandboxWorkspaceEnvironmentValues,
+      } = toolPolicy;
+
       const sandboxRoute = await resolveSandboxRoute({
         input,
         settings,
@@ -1137,568 +900,55 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         effectiveRunCredentialBackend,
       } = sandboxRoute;
 
-      const runCredentialResolver =
-        effectiveRunCredentialBackend === "none"
-          ? null
-          : await waitForTurnOperation(
-              bindRunCredentialResolver({
-                db,
-                connectionCredentials: connectionCredentials ?? null,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                session,
-                turn,
-                attemptId: input.attemptId,
-                effectiveSandboxBackend: effectiveRunCredentialBackend,
-                variableSet: workspaceVariableSet
-                  ? {
-                      id: workspaceVariableSet.id,
-                      name: workspaceVariableSet.name,
-                    }
-                  : null,
-              }),
-              cancellationSignal,
-              undefined,
-            );
-      const establishDecision = sandboxEstablishPolicyDecision({
-        lazyEnabled: lazyProvisionEnabled(settings),
-        machinePrimary,
-        sandboxBackend: runSettings.sandboxBackend,
-        hasRunCredentialResolver: runCredentialResolver !== null,
-        generatedVideoFileCount: requiredGeneratedVideoFiles.length,
-        hasSignedFileResources:
-          requiresSignedFileResourceDownloads(
-            runSettings,
-            activeSandboxBackend ?? groupBoxBackend,
-          ) && turn.resources.some((resource) => resource.kind === "file"),
-      });
-      const establishPolicy = establishDecision.policy;
-      recordTurnSandboxEstablishPolicy(observability, {
-        policy: establishDecision.policy,
-        reason: establishDecision.reason,
-        backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-      });
-      // Resolve once before model preparation so partial/auth-needed host state
-      // is available as bounded model context and reconnect UI even when an
-      // on-demand turn never provisions a box. Resolution alone performs no
-      // sandbox write or renewal; both paths reuse this exact material and the
-      // lazy path materializes it only inside its first-operation single-flight.
-      const initialRunCredentialMaterial = runCredentialResolver
-        ? await waitForTurnOperation(
-            runCredentialResolver.resolve({
-              purpose: "provision",
-              forceRefresh: false,
-            }),
-            cancellationSignal,
-            undefined,
-          )
-        : null;
-      if (initialRunCredentialMaterial) {
-        for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
-          renewals.publishedRunCredentialNotices.add(JSON.stringify(payload));
-          await eventing.publish!([{ type: "credential.auth_needed", payload }], true);
-        }
-      }
-      const runCredentialsNote = initialRunCredentialMaterial
-        ? runCredentialModelNote(initialRunCredentialMaterial)
-        : undefined;
-      throwIfTurnOperationCancelled(cancellationSignal);
-      await Promise.all([
-        waitForTurnOperation(
-          ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
-          cancellationSignal,
-          undefined,
-        ),
-        activeSandboxBackend !== "selfhosted"
-          ? assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)
-          : Promise.resolve(),
-        assertFileResourcesRemainAuthorized(
-          db,
-          input.accountId,
-          input.workspaceId,
-          fileAuthoritySubjectId,
-          turn.resources,
-        ),
-      ]);
-      // Computed exactly ONCE per turn and reused for BOTH the box manifest
-      // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
-      // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
-      // run-scoped git provider tokens on every call, so a second call would
-      // yield DIFFERENT token values and re-introduce the manifest-env delta the
-      // SDK's provided-session guard throws on — the box and the agent MUST share
-      // this same object. A machine-primary turn skips the (inert) token mint entirely
-      // (the machine uses its own git creds); the SAME base env still feeds the box +
-      // the agent, so env-parity holds.
-      // TOKEN-BROKER (B1): sandboxEnvironmentForRun now returns the STABLE manifest
-      // env (no rotating GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_* extraheader) PLUS the
-      // run-scoped git tokens minted ONCE per turn as provider seeds, with `gitToken`
-      // retained as the GitHub alias. The env feeds BOTH the box manifest AND the
-      // agent (env-parity, as before); tokens are threaded OFF-MANIFEST as
-      // clone-seeds to buildAgent (below) so the box never carries rotating values
-      // on its manifest. When a platform token IS minted, the host `gitCredentials`
-      // provider may supply it; unset still self-mints GitHub from settings.
-      // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
-      // uses its own git creds).
-      const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
-        await assertGitHubTokenMintSelectionAuthorized(
-          db,
-          input.workspaceId,
-          selection.installationId,
-          selection.repositoryIds,
-        );
-      };
-      // Git and MCP credentials share one lineage snapshot for this turn. A
-      // host that supplies both ports must never see two independently resolved
-      // roots for the same execution merely because the call sites are far apart.
-      const needsHostCredentialRoot = Boolean(
-        connectionCredentials?.gitCredentials || connectionCredentials?.mcpCredentials,
-      );
-      const hostCredentialRootSessionId = needsHostCredentialRoot
-        ? await getSessionRootId(db, input.workspaceId, input.sessionId)
-        : null;
-      if (needsHostCredentialRoot && !hostCredentialRootSessionId) {
-        throw new Error(`cannot resolve host credentials for missing session ${input.sessionId}`);
-      }
-      const gitCredentialAuthority =
-        connectionCredentials?.gitCredentials && hostCredentialRootSessionId
-          ? gitCredentialAuthorityForTurn({
-              sessionId: input.sessionId,
-              rootSessionId: hostCredentialRootSessionId,
-              attemptId: input.attemptId,
-              turn,
-            })
-          : undefined;
-      const codemodeAuthority = {
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-      };
-      const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
+      const runCredentials = await prepareRunCredentials({
+        input,
         settings,
-        runSettings,
-        activeSandboxBackend ?? groupBoxBackend,
-      );
-      const {
-        environment: baseSandboxEnvironment,
-        gitToken: sandboxGitToken,
-        gitTokens: sandboxGitTokens,
-        gitTokenExpiresAt: sandboxGitTokenExpiresAt,
-        gitCredentialBindings: sandboxGitCredentialBindings,
-        codemodeToken: sandboxCodemodeToken,
-        codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
-      } = await waitForTurnOperation(
-        sandboxEnvironmentForRun(
-          runSettings,
-          turnResources,
-          // Rig default sets merged BELOW the session set (session wins); rig-less
-          // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-          sandboxWorkspaceEnvironmentValues,
-          {
-            skipGitHubToken: activeSandboxBackend === "selfhosted",
-            codemodeDelivery:
-              activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
-            deferGitHubToken:
-              activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-            scope: connectionScope,
-            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-            gitCredentials: connectionCredentials?.gitCredentials,
-            authorizeGitHubTokenMint,
-            codemodeAuthority,
-          },
-        ),
+        db,
+        observability,
         cancellationSignal,
-        undefined,
-      );
-      // Reserved, image-owned paths win over workspace/session variables. The
-      // exact same merged object feeds both box manifest and agent declaration,
-      // preserving the no-environment-delta invariant.
-      const sandboxEnvironment = sandboxArtifactRuntime.available
-        ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
-        : baseSandboxEnvironment;
-
-      // One mutable in-memory bearer cell serves every Connected Machine route
-      // in this attempt. SelfhostedSession snapshots it into each exact exec
-      // request; it never enters the manifest, argv, filesystem, RunState, or
-      // serialized session state. Managed renewal updates the same cell so a
-      // later mid-turn swap sees the fresh bearer too.
-      const codemodeTokenState = sandboxCodemodeToken ? { token: sandboxCodemodeToken } : undefined;
-      const transientCodemodeEnvironment = codemodeTokenState
-        ? (): Readonly<Record<string, string>> => ({
-            OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(runSettings, input.workspaceId),
-            OPENGENI_CODEMODE_TOKEN: codemodeTokenState.token,
-            ...(runSettings.ogtoolPackageSpec
-              ? { OPENGENI_OGTOOL_PACKAGE_SPEC: runSettings.ogtoolPackageSpec }
-              : {}),
-          })
-        : undefined;
-
-      const sandboxCodemodeTokenFile = sandboxCodemodeToken
-        ? codemodeTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
-        : undefined;
-
-      const initialGitCredentials: MintedRunGitCredentials | undefined =
-        sandboxGitCredentialBindings
-          ? {
-              bindings: sandboxGitCredentialBindings,
-              gitTokens: sandboxGitTokens ?? {},
-              expiresAt: sandboxGitTokenExpiresAt ?? {},
-            }
-          : undefined;
-      // Lazy cloud provision mints the run-scoped git token while Modal create
-      // runs. Chat-only turns never call get(), so this stays unstarted there.
-      let runGitCredentialsMint: Promise<MintedRunGitCredentials | undefined> | undefined;
-      const startRunGitCredentialsMint = (): Promise<MintedRunGitCredentials | undefined> => {
-        if (activeSandboxBackend === "selfhosted") {
-          return Promise.resolve(undefined);
-        }
-        runGitCredentialsMint ??= waitForTurnOperation(
-          mintRunGitCredentials(runSettings, turnResources, {
-            scope: connectionScope,
-            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-            gitCredentials: connectionCredentials?.gitCredentials,
-            authorizeGitHubTokenMint,
-          }),
-          cancellationSignal,
-          undefined,
-        );
-        return runGitCredentialsMint;
-      };
-      const attachGitCredentialRenewal = async (
-        tokenSession: GitCredentialTokenWriterSession,
-        initial: MintedRunGitCredentials | undefined,
-        initialSandbox?: ResumedTurnSandbox,
-      ): Promise<void> => {
-        if (!initial || initial.bindings.length === 0) return;
-        const previous = renewals.gitCredentialRenewals;
-        renewals.gitCredentialRenewals = [];
-        await Promise.all(previous.map(async (controller) => await controller.stop()));
-        if (renewals.gitCredentialRenewalClosed) return;
-
-        const controllers = initial.bindings.map((initialBinding) => {
-          let pendingBinding: typeof initialBinding | undefined;
-          return startGitCredentialRenewalLoop({
-            expectedProviders: [initialBinding.provider],
-            initialExpiresAt: initialBinding.expiresAt
-              ? { [initialBinding.provider]: initialBinding.expiresAt }
-              : {},
-            mint: async () => {
-              const binding = await mintRunGitCredentialBinding(
-                runSettings,
-                turnResources,
-                initialBinding.provider,
-                initialBinding.credentialBindingId,
-                {
-                  scope: connectionScope,
-                  ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-                  gitCredentials: connectionCredentials?.gitCredentials,
-                  authorizeGitHubTokenMint,
-                },
-              );
-              if (binding) {
-                assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
-              }
-              pendingBinding = binding;
-              return binding
-                ? {
-                    bindings: [binding],
-                    gitTokens: { [binding.provider]: binding.token },
-                    expiresAt: binding.expiresAt ? { [binding.provider]: binding.expiresAt } : {},
-                  }
-                : undefined;
-            },
-            write: async () => {
-              if (!pendingBinding) {
-                throw new Error("credential renewal produced no binding token");
-              }
-              const runAs = sandboxRunAs(runSettings);
-              const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
-              if (!targetSandbox) {
-                throw new Error("Git credential renewal has no exact sandbox lease target");
-              }
-              await runWorkspaceMutationForSandbox(
-                targetSandbox,
-                "gitCredentialRenewal",
-                async () =>
-                  await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
-                    ...(runAs ? { runAs } : {}),
-                    ...(eventing.toolCancellationFenceRef.current
-                      ? {
-                          commandRunner:
-                            eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                              eventing.toolCancellationFenceRef.current,
-                            ),
-                        }
-                      : {}),
-                  }),
-              );
-            },
-            onSuccess: ({ providers: renewedProviders }) => {
-              for (const provider of renewedProviders) {
-                observability.incrementCounter({
-                  name: "opengeni_git_credential_renewals_total",
-                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                  labels: { provider, outcome: "completed" },
-                });
-              }
-            },
-            onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
-              for (const provider of failedProviders) {
-                observability.incrementCounter({
-                  name: "opengeni_git_credential_renewals_total",
-                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                  labels: { provider, outcome: "error" },
-                });
-              }
-              observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
-                sessionId: input.sessionId,
-                turnId: attempt.turnId,
-                providers: failedProviders.join(","),
-                errorClass,
-                retryDelayMs,
-              });
-            },
-          });
-        });
-        if (renewals.gitCredentialRenewalClosed) {
-          await Promise.all(controllers.map(async (controller) => await controller.stop()));
-          return;
-        }
-        renewals.gitCredentialRenewals = controllers;
-      };
-
-      const attachCodemodeTokenRenewal = async (
-        tokenSession?: CodemodeTokenWriterSession,
-        initialExpiresAt = sandboxCodemodeTokenExpiresAt,
-        initialSandbox?: ResumedTurnSandbox,
-      ): Promise<void> => {
-        if (!codemodeTokenState || !initialExpiresAt) return;
-        const previous = renewals.codemodeTokenRenewal;
-        renewals.codemodeTokenRenewal = null;
-        await previous?.stop();
-        if (renewals.codemodeTokenRenewalClosed) return;
-
-        const mint = async () => {
-          const material = await mintSandboxCodemodeToken(
-            runSettings,
-            connectionScope,
-            codemodeAuthority,
-          );
-          return material;
-        };
-        const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
-          if (tokenSession) {
-            const runAs = sandboxRunAs(runSettings);
-            const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
-            if (!targetSandbox) {
-              throw new Error("Codemode token renewal has no exact sandbox lease target");
-            }
-            await runWorkspaceMutationForSandbox(
-              targetSandbox,
-              "codemodeTokenRenewal",
-              async () =>
-                await refreshCodemodeTokenFile(tokenSession, material.token, {
-                  ...(runAs ? { runAs } : {}),
-                  ...(sandboxCodemodeTokenFile
-                    ? {
-                        tokenFile: sandboxCodemodeTokenFile,
-                        legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
-                      }
-                    : {}),
-                  ...(eventing.toolCancellationFenceRef.current
-                    ? {
-                        commandRunner:
-                          eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            eventing.toolCancellationFenceRef.current,
-                          ),
-                      }
-                    : {}),
-                }),
-            );
-          }
-          codemodeTokenState.token = material.token;
-        };
-        let renewalExpiresAt = initialExpiresAt;
-        if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
-          const fresh = await mint();
-          if (!fresh) {
-            throw new Error("Codemode token mint became unavailable during sandbox setup");
-          }
-          await write(fresh);
-          renewalExpiresAt = fresh.expiresAt;
-        }
-        const controller = startCodemodeTokenRenewalLoop({
-          initialExpiresAt: renewalExpiresAt,
-          mint,
-          write,
-          onSuccess: () => {
-            observability.incrementCounter({
-              name: "opengeni_codemode_token_renewals_total",
-              help: "Sandbox Codemode token renewal attempts by outcome.",
-              labels: { outcome: "completed" },
-            });
-          },
-          onFailure: ({ retryDelayMs, errorClass }) => {
-            observability.incrementCounter({
-              name: "opengeni_codemode_token_renewals_total",
-              help: "Sandbox Codemode token renewal attempts by outcome.",
-              labels: { outcome: "error" },
-            });
-            observability.warn("Sandbox Codemode token renewal failed; retry scheduled", {
-              sessionId: input.sessionId,
-              turnId: attempt.turnId,
-              errorClass,
-              retryDelayMs,
-            });
-          },
-        });
-        if (renewals.codemodeTokenRenewalClosed) {
-          await controller.stop();
-          return;
-        }
-        renewals.codemodeTokenRenewal = controller;
-      };
-
-      // A Connected Machine needs renewal, but renewal is purely worker-local:
-      // starting this loop performs no control-plane or machine operation.
-      if (activeSandboxBackend === "selfhosted") {
-        await attachCodemodeTokenRenewal();
-      }
-
-      const attachRunCredentialRenewal = async (
-        credentialSession: RunCredentialCommandSession,
-        initialMaterial: NormalizedRunCredentialMaterial | null,
-        initialSandbox?: ResumedTurnSandbox,
-      ): Promise<void> => {
-        if (!runCredentialResolver) return;
-        const previous = renewals.runCredentialRenewal;
-        renewals.runCredentialRenewal = null;
-        await previous?.stop();
-        if (renewals.runCredentialRenewalClosed) return;
-        renewals.runCredentialSession = credentialSession;
-
-        const requireTargetSandbox = (): ResumedTurnSandbox => {
-          const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
-          if (!targetSandbox) {
-            throw new Error("Run credential mutation has no exact sandbox lease target");
-          }
-          return targetSandbox;
-        };
-
-        if (!initialMaterial) {
-          await runWorkspaceMutationForSandbox(
-            requireTargetSandbox(),
-            "runCredentialClear",
-            async () =>
-              await clearRunCredentials(
-                credentialSession,
-                input.sessionId,
-                eventing.toolCancellationFenceRef.current
-                  ? eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      eventing.toolCancellationFenceRef.current,
-                    )
-                  : undefined,
-              ),
-          );
-          return;
-        }
-
-        const write = async (
-          material: NormalizedRunCredentialMaterial | null,
-          pruneOtherAttempts = false,
-        ): Promise<void> => {
-          if (!material) {
-            await runWorkspaceMutationForSandbox(
-              requireTargetSandbox(),
-              "runCredentialAttemptClear",
-              async () =>
-                await clearRunCredentialsForAttempt(credentialSession, {
-                  sessionId: input.sessionId,
-                  attemptId: input.attemptId,
-                  executionGeneration: attempt.executionGeneration,
-                }),
-            );
-            return;
-          }
-
-          await runWorkspaceMutationForSandbox(
-            requireTargetSandbox(),
-            "runCredentialMaterialization",
-            async () =>
-              await materializeRunCredentials(credentialSession, material, {
-                sessionId: input.sessionId,
-                attemptId: input.attemptId,
-                executionGeneration: attempt.executionGeneration,
-                ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
-                ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
-                ...(material.authNeeded.length > 0 &&
-                Object.keys(material.environment).length === 0 &&
-                material.files.length === 0
-                  ? { prunePreviousGenerations: true }
-                  : {}),
-                ...(eventing.toolCancellationFenceRef.current
-                  ? {
-                      commandRunner:
-                        eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                          eventing.toolCancellationFenceRef.current,
-                        ),
-                    }
-                  : {}),
-              }),
-          );
-          for (const payload of runCredentialAuthNeededPayloads(material)) {
-            const key = JSON.stringify(payload);
-            if (renewals.publishedRunCredentialNotices.has(key)) continue;
-            renewals.publishedRunCredentialNotices.add(key);
-            await eventing.publish!([{ type: "credential.auth_needed", payload }], true);
-          }
-        };
-
-        const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
-        const seed =
-          initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
-            ? await runCredentialResolver.resolve({
-                purpose: "provision",
-                forceRefresh: true,
-              })
-            : initialMaterial;
-        await write(seed, true);
-        if (renewals.runCredentialRenewalClosed) return;
-        const controller = startRunCredentialRenewalLoop({
-          initialExpiresAt: seed?.expiresAt ?? null,
-          resolve: async () =>
-            await runCredentialResolver.resolve({
-              purpose: "renewal",
-              forceRefresh: true,
-            }),
-          write: async (material) => await write(material),
-          onSuccess: ({ authNeeded }) => {
-            observability.incrementCounter({
-              name: "opengeni_run_credential_renewals_total",
-              help: "Host-managed run credential renewal attempts by outcome.",
-              labels: { outcome: authNeeded ? "auth_needed" : "completed" },
-            });
-          },
-          onFailure: ({ retryDelayMs, errorClass }) => {
-            observability.incrementCounter({
-              name: "opengeni_run_credential_renewals_total",
-              help: "Host-managed run credential renewal attempts by outcome.",
-              labels: { outcome: "error" },
-            });
-            observability.warn("Host run credential renewal failed; retry scheduled", {
-              sessionId: input.sessionId,
-              turnId: attempt.turnId,
-              errorClass,
-              retryDelayMs,
-            });
-          },
-        });
-        if (renewals.runCredentialRenewalClosed) {
-          await controller.stop();
-          return;
-        }
-        renewals.runCredentialRenewal = controller;
-      };
+        connectionCredentials,
+        eventing,
+        attempt,
+        renewals,
+        sandboxState,
+        sandboxRuntime,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        runSettings,
+        workspaceVariableSet,
+        turnResources,
+        requiredGeneratedVideoFiles,
+        machinePrimary,
+        activeSandboxBackend,
+        groupBoxBackend,
+        sandboxCreationBackend,
+        effectiveRunCredentialBackend,
+        sandboxWorkspaceEnvironmentValues,
+        connectionScope,
+        runWorkspaceMutationForSandbox,
+      });
+      const {
+        runCredentialResolver,
+        establishPolicy,
+        initialRunCredentialMaterial,
+        runCredentialsNote,
+        hostCredentialRootSessionId,
+        codemodeAuthority,
+        sandboxArtifactRuntime,
+        sandboxEnvironment,
+        sandboxGitToken,
+        sandboxGitTokens,
+        sandboxGitCredentialBindings,
+        sandboxCodemodeToken,
+        sandboxCodemodeTokenExpiresAt,
+        transientCodemodeEnvironment,
+        initialGitCredentials,
+        startRunGitCredentialsMint,
+        attachGitCredentialRenewal,
+        attachCodemodeTokenRenewal,
+        attachRunCredentialRenewal,
+      } = runCredentials;
 
       await establishTurnSandbox({
         ...sandboxRoute,
@@ -1801,971 +1051,111 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ]),
         ).values(),
       ];
-      const toolContextPreparationStartedAt = performance.now();
-      throwIfWorkerShuttingDown();
-      throwIfTurnCancelled();
-      const mcpCredentialRootSessionId =
-        connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
-          ? hostCredentialRootSessionId
-          : input.sessionId;
-      // Connection credentials and the optional Apps credential are resolved
-      // independently. Inference auth is never an Apps fallback.
-      const rawResolveCredential = connectionTokenResolverForTurn({
+      const toolRuntime = await prepareTurnToolRuntime({
+        input,
         db,
-        settings: runSettings,
-        connectionCredentials: connectionCredentials ?? null,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        rootSessionId: mcpCredentialRootSessionId,
-        attemptId: input.attemptId,
-        turn,
+        bus,
+        runtime,
+        objectStorage,
         observability,
-      });
-      const personalConnectionDelegations = turn.personalConnectionDelegations;
-      const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
-      const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
-        const existing = delegatedMembershipChecks.get(subjectId);
-        if (existing) return await existing;
-        const check = getWorkspaceGrant(db, subjectId, input.workspaceId).then(Boolean);
-        delegatedMembershipChecks.set(subjectId, check);
-        return await check;
-      };
-      const resolveFrozenCredential = withFrozenPersonalConnectionDelegations({
-        resolveCredential: rawResolveCredential,
-        settings: runSettings,
-        personalConnectionDelegations,
-        ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
-      });
-      const resolveCredential: typeof rawResolveCredential = async (request) => {
-        const result = await resolveFrozenCredential(request);
-        if (result.status === "ok") {
-        }
-        return result;
-      };
-      const connectorActionIdentity = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: attempt.executionGeneration,
-        initiator: {
-          kind: turn.initiator.kind,
-          subjectId: turn.initiator.subjectId,
-        },
-      } as const;
-      const googleDrivePublicationTarget = objectStorage
-        ? await resolveGoogleDrivePublicationTarget(
-            db,
-            input.workspaceId,
-            personalConnectionDelegations,
-          )
-        : null;
-      const googleDrivePublicationTool =
-        objectStorage && googleDrivePublicationTarget
-          ? createGoogleDrivePublicationAttemptTool({
-              db,
-              objectStorage,
-              identity: connectorActionIdentity,
-              subjectId: googleDrivePublicationTarget.ownerSubjectId,
-              target: googleDrivePublicationTarget,
-              resolveCredential,
-              ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-            })
-          : null;
-      const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
-        if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
-          return;
-        }
-        await eventing.publish!([{ type: "tool.auth_needed", payload }], true);
-      };
-      const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
-      const localMcpServers = buildApiIntegrationServersForTurn({
-        settings: runSettings,
-        integrations: installedApiIntegrations.filter((integration) =>
-          selectedApiIntegrationServerIds.has(integration.serverId),
-        ),
-        authority: {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          rootSessionId: session.rootSessionId,
-          turnId: turn.id,
-          attemptId: input.attemptId,
-          ...(credentialSubjectId ? { initiatingSubjectId: credentialSubjectId } : {}),
-        },
-        resolveCredential,
-        onAuthNeeded: publishToolAuthNeeded,
-      });
-      const codexAppsAuth = codexAppsCredentialId
-        ? (() => {
-            const resolver = buildCodexTokenResolver(
-              db,
-              runSettings,
-              input.workspaceId,
-              codexAppsCredentialId,
-            );
-            return {
-              clientVersion: CODEX_CLIENT_VERSION,
-              withAuthorization: async <T>(
-                use: (token: {
-                  accessToken: string;
-                  chatgptAccountId: string | null;
-                }) => Promise<T>,
-              ): Promise<T> => {
-                const snapshot = await resolver.getToken();
-
-                return await withCodexAppsRequestAuthorization(
-                  db,
-                  {
-                    workspaceId: input.workspaceId,
-                    credentialId: codexAppsCredentialId,
-                  },
-                  async () => await use(snapshot),
-                );
-              },
-            };
-          })()
-        : undefined;
-      const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+        cancellationSignal,
+        connectionCredentials,
+        eventing,
+        attempt,
+        sandboxState,
+        media,
+        toolResultSpill,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        capabilitySettings,
+        installedApiIntegrations,
+        codexAppsCredentialId,
+        turnExecutionPolicy,
+        trigger,
         runSettings,
-        session.firstPartyMcpTools,
-      );
-      const googleDrivePublicationAllowed =
-        selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
-        selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
-        (!session.firstPartyMcpPermissions?.length ||
-          (session.firstPartyMcpPermissions.includes("artifacts:read") &&
-            session.firstPartyMcpPermissions.includes("artifacts:publish")));
-      const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
-        googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
-          ? [
-              {
-                modelName: googleDrivePublicationTool.modelName,
-                call: (approvalId, arguments_) =>
-                  googleDrivePublicationConnectorCall(
-                    googleDrivePublicationTarget,
-                    arguments_,
-                    approvalId,
-                  ),
-              },
-            ]
-          : [];
-      const attemptToolDefinitions = [
-        ...createFirstPartyInteractionAttemptToolDefinitions({
-          settings: runSettings,
-          scope: {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-          },
-          ...(session.firstPartyMcpPermissions?.length
-            ? { permissions: session.firstPartyMcpPermissions }
-            : {}),
-          selectedTools: selectedFirstPartyMcpTools,
-          subjectId: "worker:first-party-mcp",
-          subjectLabel: "OpenGeni worker",
-          ...(interactionInterventionResume
-            ? { interventionResume: interactionInterventionResume }
-            : {}),
-        }),
-        ...(googleDrivePublicationTool && googleDrivePublicationAllowed
-          ? [googleDrivePublicationTool]
-          : []),
-      ];
-      recordTurnStartupPhase(observability, {
-        phase: "tool_context_preparation",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: "completed",
-        durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
-        count: turnTools.length,
-      });
-      await eventing.publish!([
-        {
-          type: "turn.startup.phase.started",
-          payload: { phase: "tools" },
-        },
-      ]);
-      const toolPreparationStartedAt = performance.now();
-      let toolPreparationOutcome: "completed" | "failed" = "completed";
-      const progressiveDisclosureEnabled =
-        lazyToolTransport === "codex_native"
-          ? runSettings.codexToolSearchEnabled
-          : runSettings.lazyToolSearchEnabled;
-      const deferNonEagerToolPreparation = shouldDeferNonEagerToolPreparation({
         lazyToolTransport,
-        progressiveDisclosureEnabled,
-        artifactRuntimeAvailable: sandboxArtifactRuntime.available,
-        triggerKind: input.trigger.kind,
-        triggerType: trigger.type,
+        turnTools,
+        connectionScope,
+        hostCredentialRootSessionId,
+        sandboxArtifactRuntime,
+        activeSandboxBackend,
+        groupBoxBackend,
+        routingOn,
+        runtimeCancellationSignal,
+        credentialSubjectId,
+        interactionInterventionResume,
+        runWorkspaceMutationForSandbox,
+        throwIfWorkerShuttingDown,
+        throwIfTurnCancelled,
       });
-      const materializeConnectorAttachments = async (
-        request: ConnectorAttachmentMaterializationRequest,
-      ) => {
-        throwIfWorkerShuttingDown();
-        throwIfTurnCancelled();
-        let sandbox = sandboxState.resolvedSandbox;
-        if (!sandbox && sandboxState.turnSandboxProvisioner) {
-          sandbox = await sandboxState.turnSandboxProvisioner.get();
-        }
-        const sessionForImport = (sandboxState.lazyOwnedSandbox?.session ??
-          sandbox?.established.session ??
-          media.sdkOwnedSandboxSession) as ChannelASession | null;
-        if (!sessionForImport) {
-          throw new Error("Connector attachment sandbox is unavailable");
-        }
-        const runAs = sandboxRunAs(runSettings);
-        const channel = new SandboxChannelAService({
-          session: sessionForImport,
-          workspaceRoot: "/workspace",
-          leaseEpoch: sandbox?.leaseEpoch ?? 0,
-          emit: async (events) => {
-            await eventing.publish?.(events, true);
-          },
-          ...(runAs ? { runAs } : {}),
-        });
-        return await materializeConnectorAttachmentsInChannel(channel, request, {
-          runMutation: async (mutation) => {
-            if (sandbox && !routingOn) {
-              return await runWorkspaceMutationForSandbox(
-                sandbox,
-                "connectorAttachmentMaterialization",
-                mutation,
-              );
-            }
-            return await mutation();
-          },
-        });
-      };
-      try {
-        eventing.preparedTools = await waitForTurnOperation(
-          runtime.prepareTools(runSettings, turnTools, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            // Sign the calling turn into the first-party token so tools classify
-            // the caller by its own identity (sacred-pause guard), not the racy
-            // live active pointer.
-            ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-            subjectId: "worker:first-party-mcp",
-            subjectLabel: "OpenGeni worker",
-            ...(credentialSubjectId ? { credentialSubjectId } : {}),
-            ...(codexAppsAuth ? { codexAppsAuth } : {}),
-            resolveCredential,
-            onAuthNeeded: publishToolAuthNeeded,
-            materializeConnectorAttachments,
-            spillOversizedModelToolResult: async ({ operationId, result }) =>
-              await toolResultSpill.spill({ operationId, result }),
-            localMcpServers,
-            ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
-            onPreparationPhase: (measurement) => {
-              recordTurnStartupPhase(observability, {
-                phase: `tool_${measurement.phase}`,
-                provider: turnExecutionPolicy.providerId,
-                backend: activeSandboxBackend ?? groupBoxBackend,
-                outcome: measurement.outcome,
-                durationSeconds: measurement.durationSeconds,
-                count: turnTools.length,
-              });
-            },
-            onAttemptToolCatalog: async (catalog) => {
-              await persistAttemptToolCatalog(db, catalog);
-            },
-            // Manager-style sessions carry a creation-validated permission set
-            // for their first-party MCP token; null keeps the fixed default.
-            ...(session.firstPartyMcpPermissions?.length
-              ? { firstPartyPermissions: session.firstPartyMcpPermissions }
-              : {}),
-            firstPartyTools: selectedFirstPartyMcpTools,
-            nestedAgentDepth: session.nestedAgentDepth,
-            effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
-            attemptToolDefinitions,
-            ...(googleDrivePublicationTarget && googleDrivePublicationAllowed
-              ? {
-                  attemptToolAuthorize: async ({ call }) => {
-                    if (
-                      call.caller.kind !== "codemode" ||
-                      call.identity.serverId !== "google-drive-publishing" ||
-                      call.identity.toolName !== "google_drive_publish_file"
-                    ) {
-                      return;
-                    }
-                    await authorizeGoogleDrivePublicationAttempt({
-                      db,
-                      identity: connectorActionIdentity,
-                      target: googleDrivePublicationTarget,
-                      approvalId: call.operationId,
-                      arguments: call.arguments,
-                    });
-                  },
-                }
-              : {}),
-          }),
-          cancellationSignal,
-          async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
-        );
-      } catch (error) {
-        toolPreparationOutcome = "failed";
-        throw error;
-      } finally {
-        const toolPreparationDurationMs = performance.now() - toolPreparationStartedAt;
-        recordTurnStartupPhase(observability, {
-          phase: "tool_preparation",
-          provider: turnExecutionPolicy.providerId,
-          backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: toolPreparationOutcome,
-          durationSeconds: toolPreparationDurationMs / 1_000,
-          count: turnTools.length,
-        });
-        await eventing.publish!([
-          {
-            type:
-              toolPreparationOutcome === "completed"
-                ? "turn.startup.phase.completed"
-                : "turn.startup.phase.failed",
-            payload: {
-              phase: "tools",
-              durationMs: Math.max(0, Math.round(toolPreparationDurationMs)),
-            },
-          },
-        ]);
-      }
-      const postToolPreparationStartedAt = performance.now();
-      const activatePreparedToolEnvironment = (
-        tools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>>,
-      ): void => {
-        if (
-          eventing.toolPreparationClosing ||
-          !attempt.turnId ||
-          !tools.attemptToolEnvironment ||
-          eventing.codemodeDispatcher
-        ) {
-          return;
-        }
-        eventing.codemodeDispatcher = new CodemodeAttemptDispatcher(
-          db,
-          bus,
-          tools.attemptToolEnvironment,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: attempt.turnId,
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-          },
-          cancellationSignal,
-        );
-        eventing.codemodeDispatcher.start();
-      };
-      if (eventing.preparedTools.ready) {
-        eventing.toolPreparationReady = eventing.preparedTools.ready.then((tools) => {
-          activatePreparedToolEnvironment(tools);
-        });
-      } else {
-        activatePreparedToolEnvironment(eventing.preparedTools);
-      }
-      // Genesis turn = the first user turn (no assistant history reconciled
-      // yet). Durable Postgres state (countSessionHistoryItems includes
-      // superseded rows after compaction), NOT a workflow counter (turnsThisRun
-      // resets on continueAsNew). Drives the one-shot title hint appended to the
-      // agent's instructions; later attempts and goal continuations never match.
-      const isGenesisTurn =
-        attempt.triggerType === "user.message" &&
-        (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
-      // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
-      // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
-      // may have been swapped to a connected machine (active_sandbox_id → a
-      // selfhosted lease). buildAgent's repository-clone lifecycle hook keys off
-      // the EFFECTIVE backend; if we let it default to the home backend it would
-      // `git clone` a private GitHub-App repo onto the user's REAL disk. So pass
-      // "selfhosted" through when the active sandbox is a connected machine;
-      // otherwise leave it undefined so buildAgent defaults to the home backend
-      // (byte-for-byte unchanged cloud behavior). `activeSandboxBackend` was
-      // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
-      // tested gate) and is reused here — resolving once is correct because the
-      // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
-      // buildAgent's option key is `workspaceEnvironment` (internal runtime
-      // symbol; the product concept is a variable set). Built as a TYPED const —
-      // a direct literal assignment to Pick<BuildAgentOptions,...> IS excess-
-      // property-checked, so a wrong key fails tsc. A bare conditional spread
-      // inside the options literal is NOT checked, which is exactly how the M1
-      // key regression (workspaceVariableSet vs workspaceEnvironment) slipped
-      // through and silently dropped the variable-set instructions block.
-      const workspaceEnvironmentOption: Pick<BuildAgentOptions, "workspaceEnvironment"> =
-        workspaceVariableSet
-          ? {
-              workspaceEnvironment: {
-                name: workspaceVariableSet.name,
-                description: workspaceVariableSet.description,
-                variableNames: Object.keys(workspaceVariableSet.values),
-              },
-            }
-          : {};
-      const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
-      const resolveImageReferences = async (
-        references: Parameters<typeof resolveImageGenerationReferences>[0]["references"],
-      ) =>
-        await resolveImageGenerationReferences({
-          db,
-          objectStorage: objectStorage!,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: fileAuthoritySubjectId,
-          references,
-          readSandboxFile: async (path, maxBytes) => {
-            const imageReferenceSession = (sandboxState.setupBoxSession ??
-              media.sdkOwnedSandboxSession) as ChannelASession | null;
-            if (!imageReferenceSession) {
-              throw new Error("Sandbox image reference is unavailable");
-            }
-            const relativePath = path.slice("/workspace/".length);
-            const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
-            const channel = new SandboxChannelAService({
-              session: imageReferenceSession,
-              workspaceRoot: "/workspace",
-              leaseEpoch: sandboxState.resolvedSandbox?.leaseEpoch ?? 0,
-              ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
-            });
-            const read = await channel.fsRead({
-              path: relativePath,
-              encoding: "base64",
-              maxBytes,
-            });
-            if (read.truncated) throw new Error("Sandbox image reference exceeds the byte limit");
-            return Uint8Array.from(Buffer.from(read.content, "base64"));
-          },
-        });
-      const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
-        // Never expose a paid image operation unless its permanent artifact can
-        // be committed. Failing after provider execution would leave an
-        // unrecoverable outcome-unknown operation with no user-visible image.
-        if (!objectStorage) return {};
-        if (nativeImageProviderBinding) {
-          media.nativeImageGenerationRetention = {
-            ...nativeImageProviderBinding,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-          };
-          return { imageGeneration: { kind: "native_hosted" } };
-        }
+      const {
+        googleDriveConnectorBindings,
+        connectorActionIdentity,
+        postToolPreparationStartedAt,
+      } = toolRuntime;
 
-        if (resolvedModel?.provider.kind === "codex-subscription") {
-          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
-            codexContext,
-            providerTurn.effectiveCodexCredentialId,
-          );
-          if (!imageAuthority) return {};
-          return {
-            imageGeneration: {
-              kind: "provider_adapter",
-              execute: async ({ prompt, references }, { toolCallId }) => {
-                const resolvedReferences = await resolveImageReferences(references);
-                const receipt = await executeCodexImageGeneration({
-                  db,
-                  objectStorage,
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                  attemptId: input.attemptId,
-                  toolCallId,
-                  prompt,
-                  references: resolvedReferences,
-                  credentialId: imageAuthority.credentialId,
-                  codexContext: imageAuthority.credentialContext,
-                  ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-                });
-                media.rememberGeneratedImageCreatedThisTurn(receipt);
-                await media.materializeGeneratedImage(receipt);
-                return receipt;
-              },
-            },
-          };
-        }
-
-        if (resolvedModel?.provider.kind === "xai-subscription") {
-          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
-            providerTurn.xaiRequestContext,
-            providerTurn.effectiveXaiCredentialId,
-          );
-          if (!imageAuthority) return {};
-          return {
-            imageGeneration: {
-              kind: "provider_adapter",
-              execute: async ({ prompt, references }, { toolCallId }) => {
-                const resolvedReferences = await resolveImageReferences(references);
-                const receipt = await executeXaiSubscriptionImageGeneration({
-                  db,
-                  objectStorage,
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                  attemptId: input.attemptId,
-                  toolCallId,
-                  prompt,
-                  references: resolvedReferences,
-                  credentialId: imageAuthority.credentialId,
-                  xaiContext: imageAuthority.credentialContext,
-                  ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-                });
-                media.rememberGeneratedImageCreatedThisTurn(receipt);
-                await media.materializeGeneratedImage(receipt);
-                return receipt;
-              },
-            },
-          };
-        }
-
-        const gatewayResolution = resolveModelProvider(
-          capabilitySettings,
-          WORKSPACE_GATEWAY_PROVIDER_ID,
-        );
-        const gateway = gatewayResolution?.provider;
-        if (gateway?.kind !== "vercel-gateway-workspace" || !gateway.apiKey) return {};
-        const gatewayApiKey = gateway.apiKey;
-        return {
-          imageGeneration: {
-            kind: "provider_adapter",
-            execute: async ({ prompt, references }, { toolCallId }) => {
-              const resolvedReferences = await resolveImageReferences(references);
-              const receipt = await executeGatewayImageGeneration({
-                db,
-                objectStorage,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                apiKey: gatewayApiKey,
-                modelId: capabilitySettings.imageGenerationModel,
-                prompt,
-                references: resolvedReferences,
-                toolCallId,
-                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-              });
-              media.rememberGeneratedImageCreatedThisTurn(receipt);
-              await media.materializeGeneratedImage(receipt);
-              return receipt;
-            },
-          },
-        };
-      })();
-      const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
-      const videoGenerationEnabled =
-        videoGenerationPolicy.defaultModelId !== null &&
-        videoGenerationPolicy.enabledModelIds.length > 0;
-      let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-      if (objectStorage && videoGenerationEnabled) {
-        if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
-          videoGenerationCredential = managedVideoGenerationCredentialLease(
-            eventing.modelRunSettings,
-          );
-        } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
-          const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
-            db,
-            eventing.modelRunSettings,
-            input.workspaceId,
-          );
-          if (workspaceCredential) {
-            videoGenerationCredential = {
-              fundingSource: "workspace_gateway",
-              ...workspaceCredential,
-            };
-          }
-        } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
-          const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
-          const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-          if (encryptionKey && subjectId) {
-            const authoritySnapshot =
-              providerTurn.xaiAuthoritySnapshot ??
-              (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-                workspaceId: input.workspaceId,
-                subjectId,
-              }));
-            const pin = await getXaiSessionAccountPin(db, {
-              workspaceId: input.workspaceId,
-              subjectId,
-              sessionId: input.sessionId,
-              authoritySnapshot,
-            });
-            const selected = providerTurn.effectiveXaiCredentialId
-              ? {
-                  credentialId: providerTurn.effectiveXaiCredentialId,
-                  rotationEnabled: providerTurn.xaiRotationEnabled,
-                }
-              : await selectXaiCredentialForUse(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  subjectId,
-                  authoritySnapshot,
-                  shardKey: input.sessionId,
-                  pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-                  pinSource:
-                    pin?.pinSource === "manual" || pin?.pinSource === "policy"
-                      ? pin.pinSource
-                      : null,
-                });
-            if (selected.credentialId) {
-              if (
-                selected.rotationEnabled &&
-                pin?.pinSource !== "manual" &&
-                pin?.pinnedCredentialId !== selected.credentialId
-              ) {
-                await setXaiSessionAccountPin(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  subjectId,
-                  sessionId: input.sessionId,
-                  authoritySnapshot,
-                  credentialId: selected.credentialId,
-                  pinSource: "policy",
-                  expectedVersion: pin?.version ?? null,
-                }).catch((error: unknown) => {
-                  if (error instanceof Error && error.message === "xAI session pin changed") return;
-                  throw error;
-                });
-              }
-              const credential = await materializeXaiCredentialForRun(db, {
-                workspaceId: input.workspaceId,
-                subjectId,
-                credentialId: selected.credentialId,
-                authoritySnapshot,
-                encryptionKey,
-              });
-              videoGenerationCredential = xaiVideoGenerationCredentialLease({
-                settings: eventing.modelRunSettings,
-                credential,
-                subjectId,
-                authoritySnapshot,
-              });
-            }
-          }
-        }
-      }
-      const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
-        if (
-          !objectStorage ||
-          eventing.modelRunSettings.sandboxBackend === "none" ||
-          !videoGenerationCredential ||
-          !videoGenerationEnabled
-        ) {
-          return {};
-        }
-        // Parse the frozen capability snapshot before advertising either tool.
-        // Invalid or unsupported workspace policy therefore fails closed before
-        // it can perturb the model's tool list.
-        const capabilities = videoGenerationCapabilitiesForPolicy({
-          policy: videoGenerationPolicy,
-          credentialVersion: videoGenerationCredential.version,
-        });
-        return {
-          videoGeneration: {
-            capabilities: async () => capabilities,
-            execute: async (toolInput, { toolCallId }) => {
-              const sessionForReference =
-                sandboxState.resolvedSandbox?.established.session ?? media.sdkOwnedSandboxSession;
-              const fence = eventing.toolCancellationFenceRef.current;
-              const runAs = sandboxRunAs(eventing.modelRunSettings);
-              let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
-              try {
-                accepted = await admitVideoGenerationRequest({
-                  db,
-                  storage: objectStorage,
-                  settings: eventing.modelRunSettings,
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                  attemptId: input.attemptId,
-                  toolCallId,
-                  toolInput,
-                  policy: videoGenerationPolicy,
-                  credential: videoGenerationCredential,
-                  ...(sessionForReference && fence
-                    ? {
-                        runCommand: async (command) =>
-                          await fence.runSandboxCommandStructured(
-                            sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
-                            {
-                              ...command,
-                              ...(runAs ? { runAs } : {}),
-                            },
-                          ),
-                      }
-                    : {}),
-                  ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-                });
-              } catch (error) {
-                if (error instanceof VideoReferenceInputError) {
-                  return VideoGenerationRejectedResult.parse({
-                    schemaVersion: 1,
-                    status: "rejected",
-                    code: error.code,
-                    message: error.message,
-                    operationCreated: false,
-                  });
-                }
-                throw error;
-              }
-              videoGenerationAcceptancesByCallId.set(toolCallId, {
-                operationId: accepted.operationId,
-                requestDigest: accepted.requestDigest,
-              });
-              return accepted.receipt;
-            },
-          },
-        };
-      })();
-      const serviceTier = serviceTierForLatencyMode(
-        turnExecutionPolicy.providerId,
-        turnExecutionPolicy.latencyMode,
-      );
-      const connectorActionPolicy: ConnectorActionPolicyHooks = {
-        prepare: async (call) =>
-          await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-        begin: async (call) =>
-          await beginConnectorActionExecution(db, connectorActionIdentity, call),
-        complete: async ({ requestId, outcome }) =>
-          await completeConnectorActionExecution(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            requestId,
-            attemptId: input.attemptId,
-            outcome,
-          }),
-      };
-      const runtimeSkillActivations = [
-        ...installedSkillRuntime.activations,
-        ...packRuntime.skillActivations,
-        ...session.skills.map((skill) => ({
-          source: "session" as const,
-          id: `session:${session.id}:${skill.name}`,
-          artifact: {
-            name: skill.name,
-            description: skill.description ?? null,
-            files: skill.files.map((file) => ({
-              path: file.path,
-              content: file.content,
-            })),
-          },
-          reason: "attached to session",
-        })),
-      ];
-      const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
-        eventing.modelRunSettings.sandboxBackend,
-        runtimeSkillActivations,
-      );
-      try {
-        eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-          buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
-        );
-      } catch {
-        // Contribution telemetry must never change model execution semantics.
-      }
-      recordTurnStartupPhase(observability, {
-        phase: "post_tool_preparation",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: "completed",
-        durationSeconds: (performance.now() - postToolPreparationStartedAt) / 1_000,
+      const builtAgent = await buildTurnAgent({
+        input,
+        db,
+        runtime,
+        objectStorage,
+        observability,
+        cancellationSignal,
+        runtimeCancellationSignal,
+        eventing,
+        attempt,
+        sandboxState,
+        recordingState,
+        maybeStartOnTurnRecording,
+        providerTurn,
+        media,
+        leases,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        capabilitySettings,
+        humanInputResume,
+        turnExecutionPolicy,
+        runSettings,
+        logicalSandboxSettings,
+        verifiedRigProviderImageId,
+        resolvedModel,
+        nativeImageProviderBinding,
+        lazyToolTransport,
+        modelInputPolicy,
+        supportsImageInput,
+        agentHumanInputEnabled,
+        workspaceAgentInstructions,
+        workspaceGovernance,
+        structuredWorkspacePolicyActive,
+        workspaceMemory,
+        rigVersion,
+        rigName,
+        packRuntime,
+        installedSkillRuntime,
+        buildCompanyBrainContributionReceiptFor,
+        promptCacheKey,
+        workspaceVariableSet,
+        runtimeResources,
+        sandboxEnvironment,
+        sandboxArtifactRuntime,
+        sandboxGitToken,
+        sandboxGitTokens,
+        sandboxGitCredentialBindings,
+        sandboxCodemodeToken,
+        fileResourceDownloads,
+        googleDriveConnectorBindings,
+        connectorActionIdentity,
+        videoGenerationAcceptancesByCallId,
+        activeSandboxBackend,
+        groupBoxBackend,
+        postToolPreparationStartedAt,
+        codexContext,
       });
-      const agent = (() => {
-        const agentConstructionStartedAt = performance.now();
-        let agentConstructionOutcome: "completed" | "failed" = "completed";
-        try {
-          return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
-            reasoningEffort: turn.reasoningEffort,
-            latencyMode: turnExecutionPolicy.latencyMode,
-            ...(serviceTier ? { serviceTier } : {}),
-            ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
-            humanInputEnabled: agentHumanInputEnabled,
-            genesisTitleHint: isGenesisTurn,
-            sandboxEnvironment,
-            ...(eventing.preparedTools.attemptToolCatalog
-              ? { attemptToolCatalog: eventing.preparedTools.attemptToolCatalog }
-              : {}),
-            ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
-            ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-            onToolCancellationFence: (fence) => {
-              eventing.toolCancellationFenceRef.current = fence;
-            },
-            // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
-            // seed. ONLY when the effective backend is NOT selfhosted (the connected
-            // machine uses its own git creds — mirrors the skipGitHubToken gate above)
-            // AND the mint actually produced a token (repo resources present). The runtime
-            // seeds it to the box's token file before the repository-clone runs; it never
-            // touches the box/agent manifest env.
-            ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens
-              ? { gitTokenSeeds: sandboxGitTokens }
-              : {}),
-            ...(activeSandboxBackend !== "selfhosted" && sandboxGitCredentialBindings
-              ? { gitCredentialBindings: sandboxGitCredentialBindings }
-              : {}),
-            ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
-              ? { gitTokenSeed: sandboxGitToken }
-              : {}),
-            ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
-            // Managed boxes receive the bearer through their protected per-session
-            // token file. Connected Machines use transient per-exec delivery above,
-            // so they must not run the file-seeding lifecycle hook.
-            ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
-              ? {
-                  codemodeTokenSeed: sandboxCodemodeToken,
-                  codemodeTokenSessionId: input.sessionId,
-                }
-              : {}),
-            ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
-            fileResourceDownloads,
-            mcpServers: eventing.preparedTools.mcpServers,
-            resolvedMcpConnectionIds: eventing.preparedTools.resolvedMcpConnectionIds,
-            connectorActionPolicy,
-            attemptConnectorActionBindings: googleDriveConnectorBindings,
-            // LIVE by-reference connector namespaces (fills during this turn's
-            // codex_apps tools/list): the codex tool_search description reads it per
-            // model call so the model sees the account's real connected sources.
-            codexConnectorNamespaces: eventing.preparedTools.codexConnectorNamespaces,
-            // Resolved-model routing + gating (legacy defaults when null). The model
-            // is passed as the model *string* (agent.model = runSettings.openaiModel),
-            // NOT a Model instance: an instance only survives the in-process
-            // ("none") run, whereas the SandboxAgent/Modal path drops it and
-            // re-resolves the model *name* through the global MultiProviderModelProvider
-            // configureOpenAI installed — so registry models (Fireworks GLM) route to
-            // their own client instead of 404ing against the built-in Azure/OpenAI
-            // client. The gating still comes from the resolved provider: server-side
-            // store/compaction follow the provider's compaction mode (registry
-            // providers resolve to "client"); encrypted reasoning is only
-            // round-tripped on the Responses wire API; hosted web search is attached
-            // whenever the provider declares it runnable and is independent of the
-            // session's MCP allow-list; the effective context window drives the
-            // compaction threshold.
-            hostedWebSearch,
-            ...imageGenerationOption,
-            ...videoGenerationOption,
-            lazyToolTransport,
-            ...(eventing.toolPreparationReady
-              ? { toolPreparationReady: eventing.toolPreparationReady }
-              : {}),
-            supportsImageInput,
-            inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
-            ...(resolvedModel
-              ? {
-                  encryptedReasoning:
-                    resolvedModel.provider.api === "responses" &&
-                    runSettings.openaiReasoningEncryptedContent,
-                  contextWindowTokens:
-                    resolvedModel.configured.contextWindowTokens ?? runSettings.contextWindowTokens,
-                  // The ChatGPT/Codex backend rejects the SDK's HOSTED apply_patch
-                  // tool. Gateway Responses routes likewise expose ordinary function
-                  // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
-                  // function apply_patch and wrap successful view_image results as
-                  // typed input_image content. Chat wires have no proven typed image
-                  // result transport and therefore receive no view_image tool.
-                  structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
-                  // EXPLICIT computer-use tool transport. See {@link computerToolModeForTurn}.
-                  computerToolMode: computerToolModeForTurn(resolvedModel),
-                  ...(promptCacheKey ? { promptCacheKey } : {}),
-                }
-              : // LEGACY global-client fallback (resolveTurnModel returned null → the model
-                // is not in the registry, served by the built-in OpenAI/Azure Responses
-                // client). Pin computerToolMode to function-image EXPLICITLY rather than
-                // leaving the runtime to sniff the instance.
-                {
-                  computerToolMode: computerToolModeForTurn(null),
-                  promptCacheKey: input.sessionId,
-                }),
-            // Lazy computer-use seam: runtime first brings up :0 only after the model
-            // selects a computer tool, then this hook begins the optional proof
-            // recording. Shell/filesystem turns never invoke either operation.
-            onComputerUseReady: async () => {
-              if (!sandboxState.resolvedSandbox) {
-                throw new Error("Computer-use display became ready without a resolved sandbox");
-              }
-              // This callback is the authoritative execution boundary. Record the
-              // action before async ffmpeg startup so transport-event ordering cannot
-              // make settlement misclassify a real computer turn as unused.
-              recordingState.didComputerUse = true;
-              await maybeStartOnTurnRecording(sandboxState.resolvedSandbox, activeSandboxBackend);
-            },
-            onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
-            ...(runtimeSkillActivations.length > 0
-              ? { skillActivations: runtimeSkillActivations }
-              : {}),
-            ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
-              ? { instructionsTemplate: workspaceAgentInstructions }
-              : {}),
-            ...(workspaceGovernance ? { workspaceGovernance } : {}),
-            ...(workspaceMemory ? { workspaceMemory } : {}),
-            // Per-session persona tier (session > workspace > deployment default).
-            // Composed system-level AFTER the workspace persona so it refines it for
-            // this one session; absent ⇒ byte-identical to today's composition.
-            ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
-            ...workspaceEnvironmentOption,
-            // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
-            // the frozen version carries a non-empty script), and the rig credential
-            // hooks. All absent for a rig-less turn (byte-for-byte today).
-            ...(rigVersion && rigName
-              ? {
-                  rig: { name: rigName, version: rigVersion.version },
-                  ...(rigVersion.setupScript && rigVersion.setupScript.trim().length > 0
-                    ? {
-                        rigSetup: {
-                          rigId: session.rigId!,
-                          versionId: rigVersion.id,
-                          rigName,
-                          script: rigVersion.setupScript,
-                          timeoutMs: runSettings.rigSetupTimeoutMs,
-                          contentHash: rigProviderImageContentHash({
-                            backend: turn.sandboxBackend,
-                            sourceImage: rigProviderImageSourceImage(
-                              logicalSandboxSettings,
-                              turn.sandboxBackend,
-                            ),
-                            definition: rigVersion,
-                          }),
-                          ...(verifiedRigProviderImageId
-                            ? { verifiedProviderImageId: verifiedRigProviderImageId }
-                            : {}),
-                        },
-                      }
-                    : {}),
-                  ...(rigVersion.credentialHooks.length > 0
-                    ? { rigCredentialHookIds: rigVersion.credentialHooks }
-                    : {}),
-                }
-              : {}),
-          });
-        } catch (error) {
-          agentConstructionOutcome = "failed";
-          throw error;
-        } finally {
-          recordTurnStartupPhase(observability, {
-            phase: "agent_construction",
-            provider: turnExecutionPolicy.providerId,
-            backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: agentConstructionOutcome,
-            durationSeconds: (performance.now() - agentConstructionStartedAt) / 1_000,
-          });
-        }
-      })();
-      const postAgentPreparationStartedAt = performance.now();
-      if (
-        eventing.modelRunSettings.sandboxBackend !== "none" &&
-        eventing.toolCancellationFenceRef.current === null
-      ) {
-        throw new Error(
-          "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
-        );
-      }
+      const { agent, modelVisibleRuntimeSkillActivations, postAgentPreparationStartedAt } =
+        builtAgent;
+
       await bindLazySandboxProvisioner({
         ...sandboxRoute,
         input,
