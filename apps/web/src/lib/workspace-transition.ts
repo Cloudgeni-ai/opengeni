@@ -71,6 +71,14 @@ export function beginWorkspaceOperation(
   return { sequence, operation: { id: sequence, transition } };
 }
 
+export function beginWorkspaceOperationUnlessBlocked(
+  previousSequence: number,
+  transition: WorkspaceTransitionIdentity,
+  blocked: boolean,
+): { sequence: number; operation: WorkspaceOperationIdentity } | null {
+  return blocked ? null : beginWorkspaceOperation(previousSequence, transition);
+}
+
 export function ownsWorkspaceOperation(
   active: WorkspaceOperationIdentity | null,
   currentTransition: WorkspaceTransitionIdentity,

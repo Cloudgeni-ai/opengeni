@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   beginWorkspaceOperation,
+  beginWorkspaceOperationUnlessBlocked,
   beginWorkspaceTransition,
   invalidatePrincipalTransition,
   invalidateWorkspaceTransition,
@@ -168,6 +169,55 @@ describe("workspace transition identity", () => {
       }
       expect(settled).toEqual({ status: "stale" });
       expect(destinationEffects).toBe(0);
+    });
+  }
+
+  for (const mutation of ["request", "cancel"] as const) {
+    test(`a polling timer cannot supersede an in-flight Slack ${mutation} mutation`, async () => {
+      const transition = { workspaceId: "workspace-a", revision: 1 };
+      const startedMutation = beginWorkspaceOperation(0, transition);
+      let active: WorkspaceOperationIdentity | null = startedMutation.operation;
+      let sequence = startedMutation.sequence;
+      let mutationBusy = true;
+      let requestProjectionEligible = false;
+      let continuationEligible = false;
+      let navigationEligible = false;
+      let resolveMutation!: () => void;
+      const delayedMutation = new Promise<void>((resolve) => {
+        resolveMutation = resolve;
+      }).then(() => {
+        if (ownsWorkspaceOperation(active, transition, startedMutation.operation, "workspace-a")) {
+          if (mutation === "request") {
+            requestProjectionEligible = true;
+          } else {
+            continuationEligible = true;
+            navigationEligible = true;
+          }
+        }
+      });
+
+      // A timer callback already queued before React tears down the interval
+      // still consults the synchronous mutation-busy fence.
+      const timerTick = beginWorkspaceOperationUnlessBlocked(sequence, transition, mutationBusy);
+      if (timerTick) {
+        sequence = timerTick.sequence;
+        active = timerTick.operation;
+      }
+      expect(timerTick).toBeNull();
+      expect(active).toEqual(startedMutation.operation);
+
+      resolveMutation();
+      await delayedMutation;
+      const settlement = settleWorkspaceOperation(active, startedMutation.operation);
+      active = settlement.active;
+      if (settlement.settledCurrent) mutationBusy = false;
+
+      expect(requestProjectionEligible).toBe(mutation === "request");
+      expect(continuationEligible).toBe(mutation === "cancel");
+      expect(navigationEligible).toBe(mutation === "cancel");
+      expect(mutationBusy).toBe(false);
+      expect(active).toBeNull();
+      expect(sequence).toBe(startedMutation.sequence);
     });
   }
 });
