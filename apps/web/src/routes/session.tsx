@@ -1101,6 +1101,7 @@ function SessionChatPane(props: {
     managedSelfContext: context.managedSelfContext,
     workspace,
     session: props.session,
+    enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
       variableSetId: props.session.variableSetId,
       rigId: props.session.rigId,

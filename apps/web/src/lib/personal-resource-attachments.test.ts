@@ -7,6 +7,7 @@ import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
+  personalSelection,
   resolvePersonalResourceOwnerScope,
 } from "./personal-resource-attachments";
 
@@ -14,6 +15,54 @@ const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const variableSetId = "44444444-4444-4444-8444-444444444444";
+const rigId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+function personalVariableSet() {
+  return {
+    id: variableSetId,
+    accountId: organizationId,
+    workspaceId: personalWorkspaceId,
+    scope: "user" as const,
+    generation: 1,
+    status: "active" as const,
+    name: "Private deploy keys",
+    description: null,
+    variables: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function personalRig() {
+  return {
+    id: rigId,
+    accountId: organizationId,
+    workspaceId: personalWorkspaceId,
+    scope: "user" as const,
+    generation: 1,
+    status: "active" as const,
+    name: "Private rig",
+    description: null,
+    createdBy: "human",
+    activeVersion: null,
+    activeVersionHealth: null,
+    versionCount: 1,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function authority(resourceKind: "variable_set" | "rig", resourceId: string) {
+  return {
+    authorityId: `${resourceKind === "rig" ? "bbbbbbbb-bbbb-4bbb-8bbb" : "77777777-7777-4777-8777"}-777777777777`,
+    resourceKind,
+    resourceId,
+    originWorkspaceId: personalWorkspaceId,
+    generation: 1,
+    status: "active" as const,
+    grants: [],
+  };
+}
 
 function ownerScope(session?: Pick<Session, "id" | "tenancy">) {
   return resolvePersonalResourceOwnerScope({
@@ -61,21 +110,7 @@ describe("personal resource attachment authority", () => {
     const client = {
       listVariableSets: async (routeWorkspaceId: string) => {
         expect(routeWorkspaceId).toBe(personalWorkspaceId);
-        return [
-          {
-            id: variableSetId,
-            accountId: organizationId,
-            workspaceId: personalWorkspaceId,
-            scope: "user",
-            generation: 1,
-            status: "active",
-            name: "Private deploy keys",
-            description: null,
-            variables: [],
-            createdAt: "2026-01-01T00:00:00.000Z",
-            updatedAt: "2026-01-01T00:00:00.000Z",
-          },
-        ];
+        return [personalVariableSet()];
       },
       listRigs: async () => [],
       listUserResourceAuthorities: async (
@@ -117,6 +152,85 @@ describe("personal resource attachment authority", () => {
     expect(catalog.variableSets.map((resource) => resource.name)).toEqual(["Private deploy keys"]);
     expect(catalog.variableSetAuthorities).toHaveLength(1);
     expect(catalog.rigs).toEqual([]);
+  });
+
+  test("fails closed when a fixed personal resource is missing from the authority page", async () => {
+    const scope = ownerScope();
+    if (!scope) throw new Error("fixture owner scope missing");
+    const client = {
+      listVariableSets: async () => [personalVariableSet()],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async () => ({
+        scope: "user" as const,
+        authorities: [],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniCoreClient;
+
+    const catalog = await loadPersonalResourceCatalog(client, scope);
+    expect(personalSelection(catalog, { variableSetId, rigId: null })).toMatchObject({
+      personalResourceCount: 1,
+      resourceCount: 0,
+      closureUnverified: true,
+    });
+  });
+
+  test("fails closed on a partial two-resource authority observation", async () => {
+    const scope = ownerScope();
+    if (!scope) throw new Error("fixture owner scope missing");
+    const client = {
+      listVariableSets: async () => [personalVariableSet()],
+      listRigs: async () => [personalRig()],
+      listUserResourceAuthorities: async (
+        _routeWorkspaceId: string,
+        options: { resourceKind: "variable_set" | "rig" },
+      ) => ({
+        scope: "user" as const,
+        authorities:
+          options.resourceKind === "variable_set" ? [authority("variable_set", variableSetId)] : [],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniCoreClient;
+
+    const catalog = await loadPersonalResourceCatalog(client, scope);
+    expect(personalSelection(catalog, { variableSetId, rigId })).toMatchObject({
+      personalResourceCount: 2,
+      resourceCount: 1,
+      closureUnverified: true,
+    });
+  });
+
+  test("fails closed when bounded authority pagination remains truncated", async () => {
+    const scope = ownerScope();
+    if (!scope) throw new Error("fixture owner scope missing");
+    let variablePages = 0;
+    const client = {
+      listVariableSets: async () => [personalVariableSet()],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _routeWorkspaceId: string,
+        options: { resourceKind: "variable_set" | "rig" },
+      ) => {
+        if (options.resourceKind === "variable_set") variablePages += 1;
+        return {
+          scope: "user" as const,
+          authorities:
+            options.resourceKind === "variable_set"
+              ? [authority("variable_set", variableSetId)]
+              : [],
+          nextCursor: options.resourceKind === "variable_set" ? `page-${variablePages}` : null,
+        };
+      },
+    } as unknown as OpenGeniCoreClient;
+
+    const catalog = await loadPersonalResourceCatalog(client, scope);
+    expect(variablePages).toBe(4);
+    expect(catalog.variableSetAuthoritiesTruncated).toBe(true);
+    expect(personalSelection(catalog, { variableSetId, rigId: null })).toMatchObject({
+      personalResourceCount: 1,
+      resourceCount: 1,
+      closureUnverified: true,
+    });
   });
 
   test("requires warning acknowledgement for shared use and binds established epoch", () => {

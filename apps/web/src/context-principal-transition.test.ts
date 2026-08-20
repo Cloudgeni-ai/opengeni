@@ -185,6 +185,9 @@ describe("principal transition contract", () => {
     expect(startSession).toContain("beginWorkspaceOperation(");
     expect(startSession).toContain("activeCreateOperation.current = operation");
     expect(startSession.match(/ownsWorkspaceOperation\(/g)).toHaveLength(2);
+    expect(startSession.indexOf("options?.onFailure?.(")).toBeGreaterThan(
+      startSession.lastIndexOf("ownsWorkspaceOperation("),
+    );
     expect(startSession).toContain(
       "settleWorkspaceOperation(activeCreateOperation.current, operation)",
     );

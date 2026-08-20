@@ -225,4 +225,83 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.notice).toContain("Session authority changed");
     await hook.unmount();
   });
+
+  for (const [name, failure] of [
+    ["network failure", new TypeError("network unavailable")],
+    ["managed-session 401", new OpenGeniApiError(401, "unauthorized")],
+  ] as const) {
+    test(`${name} keeps a fixed personal-resource decision fenced with retry visible`, async () => {
+      const client = {
+        listVariableSets: async () => {
+          throw failure;
+        },
+        listRigs: async () => [],
+        listUserResourceAuthorities: async () => authorityPage(true, "variable_set"),
+      } as unknown as OpenGeniCoreClient;
+      const current = identity("owner");
+      const hook = await renderHook(
+        () =>
+          usePersonalResourceAttachment({
+            client,
+            authMode: "managedSession",
+            authSession: current.authSession,
+            accessSubjectId: "user:owner",
+            managedSelfContext: current.managedSelfContext,
+            workspace,
+            fixed: { variableSetId, rigId: null },
+            personalWorkspaceTarget: false,
+          }),
+        undefined,
+      );
+      await flush();
+      expect(hook.result.current.selected.resourceCount).toBe(0);
+      expect(hook.result.current.error).toBe(failure);
+      expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.intent).toBeUndefined();
+      await hook.unmount();
+    });
+  }
+
+  test("disabling the managed-sandbox attachment lane clears a hidden decision", async () => {
+    const client = {
+      listVariableSets: async () => [variableSet()],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _workspaceId: string,
+        options: { resourceKind: string },
+      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+    } as unknown as OpenGeniCoreClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      ({ enabled }: { enabled: boolean }) =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          fixed: { variableSetId, rigId: null },
+          personalWorkspaceTarget: false,
+          enabled,
+        }),
+      { enabled: true },
+    );
+    await flush();
+    await actRun(() => hook.result.current.setMode("session"));
+    await actRun(() => hook.result.current.setAcknowledged(true));
+    expect(hook.result.current.intent).toBeDefined();
+
+    await hook.rerender({ enabled: false });
+    await flush();
+    expect(hook.result.current.eligible).toBe(false);
+    expect(hook.result.current.mode).toBeNull();
+    expect(hook.result.current.intent).toBeUndefined();
+
+    await hook.rerender({ enabled: true });
+    await flush();
+    expect(hook.result.current.mode).toBeNull();
+    expect(hook.result.current.requiresDecision).toBe(true);
+    await hook.unmount();
+  });
 });

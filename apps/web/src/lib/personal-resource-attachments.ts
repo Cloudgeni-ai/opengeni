@@ -24,10 +24,14 @@ export type PersonalResourceOwnerScope = Readonly<{
 }>;
 
 export type PersonalResourceCatalog = Readonly<{
+  personalVariableSets: VariableSet[];
+  personalRigs: Rig[];
   variableSets: VariableSet[];
   rigs: Rig[];
   variableSetAuthorities: UserResourceAuthoritySummary[];
   rigAuthorities: UserResourceAuthoritySummary[];
+  variableSetAuthoritiesTruncated: boolean;
+  rigAuthoritiesTruncated: boolean;
   truncated: boolean;
 }>;
 
@@ -121,28 +125,31 @@ export async function loadPersonalResourceCatalog(
     authority.resourceKind === kind &&
     authority.status === "active" &&
     authority.originWorkspaceId === scope.personalWorkspaceId;
+  const personalVariableSets = variableSets.filter(
+    (resource) => resource.scope === "user" && resource.status === "active",
+  );
+  const personalRigs = rigs.filter(
+    (resource) => resource.scope === "user" && resource.status === "active",
+  );
   return {
-    variableSets: variableSets.filter(
-      (resource) =>
-        resource.scope === "user" &&
-        resource.status === "active" &&
-        variableSetPage.authorities.some(
-          (authority) =>
-            eligible(authority, "variable_set") && authority.resourceId === resource.id,
-        ),
+    personalVariableSets,
+    personalRigs,
+    variableSets: personalVariableSets.filter((resource) =>
+      variableSetPage.authorities.some(
+        (authority) => eligible(authority, "variable_set") && authority.resourceId === resource.id,
+      ),
     ),
-    rigs: rigs.filter(
-      (resource) =>
-        resource.scope === "user" &&
-        resource.status === "active" &&
-        rigPage.authorities.some(
-          (authority) => eligible(authority, "rig") && authority.resourceId === resource.id,
-        ),
+    rigs: personalRigs.filter((resource) =>
+      rigPage.authorities.some(
+        (authority) => eligible(authority, "rig") && authority.resourceId === resource.id,
+      ),
     ),
     variableSetAuthorities: variableSetPage.authorities.filter((authority) =>
       eligible(authority, "variable_set"),
     ),
     rigAuthorities: rigPage.authorities.filter((authority) => eligible(authority, "rig")),
+    variableSetAuthoritiesTruncated: variableSetPage.truncated,
+    rigAuthoritiesTruncated: rigPage.truncated,
     truncated: variableSetPage.truncated || rigPage.truncated,
   };
 }
@@ -150,14 +157,41 @@ export async function loadPersonalResourceCatalog(
 export function personalSelection(
   catalog: PersonalResourceCatalog | null,
   fixed: { variableSetId: string | null; rigId: string | null },
-): { variableSets: VariableSet[]; rigs: Rig[]; resourceCount: number } {
+): {
+  variableSets: VariableSet[];
+  rigs: Rig[];
+  resourceCount: number;
+  personalResourceCount: number;
+  closureUnverified: boolean;
+} {
+  const personalVariableSets = fixed.variableSetId
+    ? (catalog?.personalVariableSets.filter((resource) => resource.id === fixed.variableSetId) ??
+      [])
+    : [];
+  const personalRigs = fixed.rigId
+    ? (catalog?.personalRigs.filter((resource) => resource.id === fixed.rigId) ?? [])
+    : [];
   const variableSets = fixed.variableSetId
     ? (catalog?.variableSets.filter((resource) => resource.id === fixed.variableSetId) ?? [])
     : [];
   const rigs = fixed.rigId
     ? (catalog?.rigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
-  return { variableSets, rigs, resourceCount: variableSets.length + rigs.length };
+  const personalResourceCount = personalVariableSets.length + personalRigs.length;
+  const closureUnverified = Boolean(
+    (personalVariableSets.length > 0 &&
+      (catalog?.variableSetAuthoritiesTruncated ||
+        variableSets.length !== personalVariableSets.length)) ||
+    (personalRigs.length > 0 &&
+      (catalog?.rigAuthoritiesTruncated || rigs.length !== personalRigs.length)),
+  );
+  return {
+    variableSets,
+    rigs,
+    resourceCount: variableSets.length + rigs.length,
+    personalResourceCount,
+    closureUnverified,
+  };
 }
 
 export function buildPersonalResourceAttachmentIntent(input: {

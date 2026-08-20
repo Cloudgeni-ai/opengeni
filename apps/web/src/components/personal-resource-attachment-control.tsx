@@ -30,7 +30,11 @@ export function PersonalResourceAttachmentControl(props: {
   const { controller } = props;
   if (
     !controller.eligible ||
-    (!controller.loading && controller.selected.resourceCount === 0 && !controller.sourceLost)
+    (!controller.loading &&
+      controller.selected.resourceCount === 0 &&
+      !controller.sourceLost &&
+      !controller.error &&
+      !controller.truncated)
   ) {
     return null;
   }
@@ -119,7 +123,8 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="mt-2 flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            Personal resources are unavailable. They will not be included.
+            Personal-resource authority could not be verified. Retry or choose a non-personal
+            resource.
           </span>
           <Button
             type="button"

@@ -147,9 +147,10 @@ function SessionsIndexRouteContent({
     accessSubjectId: context.accessContext.subjectId,
     managedSelfContext: context.managedSelfContext,
     workspace,
+    enabled: draft.compute.kind === "sandbox",
     fixed: {
-      variableSetId: draft.variableSetId || null,
-      rigId: draft.rigId || null,
+      variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
+      rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
   });
@@ -371,10 +372,11 @@ function SessionsIndexRouteContent({
             const submittedResources = persistedValue.resources;
             const flushed = await newSessionDraft.flush();
             if (!flushed) return null;
-            const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
-            if (personalAttachment.intent) {
-              submission.extras.personalResourceAttachment = personalAttachment.intent;
-            }
+            const submission = submissionFromSessionDraft(
+              draft,
+              firstPartyMcpToolPolicy.default,
+              personalAttachment.intent,
+            );
             const created = await context.startSession(
               workspaceId,
               {
@@ -391,6 +393,8 @@ function SessionsIndexRouteContent({
                 workingDir: submission.options.workingDir,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
+                onFailure: ({ error, request }) =>
+                  personalAttachment.onDeliveryError(error, request, "create"),
               },
             );
             if (!created) return null;

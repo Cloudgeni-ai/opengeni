@@ -3083,6 +3083,116 @@ describe("useComposer durable draft and control binding", () => {
   }
 
   for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} turns an uncertain retry's definitive personal denial into a fresh reconfirmed operation`, async () => {
+      const initial: ComposerDraft = {
+        revision: 8,
+        text: "use my personal setup once",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard" as const,
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let epoch = 3;
+      let confirmed = true;
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw gatewayError(503);
+        if (attempts.length === 2) throw personalAttachmentConflict();
+        return makeEvent(3, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        listEvents: async () => [],
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        () =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: () => ({
+              personalResourceAttachment: {
+                mode: "session",
+                expectedAuthorityEpoch: epoch,
+                workspaceSharedAcknowledged: true,
+                sharedOutputWarningVersion: 1,
+              },
+            }),
+            sendBlocked: () => !confirmed,
+            onDeliveryError: (error) => {
+              if ((error as OpenGeniApiError).outcomeUnknown !== true) confirmed = false;
+            },
+          }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      const firstId = attempts[0]!.clientEventId;
+      if (delivery === "send") {
+        const uncertain = hook.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(uncertain).toBeDefined();
+        await flushing(() =>
+          hook.result.current.retryOptimisticMessage?.(uncertain!.clientEventId),
+        );
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current.steer()).toBe(false));
+      }
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]!.clientEventId).toBe(firstId);
+      expect(attempts[1]!.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
+      expect(confirmed).toBe(false);
+
+      if (delivery === "send") {
+        const definitive = hook.result.current.optimisticMessages?.find(
+          (message) => message.clientEventId === firstId,
+        );
+        expect(definitive).toMatchObject({ state: "failed", outcomeUnknown: false });
+        await flushing(() =>
+          hook.result.current.retryOptimisticMessage?.(definitive!.clientEventId),
+        );
+      } else {
+        await flushing(async () => expect(await hook.result.current.steer()).toBe(false));
+      }
+      expect(attempts).toHaveLength(2);
+
+      epoch = 4;
+      confirmed = true;
+      if (delivery === "send") {
+        const definitive = hook.result.current.optimisticMessages?.find(
+          (message) => message.clientEventId === firstId,
+        );
+        await flushing(() =>
+          hook.result.current.retryOptimisticMessage?.(definitive!.clientEventId),
+        );
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
+      }
+
+      expect(attempts).toHaveLength(3);
+      expect(attempts[2]!.clientEventId).not.toBe(firstId);
+      expect(attempts[2]!.personalResourceAttachment?.expectedAuthorityEpoch).toBe(4);
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} reconciles an outcome-unknown request before retrying`, async () => {
       const initial: ComposerDraft = {
         revision: 9,

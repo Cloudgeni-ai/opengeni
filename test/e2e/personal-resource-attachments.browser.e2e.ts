@@ -139,6 +139,18 @@ describe("personal resource attachments in Chromium", () => {
       await page.getByText(/Access to the selected personal resource changed/).count(),
     ).toBeGreaterThan(0);
 
+    await page.getByRole("button", { name: "Truncate authority catalog" }).click();
+    const unavailableControl = page.locator("[data-personal-resource-attachment]").first();
+    expect(await unavailableControl.count()).toBe(1);
+    expect(await unavailableControl.getByRole("alert").textContent()).toContain(
+      "authority could not be verified",
+    );
+    expect(await unavailableControl.getByRole("button", { name: "Retry" }).count()).toBe(1);
+    expect(await unavailableControl.getByRole("status").textContent()).toContain(
+      "first 400 personal resources",
+    );
+    expect(await page.getByRole("button", { name: "Send" }).isDisabled()).toBe(true);
+
     await page.getByRole("button", { name: "Switch principal" }).click();
     expect(await page.getByTestId("principal").textContent()).toBe("shared-user");
     expect(await page.locator("[data-personal-resource-attachment]").count()).toBe(0);

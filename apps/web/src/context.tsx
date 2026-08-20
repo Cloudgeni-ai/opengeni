@@ -3,7 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
-import type { SessionEvent } from "@opengeni/sdk";
+import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -52,7 +52,9 @@ import { sameSessionForContext } from "@/lib/session-context";
 import { runSingleFlight } from "@/lib/single-flight";
 import {
   buildCreateSessionRequest,
+  classifyCreateSessionFailure,
   prepareCreateSessionAttempt,
+  retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
 import {
@@ -261,6 +263,8 @@ export type AppContextValue = {
       expectedNewSessionDraftRevision?: number;
       /** Create a session shell without starting an underlying agent turn. */
       startMode?: "realtime";
+      /** Exact attempted request and classified outcome for host reconciliation. */
+      onFailure?: (failure: StartSessionFailure) => void;
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -271,6 +275,12 @@ export type PendingSlackLink = {
   workspaceId: string;
   token: string;
 };
+
+export type StartSessionFailure = Readonly<{
+  error: Error;
+  request: CreateSessionRequest;
+  outcomeUnknown: boolean;
+}>;
 
 export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
 
@@ -495,8 +505,9 @@ export function RootRouteComponent() {
   // Stable CREATE idempotency key for the in-flight session create. Generated
   // lazily and reused across retries (and across a double-click that re-enters
   // startSession before busy flips), so duplicate creates collapse to one
-  // session server-side; cleared only once a create succeeds so the next real
-  // submit gets a fresh, independent key. Distinct from the per-call
+  // session server-side; retained only while the mutation outcome is unknown
+  // and cleared on success or a definitive failure so a corrected request gets
+  // a fresh key. Distinct from the per-call
   // clientEventId (a fresh UUID every send).
   const pendingCreateAttempt = useRef<PendingCreateAttempt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1288,6 +1299,7 @@ export function RootRouteComponent() {
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
       startMode?: "realtime";
+      onFailure?: (failure: StartSessionFailure) => void;
     },
   ): Promise<Session | null> {
     const startedOperation = beginWorkspaceOperation(
@@ -1297,6 +1309,7 @@ export function RootRouteComponent() {
     workspaceOperationSequence.current = startedOperation.sequence;
     const operation = startedOperation.operation;
     activeCreateOperation.current = operation;
+    let attempted: ReturnType<typeof prepareCreateSessionAttempt> | null = null;
     setBusy(true);
     try {
       const sessionTools = options?.sessionTools;
@@ -1334,6 +1347,7 @@ export function RootRouteComponent() {
           startMode: options?.startMode,
         }),
       });
+      attempted = attempt;
       pendingCreateAttempt.current = attempt.pending;
       const created = await client.createSession(workspaceId, attempt.request);
       // Do not clear a newer concurrent attempt that replaced this one.
@@ -1365,8 +1379,14 @@ export function RootRouteComponent() {
       });
       return created;
     } catch (error) {
-      // Keep the attempt on failure. An exact retry dedups against a create that
-      // may have landed server-side; an edited request acquires a fresh key.
+      const { error: problem, outcomeUnknown } = classifyCreateSessionFailure(error);
+      if (attempted) {
+        pendingCreateAttempt.current = retainCreateSessionAttemptAfterFailure({
+          current: pendingCreateAttempt.current,
+          attempted: attempted.pending,
+          outcomeUnknown,
+        });
+      }
       if (
         ownsWorkspaceOperation(
           activeCreateOperation.current,
@@ -1375,9 +1395,11 @@ export function RootRouteComponent() {
           workspaceId,
         )
       ) {
+        if (attempted) {
+          options?.onFailure?.({ error: problem, request: attempted.request, outcomeUnknown });
+        }
         toast.error("Failed to start session", {
-          description:
-            error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
+          description: composerSubmissionErrorMessage(problem),
         });
       }
       return null;

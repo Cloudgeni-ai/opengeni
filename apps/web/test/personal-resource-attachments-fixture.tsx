@@ -26,12 +26,13 @@ function Fixture() {
   const [acknowledged, setAcknowledged] = useState(false);
   const [epoch, setEpoch] = useState(3);
   const [sourceLost, setSourceLost] = useState(false);
+  const [authorityUnavailable, setAuthorityUnavailable] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [createReceipt, setCreateReceipt] = useState("");
   const [sendReceipt, setSendReceipt] = useState("");
 
   const controller = useMemo<PersonalResourceAttachmentController>(() => {
-    const resourceCount = principal === "owner" && !sourceLost ? 1 : 0;
+    const resourceCount = principal === "owner" && !sourceLost && !authorityUnavailable ? 1 : 0;
     const intent =
       resourceCount > 0 && mode && acknowledged
         ? {
@@ -45,22 +46,25 @@ function Fixture() {
       eligible: principal === "owner",
       loading: false,
       refreshing: false,
-      error: null,
+      error: authorityUnavailable ? new Error("bounded authority closure unavailable") : null,
       notice,
       sourceLost,
-      truncated: false,
+      truncated: authorityUnavailable,
       catalog: null,
       selected: {
         variableSets: resourceCount > 0 ? [variableSet] : [],
         rigs: [],
         resourceCount,
+        personalResourceCount: resourceCount,
+        closureUnverified: false,
       },
       mode,
       acknowledged,
       visibility: "workspace",
       warning:
         "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.",
-      requiresDecision: sourceLost || (resourceCount > 0 && (!mode || !acknowledged)),
+      requiresDecision:
+        sourceLost || authorityUnavailable || (resourceCount > 0 && (!mode || !acknowledged)),
       intent,
       setMode: (next) => {
         setMode(next);
@@ -74,7 +78,7 @@ function Fixture() {
       onAccepted: () => undefined,
       onDeliveryError: () => undefined,
     };
-  }, [acknowledged, epoch, mode, notice, principal, sourceLost]);
+  }, [acknowledged, authorityUnavailable, epoch, mode, notice, principal, sourceLost]);
 
   const resetDecision = (message: string) => {
     setMode(null);
@@ -160,8 +164,20 @@ function Fixture() {
           type="button"
           className="rounded-md border p-2"
           onClick={() => {
+            setSourceLost(false);
+            setAuthorityUnavailable(true);
+            resetDecision("");
+          }}
+        >
+          Truncate authority catalog
+        </button>
+        <button
+          type="button"
+          className="rounded-md border p-2"
+          onClick={() => {
             setPrincipal("shared-user");
             setSourceLost(false);
+            setAuthorityUnavailable(false);
             resetDecision("");
           }}
         >

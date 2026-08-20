@@ -21,6 +21,9 @@ import {
 } from "./personal-resource-attachments";
 
 type FixedPersonalResources = { variableSetId: string | null; rigId: string | null };
+type PersonalResourceAttachmentAttempt = {
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
+};
 
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
@@ -44,7 +47,11 @@ export type PersonalResourceAttachmentController = Readonly<{
   onAccepted: (
     input: SendMessageInput | { personalResourceAttachment?: PersonalResourceAttachmentIntent },
   ) => void;
-  onDeliveryError: (error: Error, input: SendMessageInput, delivery: "send" | "steer") => void;
+  onDeliveryError: (
+    error: Error,
+    input: PersonalResourceAttachmentAttempt,
+    delivery: "send" | "steer" | "create",
+  ) => void;
 }>;
 
 export function usePersonalResourceAttachment(input: {
@@ -57,17 +64,21 @@ export function usePersonalResourceAttachment(input: {
   session?: Pick<Session, "id" | "tenancy"> | null;
   fixed: FixedPersonalResources;
   personalWorkspaceTarget: boolean;
+  enabled?: boolean | undefined;
   onReloadSession?: (() => Promise<void>) | undefined;
 }): PersonalResourceAttachmentController {
   const onReloadSession = input.onReloadSession;
-  const resolvedScope = resolvePersonalResourceOwnerScope({
-    authMode: input.authMode,
-    authSession: input.authSession,
-    accessSubjectId: input.accessSubjectId,
-    managedSelfContext: input.managedSelfContext,
-    workspace: input.workspace,
-    session: input.session,
-  });
+  const resolvedScope =
+    input.enabled === false
+      ? null
+      : resolvePersonalResourceOwnerScope({
+          authMode: input.authMode,
+          authSession: input.authSession,
+          accessSubjectId: input.accessSubjectId,
+          managedSelfContext: input.managedSelfContext,
+          workspace: input.workspace,
+          session: input.session,
+        });
   const resolvedIdentityKey = resolvedScope?.identityKey;
   const resolvedSubjectId = resolvedScope?.subjectId;
   const resolvedOrganizationId = resolvedScope?.organizationId;
@@ -155,7 +166,9 @@ export function usePersonalResourceAttachment(input: {
     void load(false);
   }, [load, scope, scopeKey]);
 
-  const selected = personalSelection(catalog, input.fixed);
+  // Eligibility is a synchronous fence. Do not wait for the transition effect
+  // to clear prior owner state before hiding it from a connected-machine send.
+  const selected = personalSelection(scope ? catalog : null, input.fixed);
   const fixedIdentity = `${input.fixed.variableSetId ?? ""}:${input.fixed.rigId ?? ""}`;
   const selectedIdentity = `${fixedIdentity}:${selected.resourceCount}`;
   const priorSelectionIdentity = useRef(selectedIdentity);
@@ -193,17 +206,29 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : "workspace";
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
-  const intent = buildPersonalResourceAttachmentIntent({
-    mode,
-    visibility,
-    acknowledged,
-    expectedAuthorityEpoch,
-    resourceCount: selected.resourceCount,
-  });
+  const fixedResourceCount =
+    Number(input.fixed.variableSetId !== null) + Number(input.fixed.rigId !== null);
+  const closureError = selected.closureUnverified
+    ? new Error(
+        "The selected personal-resource authority closure could not be verified. Retry or choose a non-personal resource.",
+      )
+    : null;
+  const effectiveError = error ?? closureError;
+  const intent = scope
+    ? buildPersonalResourceAttachmentIntent({
+        mode,
+        visibility,
+        acknowledged,
+        expectedAuthorityEpoch,
+        resourceCount: selected.closureUnverified ? 0 : selected.resourceCount,
+      })
+    : undefined;
   const requiresDecision =
-    sourceLost ||
-    (selected.resourceCount > 0 &&
-      (mode === null || (visibility === "workspace" && !acknowledged)));
+    scope !== null &&
+    (sourceLost ||
+      (fixedResourceCount > 0 && (loading || refreshing || effectiveError !== null)) ||
+      (selected.resourceCount > 0 &&
+        (mode === null || (visibility === "workspace" && !acknowledged))));
 
   const setMode = useCallback((next: PersonalAttachmentMode | null) => {
     setModeState(next);
@@ -231,7 +256,7 @@ export function usePersonalResourceAttachment(input: {
     [load],
   );
   const onDeliveryError = useCallback(
-    (deliveryError: Error, attemptedInput: SendMessageInput) => {
+    (deliveryError: Error, attemptedInput: PersonalResourceAttachmentAttempt) => {
       if (!isPersonalAttachmentConflict(deliveryError, attemptedInput)) return;
       setModeState(null);
       setAcknowledgedState(false);
@@ -247,7 +272,7 @@ export function usePersonalResourceAttachment(input: {
     eligible: scope !== null,
     loading,
     refreshing,
-    error,
+    error: effectiveError,
     notice,
     sourceLost,
     truncated: catalog?.truncated ?? false,

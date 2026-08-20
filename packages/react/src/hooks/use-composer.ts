@@ -1227,7 +1227,9 @@ export function useComposer(
       } catch (cause) {
         const problem = asError(cause);
         onDeliveryErrorRef.current?.(problem, operation.input, "send");
-        const outcomeUnknown = isOutcomeUnknownError(cause) || operation.outcomeUnknown === true;
+        // A retry's latest server result is authoritative. A prior uncertain
+        // outcome must not keep a now-definitive rejection retryable.
+        const outcomeUnknown = isOutcomeUnknownError(cause);
         if (
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
@@ -1537,13 +1539,20 @@ export function useComposer(
               });
             }
           } catch (cause) {
-            onDeliveryErrorRef.current?.(asError(cause), pending.input, pending.delivery);
-            if (pending.delivery === "steer") keepSteering = true;
+            const problem = asError(cause);
+            const outcomeUnknown = isOutcomeUnknownError(cause);
+            onDeliveryErrorRef.current?.(problem, pending.input, pending.delivery);
+            if (!outcomeUnknown) {
+              clearPending();
+              keepSteering = false;
+            } else if (pending.delivery === "steer") {
+              keepSteering = true;
+            }
             if (
               targetKeyRef.current === ownedTargetKey &&
               targetGeneration.current === ownedGeneration
             ) {
-              setError(asError(cause));
+              setError(problem);
             }
             return false;
           }
