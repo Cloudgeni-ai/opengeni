@@ -170,11 +170,13 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               className="h-9"
               disabled={rig.mutating}
               onClick={async () => {
+                const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+                if (!acceptedTransition) return;
                 const updated = await context.setWorkspaceDefaultRig(
                   workspaceId,
                   isDefaultRig ? null : current.id,
                 );
-                if (updated) {
+                if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
                   toast.success(
                     isDefaultRig
                       ? "Cleared the workspace default rig"

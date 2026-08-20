@@ -3,16 +3,54 @@ import { describe, expect, test } from "bun:test";
 import {
   beginWorkspaceOperation,
   beginWorkspaceTransition,
+  invalidatePrincipalTransition,
   invalidateWorkspaceTransition,
+  ownsPrincipalTransition,
   ownsWorkspaceOperation,
   ownsWorkspaceTransition,
   runCurrentWorkspaceRequest,
   runCurrentWorkspaceOperation,
+  runCurrentTransitionInvocation,
   settleWorkspaceOperation,
   type WorkspaceOperationIdentity,
 } from "./workspace-transition";
 
 describe("workspace transition identity", () => {
+  test("principal generations invalidate old access work without depending on route cleanup", () => {
+    const accepted = { revision: 7 };
+    const current = invalidatePrincipalTransition(accepted);
+
+    expect(current).toEqual({ revision: 8 });
+    expect(ownsPrincipalTransition(current, accepted)).toBe(false);
+    expect(ownsPrincipalTransition(current, current)).toBe(true);
+  });
+
+  for (const lateOutcome of ["resolve", "reject"] as const) {
+    test(`suppresses a delayed principal-scoped ${lateOutcome} after credential replacement`, async () => {
+      let current = { revision: 3 };
+      const accepted = current;
+      let resolveRequest!: (value: string) => void;
+      let rejectRequest!: (error: Error) => void;
+      const request = new Promise<string>((resolve, reject) => {
+        resolveRequest = resolve;
+        rejectRequest = reject;
+      });
+      const result = runCurrentTransitionInvocation({
+        isCurrent: () => ownsPrincipalTransition(current, accepted),
+        request: () => request,
+      });
+
+      current = invalidatePrincipalTransition(current);
+      if (lateOutcome === "resolve") {
+        resolveRequest("old access context");
+      } else {
+        rejectRequest(new Error("old access request failed"));
+      }
+
+      expect(await result).toEqual({ status: "stale" });
+    });
+  }
+
   test("invalidates an accepted operation when the route changes tenant", () => {
     const initial = beginWorkspaceTransition({ workspaceId: null, revision: 0 }, "workspace-a");
     const accepted = initial.identity;

@@ -9,6 +9,22 @@ import {
 } from "./lib/workspace-transition";
 
 const contextSource = await Bun.file(`${import.meta.dir}/context.tsx`).text();
+const switcherSource = await Bun.file(
+  `${import.meta.dir}/components/rail/switcher-block.tsx`,
+).text();
+const sessionListSource = await Bun.file(
+  `${import.meta.dir}/components/rail/session-list.tsx`,
+).text();
+const transcriptionSettingsSource = await Bun.file(
+  `${import.meta.dir}/components/transcription-settings.tsx`,
+).text();
+const workspaceSettingsSource = await Bun.file(
+  `${import.meta.dir}/routes/workspace-settings.tsx`,
+).text();
+const rigDetailSource = await Bun.file(`${import.meta.dir}/routes/rig-detail.tsx`).text();
+const slackIntegrationSource = await Bun.file(
+  `${import.meta.dir}/components/capabilities/use-slack-integration.tsx`,
+).text();
 
 function sourceBetween(start: string, end: string): string {
   const startIndex = contextSource.indexOf(start);
@@ -37,6 +53,8 @@ describe("principal transition contract", () => {
       "const invalidatePrincipalWorkspaceState",
       "useEffect(() => {",
     );
+    expect(invalidation).toContain("invalidatePrincipalTransition(");
+    expect(invalidation).toContain("slackLinkPrepareController.clear()");
     expect(invalidation).toContain("resetWorkspaceState(null, true)");
 
     const reset = sourceBetween("const resetWorkspaceState", "const prepareWorkspaceTransition");
@@ -52,6 +70,72 @@ describe("principal transition contract", () => {
     ]) {
       expect(reset).toContain(requiredFence);
     }
+  });
+
+  test("access bootstrap is synchronously fenced by principal generation", () => {
+    const accessLoad = sourceBetween(
+      "void Promise.all([client.getAccessContext(), client.listWorkspaces()])",
+      "const selectedInstalledRepositories",
+    );
+    expect(accessLoad).toContain(
+      "ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)",
+    );
+    expect(accessLoad.indexOf("ownsPrincipalTransition(")).toBeLessThan(
+      accessLoad.indexOf("setAccessContext(context)"),
+    );
+    expect(accessLoad.indexOf("ownsPrincipalTransition(")).toBeLessThan(
+      accessLoad.indexOf('toast.error("Failed to load workspace access"'),
+    );
+  });
+
+  test("all remaining root workspace and session mutations use the invocation fence", () => {
+    const sections = [
+      sourceBetween("async function createWorkspace(", "async function renameWorkspace("),
+      sourceBetween(
+        "async function renameWorkspace(",
+        "async function setWorkspaceInferenceControl(",
+      ),
+      sourceBetween("async function setWorkspaceInferenceControl(", "const refreshWorkspace"),
+      sourceBetween(
+        "const refreshWorkspace = useCallback",
+        "async function updateWorkspaceSettings(",
+      ),
+      sourceBetween(
+        "async function updateWorkspaceSettings(",
+        "async function setWorkspaceDefaultRig(",
+      ),
+      sourceBetween("async function setWorkspaceDefaultRig(", "async function updateSessionTitle("),
+      sourceBetween("async function updateSessionTitle(", "async function updateSessionPin("),
+      sourceBetween("async function updateSessionPin(", "async function deleteWorkspace("),
+      sourceBetween("async function deleteWorkspace(", "const refreshGitHub"),
+    ];
+    for (const section of sections) {
+      expect(section).toContain("runCurrentTransitionInvocation({");
+    }
+  });
+
+  test("mutation callers do not toast, refresh, or announce stale results", () => {
+    expect(switcherSource).toContain(
+      "const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action)",
+    );
+    expect(transcriptionSettingsSource).toContain(
+      "const updated = await context.updateWorkspaceSettings(workspaceId",
+    );
+    expect(sessionListSource).toContain(
+      "const acceptedTransition = context.captureWorkspaceInvocation(target.workspaceId)",
+    );
+    expect(sessionListSource).toContain(
+      "if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null",
+    );
+    expect(workspaceSettingsSource).toContain(
+      "const acceptedTransition = captureWorkspaceInvocation(workspaceId)",
+    );
+    expect(rigDetailSource).toContain(
+      "const acceptedTransition = context.captureWorkspaceInvocation(workspaceId)",
+    );
+    expect(slackIntegrationSource).toContain(
+      "const acceptedTransition = context.captureWorkspaceInvocation(workspaceId)",
+    );
   });
 
   test("an old-credential create cannot install after same-route principal replacement", () => {
