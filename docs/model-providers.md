@@ -157,8 +157,11 @@ object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
-ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
-exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
+ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
+runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
+`load_skill`, `request_human_input`), and exact session MCP refs marked
+`eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
+`generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
 bound through `resolveMissingFunctionTool` in that same model response before
 normal approval, guardrail, timeout, MCP error, and event handling. Leftover
@@ -296,6 +299,14 @@ Progressive disclosure is selected explicitly per resolved provider:
   receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
   protocol extension is required. This includes an OpenAI-compatible custom base
   URL: configuring the built-in OpenAI slot does not prove native-search support.
+
+Classification is origin, not transport. The same first-request set is eager on
+every path: the base runtime tools (`exec_command`, `write_stdin`,
+`apply_patch`, `view_image`, `load_skill`, `request_human_input`) plus MCP
+tools whose session `ToolRef.eager` is true. Everything else — deferred MCP, Browser/Computer, `generate_image`,
+`generate_video`, and `get_video_generation_capabilities` — is searchable on
+Codex, OpenAI, and generic dispatch alike. `ToolRef.eager` remains a per-session MCP choice and is
+untouched.
 
 The sandbox's hosted-vs-function structured-tool setting does not select any of
 these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native
