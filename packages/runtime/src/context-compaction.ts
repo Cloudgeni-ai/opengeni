@@ -10,6 +10,8 @@
 
 import {
   TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
+  hasOpaqueProviderArtifact,
+  projectRejectedReasoningArtifact,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import {
@@ -1445,12 +1447,41 @@ function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
  * The raw active history is still the source for the eventual replacement and
  * remains unchanged if the provider call fails.
  */
+/**
+ * Portable compaction is a plaintext checkpoint. Opaque `encrypted_content`
+ * cannot be summarized and 400s when a SuperGrok-minted blob is replayed on
+ * Codex (`invalid_encrypted_content`). Strip it from the temporary copy only —
+ * keep plaintext reasoning, leave durable rows untouched. Remote v2 does not
+ * use this helper and still sends Codex blobs.
+ */
+export function omitOpaqueArtifactsFromPortableCompactionHistory(
+  items: readonly CompactionItem[],
+): CompactionItem[] {
+  let changed = false;
+  const out: CompactionItem[] = [];
+  for (const item of items) {
+    const type = typeof item.type === "string" ? item.type : "";
+    if (type === "compaction" && hasOpaqueProviderArtifact(item)) {
+      changed = true;
+      continue;
+    }
+    if (type === "reasoning" && hasOpaqueProviderArtifact(item)) {
+      const projected = projectRejectedReasoningArtifact(item);
+      changed ||= projected !== item;
+      out.push(projected as CompactionItem);
+      continue;
+    }
+    out.push(item);
+  }
+  return changed ? out : (items as CompactionItem[]);
+}
+
 export function prepareCompactionPromptInput(
   items: readonly CompactionItem[],
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = items.slice();
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).slice();
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 

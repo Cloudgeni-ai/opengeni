@@ -25,6 +25,41 @@ export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-ima
 
 export type ModelHistoryItem = Record<string, unknown>;
 
+/**
+ * Responses output items carry `status` (`in_progress` / `completed` /
+ * `incomplete`). That field is not conversation meaning — pairing is `call_id`
+ * — and Codex's input schema 400s it (`Unknown parameter: 'input[N].status'`).
+ * SuperGrok accepts items with or without it. The SDK also nests `status` on
+ * `providerData` (reasoning items) and flattens it back onto the request.
+ * Canonical history therefore omits both at persist so portable sessions can
+ * cross Responses providers.
+ */
+export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(item: T): T {
+  if (!item || typeof item !== "object") return item;
+  const providerData =
+    item.providerData && typeof item.providerData === "object"
+      ? (item.providerData as Record<string, unknown>)
+      : null;
+  const hasTopStatus = "status" in item;
+  const hasNestedStatus = Boolean(providerData && "status" in providerData);
+  if (!hasTopStatus && !hasNestedStatus) return item;
+  const next = { ...item } as T;
+  if (hasTopStatus) delete (next as Record<string, unknown>).status;
+  if (hasNestedStatus && providerData) {
+    const { status: _dropped, ...rest } = providerData;
+    (next as Record<string, unknown>).providerData = rest;
+  }
+  return next;
+}
+
+/** Persist/replay boundary: drop output-only fields, then bound tool output. */
+export function canonicalizePersistedHistoryItem<T extends ModelHistoryItem>(
+  item: T,
+  policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): T {
+  return boundModelToolOutputItem(omitOutputOnlyHistoryItemFields(item), policyTokens);
+}
+
 export const CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 10_000;
 export const CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE = 1.2;
 export const DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS =
