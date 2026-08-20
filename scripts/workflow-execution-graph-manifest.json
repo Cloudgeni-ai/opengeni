@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "5b628cd9dafa7650bccabc34d7904dd78f92cfde976b0b1423cebcca84522274"
+      "sha256": "8c73674389bd6dba5ee5f452bc567076a68966f2f36c0c20787d50e6f6d9afef"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -703,7 +703,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Install dependencies",
-      "sha256": "65537c1bdf19200ddee14aec6b5b7cc6daef37e4f330c5ba39b05e2044d30d79"
+      "sha256": "914c30f10278b442754d6346aeb4f197b648d41cd9aa8c9d7e6b88fec7ca3dc0"
     },
     {
       "workflow": ".github/workflows/ci.yml",

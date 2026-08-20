@@ -18,6 +18,7 @@ import {
   WORKFLOW_GRAPH_LIMITS,
   canonicalJson,
   compareWorkflowExecutionManifest,
+  inspectWorkflowExecutionGitTreeRepository,
   inspectWorkflowExecutionRepository,
   inspectWorkflowExecutionSources,
   loadWorkflowExecutionSources,
@@ -73,6 +74,58 @@ async function createDiscoveryFixture(): Promise<string> {
   await writeFile(join(directory, ".github/workflows/fixture.yml"), minimalWorkflow);
   await writeFile(join(directory, ".github/actions/probe/action.yaml"), minimalAction);
   return directory;
+}
+
+async function runFixtureGit(
+  directory: string,
+  args: readonly string[],
+  input?: string | Uint8Array,
+): Promise<string> {
+  const child = Bun.spawn(["git", ...args], {
+    cwd: directory,
+    stdin: input === undefined ? "ignore" : new Blob([input as BlobPart]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`fixture Git failed: ${stderr.trim()}`);
+  return stdout.trim();
+}
+
+async function writeDiscoveryManifest(directory: string): Promise<void> {
+  const inspection = await inspectWorkflowExecutionRepository(directory);
+  expect(inspection.violations).toEqual([]);
+  await writeFile(
+    join(directory, GRAPH_MANIFEST_PATH),
+    `${JSON.stringify(inspection.manifest, null, 2)}\n`,
+  );
+}
+
+async function createCommittedDiscoveryFixture(): Promise<string> {
+  const directory = await createDiscoveryFixture();
+  await mkdir(join(directory, "scripts"), { recursive: true });
+  await writeDiscoveryManifest(directory);
+  await runFixtureGit(directory, ["init", "--quiet"]);
+  await runFixtureGit(directory, ["config", "user.email", "workflow-graph@example.invalid"]);
+  await runFixtureGit(directory, ["config", "user.name", "Workflow Graph Test"]);
+  await runFixtureGit(directory, ["add", "-A"]);
+  await runFixtureGit(directory, ["commit", "--quiet", "-m", "fixture"]);
+  return directory;
+}
+
+async function commitFixture(directory: string, message: string): Promise<void> {
+  await runFixtureGit(directory, ["add", "-A"]);
+  await runFixtureGit(directory, ["commit", "--quiet", "-m", message]);
+}
+
+function gitInspectionViolations(
+  result: Awaited<ReturnType<typeof inspectWorkflowExecutionGitTreeRepository>>,
+): readonly string[] {
+  return [...result.inspection.violations, ...result.manifestViolations];
 }
 
 function fixtureSources(): Record<string, string> {
@@ -814,6 +867,312 @@ describe("workflow execution graph manifest", () => {
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
+    }
+  });
+
+  test("Git-tree mode captures one immutable snapshot despite hostile worktree replacement", async () => {
+    const directory = await createCommittedDiscoveryFixture();
+    const outside = await mkdtemp(join(tmpdir(), "workflow-graph-outside-"));
+    try {
+      const committedWorkflow = await readFile(
+        join(directory, ".github/workflows/fixture.yml"),
+        "utf8",
+      );
+      await mkdir(join(outside, "workflows"), { recursive: true });
+      await mkdir(join(outside, "action"), { recursive: true });
+      await writeFile(join(outside, "workflows/fixture.yml"), `${minimalWorkflow}# outside\n`);
+      await writeFile(join(outside, "action/action.yaml"), `${minimalAction}# outside\n`);
+
+      const checked = await inspectWorkflowExecutionGitTreeRepository(directory, "HEAD^{tree}", {
+        async afterTreeCapture() {
+          await rm(join(directory, ".github/workflows"), { recursive: true, force: true });
+          await rm(join(directory, ".github/actions/probe"), { recursive: true, force: true });
+          await symlink(join(outside, "workflows"), join(directory, ".github/workflows"), "dir");
+          await symlink(join(outside, "action"), join(directory, ".github/actions/probe"), "dir");
+          await writeFile(join(directory, GRAPH_MANIFEST_PATH), "{}\n");
+          await commitFixture(directory, "move HEAD after tree capture");
+        },
+      });
+      expect(gitInspectionViolations(checked)).toEqual([]);
+      expect(checked.inspection.manifest.workflows).toHaveLength(1);
+      expect(checked.inspection.manifest.actions).toHaveLength(1);
+      expect(committedWorkflow).toBe(minimalWorkflow);
+      await expect(loadWorkflowExecutionSources(directory)).rejects.toThrow(
+        "workflow discovery root must be a regular directory",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("Git-tree mode ignores dirty state while local mode detects add, edit, delete, and rename", async () => {
+    const mutations = [
+      async (directory: string) => {
+        await writeFile(join(directory, ".github/workflows/added.yml"), minimalWorkflow);
+      },
+      async (directory: string) => {
+        await writeFile(
+          join(directory, ".github/workflows/fixture.yml"),
+          minimalWorkflow.replace("echo fixture", "echo edited"),
+        );
+      },
+      async (directory: string) => {
+        await rm(join(directory, ".github/workflows/fixture.yml"));
+      },
+      async (directory: string) => {
+        await rename(
+          join(directory, ".github/workflows/fixture.yml"),
+          join(directory, ".github/workflows/renamed.yml"),
+        );
+      },
+    ] as const;
+
+    for (const [index, mutate] of mutations.entries()) {
+      const directory = await createCommittedDiscoveryFixture();
+      try {
+        const committed = JSON.parse(
+          await readFile(join(directory, GRAPH_MANIFEST_PATH), "utf8"),
+        ) as unknown;
+        await mutate(directory);
+        expect(await runFixtureGit(directory, ["status", "--porcelain"]), String(index)).not.toBe(
+          "",
+        );
+        const local = await inspectWorkflowExecutionRepository(directory);
+        expect(
+          [...local.violations, ...compareWorkflowExecutionManifest(committed, local.manifest)],
+          String(index),
+        ).not.toEqual([]);
+        const gitTree = await inspectWorkflowExecutionGitTreeRepository(directory, "HEAD^{tree}");
+        expect(gitInspectionViolations(gitTree), String(index)).toEqual([]);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("Git-tree inventory rejects symlink, non-blob, and dual action definitions", async () => {
+    const symlinkDirectory = await createCommittedDiscoveryFixture();
+    try {
+      const action = join(symlinkDirectory, ".github/actions/probe/action.yaml");
+      await rm(action);
+      await writeFile(join(symlinkDirectory, ".github/actions/probe/payload.txt"), minimalAction);
+      await symlink("payload.txt", action);
+      await commitFixture(symlinkDirectory, "symlink action");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(symlinkDirectory, "HEAD^{tree}"),
+      ).rejects.toThrow("forbidden symlink in the Git tree");
+    } finally {
+      await rm(symlinkDirectory, { recursive: true, force: true });
+    }
+
+    const nonBlobDirectory = await createCommittedDiscoveryFixture();
+    try {
+      const head = await runFixtureGit(nonBlobDirectory, ["rev-parse", "HEAD"]);
+      await rm(join(nonBlobDirectory, ".github/workflows/fixture.yml"));
+      await runFixtureGit(nonBlobDirectory, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        `160000,${head},.github/workflows/fixture.yml`,
+      ]);
+      await runFixtureGit(nonBlobDirectory, ["commit", "--quiet", "-m", "gitlink workflow"]);
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(nonBlobDirectory, "HEAD^{tree}"),
+      ).rejects.toThrow("is not a regular Git blob");
+    } finally {
+      await rm(nonBlobDirectory, { recursive: true, force: true });
+    }
+
+    const dualDirectory = await createCommittedDiscoveryFixture();
+    try {
+      await writeFile(join(dualDirectory, ".github/actions/probe/action.yml"), minimalAction);
+      await commitFixture(dualDirectory, "dual action manifests");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(dualDirectory, "HEAD^{tree}"),
+      ).rejects.toThrow("ambiguous action definitions");
+    } finally {
+      await rm(dualDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("Git-tree manifest comparison is bound to the same committed tree", async () => {
+    const directory = await createCommittedDiscoveryFixture();
+    try {
+      const priorManifest = await readFile(join(directory, GRAPH_MANIFEST_PATH), "utf8");
+      await writeFile(
+        join(directory, ".github/workflows/fixture.yml"),
+        minimalWorkflow.replace("echo fixture", "echo committed-change"),
+      );
+      await writeDiscoveryManifest(directory);
+      await writeFile(join(directory, GRAPH_MANIFEST_PATH), priorManifest);
+      await commitFixture(directory, "stale same-tree manifest");
+      const checked = await inspectWorkflowExecutionGitTreeRepository(directory, "HEAD^{tree}");
+      expect(checked.inspection.violations).toEqual([]);
+      expect(checked.manifestViolations).toContain(
+        "workflow digest changed for .github/workflows/fixture.yml",
+      );
+      await writeFile(join(directory, GRAPH_MANIFEST_PATH), "{}\n");
+      const repeated = await inspectWorkflowExecutionGitTreeRepository(directory, "HEAD^{tree}");
+      expect(repeated.manifestViolations).toEqual(checked.manifestViolations);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("Git-tree blob preflight rejects byte limits before every content read", async () => {
+    const oversized = await createCommittedDiscoveryFixture();
+    try {
+      await writeFile(
+        join(oversized, ".github/workflows/fixture.yml"),
+        new Uint8Array(WORKFLOW_GRAPH_LIMITS.maxSourceBytes + 1),
+      );
+      await commitFixture(oversized, "oversized workflow");
+      let reads = 0;
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(oversized, "HEAD^{tree}", {
+          beforeBlobRead() {
+            reads += 1;
+          },
+        }),
+      ).rejects.toThrow("exceeds the per-source UTF-8 byte limit");
+      expect(reads).toBe(0);
+    } finally {
+      await rm(oversized, { recursive: true, force: true });
+    }
+
+    const aggregate = await createCommittedDiscoveryFixture();
+    try {
+      for (let index = 0; index < 4; index += 1) {
+        await writeFile(
+          join(aggregate, `.github/workflows/large-${index}.yml`),
+          padAscii(minimalWorkflow, WORKFLOW_GRAPH_LIMITS.maxSourceBytes),
+        );
+      }
+      await commitFixture(aggregate, "aggregate overflow");
+      let reads = 0;
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(aggregate, "HEAD^{tree}", {
+          beforeBlobRead() {
+            reads += 1;
+          },
+        }),
+      ).rejects.toThrow("exceeds the total UTF-8 byte limit");
+      expect(reads).toBe(0);
+    } finally {
+      await rm(aggregate, { recursive: true, force: true });
+    }
+  });
+
+  test("Git-tree mode fatally rejects invalid content and path UTF-8 without disclosure", async () => {
+    const invalidContent = await createCommittedDiscoveryFixture();
+    try {
+      await writeFile(
+        join(invalidContent, ".github/workflows/fixture.yml"),
+        Uint8Array.of(0x80, 0x81),
+      );
+      await commitFixture(invalidContent, "invalid content utf8");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(invalidContent, "HEAD^{tree}"),
+      ).rejects.toThrow(`${workflowPath} contains invalid UTF-8`);
+    } finally {
+      await rm(invalidContent, { recursive: true, force: true });
+    }
+
+    const invalidPath = await createCommittedDiscoveryFixture();
+    try {
+      const workflowBlob = await runFixtureGit(invalidPath, [
+        "rev-parse",
+        "HEAD:.github/workflows/fixture.yml",
+      ]);
+      const actionsTree = await runFixtureGit(invalidPath, ["rev-parse", "HEAD:.github/actions"]);
+      const scriptsTree = await runFixtureGit(invalidPath, ["rev-parse", "HEAD:scripts"]);
+      const workflowTree = await runFixtureGit(
+        invalidPath,
+        ["mktree", "-z"],
+        Buffer.concat([
+          Buffer.from(`100644 blob ${workflowBlob}\tfixture.yml\0`),
+          Buffer.from(`100644 blob ${workflowBlob}\tinvalid-`),
+          Buffer.from([0x80]),
+          Buffer.from(".yml\0"),
+        ]),
+      );
+      const githubTree = await runFixtureGit(
+        invalidPath,
+        ["mktree", "-z"],
+        [`040000 tree ${actionsTree}\tactions\0`, `040000 tree ${workflowTree}\tworkflows\0`].join(
+          "",
+        ),
+      );
+      const rootTree = await runFixtureGit(
+        invalidPath,
+        ["mktree", "-z"],
+        [`040000 tree ${githubTree}\t.github\0`, `040000 tree ${scriptsTree}\tscripts\0`].join(""),
+      );
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(invalidPath, rootTree),
+      ).rejects.toThrow("Git tree path contains invalid UTF-8");
+    } finally {
+      await rm(invalidPath, { recursive: true, force: true });
+    }
+  });
+
+  test("Git-tree discovery enforces path, entry, source, and depth bounds", async () => {
+    const invalidPath = await createCommittedDiscoveryFixture();
+    try {
+      await writeFile(join(invalidPath, ".github/workflows/control\nname.yml"), minimalWorkflow);
+      await commitFixture(invalidPath, "control path");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(invalidPath, "HEAD^{tree}"),
+      ).rejects.toThrow("contains an invalid path");
+    } finally {
+      await rm(invalidPath, { recursive: true, force: true });
+    }
+
+    const entryOverflow = await createCommittedDiscoveryFixture();
+    try {
+      await Promise.all(
+        Array.from({ length: WORKFLOW_GRAPH_LIMITS.maxWorkflowDiscoveryEntries }, (_, index) =>
+          writeFile(join(entryOverflow, `.github/workflows/filler-${index}.txt`), ""),
+        ),
+      );
+      await commitFixture(entryOverflow, "workflow entry overflow");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(entryOverflow, "HEAD^{tree}"),
+      ).rejects.toThrow("workflow Git tree discovery exceeds the directory-entry limit");
+    } finally {
+      await rm(entryOverflow, { recursive: true, force: true });
+    }
+
+    const sourceOverflow = await createCommittedDiscoveryFixture();
+    try {
+      await Promise.all(
+        Array.from({ length: WORKFLOW_GRAPH_LIMITS.maxSources - 1 }, (_, index) =>
+          writeFile(join(sourceOverflow, `.github/workflows/source-${index}.yml`), minimalWorkflow),
+        ),
+      );
+      await commitFixture(sourceOverflow, "source overflow");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(sourceOverflow, "HEAD^{tree}"),
+      ).rejects.toThrow("exceeds the source-count limit in the Git tree");
+    } finally {
+      await rm(sourceOverflow, { recursive: true, force: true });
+    }
+
+    const depthOverflow = await createCommittedDiscoveryFixture();
+    try {
+      let nested = join(depthOverflow, ".github/actions");
+      for (let index = 0; index <= WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryDepth; index += 1) {
+        nested = join(nested, `depth-${index}`);
+      }
+      await mkdir(nested, { recursive: true });
+      await writeFile(join(nested, "action.yml"), minimalAction);
+      await commitFixture(depthOverflow, "action depth overflow");
+      await expect(
+        inspectWorkflowExecutionGitTreeRepository(depthOverflow, "HEAD^{tree}"),
+      ).rejects.toThrow("action Git tree discovery exceeds the directory-depth limit");
+    } finally {
+      await rm(depthOverflow, { recursive: true, force: true });
     }
   });
 
