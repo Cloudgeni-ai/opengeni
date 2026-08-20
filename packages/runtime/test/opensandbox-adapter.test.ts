@@ -98,7 +98,18 @@ class FakeOpenSandbox {
       invalidateEndpointCache() {},
     };
     const commands = {
-      async run(_command: string, _options: unknown, handlers: any) {
+      async run(
+        _command: string,
+        options: { workingDirectory?: string } | undefined,
+        handlers: any,
+      ) {
+        const cwd = options?.workingDirectory;
+        if (cwd && !self.files.has(cwd) && ![...self.files.keys()].some((path) => path.startsWith(`${cwd}/`))) {
+          throw new SandboxApiException({
+            message: `invalid request, validation error working directory does not exist: ${cwd}: stat ${cwd}: no such file or directory`,
+            statusCode: 400,
+          });
+        }
         self.calls.push("command:run");
         await handlers?.onInit?.({ id: "exec-1", timestamp: Date.now() });
         await handlers?.onStdout?.({ text: "out", timestamp: Date.now() });
@@ -301,14 +312,14 @@ class FakeOpenSandbox {
 
 function createClient(
   fake: FakeOpenSandbox,
-  options: { poolRef?: string } = {},
+  options: { poolRef?: string; baseUrl?: string; useServerProxy?: boolean } = {},
 ): OpenSandboxClient {
   return new OpenSandboxClient({
-    baseUrl: "https://opensandbox.example.test",
+    baseUrl: options.baseUrl ?? "https://opensandbox.example.test",
     apiKey: "secret-test-key",
     image: IMAGE,
     ttlSeconds: 60,
-    useServerProxy: true,
+    useServerProxy: options.useServerProxy ?? true,
     readyTimeoutSeconds: 2,
     resourceLimits: { cpu: "1", memory: "1Gi" },
     resourceRequests: { cpu: "250m", memory: "512Mi" },
@@ -360,6 +371,20 @@ describe("OpenSandbox adapter", () => {
 
     expect(session.state.workspaceReady).toBe(true);
     expect(fake.files.get("/workspace")).toEqual({ type: "directory" });
+  });
+
+  test("exec before start still creates the declared workspace root", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+
+    const result = await session.exec({ cmd: "printf ready", yieldTimeMs: 30_000 });
+
+    expect(result.exitCode).toBe(0);
+    expect(session.state.workspaceReady).toBe(true);
+    expect(fake.files.get("/workspace")).toEqual({ type: "directory" });
+    expect(fake.calls.indexOf("command:run")).toBeGreaterThan(
+      fake.calls.findIndex((call) => call === "createSandbox"),
+    );
   });
 
   test("delete works before start and never resolves endpoints", async () => {
@@ -538,17 +563,51 @@ describe("OpenSandbox adapter", () => {
       { name: "value.txt", path: "dir/value.txt", type: "file" },
     ]);
     await expect(session.readFile({ path: "/etc/passwd" })).rejects.toThrow(/must stay within/);
+    await expect(
+      session.writeFile({
+        path: "/tmp/opengeni-browserd/authority/admin-token",
+        content: "token\n",
+      }),
+    ).resolves.toBe(6);
     await expect(session.exec({ cmd: "id", runAs: "root" })).rejects.toBeInstanceOf(
       SandboxUnsupportedFeatureError,
     );
 
     const endpoint = await session.resolveExposedPort(8080);
     expect(endpoint).toMatchObject({
-      host: "proxy.example.test",
+      host: "opensandbox.example.test",
       port: 443,
       tls: true,
       path: "/sandboxes/sbx-1/8080",
       headers: { "x-open-sandbox-route": "sbx-1" },
+    });
+  });
+
+  test("server-proxy endpoints rewrite cluster hosts to the configured lifecycle base URL", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake, {
+      baseUrl: "http://127.0.0.1:18090",
+    }).create();
+    const endpoint = await session.resolveExposedPort(6080);
+    expect(endpoint).toMatchObject({
+      host: "127.0.0.1",
+      port: 18090,
+      tls: false,
+      path: "/sandboxes/sbx-1/6080/vnc.html",
+      protocol: "http",
+    });
+    expect(endpoint.url).toBe("http://127.0.0.1:18090/sandboxes/sbx-1/6080/vnc.html");
+  });
+
+  test("signed endpoints keep the provider-advertised host when server proxy is off", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake, { useServerProxy: false }).create();
+    const endpoint = await session.resolveExposedPort(8080);
+    expect(endpoint).toMatchObject({
+      host: "proxy.example.test",
+      port: 443,
+      tls: true,
+      path: "/sandboxes/sbx-1/8080",
     });
   });
 

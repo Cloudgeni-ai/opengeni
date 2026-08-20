@@ -608,14 +608,14 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   opensandbox: {
     backend: "opensandbox",
     backendId: "opensandbox",
-    tier: "headless",
+    tier: "desktop",
     os: { supported: ["linux"], default: "linux" },
     capabilities: {
       FileSystem: { available: true, readOnly: false },
-      Terminal: { available: true, transport: "sse-events", pty: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
       Git: { available: true },
-      DesktopStream: { available: false, transport: null },
-      Recording: { available: false },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
     },
     lifetime: {
       requiresSnapshotRollover: false,

@@ -1479,12 +1479,12 @@ reaping is primary; provider expiry is a leak backstop.
 
 OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
 `/workspace` tar capture/hydration. Native OpenSandbox pause/resume, snapshots,
-and immutable rig-image builds are deliberately not used. The capability row is
-headless: ordinary and retained commands, files, Git, and configured ports are
-supported. The Agents SDK does not expose `write_stdin` because PTY is false;
-OpenGeni's internal finalizer can still poll and Ctrl-C an exact retained
-provider command. Arbitrary stdin, `runAs`, desktop, and recording are reported
-unavailable.
+and immutable rig-image builds are deliberately not used. A desktop-class box
+image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
+interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. The
+Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
+is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
+exact retained provider command. `runAs` remains unavailable.
 
 Prepare/render the pinned upstream chart without cluster mutation:
 

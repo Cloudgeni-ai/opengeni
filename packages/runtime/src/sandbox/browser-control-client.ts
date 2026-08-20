@@ -70,7 +70,12 @@ import {
   type EnsureBrowserControlServerResult,
 } from "./browser-control-server";
 import { parseExecResponseBanner } from "./exec-banner";
-import { buildStreamUrl, type ExposedPortEndpoint } from "./stream-port";
+import {
+  buildStreamUrl,
+  joinExposedPortPath,
+  StreamPortUnavailableError,
+  type ExposedPortEndpoint,
+} from "./stream-port";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
@@ -708,13 +713,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    const providerPath = endpoint.path ?? "/";
-    if (providerPath !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "browser placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/browser-sessions/${binding.browserSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "target id"))}/frames`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/browser-sessions/${binding.browserSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "target id"))}/frames`,
+    );
     return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
@@ -736,12 +738,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    if ((endpoint.path ?? "/") !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "computer placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/frames`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/frames`,
+    );
     return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
@@ -756,12 +756,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    if ((endpoint.path ?? "/") !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "computer placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`,
+    );
     return buildStreamUrl({ ...endpoint, path });
   }
 
@@ -894,13 +892,27 @@ export class BrowserControlClient {
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
         const endpoint = await this.session.resolveExposedPort(this.port);
-        if ((endpoint.path ?? "/") === "/") {
+        // Prefixed lifecycle proxies (OpenSandbox `/v1/sandboxes/<id>/proxy/<port>`)
+        // rewrite Authorization, so a host-side Bearer cannot be both the proxy
+        // key and the browserd admin token. Native `/` tunnels host-fetch.
+        // Prefixed JSON uses in-box loopback curl. A cached controller-only
+        // session has no exec, so host-fetching that prefix would 401; throw a
+        // retryable transport error so the caller invalidates and provisions.
+        const prefixed = (endpoint.path ?? "/") !== "/";
+        const canExec = Boolean(this.session.exec || this.session.execCommand);
+        if (prefixed && !canExec) {
+          throw new BrowserControlTransportError(
+            "cached browser controller endpoint cannot host-fetch a prefixed proxy",
+          );
+        }
+        if (!prefixed) {
           return await requestExposedController(endpoint, input, this.timeoutMs);
         }
       } catch (error) {
         if (
           error instanceof BrowserControlRequestError ||
           error instanceof BrowserControlProtocolError ||
+          error instanceof BrowserControlTransportError ||
           error instanceof RangeError
         ) {
           throw error;
@@ -1458,6 +1470,29 @@ function curlConfig(input: {
   ].join("\n");
 }
 
+function joinControllerPath(endpointPath: string | undefined, requestPath: string): string {
+  try {
+    return joinExposedPortPath(endpointPath, requestPath);
+  } catch (error) {
+    if (error instanceof StreamPortUnavailableError) {
+      throw new BrowserControlProtocolError(error.message);
+    }
+    throw error;
+  }
+}
+
+function exposedPortHeaders(endpoint: ExposedPortEndpoint): Record<string, string> {
+  const raw = endpoint.headers;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== "string" || typeof value !== "string") continue;
+    if (key.toLowerCase() === "authorization") continue;
+    headers[key] = value;
+  }
+  return headers;
+}
+
 async function requestExposedController(
   endpoint: ExposedPortEndpoint,
   input: {
@@ -1471,7 +1506,9 @@ async function requestExposedController(
 ): Promise<unknown> {
   const token = requireToken(input.token, "browser controller token");
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
-  const streamUrl = new URL(buildStreamUrl({ ...endpoint, path: input.path }));
+  const streamUrl = new URL(
+    buildStreamUrl({ ...endpoint, path: joinControllerPath(endpoint.path, input.path) }),
+  );
   streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
   const body = input.body === undefined ? undefined : JSON.stringify(input.body);
   if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
@@ -1480,6 +1517,7 @@ async function requestExposedController(
   const response = await fetch(streamUrl, {
     method: input.method,
     headers: {
+      ...exposedPortHeaders(endpoint),
       authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
@@ -1947,6 +1985,13 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
   }
 }
 
+function isWorkspaceConfinedWrite(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /must stay within|confines|workspace mount|within \/workspace/iu.test(error.message)
+  );
+}
+
 async function writePrivateFile(
   session: BrowserControlPlacementSession,
   input: {
@@ -1961,8 +2006,18 @@ async function writePrivateFile(
     return;
   }
   if (session.writeFile) {
-    await session.writeFile(input);
-    return;
+    try {
+      await session.writeFile(input);
+      return;
+    } catch (error) {
+      if (
+        !isWorkspaceConfinedWrite(error) ||
+        (!session.exec && !session.execCommand) ||
+        !session.writeStdin
+      ) {
+        throw error;
+      }
+    }
   }
   if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new BrowserControlUnsupportedError("browser placement has no private file transport");

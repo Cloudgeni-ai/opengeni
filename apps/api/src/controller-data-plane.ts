@@ -1,7 +1,22 @@
 import {
   BrowserControlRequestError,
   BrowserControlTransportError,
+  exposedPortEndpointFromUrl,
 } from "@opengeni/runtime/sandbox";
+
+/** Modal/Daytona/Blaxel tunnels serve browserd at `/`, so a cached
+ * controller-only session can host-fetch JSON. OpenSandbox's lifecycle proxy
+ * prefixes `/v1/sandboxes/<id>/proxy/<port>` and rewrites Authorization; JSON
+ * must stay on an exec-capable in-box curl session. */
+export function controllerCacheAllowsHostFetch(url: string): boolean {
+  try {
+    const endpoint = exposedPortEndpointFromUrl(url);
+    const path = endpoint.path ?? "/";
+    return path === "/" || path === "";
+  } catch {
+    return false;
+  }
+}
 
 /** Prefer a lease-fenced controller endpoint for the idempotent create path.
  * Only a transport-class failure invalidates the cache and provisions once;

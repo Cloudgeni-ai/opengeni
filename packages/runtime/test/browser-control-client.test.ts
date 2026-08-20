@@ -16,6 +16,7 @@ import {
   BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,
+  BrowserControlTransportError,
   BrowserControlUnsupportedError,
   provisionBrowserControlClient,
   type BrowserControlPlacementSession,
@@ -58,6 +59,87 @@ describe("BrowserControlClient", () => {
       await expect(provisionBrowserControlClient(session, { adminToken })).rejects.toBeInstanceOf(
         BrowserControlUnsupportedError,
       );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("joins a prefixed provider proxy path and forwards non-Authorization headers", async () => {
+    const sandboxId = randomUUID();
+    const prefix = `/v1/sandboxes/${sandboxId}/proxy/7682`;
+    let hostFetches = 0;
+    const browserSessionId = randomUUID();
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        hostFetches += 1;
+        return success({ origins: ["https://app.opengeni.test"] });
+      },
+    });
+    const session: BrowserControlPlacementSession = {
+      resolveExposedPort: async () => ({
+        host: "127.0.0.1",
+        port: server.port,
+        tls: false,
+        path: prefix,
+        query: "",
+        headers: {
+          "OPEN-SANDBOX-API-KEY": "preview-key",
+          authorization: "Bearer must-not-win",
+        },
+      }),
+    };
+    try {
+      const client = new BrowserControlClient(session, { adminToken });
+      await expect(client.addAllowedOrigins(["https://app.opengeni.test"])).rejects.toBeInstanceOf(
+        BrowserControlTransportError,
+      );
+      expect(hostFetches).toBe(0);
+      expect(
+        await client.frameStreamUrl({ browserSessionId, controllerGeneration: "g1" }, "target-1"),
+      ).toBe(
+        `ws://127.0.0.1:${server.port}${prefix}/v1/browser-sessions/${browserSessionId}/targets/target-1/frames`,
+      );
+      expect(
+        await client.computerRfbStreamUrl(
+          { computerSessionId: browserSessionId, controllerGeneration: "g1" },
+          "screen-1",
+        ),
+      ).toBe(
+        `ws://127.0.0.1:${server.port}${prefix}/v1/computer-sessions/${browserSessionId}/targets/screen-1/rfb`,
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("uses in-box exec for prefixed proxy JSON instead of host-fetch", async () => {
+    let hostFetches = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        hostFetches += 1;
+        return success({ origins: ["https://app.opengeni.test"] });
+      },
+    });
+    const session: BrowserControlPlacementSession = {
+      resolveExposedPort: async () => ({
+        host: "127.0.0.1",
+        port: server.port,
+        tls: false,
+        path: `/v1/sandboxes/${randomUUID()}/proxy/7682`,
+        query: "",
+      }),
+      exec: async () => {
+        throw new Error("in-box curl path");
+      },
+    };
+    try {
+      const client = new BrowserControlClient(session, { adminToken });
+      await expect(client.addAllowedOrigins(["https://app.opengeni.test"])).rejects.toThrow(
+        "browser controller request transport failed",
+      );
+      expect(hostFetches).toBe(0);
     } finally {
       server.stop(true);
     }

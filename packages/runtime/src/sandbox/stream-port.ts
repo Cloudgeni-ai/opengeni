@@ -140,6 +140,27 @@ export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
   return query ? `${authority}?${query}` : authority;
 }
 
+/**
+ * Join a provider tunnel prefix with a controller/API path. Modal/Daytona/Blaxel
+ * serve the edge at `/`; OpenSandbox's lifecycle proxy serves it at
+ * `/v1/sandboxes/<id>/proxy/<port>`. The request path (`/v1/browser-sessions/...`)
+ * must keep that prefix so Channel B hits browserd, not the lifecycle API root.
+ */
+export function joinExposedPortPath(endpointPath: string | undefined, requestPath: string): string {
+  if (
+    typeof requestPath !== "string" ||
+    !requestPath.startsWith("/") ||
+    requestPath.includes("\0") ||
+    requestPath.includes("#") ||
+    requestPath.includes("?")
+  ) {
+    throw new StreamPortUnavailableError("exposed-port request path is invalid");
+  }
+  const raw = typeof endpointPath === "string" && endpointPath.length > 0 ? endpointPath : "/";
+  const prefix = (raw.startsWith("/") ? raw : `/${raw}`).replace(/\/+$/u, "") || "";
+  return `${prefix}${requestPath}`;
+}
+
 /** Rehydrate a persisted provider tunnel URL without contacting the provider.
  * Only the exact ws/wss shape emitted by buildStreamUrl is accepted. */
 export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {

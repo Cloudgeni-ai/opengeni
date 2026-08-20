@@ -31,6 +31,15 @@ export type InteractionFrameProxyAttachment = Readonly<{
   protocols: readonly string[];
 }>;
 
+/** Docker boxes and OpenSandbox lifecycle proxies cannot carry browserd's
+ * WebSocket subprotocol grant to the viewer. The API frame-proxy holds the
+ * upstream URL + protocols; Modal/Daytona/Blaxel native tunnels stay direct. */
+export function placementUsesInteractionFrameProxy(
+  backend: string | null | undefined,
+): boolean {
+  return backend === "docker" || backend === "opensandbox";
+}
+
 export function createInteractionFrameProxyAttachment(input: {
   requestUrl: string;
   rootSecret: string;

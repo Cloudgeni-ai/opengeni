@@ -60,7 +60,13 @@ import { nextDurableOpId } from "../op-correlation";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
+const BROWSERD_ROOT = "/tmp/opengeni-browserd";
+const ALLOWED_PRIVATE_ROOTS = [PRIVATE_ROOT, BROWSERD_ROOT] as const;
 const DEFAULT_EXEC_YIELD_TIME_MS = 10_000;
+/** Lifecycle `commands.run` often spends ~10s on the control plane even for
+ * `echo`. Channel-A file/git reads use a 10–20s yield and must not be
+ * classified as retained processes just because that round-trip is slow. */
+const COMMAND_API_SETTLE_GRACE_MS = 30_000;
 const DEFAULT_WRITE_STDIN_YIELD_TIME_MS = 250;
 const OPENSANDBOX_STATE_VERSION = 1;
 
@@ -264,6 +270,12 @@ function assertStateMatchesOptions(
   }
 }
 
+function isAllowedPrivatePath(absolute: string): boolean {
+  return ALLOWED_PRIVATE_ROOTS.some(
+    (root) => absolute === root || absolute.startsWith(`${root}/`),
+  );
+}
+
 function workspacePath(path: string, options: { allowPrivate?: boolean } = {}): string {
   const raw = path.trim();
   if (raw.includes("\0") || raw.includes("\\")) {
@@ -273,11 +285,10 @@ function workspacePath(path: string, options: { allowPrivate?: boolean } = {}): 
   const allowed =
     absolute === WORKSPACE_ROOT ||
     absolute.startsWith(`${WORKSPACE_ROOT}/`) ||
-    (options.allowPrivate === true &&
-      (absolute === PRIVATE_ROOT || absolute.startsWith(`${PRIVATE_ROOT}/`)));
+    (options.allowPrivate === true && isAllowedPrivatePath(absolute));
   if (!allowed) {
     throw new SandboxConfigurationError(
-      `OpenSandbox path must stay within ${WORKSPACE_ROOT}${options.allowPrivate ? ` or ${PRIVATE_ROOT}` : ""}: ${path}`,
+      `OpenSandbox path must stay within ${WORKSPACE_ROOT}${options.allowPrivate ? ` or ${ALLOWED_PRIVATE_ROOTS.join(" or ")}` : ""}: ${path}`,
     );
   }
   return absolute;
@@ -617,8 +628,9 @@ export class OpenSandboxSession {
       transportUncertain: false,
     };
     this.processesByOpId.set(opId, process);
-    process.completed = this.ensureStarted()
-      .then(async (provider) => {
+    process.completed = this.ensureInitialManifestMaterialized()
+      .then(async () => {
+        const provider = await this.ensureStarted();
         const execution = await provider.commands.run(
           commandForArgs(args),
           {
@@ -739,7 +751,11 @@ export class OpenSandboxSession {
     assertRunAsUnsupported(args.runAs);
     if (args.workdir) workspacePath(args.workdir);
     const process = this.beginCommand(args);
-    const yieldTimeMs = args.yieldTimeMs ?? DEFAULT_EXEC_YIELD_TIME_MS;
+    const requestedYieldMs = args.yieldTimeMs ?? DEFAULT_EXEC_YIELD_TIME_MS;
+    const yieldTimeMs =
+      requestedYieldMs >= DEFAULT_EXEC_YIELD_TIME_MS
+        ? requestedYieldMs + COMMAND_API_SETTLE_GRACE_MS
+        : requestedYieldMs;
     const outcome = await Promise.race([
       process.completed.then((value) => ({ done: true as const, value })),
       delay(yieldTimeMs).then(() => ({ done: false as const })),
@@ -1301,15 +1317,54 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
     );
     return recordExposedPortEndpoint(
       this.state,
-      endpointToExposedPort(endpoint, this.options.baseUrl),
+      withOpenSandboxDesktopViewerPath(
+        endpointToExposedPort(endpoint, this.options.baseUrl, this.options.useServerProxy),
+        port,
+      ),
       port,
     );
   }
 }
 
-function endpointToExposedPort(endpoint: Endpoint, baseUrl: string): ExposedPortEndpoint {
+/** noVNC on the OpenSandbox lifecycle proxy serves HTML at the port root
+ * (`…/proxy/6080`). The RFB socket is `…/websockify`. Mint `vnc.html` so the
+ * existing SDK `desktopSocketUrl` rewrite dials that socket. Modal/Daytona
+ * edges at `/` are a different adapter and stay untouched. */
+const OPENSANDBOX_DESKTOP_STREAM_PORT = 6080;
+
+function withOpenSandboxDesktopViewerPath(
+  endpoint: ExposedPortEndpoint,
+  port: number,
+): ExposedPortEndpoint {
+  if (port !== OPENSANDBOX_DESKTOP_STREAM_PORT) return endpoint;
+  const rawPath =
+    typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
+  const prefix = (rawPath.startsWith("/") ? rawPath : `/${rawPath}`).replace(/\/+$/u, "");
+  if (prefix.length === 0) return endpoint;
+  if (/\/vnc(_lite)?\.html$/u.test(prefix) || prefix.endsWith("/websockify")) {
+    return endpoint;
+  }
+  const path = `${prefix}/vnc.html`;
+  const url =
+    typeof endpoint.url === "string" && endpoint.url.length > 0
+      ? `${endpoint.url.replace(/\/+$/u, "")}/vnc.html`
+      : endpoint.url;
+  return { ...endpoint, path, ...(url ? { url } : {}) };
+}
+
+function endpointToExposedPort(
+  endpoint: Endpoint,
+  baseUrl: string,
+  rewriteToBaseUrl: boolean,
+): ExposedPortEndpoint {
   const base = new URL(baseUrl);
-  const url = new URL(`${base.protocol}//${endpoint.endpoint}`);
+  const reported = new URL(`${base.protocol}//${endpoint.endpoint}`);
+  // Channel B is browser → provider-tunnel direct. When we use the lifecycle
+  // server proxy, rewrite the advertised host to the configured base URL so a
+  // local port-forward (or in-cluster DNS) is what the viewer actually opens.
+  const url = rewriteToBaseUrl
+    ? new URL(`${reported.pathname}${reported.search}`, base)
+    : reported;
   const tls = url.protocol === "https:" || url.protocol === "wss:";
   return {
     host: url.hostname,

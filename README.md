@@ -240,8 +240,9 @@ the optional pinned upstream platform wrapper under `deploy/stacks`; it keeps
 the lifecycle service private and its lifecycle routes Secret-backed. Upstream
 single-tenant proxy routes are not API-key checked, so the service remains
 ClusterIP-only with no ingress. OpenSandbox v1 uses exact ID-addressed attach,
-renewable provider TTL, and portable `/workspace` archives. PTY,
-desktop/recording, and native OpenSandbox snapshots are not advertised.
+renewable provider TTL, and portable `/workspace` archives. A desktop-class
+image advertises ttyd PTY and desktop/recording; native OpenSandbox snapshots
+and `runAs` stay unavailable.
 
 ## Deployment
 

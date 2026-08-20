@@ -4,8 +4,12 @@ import { OpenSandboxClient } from "./opensandbox-adapter";
 import { REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 const IMMUTABLE_OCI_IMAGE = /@sha256:[0-9a-f]{64}$/iu;
-const DIRECT_RESOURCE_LIMITS = Object.freeze({ cpu: "1", memory: "1Gi" });
-const DIRECT_RESOURCE_REQUESTS = Object.freeze({ cpu: "250m", memory: "512Mi" });
+/** Desktop-class box: Chromium + XFCE + ttyd will OOM in 1Gi. Two such boxes still fit a D4s_v3. */
+export const OPENSANDBOX_DIRECT_RESOURCE_LIMITS = Object.freeze({ cpu: "2", memory: "4Gi" });
+export const OPENSANDBOX_DIRECT_RESOURCE_REQUESTS = Object.freeze({
+  cpu: "500m",
+  memory: "2Gi",
+});
 
 function clientOptions(
   settings: Parameters<ProviderRegistration["validateCredentials"]>[0],
@@ -19,8 +23,8 @@ function clientOptions(
     ttlSeconds: settings.openSandboxTtlSeconds,
     useServerProxy: settings.openSandboxUseServerProxy,
     readyTimeoutSeconds: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
-    resourceLimits: DIRECT_RESOURCE_LIMITS,
-    resourceRequests: DIRECT_RESOURCE_REQUESTS,
+    resourceLimits: OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
+    resourceRequests: OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,
     environment,
     exposedPorts,
     ...(settings.openSandboxPoolRef ? { poolRef: settings.openSandboxPoolRef } : {}),

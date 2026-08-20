@@ -3,7 +3,7 @@ import {
   BrowserControlRequestError,
   BrowserControlTransportError,
 } from "@opengeni/runtime/sandbox";
-import { withCachedController } from "../src/controller-data-plane";
+import { controllerCacheAllowsHostFetch, withCachedController } from "../src/controller-data-plane";
 
 describe("withCachedController", () => {
   test("uses a healthy cached endpoint without provisioning", async () => {
@@ -71,5 +71,23 @@ describe("withCachedController", () => {
       ).rejects.toBe(error);
       expect(provisions).toBe(0);
     }
+  });
+});
+
+describe("controllerCacheAllowsHostFetch", () => {
+  test("allows native tunnel roots that host-fetch JSON", () => {
+    expect(controllerCacheAllowsHostFetch("wss://box.modal.host/")).toBe(true);
+    expect(controllerCacheAllowsHostFetch("wss://box.modal.host:443/")).toBe(true);
+  });
+
+  test("rejects OpenSandbox lifecycle proxy prefixes that rewrite Authorization", () => {
+    expect(
+      controllerCacheAllowsHostFetch("ws://127.0.0.1:18090/v1/sandboxes/sbx-1/proxy/7682"),
+    ).toBe(false);
+  });
+
+  test("rejects malformed cached URLs fail-closed", () => {
+    expect(controllerCacheAllowsHostFetch("https://controller.example/")).toBe(false);
+    expect(controllerCacheAllowsHostFetch("not-a-url")).toBe(false);
   });
 });

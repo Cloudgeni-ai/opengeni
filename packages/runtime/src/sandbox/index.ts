@@ -337,6 +337,7 @@ export {
   exposeStreamPort,
   buildStreamUrl,
   exposedPortEndpointFromUrl,
+  joinExposedPortPath,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
   type ExposeStreamPortInput,

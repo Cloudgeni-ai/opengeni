@@ -3,6 +3,7 @@ import {
   buildStreamUrl,
   exposedPortEndpointFromUrl,
   exposeStreamPort,
+  joinExposedPortPath,
   StreamPortUnavailableError,
   verifyStreamToken,
   type ExposedPortEndpoint,
@@ -82,6 +83,15 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
       query: "ws=w1&agent=a1&port=7681&channel=ch-1",
     });
     expect(url).toBe("wss://relay.opengeni.ai/stream?ws=w1&agent=a1&port=7681&channel=ch-1");
+  });
+
+  test("joins an OpenSandbox lifecycle proxy prefix with a controller request path", () => {
+    const prefix = "/v1/sandboxes/sbx-1/proxy/7682";
+    expect(joinExposedPortPath(prefix, "/v1/origins")).toBe(`${prefix}/v1/origins`);
+    expect(joinExposedPortPath("/", "/v1/origins")).toBe("/v1/origins");
+    expect(joinExposedPortPath(undefined, "/v1/computer-sessions")).toBe("/v1/computer-sessions");
+    expect(joinExposedPortPath(`${prefix}/`, "/v1/origins")).toBe(`${prefix}/v1/origins`);
+    expect(() => joinExposedPortPath(prefix, "origins")).toThrow(StreamPortUnavailableError);
   });
 
   test("a non-leading-slash path is normalized", () => {

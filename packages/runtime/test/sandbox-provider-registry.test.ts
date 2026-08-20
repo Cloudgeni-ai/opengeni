@@ -28,6 +28,10 @@ import {
   dockerContinuityResumeStateForImage,
   dockerInspectProvesMissing,
 } from "../src/sandbox/providers/docker";
+import {
+  OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
+  OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,
+} from "../src/sandbox/providers/opensandbox";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -512,6 +516,26 @@ describe("createSandboxClient — browser controller port merge", () => {
     ) as { options?: { exposedPorts?: number[] } };
     expect(client.options?.exposedPorts).toBeUndefined();
   });
+
+  test("OpenSandbox stays on-demand and does not pre-declare 6080 or 7682", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "opensandbox",
+        ...CREDS.opensandbox,
+        sandboxDesktopEnabled: true,
+      }),
+    ) as {
+      options?: {
+        exposedPorts?: number[];
+        resourceLimits?: Record<string, string>;
+        resourceRequests?: Record<string, string>;
+      };
+    };
+    expect(client.options?.exposedPorts ?? []).not.toContain(DESKTOP_STREAM_PORT);
+    expect(client.options?.exposedPorts ?? []).not.toContain(BROWSER_CONTROL_PORT);
+    expect(client.options?.resourceLimits).toEqual(OPENSANDBOX_DIRECT_RESOURCE_LIMITS);
+    expect(client.options?.resourceRequests).toEqual(OPENSANDBOX_DIRECT_RESOURCE_REQUESTS);
+  });
 });
 
 describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
@@ -553,6 +577,16 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.requiresAcknowledgment).toBe(true);
     expect(caps.Recording.available).toBe(true);
     expect(caps.Terminal.transport).toBe("pty-ws"); // modal has real pty
+  });
+
+  test("opensandbox warm+desktop: ttyd pty-ws + vnc-ws, tar-only persistence", () => {
+    const caps = negotiateCapabilities({ ...base, backend: "opensandbox" });
+    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.client).toBe("novnc");
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.Recording.available).toBe(true);
+    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Git.available).toBe(true);
   });
 
   test("headless backend → desktop unavailable with tier_headless reason", () => {

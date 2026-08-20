@@ -152,6 +152,22 @@ else
   export OPENGENI_CODEX_SUBSCRIPTION_ENABLED
 fi
 
+# SuperGrok/xAI is the same local-product surface: the settings card and model
+# catalog should be reachable on `bun run dev` without a second env edit.
+# packages/config stays fail-closed for production. An explicit false remains
+# authoritative for testing the disabled rail.
+if [ -z "${OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED:-}" ]; then
+  OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true
+  export OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
+  {
+    printf '\n%s\n' '# Added by scripts/dev-stack.sh for local SuperGrok development.'
+    printf 'OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true\n'
+  } >>.env
+  echo "Enabled and persisted SuperGrok subscription support in .env."
+else
+  export OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
+fi
+
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
 }
@@ -866,6 +882,7 @@ fi
     printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
   fi
   printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
+  printf 'OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED}"
   printf 'NODE_ENV=%s\n' "${NODE_ENV}"
   printf 'OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST=%s\n' "${OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST}"
   printf 'OPENGENI_ARTIFACT_TOOL_ENTRY=%s\n' "${OPENGENI_ARTIFACT_TOOL_ENTRY}"

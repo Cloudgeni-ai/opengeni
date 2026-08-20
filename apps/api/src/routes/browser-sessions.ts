@@ -161,6 +161,7 @@ import {
   buildStreamUrl,
   exposedPortEndpointFromUrl,
   buildSelfhostedBackendSession,
+  ensureDisplayStack,
   mintStreamToken,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -183,7 +184,7 @@ import {
   deriveBrowserViewGrantToken,
   deriveComputerSessionControllerTokens,
 } from "../browser-controller-authority";
-import { withCachedController } from "../controller-data-plane";
+import { controllerCacheAllowsHostFetch, withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -200,7 +201,7 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
-import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
+import { createInteractionFrameProxyAttachment, placementUsesInteractionFrameProxy } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -467,8 +468,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                       resourceId: preparedSession.id,
                       controllerGeneration,
                     },
-                    async () =>
-                      await client.createSession({
+                    async () => {
+                      await ensureHeadedBrowserDisplayStack(
+                        placement.session,
+                        preparedSession.headless,
+                      );
+                      return await client.createSession({
                         browserSessionId: preparedSession.id,
                         controllerGeneration,
                         tokenGeneration: record.tokenGeneration,
@@ -479,7 +484,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                         ...(networkRoute ? { networkRoute } : {}),
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                         ...(restore ? { restore } : {}),
-                      }),
+                      });
+                    },
                   );
                 },
               );
@@ -1788,17 +1794,16 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   request.targetId,
                   request.stream,
                 );
-                const attachment =
-                  placement.lease?.backend === "docker"
-                    ? createInteractionFrameProxyAttachment({
-                        requestUrl: context.req.url,
-                        rootSecret,
-                        upstreamUrl,
-                        upstreamProtocols: protocols,
-                        origin,
-                        expiresAt,
-                      })
-                    : { url: upstreamUrl, protocols };
+                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend)
+                  ? createInteractionFrameProxyAttachment({
+                      requestUrl: context.req.url,
+                      rootSecret,
+                      upstreamUrl,
+                      upstreamProtocols: protocols,
+                      origin,
+                      expiresAt,
+                    })
+                  : { url: upstreamUrl, protocols };
                 return {
                   kind: "direct_websocket" as const,
                   ...attachment,
@@ -2400,8 +2405,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   resourceId: browserSessionId,
                   controllerGeneration,
                 },
-                async () =>
-                  await client.createSession({
+                async () => {
+                  await ensureHeadedBrowserDisplayStack(
+                    placement.session,
+                    prepared.session.headless,
+                  );
+                  return await client.createSession({
                     browserSessionId,
                     controllerGeneration,
                     tokenGeneration: record.tokenGeneration,
@@ -2411,7 +2420,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                     ...(linkedComputer ? { linkedComputer } : {}),
                     ...(networkRoute ? { networkRoute } : {}),
                     restore: restore!,
-                  }),
+                  });
+                },
               );
             } catch (error) {
               if (!isDefiniteBrowserControllerFailure(error)) throw error;
@@ -2845,7 +2855,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       !lease ||
       (lease.liveness !== "warm" && lease.liveness !== "draining") ||
       lease.instanceId !== binding.placementInstanceId ||
-      !lease.controllerDataPlaneUrl
+      !lease.controllerDataPlaneUrl ||
+      !controllerCacheAllowsHostFetch(lease.controllerDataPlaneUrl)
     ) {
       return null;
     }
@@ -2882,6 +2893,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       controllerDataPlaneUrl: url,
     });
     if (!lease) return placement;
+    if (!controllerCacheAllowsHostFetch(url)) {
+      return { ...placement, lease };
+    }
     return { ...placement, session: controllerOnlySession(url), lease };
   }
 
@@ -2897,7 +2911,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const sandboxGroupId = placement.controllerHostSandboxGroupId;
     const cachedUrl = placement.lease?.controllerDataPlaneUrl;
     return await withCachedController({
-      cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
+      cachedUrl:
+        sandboxGroupId && cachedUrl && controllerCacheAllowsHostFetch(cachedUrl)
+          ? cachedUrl
+          : null,
       createCachedClient: (url) =>
         new BrowserControlClient(controllerOnlySession(url), { adminToken }),
       prepareCachedClient: async (client) => {
@@ -3082,6 +3099,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       placement: placement.placement,
     });
     try {
+      await ensureHeadedBrowserDisplayStack(placement.session, record.session.headless);
       await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
@@ -3300,6 +3318,17 @@ function assertCreateReplay(
       "BrowserSession create operation is bound to another ComputerSession",
     );
   }
+}
+
+async function ensureHeadedBrowserDisplayStack(
+  session: BrowserControlPlacementSession,
+  headless: boolean,
+): Promise<void> {
+  if (headless) return;
+  if (typeof session.exec !== "function" && typeof session.execCommand !== "function") return;
+  await ensureDisplayStack(session, {
+    telemetryContext: { callerKind: "viewer" },
+  });
 }
 
 async function ensureLinkedComputerController(
