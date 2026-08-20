@@ -281,10 +281,11 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or OpenGeni tools therefore cannot silently
 disable web search.
 
-`tool_search` is a different capability: it searches bounded deferred tool
-schemas so the model can discover MCP tools without preloading every schema. It
-does not search the public web and must not be presented as a fallback for
-native `web_search`.
+`tool_search` is a different capability: it searches bounded lazy tool
+schemas (deferred MCP plus every non-MCP function tool outside the
+always-visible base set) so the model can discover them without preloading
+every schema. It does not search the public web and must not be presented as a
+fallback for native `web_search`.
 
 Progressive disclosure is selected explicitly per resolved provider:
 
@@ -301,12 +302,14 @@ Progressive disclosure is selected explicitly per resolved provider:
   URL: configuring the built-in OpenAI slot does not prove native-search support.
 
 Classification is origin, not transport. The same first-request set is eager on
-every path: the base runtime tools (`exec_command`, `write_stdin`,
+every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
 `apply_patch`, `view_image`, `load_skill`, `request_human_input`) plus MCP
-tools whose session `ToolRef.eager` is true. Everything else — deferred MCP, Browser/Computer, `generate_image`,
-`generate_video`, and `get_video_generation_capabilities` — is searchable on
-Codex, OpenAI, and generic dispatch alike. `ToolRef.eager` remains a per-session MCP choice and is
-untouched.
+tools whose session `ToolRef.eager` is true. Every other function tool —
+deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
+`get_video_generation_capabilities`, and later first-party additions — is
+searchable on Codex, OpenAI, and generic dispatch alike. Native hosted image
+generation stays a `hosted_tool` and is not in this function-tool hide set.
+`ToolRef.eager` remains a per-session MCP choice and is untouched.
 
 The sandbox's hosted-vs-function structured-tool setting does not select any of
 these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native

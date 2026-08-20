@@ -1417,6 +1417,53 @@ describe("OpenAI/Azure native client tool search", () => {
     }
   });
 
+  test("hides image and video adapter schemas behind search on every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const image = firstPartyTool("generate_image", "Generate or edit exactly one image");
+      const video = firstPartyTool(
+        "generate_video",
+        "Start one durable asynchronous video generation",
+      );
+      const capabilities = firstPartyTool(
+        "get_video_generation_capabilities",
+        "Return the video-generation models currently enabled",
+      );
+      const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+      const agent = new Agent({
+        name: "lazy-test",
+        instructions: "Use tools.",
+        model: "scripted",
+        tools: [image, video, capabilities, exec],
+      });
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const visible = await agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
+        transport === "generic_dispatch"
+          ? ["exec_command", "tool_search", "tool_invoke"]
+          : ["exec_command", "tool_search"],
+      );
+      expect(
+        runtime.search({ query: "generate an image" }).map((candidate) => candidate.name),
+      ).toContain("generate_image");
+      expect(
+        runtime.search({ query: "generate a video" }).map((candidate) => candidate.name),
+      ).toContain("generate_video");
+      expect(
+        runtime
+          .search({ query: "video generation capabilities" })
+          .map((candidate) => candidate.name),
+      ).toContain("get_video_generation_capabilities");
+      expect(
+        runtime.search({ query: "run a shell command" }).map((candidate) => candidate.name),
+      ).not.toContain("exec_command");
+    }
+  });
+
   test("keeps needsApproval on a disclosed first-party tool after native search", async () => {
     let executions = 0;
     const interactionTool = tool({
