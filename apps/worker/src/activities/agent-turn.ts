@@ -43,7 +43,6 @@ import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   getCodexRotationSettings,
   getWorkspaceModelPolicy,
-  getWorkspaceGrant,
   getWorkspace,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
@@ -73,6 +72,7 @@ import {
   settleCodexCredentialFailover,
   upsertSandboxSessionEnvelope,
   setSessionLastInputTokensForTurnAttempt,
+  namedSubjectHasLiveWorkspaceAuthority,
   sumUsageQuantity,
   heartbeatLeaseHolder,
   readLease,
@@ -473,6 +473,7 @@ import {
   type GeneratedImageReceipt,
   type GeneratedImageOutput,
 } from "./generated-images";
+import { ToolResultSpill } from "./agent-turn/tool-result-spill";
 import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
@@ -4403,6 +4404,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       return false;
     };
+    const toolResultSpill = new ToolResultSpill({
+      db,
+      objectStorage,
+      observability,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      attemptId: input.attemptId,
+      getModelRunSettings: () => modelRunSettings,
+      getSandboxFileDownloadBackend: () => sandboxFileDownloadBackend,
+      getPublish: () => {
+        const current = publish;
+        if (!current) return null;
+        return async (events, immediate) =>
+          await current(events as Parameters<TurnEventPublisher>[0], immediate);
+      },
+      toolCancellationFenceRef,
+      getResolvedSandbox: () => resolvedSandbox,
+      getSetupBoxSession: () => setupBoxSession,
+      getSdkOwnedSandboxSession: () => sdkOwnedSandboxSession,
+      getSandboxGroupId: () => sandboxGroupId,
+      runWorkspaceMutation: runWorkspaceMutationForSandbox,
+    });
     let nativeImageGenerationRetention: {
       providerId: string;
       providerBindingHash: string;
@@ -8109,10 +8132,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
+      // The canonical live-authority resolver, not a bare `workspace_memberships`
+      // join: a managed human's personal workspace deliberately has no membership
+      // row (migration 0219), so the bare join would revoke the owner's own frozen
+      // personal connections for every turn that runs in their private workspace.
       const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
         const existing = delegatedMembershipChecks.get(subjectId);
         if (existing) return await existing;
-        const check = getWorkspaceGrant(db, subjectId, input.workspaceId).then(Boolean);
+        const check = namedSubjectHasLiveWorkspaceAuthority(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+        });
         delegatedMembershipChecks.set(subjectId, check);
         return await check;
       };
@@ -8143,7 +8174,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const googleDrivePublicationTarget = objectStorage
         ? await resolveGoogleDrivePublicationTarget(
             db,
-            input.workspaceId,
+            { accountId: input.accountId, workspaceId: input.workspaceId },
             personalConnectionDelegations,
           )
         : null;
@@ -8346,6 +8377,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolveCredential,
             onAuthNeeded: publishToolAuthNeeded,
             materializeConnectorAttachments,
+            spillOversizedModelToolResult: async ({ operationId, result }) =>
+              await toolResultSpill.spill({ operationId, result }),
             localMcpServers,
             ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
             onPreparationPhase: (measurement) => {
@@ -9227,6 +9260,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   provisioned.established.session,
                 );
               }
+              await toolResultSpill.materializeDeferred();
               throwIfTurnOperationCancelled(sandboxResumeSignal);
             },
             onFailed: async (error, settlement) => {
@@ -10205,6 +10239,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       for (const receipt of generatedImageReceiptsCreatedThisTurn.values()) {
                         await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
                       }
+                      await toolResultSpill.materializeDeferred();
                     },
                   }
                 : {}),

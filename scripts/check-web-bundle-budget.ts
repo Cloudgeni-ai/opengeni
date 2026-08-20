@@ -39,12 +39,12 @@ const budgets = {
   // copy, the shared large-history disclosure scheduler, and durable sandbox-file
   // receipt/download controls bring the configured graph to 2,052,836 raw bytes
   // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The always-loaded
-  // tenant-transition boundary, invocation fences, and selected context
-  // semantics bring the direct-session graph to 2,058,999 raw bytes. Managed
-  // Personal-workspace context plus the organization section router bring the
-  // combined graph to 2,060,739 raw bytes. The 2,013 KiB raw envelope
-  // retains 573 bytes of headroom without relaxing the independently bounded
-  // 559 KiB gzip graph.
+  // tenant-transition boundary, invocation fences, selected context semantics,
+  // the always-loaded managed self-context projection, and the organization
+  // section router bring the combined direct-session graph to 2,060,739 raw
+  // bytes locally. The configured Linux CI graph for the landed Personal
+  // projection measured 572,514 gzip bytes. The 2,013 KiB raw and 560 KiB gzip
+  // envelopes preserve the landed CI mapping while bounding the combined graph.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -53,7 +53,7 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   directSessionRaw: 2013 * kib,
-  directSessionGzip: 559 * kib,
+  directSessionGzip: 560 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

@@ -56,6 +56,8 @@ describe("principal transition contract", () => {
     expect(invalidation).toContain("invalidatePrincipalTransition(");
     expect(invalidation).toContain("slackLinkPrepareController.clear()");
     expect(invalidation).toContain("options?.preservePendingSlackLink !== true");
+    expect(invalidation).toContain("managedSelfContextIdentityRef.current = null");
+    expect(invalidation).toContain("setManagedSelfContext(null)");
     expect(invalidation).toContain("resetWorkspaceState(null, true)");
 
     const reset = sourceBetween("const resetWorkspaceState", "const prepareWorkspaceTransition");

@@ -11,6 +11,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "mcp:browser-focus";
+const capabilityName = "Example capability connector with a deterministically long provider name";
 const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
 const driveCapabilityId = "api:openapi:google-drive-browser-fixture";
@@ -272,6 +273,80 @@ describe("capabilities browser e2e", () => {
       }
     }
   }, 150_000);
+
+  test("four-column tiles preserve readable names and non-overlapping metadata", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tile = page.locator(`[data-capability-catalog-tile="${capabilityId}"]`);
+      await expectVisible(tile);
+      const layout = await tile.evaluate((element) => {
+        const bounds = (node: Element) => {
+          const box = node.getBoundingClientRect();
+          return {
+            left: box.left,
+            right: box.right,
+            top: box.top,
+            bottom: box.bottom,
+            width: box.width,
+          };
+        };
+        const rect = (selector: string) => {
+          const node = element.querySelector<HTMLElement>(selector);
+          if (!node) throw new Error(`Missing tile element: ${selector}`);
+          return bounds(node);
+        };
+        const name = element.querySelector<HTMLElement>("[data-capability-name]");
+        if (!name) throw new Error("Missing capability name");
+        const style = getComputedStyle(name);
+        const grid = element.parentElement;
+        return {
+          gridColumns: grid ? getComputedStyle(grid).gridTemplateColumns.split(" ").length : 0,
+          tile: bounds(element),
+          name: rect("[data-capability-name]"),
+          official: rect("[data-capability-official]"),
+          metadata: rect("[data-capability-metadata]"),
+          kind: rect("[data-capability-kind]"),
+          state: rect(":scope > span:last-child"),
+          nameScrollWidth: name.scrollWidth,
+          nameClientWidth: name.clientWidth,
+          nameOverflow: style.overflow,
+          nameTextOverflow: style.textOverflow,
+          nameWhiteSpace: style.whiteSpace,
+          nameTitle: name.title,
+        };
+      });
+
+      expect(layout.gridColumns).toBe(4);
+      expect(layout.name.width).toBeGreaterThanOrEqual(120);
+      expect(layout.nameScrollWidth).toBeGreaterThan(layout.nameClientWidth);
+      expect(layout.nameOverflow).toBe("hidden");
+      expect(layout.nameTextOverflow).toBe("ellipsis");
+      expect(layout.nameWhiteSpace).toBe("nowrap");
+      expect(layout.nameTitle).toBe(capabilityName);
+      expect(layout.name.bottom).toBeLessThanOrEqual(layout.metadata.top);
+      expect(layout.official.right).toBeLessThanOrEqual(layout.kind.left);
+      expect(layout.metadata.left).toBeGreaterThanOrEqual(layout.tile.left);
+      expect(layout.metadata.right).toBeLessThanOrEqual(layout.state.left);
+      expect(layout.state.right).toBeLessThanOrEqual(layout.tile.right);
+      expect(await tile.locator("button").count()).toBe(2);
+
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await page.screenshot({
+        path: `${evidenceDir}tile-layout-four-column-1440.png`,
+        fullPage: true,
+      });
+      await tile.screenshot({ path: `${evidenceDir}tile-layout-four-column-tile.png` });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("forced-colors and reduced-motion preserve the complete control surface", async () => {
     const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
@@ -991,7 +1066,7 @@ function capability(enabled: boolean) {
     workspaceId,
     kind: "mcp",
     source: "manual",
-    name: "Example capability",
+    name: capabilityName,
     description: "A browser-only capability used to verify focus restoration.",
     category: "integrations",
     tags: ["browser", "focus"],
@@ -1028,7 +1103,7 @@ function capability(enabled: boolean) {
     enabled,
     enabledReason: enabled ? "explicit" : null,
     connectionRef: null,
-    metadata: {},
+    metadata: { curation: { featured: false, official: true } },
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
   };

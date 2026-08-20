@@ -127,7 +127,14 @@ Curated Google and Microsoft Definitions use one signed PKCE flow:
 - `GET /v1/integrations/provider-oauth/callback`
 
 The start request names the Integration Definition and ownership and may name an existing
-Connection for reconnect/incremental consent. Google can reuse the deployment's
+Connection for reconnect/incremental consent. Ownership is optional on the wire,
+but a new Connection whose provider allows both ownerships must state one: an
+omitted value is a 422 rather than a silent choice, because defaulting to
+`personal` inverts the documented default and defaulting to `workspace` would
+share a newly connected mailbox with the whole workspace. A reconnect keeps the
+existing Connection's ownership. Requesting `personal` requires an authenticated
+human — an API key, the `configured:` key, a service principal, or an agent
+attempt is refused with a 422 rather than owning a personal Connection. Google can reuse the deployment's
 Google Drive OAuth app; Microsoft and alternate Google clients are selected
 from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
 The Google callback keeps the existing registered URI and verifies the signed

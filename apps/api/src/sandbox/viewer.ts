@@ -50,7 +50,7 @@ import {
   type LeaseSnapshot,
   type SandboxRecord,
   getSessionAuthorityEpoch,
-  subjectHasLiveWorkspaceAuthority,
+  namedSubjectHasLiveWorkspaceAuthority,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -744,7 +744,7 @@ async function resolveViewerAuthorityClaims(
     return null;
   }
   if (input.subjectId?.startsWith("user:") && input.subjectDelegated !== true) {
-    const live = await subjectHasLiveWorkspaceAuthority(db, {
+    const live = await namedSubjectHasLiveWorkspaceAuthority(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId,

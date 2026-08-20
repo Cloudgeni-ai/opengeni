@@ -25,6 +25,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 
