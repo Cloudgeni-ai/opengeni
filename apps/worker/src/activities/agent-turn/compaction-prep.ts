@@ -43,17 +43,11 @@ import type { GovernanceModelOk } from "./governance-model";
 import type {
   AttemptIdentityState,
   BillingState,
+  ClaimedResult,
   EventingState,
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
-
-type ClaimedResult = (
-  result: Omit<
-    Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
-    "turnId" | "attemptId"
-  >,
-) => RunAgentTurnResult;
 
 export type RemoteCompactionPrefix = {
   tools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>>;

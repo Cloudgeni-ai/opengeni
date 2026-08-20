@@ -123,18 +123,12 @@ import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
   AttemptIdentityState,
   BillingState,
+  ClaimedResult,
   EventingState,
   ProviderTurnState,
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
-
-type ClaimedResult = (
-  result: Omit<
-    Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
-    "turnId" | "attemptId"
-  >,
-) => RunAgentTurnResult;
 
 export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;

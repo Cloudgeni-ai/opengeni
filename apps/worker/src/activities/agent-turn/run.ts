@@ -57,7 +57,7 @@ import {
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
-import { createTurnContext } from "./turn-context";
+import { createTurnContext, type EventingState } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
@@ -327,6 +327,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!eventing.publish || !eventing.settle) {
         throw new Error("turn eventing was not wired during claim");
       }
+      // Same object, narrowed type: every post-claim phase mutates this exact
+      // context, so this must stay an assertion and never become a copy.
+      const wiredEventing = eventing as EventingState & {
+        publish: NonNullable<EventingState["publish"]>;
+        settle: NonNullable<EventingState["settle"]>;
+      };
       const {
         turn,
         session,
@@ -360,7 +366,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // when it changed from the prior run's account so the pill flips live.
       // Gated on the codex-billed predicate — non-codex turns never touch this.
       {
-        const capacityDeps = {
+        const capacityDeps: CapacityPhaseDeps = {
           input,
           settings,
           db,
@@ -373,7 +379,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           control,
           attempt,
           billingState,
-          eventing,
+          eventing: wiredEventing,
           providerTurn,
           leases,
           claimedResult,
@@ -385,7 +391,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnExecutionPolicy,
           trigger,
           codexWorkspaceKey,
-        } as CapacityPhaseDeps;
+        };
         const codexCapacity = await selectCodexTurnCapacity(capacityDeps);
         if ("exit" in codexCapacity) return codexCapacity.exit;
         const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
@@ -784,10 +790,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         control,
         attempt,
         billingState,
-        eventing: eventing as typeof eventing & {
-          publish: NonNullable<(typeof eventing)["publish"]>;
-          settle: NonNullable<(typeof eventing)["settle"]>;
-        },
+        eventing: wiredEventing,
         providerTurn,
         leases,
         media,
@@ -1206,10 +1209,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         control,
         attempt,
         billingState,
-        eventing: eventing as typeof eventing & {
-          publish: NonNullable<(typeof eventing)["publish"]>;
-          settle: NonNullable<(typeof eventing)["settle"]>;
-        },
+        eventing: wiredEventing,
         providerTurn,
         leases,
         media,
@@ -1380,10 +1380,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attempt,
         billingState,
         sandboxState,
-        eventing: eventing as typeof eventing & {
-          publish: NonNullable<(typeof eventing)["publish"]>;
-          settle: NonNullable<(typeof eventing)["settle"]>;
-        },
+        eventing: wiredEventing,
         providerTurn,
         leases,
         historySink,

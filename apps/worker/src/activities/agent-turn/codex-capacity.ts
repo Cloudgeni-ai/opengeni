@@ -45,17 +45,11 @@ import type { ClaimTurnOk } from "./claim";
 import type {
   AttemptIdentityState,
   BillingState,
+  ClaimedResult,
   EventingState,
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
-
-type ClaimedResult = (
-  result: Omit<
-    Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
-    "turnId" | "attemptId"
-  >,
-) => RunAgentTurnResult;
 
 export type CapacityPhaseDeps = {
   input: RunAgentTurnInput;

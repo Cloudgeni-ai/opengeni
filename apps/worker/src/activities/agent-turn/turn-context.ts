@@ -26,6 +26,14 @@ import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
 
+/** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
+export type ClaimedResult = (
+  result: Omit<
+    Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
+    "turnId" | "attemptId"
+  >,
+) => RunAgentTurnResult;
+
 export type TurnSettleFn = (input: {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "requires_action";

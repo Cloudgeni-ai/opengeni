@@ -63,18 +63,12 @@ import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type {
   AttemptIdentityState,
   BillingState,
+  ClaimedResult,
   EventingState,
   RecordingState,
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
-
-type ClaimedResult = (
-  result: Omit<
-    Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
-    "turnId" | "attemptId"
-  >,
-) => RunAgentTurnResult;
 
 export type ClaimTurnDeps = {
   input: RunAgentTurnInput;
