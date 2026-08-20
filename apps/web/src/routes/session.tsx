@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
+import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
 import { LoadingPanel } from "@/components/common";
 import {
   FollowUpRepositoryMenuBody,
@@ -69,6 +70,7 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
@@ -103,6 +105,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -172,7 +175,12 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
+  const {
+    session: fetchedSession,
+    loading,
+    error: loadError,
+    refresh: refreshSession,
+  } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -599,6 +607,7 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
+      onReloadSession={refreshSession}
     />
   );
 
@@ -871,6 +880,7 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
+  onReloadSession: () => Promise<void>;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -1117,13 +1127,39 @@ function SessionChatPane(props: {
     ],
   );
   const composerPolicyValidRef = useRef(false);
+  const workspace =
+    context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    session: props.session,
+    enabled: props.session.sandboxBackend !== "selfhosted",
+    fixed: {
+      variableSetId: props.session.variableSetId,
+      rigId: props.session.rigId,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    onReloadSession: props.onReloadSession,
+  });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
+      ...(personalAttachment.intent
+        ? { personalResourceAttachment: personalAttachment.intent }
+        : {}),
     }),
     sendBlocked: () =>
-      attachments.hasUnresolved || repositories.error !== null || !composerPolicyValidRef.current,
+      attachments.hasUnresolved ||
+      repositories.error !== null ||
+      !composerPolicyValidRef.current ||
+      personalAttachment.requiresDecision ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
@@ -1136,6 +1172,8 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
+    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    onDeliveryError: personalAttachment.onDeliveryError,
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;
@@ -1485,6 +1523,11 @@ function SessionChatPane(props: {
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <PersonalResourceAttachmentControl
+            controller={personalAttachment}
+            disabled={terminal || composer.sending}
+            compact
+          />
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
             composer={composer}
