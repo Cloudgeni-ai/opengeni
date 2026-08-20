@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolve } from "node:path";
 
+import { analyzeShellTimeoutBudget, analyzeStepTimeoutBudget } from "./workflow-timeout-budget";
+
 const root = resolve(import.meta.dir, "..");
 const workflowDir = resolve(root, ".github/workflows");
 
@@ -20,53 +22,16 @@ type Job = Readonly<{
   "timeout-minutes"?: number;
 }>;
 
-type Step = Readonly<{ run?: string; uses?: string; "timeout-minutes"?: unknown }>;
+type Step = Readonly<{
+  run?: string;
+  uses?: string;
+  shell?: string;
+  "timeout-minutes"?: unknown;
+}>;
 
 async function workflowFiles(): Promise<readonly string[]> {
   const entries = await readdir(workflowDir);
   return entries.filter((entry) => entry.endsWith(".yml") || entry.endsWith(".yaml")).sort();
-}
-
-/**
- * Remove shell comments while preserving a `#` that sits inside a quoted
- * string. A regex cannot do this: blanking everything after a whitespace-
- * preceded `#` also deletes real budgets on lines like
- * `echo "fixes #42" && bun x t --timeout-seconds 6000`, which would make the
- * guard blind to a spelling it currently catches.
- */
-function stripShellComments(source: string): string {
-  let out = "";
-  let quote: string | null = null;
-  let atCommandBoundary = true;
-  for (let i = 0; i < source.length; i += 1) {
-    const ch = source[i] as string;
-    if (ch === "\n") {
-      quote = null;
-      atCommandBoundary = true;
-      out += ch;
-      continue;
-    }
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-      out += ch;
-      atCommandBoundary = false;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      out += ch;
-      atCommandBoundary = false;
-      continue;
-    }
-    if (ch === "#" && atCommandBoundary) {
-      while (i < source.length && source[i] !== "\n") i += 1;
-      i -= 1;
-      continue;
-    }
-    out += ch;
-    atCommandBoundary = /[\s;&|(]/u.test(ch);
-  }
-  return out;
 }
 
 describe("workflow timeout contract", () => {
@@ -165,57 +130,11 @@ describe("workflow timeout contract", () => {
         let inner = 0;
         let usesBoundedInstall = false;
         for (const step of job.steps ?? []) {
-          // Distinguishing a real budget from prose needs quote awareness, not
-          // a tighter anchor. Two sanitised views are used:
-          //
-          //  - `commentless` removes only a `#` that genuinely starts a shell
-          //    comment. A naive /(^|\s)#.*/ also blanks the rest of a line
-          //    after a quoted `#`, which silently deletes real budgets:
-          //    `echo "fixes #42" && bun x t --timeout-seconds 6000`.
-          //  - `unquoted` additionally blanks quoted spans, so prose inside an
-          //    `echo` is not read as a command. Flag-form budgets are matched
-          //    on `commentless` so a genuine `bash -c "... --timeout-seconds N"`
-          //    still counts.
-          const commentless = stripShellComments(String(step.run ?? ""));
-          const unquoted = commentless.replace(/'[^']*'|"[^"]*"/gu, (m) => " ".repeat(m.length));
-          // Both `--flag N` and `--flag=N` spellings.
-          for (const m of commentless.matchAll(/--timeout-seconds[\s=]+(\d+)/gu))
-            inner += Number(m[1]) / 60;
-          for (const m of commentless.matchAll(/--timeout[\s=]+(\d{5,})/gu))
-            inner += Number(m[1]) / 60_000;
-          // A bare coreutils `timeout 3600 ...` bounds the step as much as a
-          // test-runner flag does. The anchor stays permissive so command
-          // positions like `; do timeout ...`, `sudo timeout ...` and
-          // `env FOO=bar timeout ...` are still seen - a retry loop is the most
-          // common way CI bounds a command. Leading options are consumed
-          // explicitly: `-k` and `-s` take a value, and a greedy `-\S+` would
-          // read the SIGKILL grace as the duration. Suffixes follow coreutils,
-          // where a bare number means seconds.
-          const suffixMinutes: Record<string, number> = {
-            "": 1 / 60,
-            s: 1 / 60,
-            m: 1,
-            h: 60,
-            d: 1440,
-          };
-          const bareTimeout =
-            /(?:^|[\s;&|(])timeout\s+(?:(?:-[ks]\s*\S+|--kill-after[=\s]\S+|--signal[=\s]\S+|--preserve-status|--foreground|-v|--verbose)\s+)*(\d+(?:\.\d+)?)([smhd]?)(?![\w.])/gmu;
-          for (const m of unquoted.matchAll(bareTimeout)) {
-            inner += Number(m[1]) * (suffixMinutes[m[2] ?? ""] ?? 1 / 60);
-          }
-          // A step-level timeout-minutes is an upper bound on that step and
-          // must fit inside the job cap exactly like any other declared budget.
-          const stepCap = step["timeout-minutes"];
-          if (typeof stepCap === "number") inner += stepCap;
-          // A budget that is only known at runtime cannot be checked
-          // statically. Fail closed rather than silently counting it as zero.
-          const expressionBudget =
-            /--timeout(?:-seconds)?[\s=]+\$\{\{/u.test(commentless) ||
-            /(?:^|[\s;&|(])timeout\s+\$\{\{/mu.test(unquoted) ||
-            (stepCap !== undefined && typeof stepCap !== "number");
-          if (expressionBudget) {
+          const budget = analyzeStepTimeoutBudget(step);
+          inner += budget.minutes;
+          for (const reason of budget.uncertainties) {
             violations.push(
-              `${file}:${name} declares an expression-valued timeout that cannot be verified statically`,
+              `${file}:${name} declares a timeout that cannot be verified: ${reason}`,
             );
           }
           if (String(step.uses ?? "").includes("playwright-browsers")) usesBoundedInstall = true;
@@ -234,6 +153,163 @@ describe("workflow timeout contract", () => {
       }
     }
     expect(violations).toEqual([]);
+  });
+
+  test("shell budget analysis is quote-aware, conservative, and amplification-aware", () => {
+    const exactCases: ReadonlyArray<Readonly<{ name: string; source: string; minutes: number }>> = [
+      { name: "bare seconds", source: "timeout 3600 bun run slow", minutes: 60 },
+      { name: "quoted duration", source: 'timeout "2h" bun run slow', minutes: 120 },
+      {
+        name: "kill grace",
+        source: "timeout --signal TERM --kill-after=15m 2h bun run slow",
+        minutes: 135,
+      },
+      {
+        name: "equals-form kill grace",
+        source: "timeout -k15s 1h bun run slow",
+        minutes: 60.25,
+      },
+      {
+        name: "flag equals form",
+        source: "bun run check --timeout-seconds=1800",
+        minutes: 30,
+      },
+      {
+        name: "static quoted shell",
+        source: `bash -c 'bun run check --timeout-seconds 1800'`,
+        minutes: 30,
+      },
+      {
+        name: "bundled shell options",
+        source: `/bin/bash -lc 'timeout 30m bun run slow'`,
+        minutes: 30,
+      },
+      {
+        name: "static for amplification",
+        source: "for attempt in 1 2 3; do timeout 10m bun run slow; done",
+        minutes: 30,
+      },
+      {
+        name: "static retry amplification",
+        source: "retry --attempts 3 timeout 10m bun run slow",
+        minutes: 30,
+      },
+      {
+        name: "equals-form retry amplification",
+        source: "retry --attempts=3 timeout 10m bun run slow",
+        minutes: 30,
+      },
+      {
+        name: "mutually exclusive branch ceiling",
+        source: "if ready; then timeout 10m fast; else timeout 20m slow; fi",
+        minutes: 20,
+      },
+      {
+        name: "subshell budget",
+        source: "(timeout 10m bun run slow)",
+        minutes: 10,
+      },
+      {
+        name: "nested timeout uses outer ceiling",
+        source: `timeout 10m bash -c 'timeout 5m bun run slow'`,
+        minutes: 10,
+      },
+      {
+        name: "pipeline uses concurrent ceiling",
+        source: "timeout 10m producer | timeout 5m consumer",
+        minutes: 10,
+      },
+      {
+        name: "escaped quote and real trailing command",
+        source: String.raw`echo "fixes \"#42\" and says timeout 9h" && timeout 1h bun run slow # timeout 1d ignored`,
+        minutes: 60,
+      },
+      {
+        name: "heredoc prose",
+        source: "cat <<'EOF'\ntimeout 9h is documentation\nEOF\ntimeout 30m bun run slow",
+        minutes: 30,
+      },
+      {
+        name: "quoted heredoc marker is prose",
+        source: "echo '<<EOF'\ntimeout 30m bun run slow",
+        minutes: 30,
+      },
+    ];
+    for (const fixture of exactCases) {
+      const result = analyzeShellTimeoutBudget(fixture.source);
+      expect(result.uncertainties, fixture.name).toEqual([]);
+      expect(result.minutes, fixture.name).toBeCloseTo(fixture.minutes, 8);
+    }
+
+    for (const fixture of [
+      { name: "echo prose", source: `echo "timeout 9h --timeout-seconds 9999"` },
+      { name: "printf prose", source: `printf '%s\\n' 'timeout 9h'` },
+      { name: "comment prose", source: "# timeout 9h\necho done" },
+    ]) {
+      const result = analyzeShellTimeoutBudget(fixture.source);
+      expect(result, fixture.name).toEqual({ minutes: 0, uncertainties: [] });
+    }
+  });
+
+  test("shell budget analysis fails closed on every dynamic or unsupported shape", () => {
+    const cases = [
+      { name: "bare expression", source: "timeout ${{ env.BUDGET }} bun run slow" },
+      { name: "quoted expression", source: 'timeout "${{ env.BUDGET }}" bun run slow' },
+      {
+        name: "quoted flag expression",
+        source: 'bun run check --timeout-seconds="${{ env.BUDGET }}"',
+      },
+      { name: "dynamic kill grace", source: 'timeout -k "$GRACE" 1h bun run slow' },
+      { name: "unknown option", source: "timeout --future-option 1h bun run slow" },
+      { name: "non-decimal flag value", source: "bun test --timeout 0x100" },
+      {
+        name: "unbounded loop amplification",
+        source: "while should_retry; do timeout 10m bun run slow; done",
+      },
+      {
+        name: "dynamic for amplification",
+        source: "for attempt in $ATTEMPTS; do timeout 10m bun run slow; done",
+      },
+      {
+        name: "glob-expanded for amplification",
+        source: "for attempt in attempt-*; do timeout 10m bun run slow; done",
+      },
+      {
+        name: "ambiguous retry count",
+        source: "retry --retries 3 timeout 10m bun run slow",
+      },
+      {
+        name: "unsupported case branches",
+        source: "case $MODE in fast) timeout 10m fast ;; *) timeout 20m slow ;; esac",
+      },
+      {
+        name: "function call amplification",
+        source: "attempt() { timeout 10m bun run slow; }; attempt; attempt",
+      },
+      { name: "unknown wrapper amplification", source: "repeat-command timeout 10m bun run slow" },
+      { name: "dynamic shell", source: 'bash -c "$TIMEOUT_COMMAND"' },
+      { name: "single-quoted Actions shell expression", source: "bash -lc '${{ env.CMD }}'" },
+      { name: "unterminated heredoc", source: "cat <<EOF\ntimeout 10m is data" },
+    ];
+    for (const fixture of cases) {
+      const result = analyzeShellTimeoutBudget(fixture.source);
+      expect(result.uncertainties.length, fixture.name).toBeGreaterThan(0);
+    }
+  });
+
+  test("a numeric step ceiling replaces nested command budgets without double counting", () => {
+    expect(
+      analyzeStepTimeoutBudget({
+        "timeout-minutes": 12,
+        run: `timeout 10m bash -c 'timeout 5m bun run slow'`,
+      }),
+    ).toEqual({ minutes: 12, uncertainties: [] });
+    expect(
+      analyzeStepTimeoutBudget({
+        "timeout-minutes": "${{ env.BUDGET }}",
+        run: "timeout 10m bun run slow",
+      }).uncertainties.length,
+    ).toBeGreaterThan(0);
   });
 
   // The runner executes `shell: bash` steps as
