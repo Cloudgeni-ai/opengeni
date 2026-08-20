@@ -98,6 +98,14 @@ config:
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
+# Digest-pinned Modal Computer/Browser box. Required when
+# config.OPENGENI_SANDBOX_BACKEND=modal and
+# OPENGENI_SANDBOX_DESKTOP_ENABLED=true. Overwrites
+# config.OPENGENI_MODAL_IMAGE_REF. Must be docker/desktop.Dockerfile,
+# never the official headless opengeni-sandbox image.
+desktop:
+  imageRef: ""
+
 secret:
   create: false
   existingSecret: opengeni-runtime
