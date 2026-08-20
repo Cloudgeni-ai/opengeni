@@ -38,8 +38,8 @@ const budgets = {
   // graph to a worst observed 2,042,520 raw bytes. Truthful zero-step lifecycle
   // copy, the shared large-history disclosure scheduler, and durable sandbox-file
   // receipt/download controls bring the configured graph to 2,052,836 raw bytes
-  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. OPE-205's
-  // always-loaded tenant-transition boundary, invocation fences, and selected
+  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The always-loaded
+  // tenant-transition boundary, invocation fences, and selected
   // context semantics bring the direct-session graph to 2,056,813 raw bytes on
   // macOS/arm64. The 2,010/559 KiB envelopes retain a narrow raw-byte margin
   // without relaxing the independently bounded gzip graph.
