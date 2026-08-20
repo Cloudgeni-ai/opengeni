@@ -348,6 +348,10 @@ describe("organization administration component fences", () => {
     });
     await flush();
     expect(container.textContent).toContain("new-member@example.test");
+    expect(container.textContent).toContain(
+      "Invitation created for new-member@example.test. It is available in OpenGeni.",
+    );
+    expect(toastSuccess).toHaveBeenCalledWith("Organization invitation created");
     expect(button(container, "Load more invitations").disabled).toBe(false);
 
     await act(async () => button(container, "Revoke invitation for member@example.test").click());

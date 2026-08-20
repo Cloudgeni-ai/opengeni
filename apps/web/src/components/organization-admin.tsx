@@ -361,8 +361,10 @@ export function OrganizationPeopleSection(props: {
         error: null,
       }));
       setInviteEmail("");
-      setLiveOutcome(`Invitation sent to ${invitation.targetEmail}.`);
-      toast.success("Organization invitation sent");
+      setLiveOutcome(
+        `Invitation created for ${invitation.targetEmail}. It is available in OpenGeni.`,
+      );
+      toast.success("Organization invitation created");
     } catch (error) {
       if (!owns(operation)) return;
       if (isOrganizationConflict(error)) {
@@ -927,7 +929,7 @@ export function OrganizationPeopleSection(props: {
                   </span>
                   <span className="ml-2 capitalize text-fg-muted">{invite.role}</span>
                   <div className="mt-0.5 text-fg-subtle">
-                    Sent to {invite.targetEmail} · expires {formatTimestamp(invite.expiresAt)}
+                    Created for {invite.targetEmail} · expires {formatTimestamp(invite.expiresAt)}
                   </div>
                 </div>
                 <Button
