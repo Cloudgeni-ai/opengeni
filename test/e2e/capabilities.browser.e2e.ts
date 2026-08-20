@@ -812,6 +812,7 @@ async function installCapabilityApi(
     if (url.pathname === "/v1/workspaces") {
       return json([workspace()]);
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({
         items:
@@ -1001,6 +1002,7 @@ async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promi
       });
     }
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       await new Promise((resolve) => setTimeout(resolve, catalogDelayMs));
       return json({ items: catalog, installations: [] });
