@@ -44,7 +44,11 @@ const budgets = {
   // section router bring the combined direct-session graph to 2,060,739 raw
   // bytes locally. The configured Linux CI graph for the landed Personal
   // projection measured 572,514 gzip bytes. The 2,013 KiB raw and 560 KiB gzip
-  // envelopes preserve the landed CI mapping while bounding the combined graph.
+  // envelopes preserved that landed CI mapping. The activation-gated session
+  // tenancy control stays lazy, but its route-level projection check, durable
+  // refresh trigger, and Suspense boundary bring the local graph to 2,063,149
+  // raw bytes. A 2,016 KiB raw envelope keeps a bounded 1,235-byte margin while
+  // every gzip, file-count, lazy-chunk, and CSS cap remains unchanged.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -52,7 +56,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2013 * kib,
+  directSessionRaw: 2016 * kib,
   directSessionGzip: 560 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

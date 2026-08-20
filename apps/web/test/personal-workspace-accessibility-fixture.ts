@@ -3,8 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
 import { WorkspaceMenuItemContent } from "../src/components/rail/switcher-block";
+import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
 import { managedSelfContextIdentity } from "../src/lib/managed-self-context";
-import type { Workspace } from "../src/types";
+import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { Session, Workspace } from "../src/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";
@@ -55,6 +57,34 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           workspace: personalWorkspace,
           activeWorkspaceId: "another-workspace",
           managedSelfContext: selfContext,
+        }),
+      ),
+      createElement(
+        "div",
+        { id: "personal-session-tenancy" },
+        createElement(SessionTenancyControl, {
+          session: {
+            id: "44444444-4444-4444-8444-444444444444",
+            workspaceId: personalWorkspaceId,
+            accountId: organizationId,
+            status: "idle",
+            initialMessage: "Review the private workspace boundary",
+            title: "Private workspace review",
+            titleSource: "user",
+            tenancy: {
+              visibility: "private",
+              authorityEpoch: 3,
+              ownedByCurrentUser: true,
+              fork: null,
+            },
+          } as Session,
+          client: {} as OpenGeniCoreClient,
+          managedSession: true,
+          scopeLabel: "Roadmap Personal workspace",
+          captureWorkspaceInvocation: () => null,
+          ownsWorkspaceInvocation: () => false,
+          onRefreshSession: async () => undefined,
+          onOpenSession: () => undefined,
         }),
       ),
     ),

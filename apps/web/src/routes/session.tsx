@@ -127,6 +127,12 @@ const LazyCodexRealtimeControl = lazy(() =>
   })),
 );
 
+const LazySessionTenancyControl = lazy(() =>
+  import("@/components/session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
+    default: SessionTenancyRouteControl,
+  })),
+);
+
 export function SessionRoute({
   workspaceId,
   sessionId,
@@ -168,7 +174,12 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
+  const {
+    session: fetchedSession,
+    loading,
+    error: loadError,
+    refresh: refreshSession,
+  } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -278,6 +289,14 @@ export function SessionRoute({
       toast.error("Failed to load session", { description: String(loadError) });
     }
   }, [loadError]);
+  const latestVisibilitySequence = events.reduce(
+    (latest, event) =>
+      event.type === "session.visibility.changed" ? Math.max(latest, event.sequence) : latest,
+    0,
+  );
+  useEffect(() => {
+    if (latestVisibilitySequence > 0) void refreshSession();
+  }, [latestVisibilitySequence, refreshSession]);
 
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
@@ -551,6 +570,7 @@ export function SessionRoute({
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
       onClearView={clearView}
+      onRefreshSession={refreshSession}
       onOpenSession={(nextSessionId) =>
         void navigate({
           to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -834,6 +854,8 @@ function SessionChatPane(props: {
   onJumpToLatest: () => Promise<void>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
+  /** Re-read the activation-gated session tenancy projection. */
+  onRefreshSession: () => Promise<void>;
   onOpenSession: (sessionId: string) => void;
   /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
@@ -1287,6 +1309,16 @@ function SessionChatPane(props: {
               creditExhausted={props.creditExhausted}
               workspaceId={props.session.workspaceId}
             />
+          ) : null}
+          {props.session.tenancy ? (
+            <div className="shrink-0 px-4 pt-2 sm:px-6">
+              <Suspense fallback={null}>
+                <LazySessionTenancyControl
+                  session={props.session}
+                  onRefreshSession={props.onRefreshSession}
+                />
+              </Suspense>
+            </div>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline

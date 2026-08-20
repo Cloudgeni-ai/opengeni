@@ -415,6 +415,18 @@ opt-out is `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`
 preconditions, [`deployment.md`](deployment.md) for the operator procedure, and
 the accepted [ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
+The separately activated session-tenancy product surface exposes a secret-safe
+`Session.tenancy` projection plus owner-only managed-cookie visibility and
+same-workspace private-fork SDK mutations. The web console renders access state
+only when that projection is present, retains the exact idempotency key across
+ambiguous outcomes, reconciles replay/epoch/quiescence conflicts, and suppresses
+late results after a principal, workspace, or session transition. Fork
+navigation uses only the authoritative same-workspace response. It adds no
+cross-workspace fork, attachment, personal-resource-grant, worker, runtime, MCP,
+or React-package caller. Canonical: `apps/web/src/lib/session-tenancy.ts`,
+`apps/web/src/components/session/session-tenancy-control.tsx`, and
+[`organization-tenancy.md`](organization-tenancy.md).
+
 Migration 0223 adds organization-independent canonical human identity and
 verified login-binding authority. Each Better Auth user converges on one
 canonical identity, while multiple provider/account bindings can authenticate

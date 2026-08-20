@@ -326,7 +326,8 @@ else, so each is a broken feature, not an authority hole:
   `transition_session_visibility` and `fork_session_content` with the exact
   active-membership personal-workspace-or-ordinary-membership disjunction. The
   API/core/SDK caller is now active for explicitly activated organizations;
-  worker, MCP, runtime, React, and web callers remain future work. 0225's
+  the web console is its managed-owner caller, while worker, MCP, runtime, and
+  React package callers remain future work. 0225's
   `guard_session_authority_write` was the same defect and is repaired by
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
@@ -755,8 +756,10 @@ DEFINER, are granted to the runtime role, are listed in
 adapter call, reached by `PUT .../sessions/:id/visibility` and
 `POST .../sessions/:id/forks`; `@opengeni/sdk` exposes matching methods. Both
 routes require the canonical managed-cookie owner, the exact workspace/session
-permissions, and the corresponding host authorization operation. Worker, MCP,
-runtime, React, and web remain non-callers. The SQL function remains the sole
+permissions, and the corresponding host authorization operation. The web
+console calls only these SDK methods after the activation-gated `tenancy`
+projection proves current ownership; worker, MCP, runtime, and the React
+package remain non-callers. The SQL function remains the sole
 writer of `session.visibility.changed`; core fetches the returned durable event
 id and sequence and performs best-effort live publication without appending a
 second event or waking a workflow.
@@ -808,11 +811,17 @@ organization's canonical managed-human owner may change an otherwise quiescent
 same-workspace session between `workspace_shared` and `user_private`, or make an
 independent same-workspace private fork. API keys, delegated/service callers,
 administrators acting on another human's session, workers, MCP, runtime, React,
-and web have no caller. The SDK requires an explicit idempotency key, and
+and external non-cookie clients have no product control. The SDK requires an explicit idempotency key, and
 visibility changes additionally require the current public authority epoch.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
-only after activation. `test/session-visibility-contract-surface.test.ts` pins
-that exact caller boundary.
+only after activation. The console renders state only when that projection is
+present, retains one exact operation key across outcome-unknown/replay recovery,
+refetches epoch and quiescence conflicts, and navigates to a same-workspace
+private fork only from the authoritative create/replay receipt. Route and
+principal transitions make delayed browser outcomes inert.
+`test/session-visibility-contract-surface.test.ts` pins the server caller
+boundary; the web component and Chromium acceptance tests pin the browser
+boundary.
 
 ## Referential integrity
 
@@ -1416,8 +1425,9 @@ key. 0301 closes both halves of that gap:
 
 Severity was bounded when the repair landed because
 `transition_session_visibility` had no product caller then. The later
-API/core/SDK activation now depends on this prerequisite; worker, MCP, runtime,
-React, and web surfaces remain out of scope.
+API/core/SDK activation now depends on this prerequisite; the bounded managed
+web owner surface is active, while worker, MCP, runtime, and React package
+surfaces remain out of scope.
 
 ### G. Retire
 
