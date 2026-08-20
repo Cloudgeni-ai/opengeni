@@ -402,6 +402,12 @@ organization is activated, every subsequently started API and worker must keep
 the switch `true`, and a pre-0303 image or a new image with the switch disabled
 fails closed.
 
+Consequently, a normal local stack can show Workspace session creation while
+Only me is disabled with “not enabled for this organization yet.” That is the
+expected pre-activation posture, not a missing browser feature. Testing Only me
+requires the same explicit version-1 activation receipt and enabled deployment
+switch described below; do not seed the receipt through direct table DML.
+
 The migration deliberately drops the legacy eight-argument visibility/fork
 routines and exposes only nine-argument, activation-versioned routines with no
 defaults. This is a drained protocol cutover, not an overload-compatible API:

@@ -619,6 +619,11 @@ describe("contracts", () => {
     expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+    expect(payload.visibility).toBe("workspace");
+    expect(
+      CreateSessionRequest.parse({ initialMessage: "private work", visibility: "private" })
+        .visibility,
+    ).toBe("private");
   });
 
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {

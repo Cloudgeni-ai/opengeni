@@ -11,6 +11,7 @@ import type {
   ProposeRigChangeRequest,
   Rig,
   RigChange,
+  ResourceAuthorityScope,
   RigVersion,
   UpdateRigRequest,
 } from "@opengeni/contracts";
@@ -176,6 +177,7 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
 async function assertVariableSetsExist(
   db: Database,
   access: AccessGrant,
+  rigScope: ResourceAuthorityScope,
   ids: ReadonlyArray<string> | undefined,
 ): Promise<void> {
   if (ids === undefined) {
@@ -194,7 +196,25 @@ async function assertVariableSetsExist(
         message: `unknown defaultVariableSetId: ${id}`,
       });
     }
+    if (!variableSetScopeAllowedForRig(rigScope, variableSet.scope)) {
+      throw new HTTPException(422, {
+        message: `${rigScope}-scoped rigs cannot use ${variableSet.scope}-scoped variable sets`,
+      });
+    }
   }
+}
+
+/** A resource may depend only on Variable Sets whose audience is no narrower
+ * than its own. User-owned rigs may use anything visible to their owner. */
+export function variableSetScopeAllowedForRig(
+  rigScope: ResourceAuthorityScope,
+  variableSetScope: ResourceAuthorityScope,
+): boolean {
+  return (
+    rigScope === "user" ||
+    variableSetScope === "organization" ||
+    (rigScope === "workspace" && variableSetScope === "workspace")
+  );
 }
 
 export async function createRigForApi(
@@ -208,6 +228,7 @@ export async function createRigForApi(
   await assertVariableSetsExist(
     deps.db,
     grant,
+    payload.scope,
     payload.defaultVariableSetIds.length > 0 ? payload.defaultVariableSetIds : undefined,
   );
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
@@ -326,6 +347,7 @@ export async function proposeRigChangeForApi(
     await assertVariableSetsExist(
       deps.db,
       grant,
+      rig.scope,
       request.payload.defaultVariableSetIds ?? undefined,
     );
   }
@@ -572,7 +594,12 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "rig has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(deps.db, grant, payload.defaultVariableSetIds ?? undefined);
+  await assertVariableSetsExist(
+    deps.db,
+    grant,
+    rig.scope,
+    payload.defaultVariableSetIds ?? undefined,
+  );
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,

@@ -146,6 +146,7 @@ describe("release schema contract", () => {
       "0304_personal_workspace_private_session_reads.sql",
       "0305_personal_resource_grant_management.sql",
       "0306_atomic_personal_resource_attachments.sql",
+      "0311_company_scope_and_private_session_create.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -215,6 +216,14 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "4aa927065e39ecda0cbf118e9f861d728f8b213e4b72238e2cdbccea002e2af4",
       deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0311_company_scope_and_private_session_create.sql",
+      ),
+    ).toMatchObject({
+      sha256: "88a490617b0053bb4dba904bbacd33d69e3de5b0f64ff57ef64ddbb395f91e69",
+      deploymentMode: "rolling",
     });
     expect(
       completeSourceContract.migrations.find(

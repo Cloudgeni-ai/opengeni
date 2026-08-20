@@ -507,6 +507,29 @@ export const organizationMemberships = pgTable(
   }),
 );
 
+export const organizationProfileEvents = pgTable(
+  "organization_profile_events",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    previousName: text("previous_name").notNull(),
+    requestedName: text("requested_name").notNull(),
+    expectedUpdatedAt: timestamp("expected_updated_at", { withTimezone: true }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorMembership: foreignKey({
+      name: "organization_profile_events_actor_fk",
+      columns: [table.actorMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+  }),
+);
+
 // Forward-only organization-scoped activation receipt for the product session-
 // tenancy surface. Runtime may observe this marker, but only the drained
 // migration-owner activation seam may insert it.
@@ -3061,6 +3084,9 @@ export const sessions = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
+    createRequestedVisibility: text("create_requested_visibility")
+      .notNull()
+      .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
     // Independent-copy provenance. A destination may use either visibility and
     // may live in another workspace in the same organization; no live process,

@@ -8,6 +8,12 @@ Variable sets are named encrypted secret collections with one explicit owner sco
 
 A variable set is attached to runnable things — a session (at creation only), a scheduled task, or a capability pack installation that declares it uses one — and its values are injected only after exact runtime authority is revalidated.
 
+The web creation form makes this scope a required, explicit choice and every
+list row carries the same Organization, Workspace, or Only me label. Scope is a
+property of the resource, not a duplicate navigation hierarchy. Only an active
+managed organization member can create an Only-me set, and organization scope
+requires account-administrator authority.
+
 ## Invariants
 
 1. **Plaintext has one explicit read boundary.** Generic workspace, session, event, capability, installation, list, and variable-set metadata responses remain value-free. One dedicated REST route and one live-session MCP tool return exactly one configured value, and only when the caller holds both the resource permission and literal `secrets:read`.

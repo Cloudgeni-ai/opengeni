@@ -266,6 +266,8 @@ export type AppContextValue = {
       expectedNewSessionDraftRevision?: number;
       /** Create a session shell without starting an underlying agent turn. */
       startMode?: "realtime";
+      /** Atomic create-time session visibility. */
+      visibility?: "private" | "workspace";
       /** Exact attempted request and classified outcome for host reconciliation. */
       onFailure?: (failure: StartSessionFailure) => void;
     },
@@ -1324,6 +1326,7 @@ export function RootRouteComponent() {
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
       startMode?: "realtime";
+      visibility?: "private" | "workspace";
       onFailure?: (failure: StartSessionFailure) => void;
     },
   ): Promise<Session | null> {
@@ -1371,6 +1374,7 @@ export function RootRouteComponent() {
           channelId: options?.channelId,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
           startMode: options?.startMode,
+          visibility: options?.visibility,
         }),
       });
       attempted = attempt;

@@ -1056,6 +1056,12 @@ export type IntegrationClientMetadata = {
 
 export type SessionVisibility = "private" | "workspace";
 
+export type SessionTenancyCreateCapabilities = {
+  activated: boolean;
+  canCreatePrivate: boolean;
+  reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+};
+
 export type SessionTenancyPublicProjection = {
   visibility: SessionVisibility;
   authorityEpoch: number;
@@ -2465,6 +2471,7 @@ export type CreateSessionRequest = {
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
+  visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
@@ -3527,6 +3534,38 @@ export type OrganizationMember = {
   createdAt: string;
   updatedAt: string;
 };
+export type OrganizationSummary = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationWorkspaceAccessMember = {
+  membershipId: string;
+  subjectId: string;
+  subjectLabel: string | null;
+  principalKind: "human" | "service";
+  role: string;
+  permissions: string[];
+  createdAt: string;
+};
+export type OrganizationWorkspaceAccess = {
+  id: string;
+  name: string;
+  slug: string | null;
+  createdAt: string;
+  updatedAt: string;
+  members: OrganizationWorkspaceAccessMember[];
+};
+export type OrganizationAdministrationOverview = {
+  organization: OrganizationSummary;
+  workspaces: OrganizationWorkspaceAccess[];
+};
+export type UpdateOrganizationNameRequest = {
+  name: string;
+  expectedUpdatedAt: string;
+  operationId: string;
+};
 export type OrganizationRetentionPolicy = {
   organizationId: string;
   mode: "retain" | "delete_after";
@@ -3977,6 +4016,7 @@ export type ComposerDraft = {
 };
 
 export type NewSessionDraftOptions = {
+  visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;

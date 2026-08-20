@@ -15,10 +15,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import type { ProposeRigChangeRequest, RigVersion, VariableSet } from "@/types";
+import type {
+  ProposeRigChangeRequest,
+  ResourceAuthorityScope,
+  RigVersion,
+  VariableSet,
+} from "@/types";
 
 export function RigSetupSection({
   activeVersion,
+  rigScope,
   variableSets,
   canPropose,
   mutating,
@@ -26,6 +32,7 @@ export function RigSetupSection({
   onProposed,
 }: {
   activeVersion: RigVersion | null;
+  rigScope: ResourceAuthorityScope;
   variableSets: VariableSet[];
   canPropose: boolean;
   mutating: boolean;
@@ -47,6 +54,7 @@ export function RigSetupSection({
     return (
       <DefinitionEditor
         activeVersion={activeVersion}
+        rigScope={rigScope}
         variableSets={variableSets}
         mutating={mutating}
         onCancel={() => setEditing(false)}
@@ -104,12 +112,14 @@ export function RigSetupSection({
 
 function DefinitionEditor({
   activeVersion,
+  rigScope,
   variableSets,
   mutating,
   onCancel,
   onSubmit,
 }: {
   activeVersion: RigVersion;
+  rigScope: ResourceAuthorityScope;
   variableSets: VariableSet[];
   mutating: boolean;
   onCancel: () => void;
@@ -149,6 +159,7 @@ function DefinitionEditor({
         value={draft}
         onChange={setDraft}
         variableSets={variableSets}
+        rigScope={rigScope}
         disabled={mutating}
         idPrefix="edit-rig"
       />

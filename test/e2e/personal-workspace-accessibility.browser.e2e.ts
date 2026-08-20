@@ -152,30 +152,27 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(0);
   });
 
-  test("scope navigation is screen-reader legible and keyboard operable", async () => {
-    const disclosure = page.locator("#desktop-scope-navigation details");
-    const summary = disclosure.locator("summary");
-    await summary.focus();
-    await page.keyboard.press("Enter");
-    expect(await disclosure.getAttribute("open")).not.toBeNull();
+  test("resource and session scope choices are explicit, accessible, and responsive", async () => {
+    await page.setViewportSize({ width: 320, height: 900 });
 
-    const snapshot = await disclosure.ariaSnapshot();
-    expect(snapshot).toContain("Scope & access");
-    expect(snapshot).toContain("Personal workspace inside this organization");
-    expect(snapshot).toContain("Northstar Organization administration");
-    expect(snapshot).toContain("Variable sets Organization, Workspace, or Only me");
+    const resources = page.locator("#resource-scope-picker");
+    expect(await resources.getByRole("radio", { name: /Organization/ }).count()).toBe(1);
+    expect(await resources.getByRole("radio", { name: /Workspace/ }).isChecked()).toBe(true);
+    expect(await resources.getByRole("radio", { name: /Only me/ }).count()).toBe(1);
 
-    await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.textContent)).toContain("Northstar");
-  });
+    const sessions = page.locator("#session-visibility-picker");
+    expect(await sessions.getByRole("radio", { name: /Workspace/ }).isChecked()).toBe(true);
+    expect(await sessions.getByRole("radio", { name: /Only me/ }).isEnabled()).toBe(true);
+    expect(await sessions.textContent()).toContain("Only you can open this session.");
 
-  test("the mobile scope list remains usable at phone width", async () => {
-    await page.setViewportSize({ width: 320, height: 640 });
-    const navigation = page.locator("#mobile-scope-navigation");
-    expect(await navigation.getByRole("navigation", { name: "Scope and access" }).count()).toBe(1);
-    expect(await navigation.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-    for (const link of await navigation.getByRole("link").all()) {
-      expect((await link.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(40);
-    }
+    const inactive = page.locator("#inactive-session-visibility-picker");
+    expect(await inactive.getByRole("radio", { name: /Only me/ }).isDisabled()).toBe(true);
+    expect(await inactive.textContent()).toContain(
+      "Private sessions are not enabled for this organization yet.",
+    );
+
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
   });
 });

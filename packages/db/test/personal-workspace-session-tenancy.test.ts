@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   createDb,
   createSession,
+  createSessionWithIdempotencyKey,
   ensureManagedAccessForUser,
   forkSessionContent,
   getSessionEventForSubject,
@@ -115,6 +116,64 @@ async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<s
  * inference is accepted.
  */
 describe("session tenancy SQL seams inside a managed human's own personal workspace", () => {
+  test("creates an owner-bound private session atomically in shared and Personal workspaces", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+
+    for (const workspaceId of [human.legacyWorkspaceId, human.personalWorkspaceId]) {
+      const idempotencyKey = `private-create-${crypto.randomUUID()}`;
+      const input = {
+        accountId: human.accountId,
+        workspaceId,
+        visibility: "user_private" as const,
+        initialMessage: "private from the first durable row",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject" as const, subjectId: human.subjectId },
+        subjectId: human.subjectId,
+        model: "test-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none" as const,
+        createIdempotencyKey: idempotencyKey,
+      };
+      const created = await createSessionWithIdempotencyKey(client.db, input);
+      const replay = await createSessionWithIdempotencyKey(client.db, input);
+      expect(replay.session.id).toBe(created.session.id);
+
+      const visible = await getSessionForSubject(
+        client.db,
+        workspaceId,
+        created.session.id,
+        human.subjectId,
+      );
+      expect(visible?.tenancy).toMatchObject({
+        visibility: "private",
+        authorityEpoch: 1,
+        ownedByCurrentUser: true,
+      });
+      const [stored] = await shared.admin<
+        Array<{
+          visibility: string;
+          requestedVisibility: string;
+          ownerMembershipId: string | null;
+          sandboxGroupId: string;
+        }>
+      >`
+        select visibility,
+          create_requested_visibility as "requestedVisibility",
+          owner_organization_membership_id as "ownerMembershipId",
+          sandbox_group_id as "sandboxGroupId"
+        from sessions where id = ${created.session.id}`;
+      expect(stored).toEqual({
+        visibility: "user_private",
+        requestedVisibility: "user_private",
+        ownerMembershipId: human.organizationMembershipId,
+        sandboxGroupId: created.session.id,
+      });
+    }
+  }, 180_000);
+
   test("subject reads expose tenancy only after the organization's durable activation", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

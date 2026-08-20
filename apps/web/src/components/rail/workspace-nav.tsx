@@ -11,7 +11,6 @@ import { ChevronUpIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
-import { WorkspaceScopeNav } from "@/components/rail/workspace-scope-nav";
 import { useRail } from "@/components/rail/rail-context";
 import {
   filterWorkspaceConfigGroups,
@@ -51,7 +50,6 @@ export function WorkspaceNav() {
   if (rail.isMobile) {
     return (
       <div className="grid gap-2">
-        <WorkspaceScopeNav />
         <nav aria-label="Workspace" className="grid gap-2 px-2">
           {groups.map((group) => (
             <div key={group.id} className="grid gap-0.5">
@@ -77,7 +75,6 @@ export function WorkspaceNav() {
 
   return (
     <div className="grid gap-0.5">
-      <WorkspaceScopeNav />
       <nav aria-label="Workspace" className="grid gap-0.5 px-2">
         <WorkspaceSettingsMenu
           workspaceId={rail.workspaceId}

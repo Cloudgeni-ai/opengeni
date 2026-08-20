@@ -65,6 +65,7 @@ export type ConnectedMachineTarget = {
 export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
 
 export type SessionDraft = {
+  visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
@@ -86,6 +87,7 @@ export function emptySessionDraft(
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
 ): SessionDraft {
   return {
+    visibility: "workspace",
     compute: { kind: "sandbox", backend: "" },
     variableSetId: "",
     rigId: "",
@@ -121,7 +123,11 @@ export type SessionDraftSubmission = {
   /** TurnSubmission extras merged into the create payload. */
   extras: Omit<TurnSubmission, "text">;
   /** Top-level create fields threaded into `startSession` separately. */
-  options: { targetSandboxId: string | null; workingDir: string | null };
+  options: {
+    targetSandboxId: string | null;
+    workingDir: string | null;
+    visibility?: "private" | "workspace";
+  };
   /** When true (a connected machine) the workspace's selected repos must NOT be
    *  cloned: the machine uses its own checkout & git auth (D3). This is the UI
    *  half of the clone-gating footgun fix — the selection is retained in context
@@ -135,6 +141,7 @@ export type BuildCreateSessionRequestInput = {
   /** Session-scoped system guidance that is not rendered in the chat timeline. */
   instructions?: string;
   startMode?: "realtime";
+  visibility?: "private" | "workspace";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
@@ -222,6 +229,7 @@ export function buildCreateSessionRequest(
     ...(input.startMode === "realtime"
       ? { startMode: "realtime" as const }
       : { initialMessage: input.submission.text }),
+    visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
@@ -317,6 +325,7 @@ export function submissionFromSessionDraft(
       options: {
         targetSandboxId: draft.compute.sandboxId,
         workingDir: workingDirFromFolder(draft.compute.folder),
+        visibility: draft.visibility,
       },
       omitWorkspaceResources: true,
     };
@@ -332,7 +341,7 @@ export function submissionFromSessionDraft(
       ...mcp,
       ...visibleTools,
     },
-    options: { targetSandboxId: null, workingDir: null },
+    options: { targetSandboxId: null, workingDir: null, visibility: draft.visibility },
     omitWorkspaceResources: false,
   };
 }
@@ -359,6 +368,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
+      visibility: draft.visibility,
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -368,6 +378,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   }
 
   return {
+    visibility: draft.visibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
@@ -388,6 +399,7 @@ export function sessionDraftFromNewSessionDraftOptions(
   );
   return {
     ...base,
+    visibility: options.visibility ?? "workspace",
     compute: machine
       ? {
           kind: "machine",

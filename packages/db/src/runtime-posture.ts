@@ -73,6 +73,8 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_self_organization_invitation(text, uuid)",
   "list_organization_invitations(uuid, text, uuid, integer)",
   "list_organization_members(uuid, text)",
+  "get_organization_administration_overview(uuid, text)",
+  "update_organization_name(uuid, text, text, timestamp with time zone, uuid)",
   "organization_membership_command(jsonb)",
   "prepare_organization_membership_protocol_settlements(jsonb)",
   "assert_active_managed_human_organization_membership(uuid, text)",
@@ -93,6 +95,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -294,6 +297,10 @@ const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
+const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
+  "open_private_session_create_capability(uuid, uuid, text)",
+  "close_private_session_create_capability(uuid)",
+] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
@@ -306,6 +313,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
+  ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
@@ -346,6 +354,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
+  ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
@@ -526,6 +535,7 @@ export const FORCE_RLS_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -968,6 +978,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",

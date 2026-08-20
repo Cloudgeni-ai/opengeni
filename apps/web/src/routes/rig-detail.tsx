@@ -267,6 +267,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
         <TabsContent value="setup" className="mt-5">
           <RigSetupSection
             activeVersion={active}
+            rigScope={current.scope}
             variableSets={variableSets.variableSets}
             canPropose={canView}
             mutating={rig.mutating}
