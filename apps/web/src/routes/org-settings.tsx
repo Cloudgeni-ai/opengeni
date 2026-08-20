@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
@@ -28,6 +29,7 @@ import {
   validTopupAmount,
 } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasAccountPermission } from "@/lib/permissions";
 import type { BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
 
@@ -46,6 +48,7 @@ export function OrgSettingsRoute({
   const organizationLabel = accountId
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
+  const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingError, setBillingError] = useState<Error | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -174,11 +177,16 @@ export function OrgSettingsRoute({
             <div className="min-w-0">
               <h2 className="text-sm font-medium">Organization name</h2>
               <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
+              <p className="mt-1 text-xs text-fg-subtle">
+                Organization roles govern administration and billing. They do not grant access to a
+                member's Personal workspace or content.
+              </p>
             </div>
             <Button asChild type="button" variant="ghost" size="sm">
               <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
                 <SettingsIcon className="size-3.5" />
-                Workspace
+                {personal ? "Personal workspace" : "Workspace"}
+                {personal ? <PersonalWorkspaceBadge decorative /> : null}
               </Link>
             </Button>
           </div>
@@ -288,6 +296,7 @@ export function OrgSettingsRoute({
             context.accessContext.subjectId
           }
           role={accountGrant?.role ?? null}
+          personalWorkspace={personal}
         />
       </section>
     </ContentPage>
@@ -485,6 +494,7 @@ function MembersSection(props: {
   canManage: boolean;
   subjectLabel: string;
   role: string | null;
+  personalWorkspace: boolean;
 }) {
   return (
     <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
@@ -496,12 +506,19 @@ function MembersSection(props: {
           </h2>
           <p className="mt-1 text-xs text-fg-muted">Who can act in this organization.</p>
         </div>
-        <Button asChild type="button" variant="secondary" size="sm">
-          <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId: props.workspaceId }}>
-            <UsersIcon className="size-3.5" />
-            People with access
-          </Link>
-        </Button>
+        {!props.personalWorkspace ? (
+          <Button asChild type="button" variant="secondary" size="sm">
+            <Link
+              to="/workspaces/$workspaceId/settings"
+              params={{ workspaceId: props.workspaceId }}
+            >
+              <UsersIcon className="size-3.5" />
+              Current workspace access
+            </Link>
+          </Button>
+        ) : (
+          <PersonalWorkspaceBadge />
+        )}
       </div>
       <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
         <div className="min-w-0">
@@ -515,7 +532,10 @@ function MembersSection(props: {
         </span>
       </div>
       <p className="text-xs text-fg-subtle">
-        Access is granted per workspace. Manage members in Workspace → People with access.
+        Organization roles control tenant administration, not personal content.
+        {props.personalWorkspace
+          ? " This page was opened from your owner-only Personal workspace."
+          : " Access to this shared workspace is managed separately in Workspace settings."}
         {props.canManage ? "" : " Only organization admins can change organization-level roles."}
       </p>
     </section>
