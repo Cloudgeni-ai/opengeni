@@ -287,11 +287,18 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "workspace_learning_policy_revisions",
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
-  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
-  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
+const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
+const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
+const SESSION_TENANCY_QUIESCENCE_ROUTINE =
+  "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
@@ -328,6 +335,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -352,6 +361,11 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_RESOLVE_POOL_ROUTINE,
   XAI_REVALIDATE_CREDENTIAL_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+
+/** Owner-internal helpers that must exist but must never be callable by the runtime role. */
+export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
@@ -575,6 +589,7 @@ export const FORCE_RLS_TABLES = [
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
+  "session_tenancy_activations",
   "session_turn_attempts",
   "session_turns",
   "session_visibility_write_capabilities",
@@ -820,6 +835,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "session_tenancy_activations",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -1020,6 +1036,7 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1095,6 +1112,7 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
+  sessionTenancyProductActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1142,7 +1160,7 @@ function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): stri
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
-/** Inspect only PostgreSQL catalogs and privilege functions; no tenant rows. */
+/** Inspect PostgreSQL catalogs plus one value-free global activation predicate; no tenant content. */
 export async function inspectRuntimeDatabasePosture(
   db: Database,
   options: RuntimeDatabasePostureOptions,
@@ -1193,6 +1211,15 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
+      // The forward-only activation receipt outlives topology. Embedded/scoped
+      // deployments must enforce the same environment interlock as standalone
+      // FORCE-RLS deployments, so inspect the value-free predicate before the
+      // scoped catalog fast-path.
+      const activationRows = resultRows<{ activated: boolean }>(
+        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
+      );
+      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
       // the standalone opengeni_app object/grant contract on the host's role.
@@ -1207,6 +1234,7 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
+          sessionTenancyProductActivationPresent,
         };
       }
 
@@ -1387,7 +1415,10 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => sql`${name}`),
+                  [
+                    ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+                    ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+                  ].map((name) => sql`${name}`),
                   sql`, `,
                 )}
               ]::text[]
@@ -1446,6 +1477,7 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
+        sessionTenancyProductActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1459,6 +1491,15 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (
+    posture.sessionTenancyProductActivationPresent &&
+    options.organizationTenancyCanonicalActivationEnabled !== true
+  ) {
+    violations.push(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+  }
 
   if (!identity.currentUser || !identity.sessionUser) {
     violations.push("database identity is empty");
@@ -1615,6 +1656,33 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const forbiddenRoutine of RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES) {
+    const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    if (matches.length !== 1) {
+      violations.push(
+        `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
+      );
+      continue;
+    }
+    const routine = matches[0]!;
+    if (!routine.securityDefiner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+    if (authorityOwner && routine.owner !== authorityOwner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
+      );
+    }
+    if (routine.execute) {
+      violations.push(`runtime role has forbidden owner-internal helper ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
+    }
+  }
   for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (matches.length !== 1) {

@@ -393,21 +393,33 @@ deployment keeps the legacy workspace-owned lane and an image rollback stays an
 ordinary deployment decision. Every rolling tenancy migration still applies
 normally with the switch off.
 
-Be precise about what that switch is today: **no runtime path reads it.**
-Canonical activation is unshipped, so the setting reserves the name, pins the
-safe default in the chart and `.env.example`, and gives every future activation
-slice one gate to consult. It is an operator declaration, not an enforced
-interlock - `false` does not by itself prevent an activation migration from
-being applied, and step 3 below is therefore a procedural gate rather than a
-runtime one. `docs/organization-tenancy.md` owns the switch's full contract.
+Migration 0303 is intentionally rolling and applies while the switch remains
+`false`; applying the ordinary migration chain does not activate an
+organization. The switch is enforced by the separately invoked session-tenancy
+activation command and by API/worker startup posture after the first durable
+activation receipt exists. It is not a reversible feature flag: once any
+organization is activated, every subsequently started API and worker must keep
+the switch `true`, and a pre-0303 image or a new image with the switch disabled
+fails closed.
 
-Two tenancy cutovers have already run this maintenance path, and a pre-0264 or
-pre-0275 image must never be started again:
+The migration deliberately drops the legacy eight-argument visibility/fork
+routines and exposes only nine-argument, activation-versioned routines with no
+defaults. This is a drained protocol cutover, not an overload-compatible API:
+an old caller fails with undefined-function, and operators must not add a
+wrapper that supplies an activation version on its behalf.
+
+Three tenancy cutovers have now used this maintenance shape, and a pre-0264,
+pre-0275, or pre-0303 image must never be started again after its corresponding
+activation:
 
 - `0264_connection_authority_runtime_activation.sql` activated canonical
   Connection authority; and
 - `0275_scheduled_connection_authority.sql` froze common-user Connection
-  authority on scheduled-task revisions.
+  authority on scheduled-task revisions; and
+- `0303_session_tenancy_product_activation.sql` installed the per-organization
+  session-tenancy receipt plus hardened visibility/fork contract. Unlike the
+  first two, applying 0303 is inert; the drained operator command performs the
+  forward-only per-organization activation.
 
 Both declare `-- deployment-mode: maintenance`, both reject a live application
 with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
@@ -423,16 +435,36 @@ neither has a down-migration. For each subsequent activation:
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
 3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only - this records the operator's acceptance of the
-   one-way boundary and is not yet enforced by any runtime path. Never flip it
-   on a running pre-activation generation as a way to "test" activation;
+   new image generation only. Never flip it on a running pre-activation
+   generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require the activation migration to
-   appear in `schema_migrations`;
-7. start only that same digest's API and workers, and require the startup and
+6. run the new digest's migration Job and require 0303 plus every prerequisite
+   migration to appear in `schema_migrations`;
+7. with the application still drained, run:
+
+   ```bash
+   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true \
+   OPENGENI_MIGRATIONS_DATABASE_URL='<migration-owner-url>' \
+   OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES='opengeni_app' \
+   bun run db:activate-session-tenancy -- \
+     --organization-id <organization-uuid> \
+     --activated-by '<bounded-operator-identity>'
+   ```
+
+   The command reruns the canonical inventory and parity reports, retains and
+   hashes the inventory snapshot, and requires every parity invariant plus each
+   exact drainable/bounded activation lane to be zero. It deliberately does not
+   gate on total ownerless sessions or all-time immutable legacy writer rows;
+   migration 0298 supplies their truthful attributable and observation-window
+   refinements. It durably records the exact evidence, checks the supplied exact
+   application-role inventory twice around write-blocking locks, and is
+   idempotent only for the same evidence digests.
+   A live application session rejects activation with SQLSTATE `55000`; changed
+   evidence against an existing receipt is a conflict.
+8. start only that same digest's API and workers, and require the startup and
    readiness posture checks to pass before reopening admission.
 
 After the activation migration commits, rollback to an earlier application image

@@ -21,6 +21,7 @@ import {
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
@@ -318,15 +319,24 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
     expect(posture.targetRoutines).toEqual(
-      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
-        name,
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+      [
+        ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
           name,
-        ),
-      })).sort((left, right) => left.name.localeCompare(right.name)),
+          owner: "postgres",
+          execute: true,
+          publicExecute: false,
+          securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+            name,
+          ),
+        })),
+        ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+          name,
+          owner: "postgres",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: true,
+        })),
+      ].sort((left, right) => left.name.localeCompare(right.name)),
     );
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
       FORCE_RLS_TABLES.length,
@@ -1180,6 +1190,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       name: "Dedicated context owner",
     });
     const grant = access.workspaceGrants[0]!;
+    await admin`
+      insert into ${admin(SCHEMA)}.session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const session = await withSessionRlsActorContext({ subjectId }, async () =>
       createSession(db, {
         accountId: grant.accountId,

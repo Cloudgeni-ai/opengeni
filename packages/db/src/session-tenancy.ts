@@ -7,6 +7,26 @@ import {
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
+
+const SESSION_TENANCY_ACTIVATION_VERSION = 1;
+
+export class SessionTenancyConflictError extends Error {
+  readonly name = "SessionTenancyConflictError";
+  constructor(
+    readonly reason: "not_quiescent" | "authority_epoch" | "operation_reuse",
+    options?: ErrorOptions,
+  ) {
+    super(
+      reason === "not_quiescent"
+        ? "Session must be fully quiescent before its tenancy can change"
+        : reason === "authority_epoch"
+          ? "Session authority changed before the operation committed"
+          : "Session tenancy operation key was reused with different input",
+      options,
+    );
+  }
+}
 
 export type SessionTenancyVisibility = "user_private" | "workspace_shared";
 
@@ -21,6 +41,8 @@ export type TransitionSessionVisibilityInput = {
 
 export type TransitionSessionVisibilityResult = {
   operationId: string;
+  eventId: string | null;
+  eventSequence: number | null;
   visibility: SessionTenancyVisibility;
   authorityEpoch: number;
   ownerOrganizationMembershipId: string | null;
@@ -44,6 +66,8 @@ export type ForkSessionContentInput = {
 
 export type ForkSessionContentResult = {
   operationId: string;
+  eventId: string;
+  eventSequence: number;
   sessionId: string;
   workspaceId: string;
   visibility: SessionTenancyVisibility;
@@ -98,27 +122,32 @@ export async function transitionSessionVisibility(
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const requestHash = canonicalSessionVisibilityTransitionHash(input);
   const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const rows = await rawRows<{
-        operationId: string;
-        visibility: SessionTenancyVisibility;
-        authorityEpoch: number;
-        ownerOrganizationMembershipId: string | null;
-        changed: boolean;
-        replay: boolean;
-        interruptedAttemptCount: number;
-        cancelledTurnCount: number;
-        cancelledUpdateCount: number;
-        pausedGoalCount: number;
-        revokedGrantCount: number;
-      }>(
-        scopedDb,
-        sql`select
+  try {
+    return await withWorkspaceSubjectSessionActivityRls(
+      db,
+      input.workspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        const rows = await rawRows<{
+          operationId: string;
+          eventId: string | null;
+          eventSequence: number | null;
+          visibility: SessionTenancyVisibility;
+          authorityEpoch: number;
+          ownerOrganizationMembershipId: string | null;
+          changed: boolean;
+          replay: boolean;
+          interruptedAttemptCount: number;
+          cancelledTurnCount: number;
+          cancelledUpdateCount: number;
+          pausedGoalCount: number;
+          revokedGrantCount: number;
+        }>(
+          scopedDb,
+          sql`select
           operation_id as "operationId",
+          event_id as "eventId",
+          event_sequence as "eventSequence",
           visibility,
           authority_epoch as "authorityEpoch",
           owner_organization_membership_id as "ownerOrganizationMembershipId",
@@ -137,14 +166,24 @@ export async function transitionSessionVisibility(
           ${input.targetVisibility},
           ${input.expectedAuthorityEpoch},
           ${input.operationKey},
-          ${requestHash}
+          ${requestHash},
+          ${SESSION_TENANCY_ACTIVATION_VERSION}
         )`,
-      );
-      const result = rows[0];
-      if (!result) throw new Error("Session visibility transition returned no result");
-      return result;
-    },
-  );
+        );
+        const result = rows[0];
+        if (!result) throw new Error("Session visibility transition returned no result");
+        return result;
+      },
+    );
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "55P03") throw new SessionTenancyConflictError("not_quiescent", { cause: error });
+    if (state === "40001")
+      throw new SessionTenancyConflictError("authority_epoch", { cause: error });
+    if (state === "23505")
+      throw new SessionTenancyConflictError("operation_reuse", { cause: error });
+    throw error;
+  }
 }
 
 export async function forkSessionContent(
@@ -152,17 +191,26 @@ export async function forkSessionContent(
   input: ForkSessionContentInput,
 ): Promise<ForkSessionContentResult> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
+    throw new Error("The first session fork contract is same-workspace only");
+  }
+  if (input.destinationVisibility !== "user_private") {
+    throw new Error("The first session fork contract is private-only");
+  }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
-  return await withWorkspaceSubjectRls(
-    db,
-    input.sourceWorkspaceId,
-    input.actorSubjectId,
-    async (scopedDb) => {
-      const rows = await rawRows<ForkSessionContentResult>(
-        scopedDb,
-        sql`select
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.sourceWorkspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        const rows = await rawRows<ForkSessionContentResult>(
+          scopedDb,
+          sql`select
           operation_id as "operationId",
+          event_id as "eventId",
+          event_sequence as "eventSequence",
           session_id as "sessionId",
           workspace_id as "workspaceId",
           visibility,
@@ -177,12 +225,20 @@ export async function forkSessionContent(
           ${input.destinationWorkspaceId}::uuid,
           ${input.destinationVisibility},
           ${input.operationKey},
-          ${requestHash}
+          ${requestHash},
+          ${SESSION_TENANCY_ACTIVATION_VERSION}
         )`,
-      );
-      const result = rows[0];
-      if (!result) throw new Error("Session fork returned no result");
-      return result;
-    },
-  );
+        );
+        const result = rows[0];
+        if (!result) throw new Error("Session fork returned no result");
+        return result;
+      },
+    );
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "55P03") throw new SessionTenancyConflictError("not_quiescent", { cause: error });
+    if (state === "23505")
+      throw new SessionTenancyConflictError("operation_reuse", { cause: error });
+    throw error;
+  }
 }
