@@ -92,9 +92,28 @@ the other.
 Attachment points:
 
 - `POST /v1/workspaces/:id/sessions` accepts `variableSetId` and requires both attachment permissions when it is present. The attachment is fixed at creation; follow-up `user.message` events cannot add or switch one. The `session.created` event carries `variableSetId`/`variableSetName` (names only).
+- Create, Send, and Steer may also carry `personalResourceAttachment` with
+  `once | session | always`. This does not change the session's fixed
+  `variableSetId`, Rig, or Rig version. It atomically issues authority for the
+  server-derived personal subset of that fixed closure in the same transaction
+  that accepts the logical turn. Established-session requests must carry the
+  expected session authority epoch; create binds the new epoch server-side.
+  Workspace-shared use requires warning receipt version 1 and an explicit
+  acknowledgement. The event/turn/audit projections contain mode, context,
+  kinds, count, and warning version only—never values or resource ids.
+  Migration 0306 is a drained maintenance cutover: stop every API/control/turn
+  worker and provide the exact old/new runtime login list through
+  `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; never restart a pre-0306
+  image after it commits.
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 — the session keeps its creation-time attachment, so recreate the task instead.
 - Organization- and workspace-scoped Variable Sets on scheduled runs materialize under the exact fenced service turn (`scheduler`) and do not invent an initiating human. User-scoped Variable Sets remain different: they require the frozen causal human and exact personal-resource grant described next. This distinction applies identically to standalone database decryption and a host-provided `sandboxSecrets` credential boundary.
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.
+- Direct session `once` follows the same logical-work rule: acceptance consumes
+  it once for the turn, while same-turn worker recovery reuses the accepted
+  receipt. New goal continuations and machine-input successor turns do not
+  inherit a once snapshot; machine updates already coalesced into the accepted
+  turn remain part of that exact turn. A nonowner in a shared session cannot
+  attach or resolve the owner's personal fixed resources.
 - `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block and requires both attachment permissions; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking either permission on the caller — both were authorized at enable time.
 
 An organization- or user-scoped `variableSetId` may originate in another workspace in the same organization when its scoped authority makes it visible from the target workspace. Unknown, inaccessible, workspace-scoped foreign, and cross-organization ids return `422 unknown variableSetId`; RLS makes those cases indistinguishable by design.

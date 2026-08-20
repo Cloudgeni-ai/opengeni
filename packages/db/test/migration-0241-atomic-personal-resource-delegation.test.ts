@@ -3,7 +3,12 @@ import { acquireBlankTestDatabase } from "@opengeni/testing";
 import { sql as drizzleSql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, createSession, withWorkspaceSubjectSessionActivityRls } from "../src";
+import {
+  createDb,
+  createSession,
+  nestedPostgresSqlState,
+  withWorkspaceSubjectSessionActivityRls,
+} from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -878,20 +883,58 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         where id = ${drift.directGrant}
       `;
 
-      await withWorkspaceSubjectSessionActivityRls(
-        client.db,
-        drift.targetWorkspace,
-        drift.subject,
-        async (tx) =>
-          await tx.execute(drizzleSql`
-            select * from transition_session_visibility(
-              ${drift.account}::uuid, ${drift.targetWorkspace}::uuid,
-              ${drift.session}::uuid, ${drift.subject}, 'user_private', 1,
-              ${`delegation-${crypto.randomUUID()}`},
-              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-            )
-          `),
-      );
+      // This test migrates through 0303, whose drained cutover deliberately
+      // removed the legacy eight-argument lifecycle signature. Manufacture the
+      // exact durable activation receipt before exercising the versioned seam;
+      // omitting the version must remain a fail-closed undefined-function error.
+      await admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (
+          ${drift.account}::uuid, 1,
+          ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0241-test'
+        )
+      `;
+
+      const transition = async () =>
+        await withWorkspaceSubjectSessionActivityRls(
+          client!.db,
+          drift.targetWorkspace,
+          drift.subject,
+          async (tx) =>
+            await tx.execute(drizzleSql`
+              select * from transition_session_visibility(
+                ${drift.account}::uuid, ${drift.targetWorkspace}::uuid,
+                ${drift.session}::uuid, ${drift.subject}, 'user_private', 1,
+                ${`delegation-${crypto.randomUUID()}`},
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                1
+              )
+            `),
+        );
+      let transitionFailure: unknown;
+      try {
+        await transition();
+      } catch (error) {
+        transitionFailure = error;
+      }
+      expect(nestedPostgresSqlState(transitionFailure)).toBe("55P03");
+      await admin.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`
+          update session_turn_attempts
+          set state = 'closed', outcome = 'completed',
+            closed_at = clock_timestamp(), quiesced_at = clock_timestamp()
+          where id = ${drift.attemptA}
+        `;
+        await tx`
+          update session_turns
+          set status = 'completed', active_attempt_id = null, finished_at = clock_timestamp()
+          where id = ${drift.turn}
+        `;
+        await tx`update sessions set active_turn_id = null where id = ${drift.session}`;
+      });
+      await transition();
       await expect(resolve()).rejects.toThrow(
         "personal-resource resolve requires the exact current uninterrupted attempt",
       );

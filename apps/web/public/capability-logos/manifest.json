@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "capabilityId": "api:fiken",
+      "file": "fiken.svg",
+      "sourceUrl": "https://fiken.no/android-chrome-192x192.png",
+      "sourceLicense": "vendor mark; nominative catalog use",
+      "modifications": "Recreated as safe passive SVG paths from the provider-published favicon for crisp display."
+    },
+    {
+      "capabilityId": "api:reddit",
+      "file": "reddit.svg",
+      "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/34c22501f9ac9f22b12f825677ccbab1fb22e14b/icons/reddit.svg",
+      "sourceLicense": "CC0-1.0 icon data; Reddit mark remains property of Reddit",
+      "modifications": "Applied Reddit's brand orange for contrast on light and dark surfaces."
+    },
+    {
+      "capabilityId": "api:x",
+      "file": "x.svg",
+      "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/34c22501f9ac9f22b12f825677ccbab1fb22e14b/icons/x.svg",
+      "sourceLicense": "CC0-1.0 icon data; X mark remains property of X Corp.",
+      "modifications": "Added a white backing tile so the black mark remains visible in dark mode."
+    }
+  ]
+}

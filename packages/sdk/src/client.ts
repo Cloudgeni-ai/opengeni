@@ -155,6 +155,7 @@ import type {
   UpsertIntegrationFacetRequest,
   PreviewPluginRequest,
   PluginPreview,
+  PersonalResourceAttachmentIntent,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -228,6 +229,11 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
+  ListUserResourceAuthoritiesOptions,
+  ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
+  RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
@@ -284,11 +290,17 @@ import type {
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
+  ForkSessionRequest,
+  ForkSessionResponse,
   Session,
   SessionListResponse,
   AgentTopologyPageResponse,
   UpdateSessionChannelRequest,
+  UpdateSessionAttentionRequest,
+  UpdateSessionArchiveRequest,
   UpdateSessionPinRequest,
+  UpdateSessionVisibilityRequest,
+  UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
   SessionEvent,
@@ -400,6 +412,7 @@ import type {
   VariableSetVariableMetadata,
   Channel,
   CreateChannelRequest,
+  ReorderChannelsRequest,
   UpdateChannelRequest,
   Rig,
   RigVersion,
@@ -546,6 +559,7 @@ export type SendMessageInput = {
   expectedDraftRevision?: number;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
 export type SteerMessageResult = {
@@ -878,6 +892,32 @@ export class OpenGeniClient {
     );
   }
 
+  /** Change an owned, fully quiescent session between private and workspace visibility. */
+  async updateSessionVisibility(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionVisibilityRequest,
+  ): Promise<UpdateSessionVisibilityResponse> {
+    return await this.requestJson<UpdateSessionVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/visibility`,
+      request,
+    );
+  }
+
+  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  async forkSession(
+    workspaceId: string,
+    sessionId: string,
+    request: ForkSessionRequest,
+  ): Promise<ForkSessionResponse> {
+    return await this.requestJson<ForkSessionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/forks`,
+      request,
+    );
+  }
+
   /** Replace the durable tool policy or explicitly adopt workspace defaults. */
   async updateSessionToolPolicy(
     workspaceId: string,
@@ -945,6 +985,8 @@ export class OpenGeniClient {
       search?: string;
       /** Return only the complete personal pinned projection. */
       pinsOnly?: boolean;
+      /** Return archived root chats instead of the active session list. */
+      archivedOnly?: boolean;
     } = {},
   ): Promise<SessionListResponse> {
     const search = options.search?.trim();
@@ -960,6 +1002,7 @@ export class OpenGeniClient {
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(search ? { search } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
+          ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
         },
       );
     } catch (error) {
@@ -990,6 +1033,9 @@ export class OpenGeniClient {
       }
       if (options.pinsOnly) {
         throw new Error("The connected OpenGeni API does not support pins-only session lists");
+      }
+      if (options.archivedOnly) {
+        throw new Error("The connected OpenGeni API does not support archived session lists");
       }
       return { pinned: [], sessions: response, nextCursor: null };
     }
@@ -1031,6 +1077,32 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+      request,
+    );
+  }
+
+  /** Set this authenticated member's explicit read/actively-working state. */
+  async updateSessionAttention(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAttentionRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/attention`,
+      request,
+    );
+  }
+
+  /** Archive or restore this authenticated member's root chat. */
+  async updateSessionArchive(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionArchiveRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/archive`,
       request,
     );
   }
@@ -3567,6 +3639,47 @@ export class OpenGeniClient {
     );
   }
 
+  /** Bounded owner-only personal-resource authority page for one exact resource kind. */
+  async listUserResourceAuthorities(
+    workspaceId: string,
+    options: ListUserResourceAuthoritiesOptions,
+  ): Promise<ListUserResourceAuthoritiesResponse> {
+    const query = new URLSearchParams({
+      scope: "user",
+      resourceKind: options.resourceKind,
+    });
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return await this.requestJson<ListUserResourceAuthoritiesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities?${query.toString()}`,
+    );
+  }
+
+  /** Issue an exact-session or standing personal-resource grant. */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
+  /** Revoke an owner grant through the exact workspace it targets. */
+  async revokeUserResourceGrant(
+    workspaceId: string,
+    grantId: string,
+  ): Promise<RevokeUserResourceGrantResponse> {
+    return await this.requestJson<RevokeUserResourceGrantResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
+    );
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -4432,6 +4545,14 @@ export class OpenGeniClient {
     return await this.requestJson<Channel>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/channels/${channelId}`,
+      request,
+    );
+  }
+
+  async reorderChannels(workspaceId: string, request: ReorderChannelsRequest): Promise<Channel[]> {
+    return await this.requestJson<Channel[]>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/channels/order`,
       request,
     );
   }

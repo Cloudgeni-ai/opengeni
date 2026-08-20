@@ -5,8 +5,15 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
 data:
+  {{- include "opengeni.assertDesktopModalImagePin" . }}
+  {{- $desktopImageRef := include "opengeni.desktopImageRef" . -}}
   {{- range $key, $value := .Values.config }}
+  {{- if or (ne $key "OPENGENI_MODAL_IMAGE_REF") (not $desktopImageRef) }}
   {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if $desktopImageRef }}
+  OPENGENI_MODAL_IMAGE_REF: {{ $desktopImageRef | quote }}
   {{- end }}
   {{- if not (hasKey .Values.config "OPENGENI_MCP_INTERNAL_URL") }}
   OPENGENI_MCP_INTERNAL_URL: {{ printf "http://%s-api:%d/v1/workspaces/{workspaceId}/mcp" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}

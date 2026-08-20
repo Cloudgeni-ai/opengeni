@@ -116,6 +116,10 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
           (${account!.id}, ${workspaceA.id}, ${ownerSubject}),
           (${account!.id}, ${workspaceB.id}, ${ownerSubject}),
           (${account!.id}, ${workspaceB.id}, ${otherSubject})`;
+      await admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (${account!.id}, 1, ${"7".repeat(64)}, ${"8".repeat(64)}, '0258-test')`;
 
       const ownerA = {
         accountId: account!.id,
@@ -305,17 +309,15 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
         select visibility, authority_epoch as epoch,
           owner_organization_membership_id as "membershipId"
         from sessions where id = ${session.id}`;
-      const [grant] = await withScope(
-        app,
-        ownerB,
-        async (tx) =>
-          await tx<Array<{ grantId: string }>>`
-          select grant_id as "grantId" from issue_self_user_resource_grant(
-            ${account!.id}::uuid, ${authority!.authorityId}::uuid,
-            ${workspaceB.id}::uuid, 'document.read', 'once',
-            'workspace_shared', ${session.id}::uuid, true
-          )`,
-      );
+      const [grant] = await admin<Array<{ grantId: string }>>`
+        insert into organization_user_resource_grants (
+          account_id, authority_id, owner_organization_membership_id, workspace_id,
+          session_id, action, mode, context, authority_epoch, generation, status
+        ) values (
+          ${account!.id}, ${authority!.authorityId}, ${ownerMembership!.id},
+          ${workspaceB.id}, ${session.id}, 'document.read', 'once', 'workspace_shared',
+          ${sessionAuthority!.epoch}, 1, 'active'
+        ) returning id as "grantId"`;
       const [turn] = await admin<Array<{ id: string }>>`
         insert into session_turns (
           account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
@@ -351,8 +353,8 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
       await withScope(app, ownerB, async (tx) => {
         await tx`select issue_self_user_resource_grant(
           ${account!.id}::uuid, ${lateAuthority!.authorityId}::uuid,
-          ${workspaceB.id}::uuid, 'document.read', 'always',
-          'workspace_shared', null, true
+          ${workspaceB.id}::uuid, 'document', 'always',
+          'workspace_shared', null, null, true
         )`;
       });
 
@@ -369,7 +371,7 @@ describe("migration 0258 three-scope Document/Knowledge authority", () => {
       expect(await resolve()).toEqual([documentId]);
       await withScope(app, ownerB, async (tx) => {
         await tx`select revoke_self_user_resource_grant(
-          ${account!.id}::uuid, ${grant!.grantId}::uuid
+          ${account!.id}::uuid, ${workspaceB.id}::uuid, ${grant!.grantId}::uuid
         )`;
       });
       await expect(resolve()).rejects.toThrow(/snapshot is no longer live/iu);

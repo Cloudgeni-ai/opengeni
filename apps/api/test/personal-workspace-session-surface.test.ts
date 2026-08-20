@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessContext } from "@opengeni/contracts";
+import type {
+  AccessContext,
+  SessionAuthorizationOperation,
+  SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -18,6 +22,7 @@ import {
   SessionPinAccessError,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
+  transitionSessionVisibility,
   withRlsContext,
   withWorkspaceSubjectRls,
   type DbClient,
@@ -30,6 +35,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { createApp } from "../src/app";
 import { registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -55,7 +61,7 @@ const authSessionBySessionCookie = new Map<
   { authSessionId: string; userId: string; email: string }
 >();
 
-function buildApp(): Hono {
+function buildApp(sessionAuthorization?: SessionAuthorizationPort, full = false): Hono {
   if (!client) throw new Error("test database unavailable");
   const noop = async () => undefined;
   const hono = new Hono();
@@ -100,7 +106,9 @@ function buildApp(): Hono {
         },
       },
     } as never,
+    ...(sessionAuthorization ? { sessionAuthorization } : {}),
   } as unknown as ApiRouteDeps;
+  if (full) return createApp(deps);
   registerWorkspaceRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
   registerApiKeyRoutes(hono, deps);
@@ -302,6 +310,65 @@ async function seedSession(human: ManagedHuman, workspaceId: string): Promise<st
   return session.id;
 }
 
+async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (
+      ${human.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-test'
+    )`;
+}
+
+async function addOrdinaryWorkspaceMember(
+  owner: ManagedHuman,
+  member: ManagedHuman,
+): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, role, permissions
+    ) values (
+      ${owner.accountId}, ${owner.legacyWorkspaceId}, ${member.subjectId},
+      'member',
+      '["sessions:read","sessions:create","sessions:control"]'::jsonb
+    )`;
+}
+
+async function tenancyErrorFact(response: Response): Promise<unknown> {
+  const payload = (await response.json()) as {
+    error: Record<string, unknown> & { requestId?: string };
+  };
+  const { requestId: _, ...error } = payload.error;
+  return { status: response.status, error };
+}
+
+async function requestTenancyOperation(
+  app: Hono,
+  workspaceId: string,
+  sessionId: string,
+  headers: Record<string, string>,
+  operation: "visibility" | "fork",
+  suffix: string,
+): Promise<Response> {
+  return await app.request(
+    `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/${operation === "fork" ? "forks" : "visibility"}`,
+    {
+      method: operation === "fork" ? "POST" : "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(
+        operation === "fork"
+          ? { idempotencyKey: `matrix-fork-${suffix}` }
+          : {
+              visibility: "private",
+              expectedAuthorityEpoch: 1,
+              idempotencyKey: `matrix-visibility-${suffix}`,
+            },
+      ),
+    },
+  );
+}
+
 const draftBody = {
   expectedRevision: 0,
   text: "draft in my own personal workspace",
@@ -333,6 +400,208 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session surface inside their own personal workspace", () => {
+  test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const sessionId = await seedSession(human, human.personalWorkspaceId);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
+
+    const visibility = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/visibility`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          visibility: "private",
+          expectedAuthorityEpoch: 1,
+          idempotencyKey: "api-personal-visibility",
+        }),
+      },
+    );
+    expect(visibility.status).toBe(200);
+    expect(await visibility.json()).toMatchObject({
+      visibility: "private",
+      authorityEpoch: 2,
+      changed: true,
+      replay: false,
+    });
+
+    const fork = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+      },
+    );
+    expect(fork.status).toBe(201);
+    const created = (await fork.json()) as { sessionId: string; eventId: string };
+    expect(created).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
+
+    const replay = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+      },
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      replay: true,
+      sessionId: created.sessionId,
+      eventId: created.eventId,
+    });
+    expect(hostOperations).toEqual([
+      "session.visibility.write",
+      "session.fork.create",
+      "session.fork.create",
+    ]);
+  }, 180_000);
+
+  test("tenancy pre-gates are target-blind and each allowed request host-authorizes once", async () => {
+    if (!shared || !client) return;
+    const caller = await provisionManagedHuman();
+    const sessionOwner = await inviteIntoOrganization(caller, "member");
+    await addOrdinaryWorkspaceMember(caller, sessionOwner);
+    await activateSessionTenancy(caller);
+
+    const sharedSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
+    const privateSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
+    await transitionSessionVisibility(client.db, {
+      workspaceId: caller.legacyWorkspaceId,
+      sessionId: privateSessionId,
+      actorSubjectId: sessionOwner.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: "matrix-private-owner-transition",
+    });
+    const targetIds = [crypto.randomUUID(), sharedSessionId, privateSessionId];
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
+
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { cookie: caller.cookie },
+              operation,
+              `canonical-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts).toEqual([
+        {
+          status: 404,
+          error: {
+            status: 404,
+            code: "not_found",
+            message: "Session not found.",
+            retryable: false,
+          },
+        },
+        facts[0],
+        facts[0],
+      ]);
+    }
+    // Only each shared-session request reaches the host. The missing and
+    // another-owner private targets are denied by durable target resolution.
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId: caller.accountId,
+      workspaceId: caller.legacyWorkspaceId,
+      name: "session tenancy matrix key",
+      prefix: token.slice(0, 14),
+      keyHash: await sha256Hex(token),
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+    });
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { authorization: `Bearer ${token}` },
+              operation,
+              `noncanonical-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts[1]).toEqual(facts[0]);
+      expect(facts[2]).toEqual(facts[0]);
+      expect(facts[0]).toMatchObject({
+        status: 403,
+        error: { status: 403, code: "forbidden", retryable: false },
+      });
+    }
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+
+    await shared.admin`
+      delete from session_tenancy_activations where account_id = ${caller.accountId}`;
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { cookie: caller.cookie },
+              operation,
+              `unactivated-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts[1]).toEqual(facts[0]);
+      expect(facts[2]).toEqual(facts[0]);
+      expect(facts[0]).toMatchObject({
+        status: 409,
+        error: {
+          status: 409,
+          code: "conflict",
+          retryable: false,
+          details: { reason: "not_activated" },
+        },
+      });
+    }
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+  }, 180_000);
+
   test("the premise: the personal workspace has no workspace_memberships row", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
@@ -905,5 +1174,94 @@ describe("the in-scope resolver refuses to be an arbitrary-subject oracle", () =
           }),
       ),
     ).rejects.toThrow(/does not match the applied RLS scope/);
+  }, 180_000);
+});
+
+describe("managed personal-resource grant HTTP lifecycle", () => {
+  test("returns RFC3339 expiry/revoke times, reissues expiry, and revokes without connections:read", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const [membership] = await shared.admin<Array<{ id: string }>>`
+      select id from organization_memberships
+      where account_id = ${human.accountId} and subject_id = ${human.subjectId}`;
+    if (!membership) throw new Error("managed human membership missing");
+    const authorityId = crypto.randomUUID();
+    await shared.admin`
+      insert into organization_user_resource_authorities (
+        id, account_id, organization_membership_id, resource_kind, resource_id,
+        origin_workspace_id, generation, status
+      ) values (
+        ${authorityId}, ${human.accountId}, ${membership.id}, 'connection',
+        ${crypto.randomUUID()}, ${human.personalWorkspaceId}, 1, 'active'
+      )`;
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const issue = async (workspaceId: string, connectionWrapper = false): Promise<Response> =>
+      await app.request(
+        `http://x/v1/workspaces/${workspaceId}/${
+          connectionWrapper ? "connection-authorities" : "user-resource-authorities"
+        }/${authorityId}/grants`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            scope: "user",
+            ...(connectionWrapper ? {} : { resourceKind: "connection" }),
+            mode: "always",
+            context: "user_private",
+          }),
+        },
+      );
+
+    const firstResponse = await issue(human.personalWorkspaceId);
+    expect(firstResponse.status).toBe(200);
+    const first = (await firstResponse.json()) as { grant: { grantId: string } };
+    await shared.admin`
+      update organization_user_resource_grants
+      set expires_at = clock_timestamp() - interval '1 second'
+      where id = ${first.grant.grantId}`;
+
+    const listResponse = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=connection`,
+      { headers },
+    );
+    expect(listResponse.status).toBe(200);
+    const listed = (await listResponse.json()) as {
+      authorities: Array<{
+        grants: Array<{ grantId: string; status: string; expiresAt: string | null }>;
+      }>;
+    };
+    const expired = listed.authorities
+      .flatMap((authority) => authority.grants)
+      .find((grant) => grant.grantId === first.grant.grantId);
+    expect(expired).toMatchObject({ status: "expired" });
+    expect(expired?.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
+
+    const reissueResponse = await issue(human.personalWorkspaceId);
+    expect(reissueResponse.status).toBe(200);
+    const reissued = (await reissueResponse.json()) as { grant: { grantId: string } };
+    expect(reissued.grant.grantId).not.toBe(first.grant.grantId);
+
+    const routeGrantResponse = await issue(human.legacyWorkspaceId, true);
+    expect(routeGrantResponse.status).toBe(200);
+    const routeGrant = (await routeGrantResponse.json()) as { grant: { grantId: string } };
+    await shared.admin`
+      update workspace_memberships
+      set permissions = permissions - 'connections:read'
+      where account_id = ${human.accountId}
+        and workspace_id = ${human.legacyWorkspaceId}
+        and subject_id = ${human.subjectId}`;
+
+    const revokeResponse = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/connection-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
+      { method: "DELETE", headers },
+    );
+    expect(revokeResponse.status).toBe(200);
+    const revoked = (await revokeResponse.json()) as {
+      grant: { status: string; revokedAt: string };
+    };
+    expect(revoked.grant.status).toBe("revoked");
+    expect(revoked.grant.revokedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
   }, 180_000);
 });

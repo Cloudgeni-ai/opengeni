@@ -1054,6 +1054,52 @@ export type IntegrationClientMetadata = {
   response_types: ["code"];
 };
 
+export type SessionVisibility = "private" | "workspace";
+
+export type SessionTenancyPublicProjection = {
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  ownedByCurrentUser: boolean;
+  fork: {
+    sourceVisibility: SessionVisibility;
+    sourceAuthorityEpoch: number;
+    forkedAt: string;
+  } | null;
+};
+
+export type UpdateSessionVisibilityRequest = {
+  visibility: SessionVisibility;
+  expectedAuthorityEpoch: number;
+  idempotencyKey: string;
+};
+
+export type UpdateSessionVisibilityResponse = {
+  operationId: string;
+  eventId: string | null;
+  eventSequence: number | null;
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  changed: boolean;
+  replay: boolean;
+  revokedGrantCount: number;
+};
+
+export type ForkSessionRequest = {
+  idempotencyKey: string;
+};
+
+export type ForkSessionResponse = {
+  operationId: string;
+  eventId: string;
+  eventSequence: number;
+  sessionId: string;
+  workspaceId: string;
+  visibility: "private";
+  authorityEpoch: 1;
+  copiedHistoryItemCount: number;
+  replay: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -1074,6 +1120,8 @@ export type Session = {
   toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
+  /** Present only when session-tenancy product activation is enabled for the organization. */
+  tenancy?: SessionTenancyPublicProjection | undefined;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;
@@ -1130,6 +1178,17 @@ export type Session = {
   pinnedAt?: string | null;
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion?: number;
+  /** Personal explicit acknowledgment state. */
+  unread?: boolean;
+  /** Personal actively-working label. */
+  activelyWorking?: boolean;
+  /** Optimistic unread/actively-working revision. */
+  attentionVersion?: number;
+  /** Personal archive state. */
+  archived?: boolean;
+  archivedAt?: string | null;
+  /** Optimistic archive-state revision. */
+  archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
   treeStats?:
     | {
@@ -1140,6 +1199,8 @@ export type Session = {
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
+        unreadDescendants?: number | undefined;
+        activelyWorkingDescendants?: number | undefined;
         /** Counts are lower bounds rather than exact totals when true. */
         truncated: boolean;
       }
@@ -1214,6 +1275,17 @@ export type UpdateSessionPinRequest = {
   expectedVersion?: number;
 };
 
+export type UpdateSessionAttentionRequest = {
+  unread?: boolean;
+  activelyWorking?: boolean;
+  expectedVersion?: number;
+};
+
+export type UpdateSessionArchiveRequest = {
+  archived: boolean;
+  expectedVersion?: number;
+};
+
 export type LineageNode = {
   session: SessionSummary;
   children: LineageNode[];
@@ -1278,6 +1350,25 @@ export type TimelineAnnotation = DraftTimelineAnnotation & {
   ordinal: number;
 };
 
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+export type PersonalResourceAttachmentIntent = {
+  mode: "once" | "session" | "always";
+  expectedAuthorityEpoch?: number | undefined;
+  workspaceSharedAcknowledged?: boolean | undefined;
+  sharedOutputWarningVersion: 1;
+};
+
+export type PersonalResourceAttachmentSummary = {
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  resourceCount: number;
+  resourceKinds: Array<"variable_set" | "rig">;
+  sharedOutputWarningVersion: 1;
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -1305,6 +1396,7 @@ export type SessionTurn = {
   initiator: TurnInitiator;
   initiatorContext: Record<string, unknown>;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  personalResources?: PersonalResourceAttachmentSummary | null | undefined;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
@@ -1465,6 +1557,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.visibility.changed",
+  "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
@@ -2418,6 +2511,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
   // (from inside a session → "shared" with the creator's box, top-level → "new").
@@ -3329,6 +3424,83 @@ export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
 };
 
+export type UserResourceKind =
+  | "connection"
+  | "document"
+  | "variable_set"
+  | "rig"
+  | "connected_machine";
+export type UserResourceGrantAction =
+  | "connection.use"
+  | "document.read"
+  | "variable_set.use"
+  | "rig.use"
+  | "connected_machine.use";
+export type UserResourceAuthorityGrant = {
+  grantId: string;
+  targetWorkspaceId: string;
+  targetSessionId: string | null;
+  action: UserResourceGrantAction;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  generation: number;
+  status: "active" | "consumed" | "revoked" | "expired";
+  expiresAt: string | null;
+  delegation: UserResourceDelegation;
+};
+export type UserResourceAuthoritySummary = {
+  authorityId: string;
+  resourceKind: UserResourceKind;
+  resourceId: string;
+  originWorkspaceId: string | null;
+  generation: number;
+  status: "active" | "retained" | "revoked";
+  grants: UserResourceAuthorityGrant[];
+};
+export type ListUserResourceAuthoritiesOptions = {
+  resourceKind: UserResourceKind;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+};
+export type ListUserResourceAuthoritiesResponse = {
+  scope: "user";
+  authorities: UserResourceAuthoritySummary[];
+  nextCursor: string | null;
+};
+export type IssueUserResourceGrantRequest =
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "session";
+      context: "user_private" | "workspace_shared";
+      sessionId: string;
+      expectedAuthorityEpoch: number;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    }
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "always";
+      context: "user_private" | "workspace_shared";
+      sessionId?: null | undefined;
+      expectedAuthorityEpoch?: null | undefined;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    };
+export type UserResourceGrantMutationResponse = {
+  scope: "user";
+  grant: UserResourceAuthorityGrant;
+};
+export type RevokeUserResourceGrantResponse = {
+  scope: "user";
+  grant: {
+    grantId: string;
+    generation: number;
+    status: "revoked";
+    revokedAt: string;
+  };
+};
+
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type OrganizationInvitation = {
   id: string;
@@ -3421,6 +3593,8 @@ export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   /** Reversible Memory V1 prompt composition rollout. */
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  /** Model policy inherited by new chats and scheduled tasks. */
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3430,6 +3604,11 @@ export type WorkspaceSettings = {
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
+};
+
+export type WorkspaceSessionDefaults = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -3456,6 +3635,7 @@ export type WorkspaceVoiceInputSettings = {
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3974,6 +4154,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
 export type SubmitComposerDraftResponse = {
@@ -4261,6 +4442,8 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  pinned: boolean;
+  sortOrder: number;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4274,6 +4457,12 @@ export type CreateChannelRequest = {
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  pinned?: boolean;
+};
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export type ReorderChannelsRequest = {
+  channelIds: string[];
 };
 
 /** Re-files one session; null moves it back to the unfiled inbox. */
@@ -6320,6 +6509,7 @@ export type UserMessageEventInput = {
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };
 

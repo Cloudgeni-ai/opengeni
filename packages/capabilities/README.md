@@ -21,3 +21,19 @@ Security defaults:
   mutation is never replayed after an ambiguous provider authorization result;
   and
 - errors contain structural recovery facts, never provider bodies or secrets.
+
+## Local MCP bridge kit
+
+`src/mcp-bridge.ts` defines the shared contract for provider APIs exposed as
+in-process MCP servers. A bridge declares a secret-free catalog identity,
+actual authority class, reviewed tool-surface class, 1-32 exact HTTPS
+destinations, and the safe-read-only replay rule. Adapter matching is generic
+and fails closed on ambiguity. The descriptor is not authorization: each
+adapter still revalidates its Connection or host-owned authority before every
+provider request.
+
+The Gmail REST adapter is the static reviewed example. OpenAPI and GraphQL
+Integration Definitions keep their existing local MCP adapters without
+claiming this descriptor. Google Drive remains one functional Integration row
+with its existing Connection and facet authority. See
+`docs/design/first-party-mcp-bridges.md`.

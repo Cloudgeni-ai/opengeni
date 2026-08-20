@@ -80,6 +80,7 @@ import type {
   ResolveInteractionInterventionRequest,
   Channel,
   CreateChannelRequest,
+  ReorderChannelsRequest,
   UpdateChannelRequest,
   UpdateSessionChannelRequest,
   Rig,
@@ -1188,6 +1189,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       workspaceId: WORKSPACE_ID,
       name: request.name,
       description: request.description ?? null,
+      pinned: false,
+      sortOrder: this.channels.length,
       createdBy: "user:demo",
       createdAt: now,
       updatedAt: now,
@@ -1205,12 +1208,30 @@ export class MockOpenGeniClient implements SessionClientLike {
     if (!channel) throw new Error(`unknown channel: ${channelId}`);
     if (request.name !== undefined) channel.name = request.name;
     if (request.description !== undefined) channel.description = request.description;
+    if (request.pinned !== undefined) channel.pinned = request.pinned;
     channel.updatedAt = new Date().toISOString();
     return { ...channel };
   }
 
   async deleteChannel(_workspaceId: string, channelId: string): Promise<void> {
     this.channels = this.channels.filter((row) => row.id !== channelId);
+  }
+
+  async reorderChannels(_workspaceId: string, request: ReorderChannelsRequest): Promise<Channel[]> {
+    const byId = new Map(this.channels.map((channel) => [channel.id, channel]));
+    if (
+      request.channelIds.length !== this.channels.length ||
+      new Set(request.channelIds).size !== request.channelIds.length ||
+      request.channelIds.some((channelId) => !byId.has(channelId))
+    ) {
+      throw new Error("project order changed");
+    }
+    this.channels = request.channelIds.map((channelId, sortOrder) => ({
+      ...byId.get(channelId)!,
+      sortOrder,
+      updatedAt: new Date().toISOString(),
+    }));
+    return this.channels.map((channel) => ({ ...channel }));
   }
 
   // Sessions are fabricated per read, so moves must persist here or the rail's

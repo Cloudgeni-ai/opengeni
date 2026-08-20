@@ -29,6 +29,7 @@ import {
   type McpPersonalConnectionDelegation,
   type McpConnectionAuthoritySelection,
   type Permission,
+  type PersonalResourceAttachmentIntent,
   type ReasoningEffort,
   type ResourceRef,
   type Session,
@@ -92,6 +93,9 @@ import {
   SessionSpawnDeniedDbError,
   SessionControlConflictError,
   SessionToolPolicyVersionConflictError,
+  SessionCreateIdempotencyConflictError,
+  PersonalResourceAttachmentAcceptanceError,
+  sessionTenancyProductActivated,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
 } from "@opengeni/db";
@@ -102,7 +106,7 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requirePermission } from "../access";
+import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type {
   AcceptSessionUserMessageDependencies,
@@ -123,6 +127,7 @@ import {
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
+import { requireCanonicalManagedHuman } from "../application/session-tenancy";
 import {
   assertToolRefsSubset,
   availableToolRefs,
@@ -142,6 +147,39 @@ const maxSessionMcpCredentialHeaderValueLength = 4096;
 const maxToolPolicyAuditRefs = 40;
 // RFC 9110 field-name token characters.
 const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+async function requireAtomicPersonalResourceAttachment(
+  deps: Pick<ApiRouteDeps, "db">,
+  authorization: AccessGrantAuthorization | undefined,
+  workspaceId: string,
+  intent: PersonalResourceAttachmentIntent | undefined,
+  existingSession: boolean,
+): Promise<void> {
+  if (!intent) return;
+  if (!authorization) {
+    throw new HTTPException(403, {
+      message: "Personal resources require the owning managed-human session.",
+    });
+  }
+  try {
+    requireCanonicalManagedHuman(authorization, workspaceId);
+  } catch (error) {
+    throw new HTTPException(403, {
+      message: "Personal resources require the owning managed-human session.",
+      cause: error,
+    });
+  }
+  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
+    throw new HTTPException(409, {
+      message: "Session tenancy is not activated for this organization.",
+    });
+  }
+  if (existingSession && intent.expectedAuthorityEpoch === undefined) {
+    throw new HTTPException(422, {
+      message: "Personal-resource attachment requires expectedAuthorityEpoch.",
+    });
+  }
+}
 
 /** Transport-neutral typed denial raised only after its audit row committed. */
 export class SessionSpawnDeniedError extends Error {
@@ -620,6 +658,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpServers?: CreateSessionMcpServerInput[];
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
@@ -710,6 +749,8 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      initialPersonalResourceAttachmentIntent:
+        input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
         ? {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
@@ -777,6 +818,8 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      initialPersonalResourceAttachmentIntent:
+        input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
         ? {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
@@ -1121,6 +1164,7 @@ export async function postUserMessageTurn(input: {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
@@ -1200,11 +1244,20 @@ export async function postUserMessageTurn(input: {
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              ...(input.personalResourceAttachment
+                ? { personalResourceAttachment: input.personalResourceAttachment }
+                : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
             }),
         ),
     );
   } catch (error) {
+    if (error instanceof PersonalResourceAttachmentAcceptanceError) {
+      throw new HTTPException(
+        error.kind === "invalid" ? 422 : error.kind === "forbidden" ? 403 : 409,
+        { message: error.message, cause: error },
+      );
+    }
     if (
       error instanceof QueueCommandConflictError ||
       error instanceof SessionControlConflictError
@@ -1331,6 +1384,7 @@ export async function createSessionForRequestWithOutcome(
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
+  authorization?: AccessGrantAuthorization,
 ): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
@@ -1353,6 +1407,13 @@ export async function createSessionForRequestWithOutcome(
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(denial));
     }
   }
+  await requireAtomicPersonalResourceAttachment(
+    deps,
+    authorization,
+    workspaceId,
+    payload.personalResourceAttachment,
+    false,
+  );
   // Parent linkage and execution-context inheritance come ONLY from the
   // worker-signed sessionId claim. A caller cannot nominate a parent in the
   // payload, so inheriting an existing repository/tool/credential snapshot does
@@ -2073,6 +2134,7 @@ export async function createSessionForRequestWithOutcome(
       mcpServers: sessionMcpServers.dbServers,
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
+      initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
@@ -2101,6 +2163,12 @@ export async function createSessionForRequestWithOutcome(
           : null,
     });
   } catch (error) {
+    if (error instanceof PersonalResourceAttachmentAcceptanceError) {
+      throw new HTTPException(
+        error.kind === "invalid" ? 422 : error.kind === "forbidden" ? 403 : 409,
+        { message: error.message, cause: error },
+      );
+    }
     if (error instanceof AgentCommandAuthorityError) {
       throw new HTTPException(403, { message: error.message });
     }
@@ -2114,6 +2182,9 @@ export async function createSessionForRequestWithOutcome(
         message: error.message,
         cause: error,
       });
+    }
+    if (error instanceof SessionCreateIdempotencyConflictError) {
+      throw new HTTPException(409, { message: error.message, cause: error });
     }
     throw error;
   }
@@ -2161,8 +2232,11 @@ export async function createSessionForRequest(
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
+  authorization?: AccessGrantAuthorization,
 ): Promise<CreateSessionResponse> {
-  return (await createSessionForRequestWithOutcome(deps, grant, workspaceId, rawPayload)).session;
+  return (
+    await createSessionForRequestWithOutcome(deps, grant, workspaceId, rawPayload, authorization)
+  ).session;
 }
 
 /**
@@ -2192,6 +2266,8 @@ export async function acceptSessionUserMessageWithOutcome(
     origin?: "human" | "operator";
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
+    personalResourceAttachment?: PersonalResourceAttachmentIntent;
+    authorization?: AccessGrantAuthorization;
   },
 ): Promise<{
   accepted: SessionEvent;
@@ -2207,6 +2283,13 @@ export async function acceptSessionUserMessageWithOutcome(
     operation: input.delivery === "steer" ? "session.steer" : "session.append",
     surface: "core",
   });
+  await requireAtomicPersonalResourceAttachment(
+    deps,
+    input.authorization,
+    workspaceId,
+    input.personalResourceAttachment,
+    true,
+  );
   // Hoisted above requireLimit so the codex-billed predicate can resolve the
   // turn's effective model (a follow-up turn inherits the session's model). A
   // pure read with no side effects.
@@ -2330,6 +2413,9 @@ export async function acceptSessionUserMessageWithOutcome(
     turnExecutionPolicy,
     mcpCredentialUpdates,
     personalConnectionDelegations,
+    ...(input.personalResourceAttachment
+      ? { personalResourceAttachment: input.personalResourceAttachment }
+      : {}),
     delivery: input.delivery ?? "send",
     origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
     actor: grant.subjectId,

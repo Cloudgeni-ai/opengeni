@@ -167,6 +167,7 @@ jobs:
           bun-version-file: .bun-version
 
       - name: Install exact dependency tree
+        timeout-minutes: 11
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: >-
@@ -295,7 +296,9 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
 
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
@@ -359,6 +362,7 @@ jobs:
           fi
 
       - name: Profile impacted TypeScript 7 projects
+        timeout-minutes: 11
         run: >-
           bun scripts/ci/profile-command.ts
           --name typecheck
@@ -368,6 +372,7 @@ jobs:
           --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
 
       - name: Run exactly the explained source guards
+        timeout-minutes: 16
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
@@ -436,6 +441,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Unit test shard
+        timeout-minutes: 21
         env:
           # The per-subject FORCE-RLS/OCC suite remains fail-closed on every shard.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -487,6 +493,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Run real PostgreSQL, pgvector, Temporal, NATS, and object-storage tests
+        timeout-minutes: 31
         run: >-
           bun scripts/ci/profile-command.ts
           --name integration-${{ matrix.number }}
@@ -570,10 +577,12 @@ jobs:
       # web-broad candidate.
       - name: Install pinned browser runtimes
         uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
         with:
           browsers: chromium firefox
 
       - name: Run exactly the impacted E2E tests
+        timeout-minutes: 13
         run: >-
           bun scripts/ci/profile-command.ts
           --name e2e-${{ matrix.number }}
@@ -628,6 +637,7 @@ jobs:
         run: bun run test:react:clean
 
       - name: Real workspace capture acceptance
+        timeout-minutes: 13
         run: >-
           bun test --max-concurrency=1 --timeout 720000
           --test-name-pattern
@@ -639,6 +649,7 @@ jobs:
       # suite split cannot silently drop either the exactly-once/active-goal proof
       # or the real-Postgres shrink proof.
       - name: Recovery integration regressions
+        timeout-minutes: 5
         run: |
           bun test --timeout 30000 \
             --test-name-pattern \
@@ -702,17 +713,11 @@ jobs:
             'Acquire::https::Timeout "30";' \
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
-      - name: Install pinned Chromium runtime
-        if: ${{ matrix.lane != 'workbench' }}
+      - name: Install pinned lane browser runtimes
         uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
         with:
-          browsers: chromium
-
-      - name: Install pinned cross-browser runtimes
-        if: ${{ matrix.lane == 'workbench' }}
-        uses: ./.github/actions/playwright-browsers
-        with:
-          browsers: chromium firefox webkit
+          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}
 
       - name: Editable artifact browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
@@ -770,6 +775,7 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
+        timeout-minutes: 4
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -777,6 +783,7 @@ jobs:
 
       - name: Responsive knowledge surfaces browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
+        timeout-minutes: 6
         env:
           # This gate traverses the public configured-principal API and must fail
           # rather than skip when its real PostgreSQL boundary is unavailable.
@@ -786,6 +793,7 @@ jobs:
       - name: Workbench browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
         id: workbench_browser
+        timeout-minutes: 4
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
       - name: Upload session pin visual evidence
@@ -938,6 +946,7 @@ jobs:
             bun run --cwd packages/artifact-tool test:production-native
 
       - name: Build client packages (contracts + SDK + React)
+        timeout-minutes: 21
         env:
           OPENGENI_BUILD_CACHE_REPORT: ci-profile/package-cache.json
         run: >-
@@ -974,6 +983,7 @@ jobs:
 
       - name: Install Chromium for packed WASM package proof
         uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
         with:
           browsers: chromium
           only-shell: "true"

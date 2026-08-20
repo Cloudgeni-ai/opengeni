@@ -3025,12 +3025,26 @@ describe("worker activities integration", () => {
       scheduledTaskId: task.id,
       source: "test",
     });
+    expect(session).toMatchObject({
+      title: "scheduled-new-session",
+      titleSource: "agent",
+    });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     // session.created carries the public "queued" status directly, so no
-    // separate session.status.changed event is emitted before the wake.
-    expect(events.map((event) => event.type)).toEqual(["session.created", "system.update.pending"]);
+    // separate session.status.changed event is emitted before the wake. The
+    // scheduler then exposes its generated title through the same event used by
+    // human and agent renames before it appends the scheduled occurrence.
+    expect(events.map((event) => event.type)).toEqual([
+      "session.created",
+      "session.title_set",
+      "system.update.pending",
+    ]);
     expect(events[0]?.payload).toMatchObject({ status: "queued" });
+    expect(events[1]?.payload).toMatchObject({
+      title: "scheduled-new-session",
+      source: "agent",
+    });
     const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,

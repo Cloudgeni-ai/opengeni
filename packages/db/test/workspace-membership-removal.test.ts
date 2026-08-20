@@ -54,6 +54,10 @@ async function freshWorkspace(): Promise<Workspace> {
   await admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
+  await admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${account!.id}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -221,6 +225,11 @@ describe("workspace membership removal fencing", () => {
     });
     const [owner] = await listSelfOrganizationMemberships(db, ownerSubject);
     const organizationId = owner!.organizationId;
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const invitation = await createOrganizationInvitation(db, {
       organizationId,
       actorSubjectId: ownerSubject,

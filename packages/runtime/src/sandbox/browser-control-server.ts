@@ -5,20 +5,15 @@ export { BROWSER_CONTROL_PORT };
 
 export const BROWSER_CONTROL_SERVER_TIMEOUT_MS = 60_000;
 export const BROWSER_CONTROL_STATE_DIRECTORY = "/tmp/opengeni-browserd/state";
+export const BROWSER_CONTROL_SERVER_BIN = "/usr/local/bin/opengeni-browserd-up";
+export const BROWSER_CONTROL_SERVER_DOWN_BIN = "/usr/local/bin/opengeni-browserd-down";
 
 export class BrowserControlServerError extends Error {
   readonly exitCode: number;
   readonly stage: "startup" | "port_conflict" | "engine_unavailable" | "unknown";
 
   constructor(exitCode: number, output: string) {
-    const stage =
-      exitCode === 14
-        ? "startup"
-        : exitCode === 15
-          ? "port_conflict"
-          : exitCode === 16
-            ? "engine_unavailable"
-            : "unknown";
+    const stage = classifyBrowserControlStage(exitCode, output);
     super(
       `browser control server failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`,
     );
@@ -45,15 +40,21 @@ type ExecResultLike = {
 type ExecCapableSession = {
   exec?: (args: {
     cmd: string;
+    workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<ExecResultLike>;
   execCommand?: (args: {
     cmd: string;
+    workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<string>;
 };
+
+// Image-backed controller spawn uses absolute /tmp paths. Do not inherit a
+// session working directory; a missing cwd makes spawn fail with ENOENT.
+const PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 
 export type EnsureBrowserControlServerOptions = {
   port?: number;
@@ -76,13 +77,14 @@ export function buildBrowserControlServerScript(
   const allowedOrigins = normalizeOrigins(options.allowedOrigins ?? []);
   return [
     "mkdir -p /tmp/opengeni-browserd &&",
+    `if ! test -x ${BROWSER_CONTROL_SERVER_BIN}; then echo 'opengeni-browserd-up is not installed on this sandbox image' >&2; exit 16; fi &&`,
     "flock -w 30 --close /tmp/opengeni-browserd/up.outer.lock",
     `env OPENGENI_BROWSERD_PORT=${port}`,
     `OPENGENI_BROWSERD_ROOT=${shellQuote(BROWSER_CONTROL_STATE_DIRECTORY)}`,
     `OPENGENI_BROWSERD_ADMIN_TOKEN_FILE=${shellQuote(tokenFile)}`,
     `OPENGENI_BROWSERD_ALLOWED_ORIGINS=${shellQuote(allowedOrigins.join(","))}`,
     "OPENGENI_CODEMODE_TOKEN_FILE=/dev/null",
-    "opengeni-browserd-up",
+    BROWSER_CONTROL_SERVER_BIN,
   ].join(" ");
 }
 
@@ -104,8 +106,18 @@ export async function ensureBrowserControlServer(
     ...(options.allowedOrigins ? { allowedOrigins: options.allowedOrigins } : {}),
   });
   const result = target.exec
-    ? await target.exec({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 4_000 })
-    : await target.execCommand!({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 4_000 });
+    ? await target.exec({
+        cmd,
+        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        yieldTimeMs: timeoutMs,
+        maxOutputTokens: 4_000,
+      })
+    : await target.execCommand!({
+        cmd,
+        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        yieldTimeMs: timeoutMs,
+        maxOutputTokens: 4_000,
+      });
   const output = outputOf(result);
   const exitCode = exitCodeOf(result) ?? inferExitCode(output);
   if (exitCode !== 0) throw new BrowserControlServerError(exitCode, output);
@@ -123,13 +135,15 @@ export async function tearDownBrowserControlServer(session: unknown): Promise<vo
   const target = session as ExecCapableSession;
   if (target?.exec) {
     await target.exec({
-      cmd: "opengeni-browserd-down",
+      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: 15_000,
       maxOutputTokens: 4_000,
     });
   } else if (target?.execCommand) {
     await target.execCommand({
-      cmd: "opengeni-browserd-down",
+      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: 15_000,
       maxOutputTokens: 4_000,
     });
@@ -147,10 +161,31 @@ function exitCodeOf(result: ExecResultLike | string): number | null {
   return typeof result === "string" || typeof result.exitCode !== "number" ? null : result.exitCode;
 }
 
+function classifyBrowserControlStage(
+  exitCode: number,
+  output: string,
+): BrowserControlServerError["stage"] {
+  if (exitCode === 14) return "startup";
+  if (exitCode === 15) return "port_conflict";
+  if (exitCode === 16 || isMissingBrowserControlServer(exitCode, output)) {
+    return "engine_unavailable";
+  }
+  return "unknown";
+}
+
+function isMissingBrowserControlServer(exitCode: number, output: string): boolean {
+  if (exitCode === 127) return true;
+  return /opengeni-browserd-up[^\n]*No such file or directory|opengeni-browserd-up is not installed on this sandbox image/u.test(
+    output,
+  );
+}
+
 function inferExitCode(output: string): number {
   if (/OPENGENI_BROWSERD_UP\b/u.test(output)) return 0;
   if (/occupied by an unmanaged process/u.test(output)) return 15;
-  if (/no supported Chromium engine/u.test(output)) return 16;
+  if (/no supported Chromium engine/u.test(output) || isMissingBrowserControlServer(-1, output)) {
+    return 16;
+  }
   if (/exited during startup|failed to become ready/u.test(output)) return 14;
   return -1;
 }

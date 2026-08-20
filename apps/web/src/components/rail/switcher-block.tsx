@@ -18,6 +18,7 @@ import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
+import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -30,30 +31,28 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
-import { organizationsForSubject, workspacesInOrg } from "@/lib/org";
+import {
+  organizationsForSubject,
+  shortAccountId,
+  workspacesInOrg,
+  type OrgOption,
+} from "@/lib/org";
+import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
 import { workspaceCreationAccountId } from "@/lib/workspaces";
-import type { AccountGrant, Workspace } from "@/types";
+import type { Workspace } from "@/types";
 
 function workspaceInitial(workspace: Workspace | null): string {
   return (workspace?.name.trim()[0] ?? "W").toUpperCase();
 }
 
-/**
- * The org's human name if the access grant carries one, else null. The
- * always-visible switcher line prefers this and falls back to a generic
- * "Organization" — never a raw account id (the id stays available in the
- * org-switch menu and settings, which keep `orgLabel`'s id fallback).
- */
-function orgDisplayName(accountId: string | null, grants: AccountGrant[]): string | null {
-  if (!accountId) {
-    return null;
+function activeOrganizationLabel(orgs: OrgOption[], activeAccountId: string | null): string {
+  if (!activeAccountId) {
+    return "Organization";
   }
-  const grant = grants.find((candidate) => candidate.accountId === accountId);
-  const name =
-    grant?.metadata && typeof grant.metadata.accountName === "string"
-      ? grant.metadata.accountName
-      : undefined;
-  return name?.trim() || null;
+  return (
+    orgs.find((organization) => organization.accountId === activeAccountId)?.label ??
+    `Org ${shortAccountId(activeAccountId)}`
+  );
 }
 
 export function SwitcherBlock() {
@@ -65,11 +64,11 @@ export function SwitcherBlock() {
     activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
-  const currentOrgLabel =
-    orgDisplayName(activeAccountId, context.accessContext.accountGrants) ?? "Organization";
+  const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const orgWorkspaces = activeAccountId
     ? workspacesInOrg(context.workspaces, activeAccountId)
     : context.workspaces;
+  const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const createAccountId = workspaceCreationAccountId(
     context.accessContext,
@@ -87,11 +86,15 @@ export function SwitcherBlock() {
 
   async function toggleWorkspaceControl() {
     if (!activeWorkspace || controlBusy) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(activeWorkspace.id);
+    if (!acceptedTransition) return;
     const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
     setControlBusy(true);
     try {
-      await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
-      toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
+      if (updated && context.ownsWorkspaceInvocation(activeWorkspace.id, acceptedTransition)) {
+        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      }
     } catch (error) {
       toast.error(`Couldn't ${action} the workspace`, {
         description: error instanceof Error ? error.message : String(error),
@@ -111,6 +114,8 @@ export function SwitcherBlock() {
     if (!name || !dialog) {
       return;
     }
+    const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+    if (!acceptedTransition) return;
     setBusy(true);
     try {
       if (dialog === "create") {
@@ -121,6 +126,7 @@ export function SwitcherBlock() {
         if (!created) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success(`Workspace ${created.name} created`);
         rail.openWorkspace(created.id);
       } else {
@@ -128,6 +134,7 @@ export function SwitcherBlock() {
         if (!renamed) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success("Workspace renamed");
       }
       setDialog(null);
@@ -146,18 +153,18 @@ export function SwitcherBlock() {
           onSelect={rail.openWorkspace}
           onCreate={() => openDialog("create")}
           activeWorkspace={activeWorkspace}
+          managedSelfContext={context.managedSelfContext}
           canControl={canControlWorkspace}
           controlBusy={controlBusy}
           onToggleControl={() => void toggleWorkspaceControl()}
           align="start"
         >
-          <button
-            type="button"
-            aria-label={`Workspace: ${activeWorkspace?.name ?? "switch workspace"}`}
-            className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
-          >
-            {workspaceInitial(activeWorkspace)}
-          </button>
+          <WorkspaceSwitcherTrigger
+            activeWorkspace={activeWorkspace}
+            activeOrganizationLabel={currentOrgLabel}
+            personal={activeIsPersonal}
+            collapsed
+          />
         </WorkspaceMenu>
         <WorkspaceNameDialog
           mode={dialog}
@@ -173,7 +180,13 @@ export function SwitcherBlock() {
 
   return (
     <div className="grid gap-1.5 px-3 pt-1">
-      <OrgLine orgs={orgs} currentLabel={currentOrgLabel} activeAccountId={activeAccountId} />
+      <OrganizationSwitcherLine
+        orgs={orgs}
+        currentLabel={currentOrgLabel}
+        activeAccountId={activeAccountId}
+        onSelect={rail.openOrg}
+        workspaceId={rail.workspaceId}
+      />
 
       <WorkspaceMenu
         workspaces={orgWorkspaces}
@@ -182,28 +195,18 @@ export function SwitcherBlock() {
         onSelect={rail.openWorkspace}
         onCreate={() => openDialog("create")}
         activeWorkspace={activeWorkspace}
+        managedSelfContext={context.managedSelfContext}
         canControl={canControlWorkspace}
         controlBusy={controlBusy}
         onToggleControl={() => void toggleWorkspaceControl()}
         align="start"
       >
-        <button
-          type="button"
-          className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
-        >
-          <Avatar size="sm" className="rounded-md">
-            <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-              {workspaceInitial(activeWorkspace)}
-            </AvatarFallback>
-          </Avatar>
-          <span
-            className="min-w-0 flex-1 truncate text-sm font-medium"
-            title={activeWorkspace?.name}
-          >
-            {activeWorkspace?.name ?? "Select workspace"}
-          </span>
-          <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
-        </button>
+        <WorkspaceSwitcherTrigger
+          activeWorkspace={activeWorkspace}
+          activeOrganizationLabel={currentOrgLabel}
+          personal={activeIsPersonal}
+          collapsed={false}
+        />
       </WorkspaceMenu>
 
       <WorkspaceNameDialog
@@ -218,12 +221,13 @@ export function SwitcherBlock() {
   );
 }
 
-function OrgLine(props: {
-  orgs: ReturnType<typeof organizationsForSubject>;
+export function OrganizationSwitcherLine(props: {
+  orgs: OrgOption[];
   currentLabel: string;
   activeAccountId: string | null;
+  onSelect: (accountId: string) => void;
+  workspaceId: string | null;
 }) {
-  const rail = useRail();
   // The org *name* renders in normal case (it's a name, not a section caption).
   // Exactly one org: a static muted label, no useless switcher.
   if (props.orgs.length <= 1) {
@@ -242,7 +246,7 @@ function OrgLine(props: {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="Switch organization"
+          aria-label={`${props.currentLabel}. Switch organization`}
           className="flex min-w-0 items-center gap-1 rounded px-0.5 py-0.5 text-2xs font-medium text-fg-subtle transition-colors hover:text-fg-muted focus-visible:outline-none"
         >
           <BuildingIcon className="size-3 shrink-0" />
@@ -255,13 +259,17 @@ function OrgLine(props: {
         {props.orgs.map((org) => (
           <DropdownMenuItem
             key={org.accountId}
+            aria-current={org.accountId === props.activeAccountId ? "true" : undefined}
             onSelect={() => {
               if (org.accountId !== props.activeAccountId) {
-                rail.openOrg(org.accountId);
+                props.onSelect(org.accountId);
               }
             }}
           >
-            <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
+            <span
+              aria-hidden="true"
+              className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+            >
               {org.label
                 .replace(/^Org\s+/, "")
                 .slice(0, 2)
@@ -269,22 +277,73 @@ function OrgLine(props: {
             </span>
             <span className="min-w-0 flex-1 truncate">{org.label}</span>
             {org.accountId === props.activeAccountId ? (
-              <CheckIcon className="size-4 text-brand" />
+              <CheckIcon aria-hidden="true" className="size-4 text-brand" />
             ) : null}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId: rail.workspaceId }}
-          >
-            <SettingsIcon className="size-4" />
-            Organization settings
-          </Link>
-        </DropdownMenuItem>
+        {props.workspaceId ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId: props.workspaceId }}
+              >
+                <SettingsIcon className="size-4" />
+                Organization settings
+              </Link>
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+export function WorkspaceSwitcherTrigger(props: {
+  activeWorkspace: Workspace | null;
+  activeOrganizationLabel: string;
+  personal: boolean;
+  collapsed: boolean;
+}) {
+  const workspaceLabel =
+    props.activeWorkspace?.name ?? (props.collapsed ? "switch workspace" : "none");
+  const accessibleLabel = `${props.activeOrganizationLabel}. ${
+    props.personal ? "Personal workspace" : "Workspace"
+  }: ${workspaceLabel}. Switch workspace`;
+
+  if (props.collapsed) {
+    return (
+      <button
+        type="button"
+        aria-label={accessibleLabel}
+        className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+      >
+        {workspaceInitial(props.activeWorkspace)}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label={accessibleLabel}
+      className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+    >
+      <Avatar size="sm" className="rounded-md">
+        <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
+          {workspaceInitial(props.activeWorkspace)}
+        </AvatarFallback>
+      </Avatar>
+      <span
+        className="min-w-0 flex-1 truncate text-sm font-medium"
+        title={props.activeWorkspace?.name}
+      >
+        {props.activeWorkspace?.name ?? "Select workspace"}
+      </span>
+      {props.personal ? <PersonalWorkspaceBadge decorative /> : null}
+      <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
+    </button>
   );
 }
 
@@ -295,6 +354,7 @@ function WorkspaceMenu(props: {
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
   activeWorkspace: Workspace | null;
+  managedSelfContext: ManagedSelfContext | null;
   canControl: boolean;
   controlBusy: boolean;
   onToggleControl: () => void;
@@ -317,20 +377,16 @@ function WorkspaceMenu(props: {
       >
         <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
         {props.workspaces.map((workspace) => (
-          <DropdownMenuItem key={workspace.id} onSelect={() => props.onSelect(workspace.id)}>
-            <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
-              {workspaceInitial(workspace)}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-            {workspace.inferenceControl.state === "paused" ? (
-              <PauseIcon
-                className="size-3.5 fill-current text-status-waiting"
-                aria-label="Paused"
-              />
-            ) : null}
-            {workspace.id === props.activeWorkspaceId ? (
-              <CheckIcon className="size-4 text-brand" />
-            ) : null}
+          <DropdownMenuItem
+            key={workspace.id}
+            aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
+            onSelect={() => props.onSelect(workspace.id)}
+          >
+            <WorkspaceMenuItemContent
+              workspace={workspace}
+              activeWorkspaceId={props.activeWorkspaceId}
+              managedSelfContext={props.managedSelfContext}
+            />
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -373,5 +429,35 @@ function WorkspaceMenu(props: {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+export function WorkspaceMenuItemContent(props: {
+  workspace: Workspace;
+  activeWorkspaceId: string;
+  managedSelfContext: ManagedSelfContext | null;
+}) {
+  const personal = isPersonalWorkspace(props.workspace, props.managedSelfContext);
+  const paused = props.workspace.inferenceControl.state === "paused";
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+      >
+        {workspaceInitial(props.workspace)}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.workspace.name}</span>
+      {personal ? <PersonalWorkspaceBadge /> : null}
+      {paused ? (
+        <>
+          <PauseIcon aria-hidden="true" className="size-3.5 fill-current text-status-waiting" />
+          <span className="sr-only"> Paused</span>
+        </>
+      ) : null}
+      {props.workspace.id === props.activeWorkspaceId ? (
+        <CheckIcon aria-hidden="true" className="size-4 text-brand" />
+      ) : null}
+    </>
   );
 }

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useAppContext } from "@/context";
 import {
+  authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
   resolveAuthorizedSessionWorkspace,
   shouldRedirectSessionDeepLink,
@@ -12,6 +13,10 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
   const context = useAppContext();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<"loading" | "not-found" | "error">("loading");
+  const authorizedWorkspaceIds = useMemo(
+    () => authorizedSessionReadWorkspaceIds(context.accessContext, context.workspaces),
+    [context.accessContext, context.workspaces],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -21,6 +26,7 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
       context.client,
       context.accessContext.workspaceGrants,
       sessionId,
+      { authorizedWorkspaceIds },
     ).then((resolution) => {
       if (cancelled) {
         return;
@@ -47,7 +53,13 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [attempt, context.accessContext.workspaceGrants, context.client, sessionId]);
+  }, [
+    attempt,
+    context.accessContext.workspaceGrants,
+    context.client,
+    authorizedWorkspaceIds,
+    sessionId,
+  ]);
 
   if (state === "loading") {
     return <LoadingPanel label="Opening session" />;

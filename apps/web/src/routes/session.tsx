@@ -20,7 +20,7 @@ import {
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
   CheckIcon,
   Loader2Icon,
@@ -35,7 +35,8 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
+import { LoadingPanel } from "@/components/common";
 import {
   FollowUpRepositoryMenuBody,
   FollowUpRepositoryPicker,
@@ -69,6 +70,7 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
@@ -103,6 +105,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -125,6 +128,10 @@ const LazyCodexRealtimeControl = lazy(() =>
   import("@opengeni/react/realtime").then(({ SessionRealtimeControl }) => ({
     default: SessionRealtimeControl,
   })),
+);
+
+const LazySessionRouteAuxiliary = lazy(
+  () => import("@/components/session/session-tenancy-control"),
 );
 
 export function SessionRoute({
@@ -168,7 +175,12 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
+  const {
+    session: fetchedSession,
+    loading,
+    error: loadError,
+    refresh: refreshSession,
+  } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -247,9 +259,45 @@ export function SessionRoute({
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
+  const acknowledgedSessionRef = useRef<string | null>(null);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
+  useEffect(() => {
+    if (!session?.unread || acknowledgedSessionRef.current === session.id) return;
+    acknowledgedSessionRef.current = session.id;
+    void context.client
+      .updateSessionAttention(workspaceId, session.id, {
+        unread: false,
+        expectedVersion: session.attentionVersion ?? 0,
+      })
+      .then((updated) => {
+        setContextSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                unread: updated.unread,
+                activelyWorking: updated.activelyWorking,
+                attentionVersion: updated.attentionVersion,
+              }
+            : current,
+        );
+      })
+      .catch(() => {
+        // A later route load or the normal rail refresh can retry. Reading a
+        // chat should never interrupt the user with an acknowledgement error.
+        if (acknowledgedSessionRef.current === session.id) {
+          acknowledgedSessionRef.current = null;
+        }
+      });
+  }, [
+    context.client,
+    session?.attentionVersion,
+    session?.id,
+    session?.unread,
+    setContextSession,
+    workspaceId,
+  ]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
@@ -278,7 +326,6 @@ export function SessionRoute({
       toast.error("Failed to load session", { description: String(loadError) });
     }
   }, [loadError]);
-
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -362,7 +409,9 @@ export function SessionRoute({
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {
-          const status = await context.client.getGitHubApp(workspaceId, { returnPath });
+          const status = await context.client.getGitHubApp(workspaceId, {
+            returnPath,
+          });
           if (status.status === "bound") {
             toast.success("GitHub is already connected");
             return;
@@ -478,30 +527,14 @@ export function SessionRoute({
 
   if (!session) {
     if (loadError) {
-      return isApiErrorStatus(loadError, 404) ? (
-        <ProblemPanel
-          title="Session not found in this workspace"
-          description="The session ID is not available under the workspace in the URL."
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
-      ) : (
-        <ProblemPanel
-          title="Unable to open session"
-          description={loadError instanceof Error ? loadError.message : String(loadError)}
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
+      return (
+        <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
+          <LazySessionRouteAuxiliary
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            loadError={loadError}
+          />
+        </Suspense>
       );
     }
     return (
@@ -574,6 +607,7 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
+      onReloadSession={refreshSession}
     />
   );
 
@@ -783,7 +817,11 @@ function useSessionEditableArtifactSummaries(input: {
           },
         );
         if (current) {
-          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+          setLoaded({
+            key: authorityKey,
+            status: "ready",
+            artifacts: result.artifacts,
+          });
         }
       })
       .catch(() => {
@@ -842,10 +880,14 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
+  onReloadSession: () => Promise<void>;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const fleet = useMachines({
+    sessionId: props.session.id,
+    pollIntervalMs: 5000,
+  });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const loadRetainedScreenshot = useMemo(
@@ -1085,13 +1127,39 @@ function SessionChatPane(props: {
     ],
   );
   const composerPolicyValidRef = useRef(false);
+  const workspace =
+    context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    session: props.session,
+    enabled: props.session.sandboxBackend !== "selfhosted",
+    fixed: {
+      variableSetId: props.session.variableSetId,
+      rigId: props.session.rigId,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    onReloadSession: props.onReloadSession,
+  });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
+      ...(personalAttachment.intent
+        ? { personalResourceAttachment: personalAttachment.intent }
+        : {}),
     }),
     sendBlocked: () =>
-      attachments.hasUnresolved || repositories.error !== null || !composerPolicyValidRef.current,
+      attachments.hasUnresolved ||
+      repositories.error !== null ||
+      !composerPolicyValidRef.current ||
+      personalAttachment.requiresDecision ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
@@ -1104,6 +1172,8 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
+    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    onDeliveryError: personalAttachment.onDeliveryError,
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;
@@ -1155,7 +1225,10 @@ function SessionChatPane(props: {
     if (launchLatency) setComposerLatencyMode(launchLatency);
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
-      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      params: {
+        workspaceId: props.session.workspaceId,
+        sessionId: props.session.id,
+      },
       search: composerLaunchSearchAfterPolicyApply({
         model: launchModel,
         effort: launchEffort,
@@ -1287,6 +1360,11 @@ function SessionChatPane(props: {
               creditExhausted={props.creditExhausted}
               workspaceId={props.session.workspaceId}
             />
+          ) : null}
+          {props.session.tenancy ? (
+            <Suspense fallback={null}>
+              <LazySessionRouteAuxiliary session={props.session} events={props.events} />
+            </Suspense>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
@@ -1445,6 +1523,11 @@ function SessionChatPane(props: {
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <PersonalResourceAttachmentControl
+            controller={personalAttachment}
+            disabled={terminal || composer.sending}
+            compact
+          />
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
             composer={composer}

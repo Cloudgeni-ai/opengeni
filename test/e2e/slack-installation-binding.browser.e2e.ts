@@ -186,6 +186,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
     }
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}`) return json(workspace());
+    if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
     }

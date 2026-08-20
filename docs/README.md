@@ -40,6 +40,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, pack/capability UI copy, and marketing-pack docs should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Fiken connector (accounting) | `docs/fiken.md` | Capabilities UI copy and architecture should link instead of restating token verification, company scoping, or the single-concurrent-request rule. |
+| First-party local MCP bridges | `docs/design/first-party-mcp-bridges.md` | Provider bridge adapters, catalog/runtime registration, and follow-ups must preserve its authority, destination, and mutation-replay contract. |
 | Rigs (versioned sandbox machine definitions) | `docs/rigs.md` | `docs/architecture.md`, `docs/packs.md`, `docs/variable-sets.md`, `docs/capabilities.md` should link instead of restating verification/promotion rules. |
 | Nested-agent depth policy | `docs/nested-agent-depth.md` | `docs/architecture.md`, API/session comments, and release notes should link instead of restating admission and denial semantics. |
 | Agent session authority | `docs/agent-session-authority.md` | `docs/architecture.md`, `AGENTS.md`, and nested-depth notes should link instead of restating peer-session access. |

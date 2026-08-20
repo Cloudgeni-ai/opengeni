@@ -21,7 +21,11 @@ import {
   type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
-import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk";
+import type {
+  CreateSessionRequest,
+  NewSessionDraftOptions,
+  PersonalResourceAttachmentIntent,
+} from "@opengeni/sdk";
 
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
@@ -140,6 +144,7 @@ export type BuildCreateSessionRequestInput = {
   idempotencyKey: string;
   targetSandboxId?: string | null;
   workingDir?: string | null;
+  channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
@@ -153,6 +158,33 @@ export type PendingCreateAttempt = {
   signature: string;
   idempotencyKey: string;
 };
+
+export function classifyCreateSessionFailure(error: unknown): {
+  error: Error;
+  outcomeUnknown: boolean;
+} {
+  return {
+    error: error instanceof Error ? error : new Error(String(error)),
+    outcomeUnknown:
+      typeof error === "object" &&
+      error !== null &&
+      (error as { outcomeUnknown?: unknown }).outcomeUnknown === true,
+  };
+}
+
+/** A create may be retried with the same key only when the transport cannot
+ * prove whether the server committed it. Definitive HTTP results end that
+ * logical attempt so a corrected, reconfirmed request gets a fresh key. */
+export function retainCreateSessionAttemptAfterFailure(input: {
+  current: PendingCreateAttempt | null;
+  attempted: PendingCreateAttempt;
+  outcomeUnknown: boolean;
+}): PendingCreateAttempt | null {
+  if (input.current?.idempotencyKey !== input.attempted.idempotencyKey) {
+    return input.current;
+  }
+  return input.outcomeUnknown ? input.current : null;
+}
 
 /**
  * Build the one canonical create payload without mutating UI state. Resource
@@ -208,8 +240,12 @@ export function buildCreateSessionRequest(
     ...(input.submission.firstPartyMcpTools
       ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
       : {}),
+    ...(input.submission.personalResourceAttachment
+      ? { personalResourceAttachment: input.submission.personalResourceAttachment }
+      : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
+    ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
           expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
@@ -261,6 +297,7 @@ export function prepareCreateSessionAttempt(input: {
 export function submissionFromSessionDraft(
   draft: SessionDraft,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined,
 ): SessionDraftSubmission {
   const goal = goalFromDraft(draft);
   const mcp = draft.customMcpPermissions
@@ -290,6 +327,7 @@ export function submissionFromSessionDraft(
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
       ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
+      ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
       ...visibleTools,

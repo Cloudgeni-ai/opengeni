@@ -4,35 +4,22 @@ import {
   ListUserResourceAuthoritiesResponse,
   RevokeUserResourceGrantQuery,
   UserResourceGrantMutationResponse,
+  UserResourceGrantRevocationResponse,
 } from "@opengeni/contracts";
 import {
+  issueManagedHumanUserResourceGrant,
+  listManagedHumanUserResourceAuthorities,
   requireAccessGrantAuthorization,
-  type AccessGrantAuthorization,
+  revokeManagedHumanUserResourceGrant,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  SessionTenancyManagedHumanRequiredError,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import {
-  issueSelfUserResourceGrant,
-  listSelfUserResourceAuthorities,
-  nestedPostgresSqlState,
-  revokeSelfUserResourceGrant,
-} from "@opengeni/db";
+import { nestedPostgresSqlState, SessionTenancyNotActivatedError } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-
-function requireAuthenticatedHuman(access: AccessGrantAuthorization): string {
-  if (
-    !access.contextIntegrity ||
-    access.authenticatedSubjectId !== access.grant.subjectId ||
-    access.grant.principalKind !== "human_session" ||
-    access.grant.serviceInitiator ||
-    access.grant.serviceInitiatorContext ||
-    access.grant.subjectId.startsWith("api_key:")
-  ) {
-    throw new HTTPException(403, { message: "authenticated human session required" });
-  }
-  return access.grant.subjectId;
-}
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
   const parsed = schema.safeParse(await context.req.json().catch(() => null));
@@ -41,6 +28,16 @@ async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z
 }
 
 function lifecycleError(error: unknown): never {
+  if (
+    error instanceof SessionAuthorizationDeniedError ||
+    error instanceof SessionTenancyManagedHumanRequiredError ||
+    error instanceof SessionTenancyNotActivatedError
+  ) {
+    throw new HTTPException(403, { message: "user-resource authority denied" });
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    throw new HTTPException(503, { message: "session authorization unavailable" });
+  }
   if (nestedPostgresSqlState(error) === "42501") {
     throw new HTTPException(403, { message: "user-resource authority denied" });
   }
@@ -53,7 +50,12 @@ function lifecycleError(error: unknown): never {
 export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/user-resource-authorities";
   app.get(base, async (context) => {
-    const query = ListUserResourceAuthoritiesQuery.safeParse({ scope: context.req.query("scope") });
+    const query = ListUserResourceAuthoritiesQuery.safeParse({
+      scope: context.req.query("scope"),
+      resourceKind: context.req.query("resourceKind"),
+      cursor: context.req.query("cursor"),
+      limit: context.req.query("limit"),
+    });
     if (!query.success) throw new HTTPException(422, { message: "explicit scope=user required" });
     const workspaceId = context.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(
@@ -62,16 +64,17 @@ export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDep
       workspaceId,
       "workspace:read",
     );
-    const subjectId = requireAuthenticatedHuman(access);
     try {
+      const page = await listManagedHumanUserResourceAuthorities(
+        deps,
+        access,
+        workspaceId,
+        query.data,
+      );
       return context.json(
         ListUserResourceAuthoritiesResponse.parse({
           scope: "user",
-          authorities: await listSelfUserResourceAuthorities(deps.db, {
-            accountId: access.grant.accountId,
-            workspaceId,
-            subjectId,
-          }),
+          ...page,
         }),
       );
     } catch (error) {
@@ -90,22 +93,18 @@ export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDep
       workspaceId,
       "workspace:read",
     );
-    const subjectId = requireAuthenticatedHuman(access);
     try {
       return context.json(
         UserResourceGrantMutationResponse.parse({
           scope: "user",
-          grant: await issueSelfUserResourceGrant(deps.db, {
-            accountId: access.grant.accountId,
+          grant: await issueManagedHumanUserResourceGrant(
+            deps,
+            access,
             workspaceId,
-            subjectId,
-            authorityId: authorityId.data,
-            action: request.action,
-            mode: request.mode,
-            context: request.context,
-            sessionId: request.sessionId ?? null,
-            workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
-          }),
+            authorityId.data,
+            request,
+            "http",
+          ),
         }),
       );
     } catch (error) {
@@ -125,17 +124,13 @@ export function registerUserResourceAuthorityRoutes(app: Hono, deps: ApiRouteDep
       workspaceId,
       "workspace:read",
     );
-    const subjectId = requireAuthenticatedHuman(access);
     try {
-      return context.json({
-        scope: "user",
-        grant: await revokeSelfUserResourceGrant(deps.db, {
-          accountId: access.grant.accountId,
-          workspaceId,
-          subjectId,
-          grantId: grantId.data,
+      return context.json(
+        UserResourceGrantRevocationResponse.parse({
+          scope: "user",
+          grant: await revokeManagedHumanUserResourceGrant(deps, access, workspaceId, grantId.data),
         }),
-      });
+      );
     } catch (error) {
       return lifecycleError(error);
     }

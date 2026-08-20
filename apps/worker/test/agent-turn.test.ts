@@ -2991,6 +2991,17 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
   });
 
+  test("personal-connection membership uses named live-authority, not a bare grant join", async () => {
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
+    expect(toolsSource).not.toContain("getWorkspaceGrant");
+    expect(toolsSource).toMatch(
+      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
+    );
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({

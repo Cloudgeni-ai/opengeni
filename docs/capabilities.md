@@ -73,6 +73,20 @@ one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
+Reviewed first-party local bridges implement the shared static contract in
+`packages/capabilities/src/mcp-bridge.ts`. They expose a strictly validated
+descriptor with 1-32 exact HTTPS destinations.
+
+The descriptor identifies catalog identity, actual complete Connection/host/no
+credential authority, tool-surface class, destinations, and safe-read-only
+replay policy, but grants no authority. Generic static-adapter selection rejects
+ambiguous matches and keeps provider matching out of the catalog importer,
+OAuth client/profiles, and web row/sheet components. OpenAPI and GraphQL
+Integrations, including Google Drive, keep their existing local MCP adapters and
+do not claim this reviewed static bridge descriptor. Compiler-wide OpenAPI
+destination governance remains separate work. See
+[`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
+
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
 flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
 Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
@@ -915,10 +929,20 @@ the import fails loudly on an unknown key, a non-canonical URL, or a curated
 entry that matches nothing, because each of those would otherwise silently
 ship the raw aggregator row.
 
+Every overlay match also records `metadata.curation.curated: true`. That fact
+is presentation provenance, not a badge or a security review. The web browser
+uses it to place synthesized first-party rows and the reviewed connector set
+before the raw aggregator long tail in the initial bounded window. Rows with a
+self-hosted logo follow, then ordinary long-tail names, with hostname- and
+machine-id-like labels last. Search still filters the complete catalog before
+this stable presentation sort, so no imported row is hidden or made
+undiscoverable. `official` remains the narrower evidence-based provider-domain
+claim and is the only one of these facts rendered as an Official badge.
+
 Curated `category` values are grouping slugs rendered through a display-label
-map in the web app; the catalog sort key is `kind`, then `category`, then
-`name`, so assigning a category moves a row into that group in the merged
-listing.
+map in the web app. The API retains its stable `kind`, `category`, `name`
+ordering; the connector browser applies the presentation-only stable grouping
+above after search and filtering.
 
 Imported logos are validated as images below 512KB and stored through OpenGeni
 object storage under `catalog-assets/...`; catalog rows store only the
@@ -957,3 +981,12 @@ an invalid response, keeps a still-valid prior asset when a refetch fails, and
 removes files no curated row references. Review the diff and commit it like a
 snapshot or overlay change; the committed manifest is checked in tests to cover
 exactly the curated rows that permit a logo, byte for byte.
+
+Fiken, X, and Reddit are synthesized first-party catalog rows rather than
+integrations.sh imports, so they cannot receive an importer-owned
+`logoAssetPath`. Their three passive SVG marks ship with the web build under
+`apps/web/public/capability-logos/`, beside a small provenance manifest. The
+browser prefers those local marks for the exact built-in ids and otherwise uses
+the normal self-hosted catalog asset URL. Missing or invalid bytes still fall
+back to the same monogram. Keep this exception limited to first-party rows;
+registry marks continue to belong in the reviewed vendoring pipeline above.

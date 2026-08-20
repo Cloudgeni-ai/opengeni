@@ -1,10 +1,15 @@
 import { z } from "zod";
-import { CreateChannelRequest, UpdateChannelRequest } from "@opengeni/contracts";
+import {
+  CreateChannelRequest,
+  ReorderChannelsRequest,
+  UpdateChannelRequest,
+} from "@opengeni/contracts";
 import {
   ChannelNameConflictError,
   createChannel,
   deleteChannel,
   listChannels,
+  reorderChannels,
   updateChannel,
 } from "@opengeni/db";
 import type { Hono } from "hono";
@@ -76,6 +81,17 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+  });
+
+  app.put("/v1/workspaces/:workspaceId/channels/order", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const payload = ReorderChannelsRequest.parse(await c.req.json());
+    const channels = await reorderChannels(db, workspaceId, payload.channelIds);
+    if (!channels) {
+      throw new HTTPException(409, { message: "projects changed; refresh and try again" });
+    }
+    return c.json(channels);
   });
 
   app.delete("/v1/workspaces/:workspaceId/channels/:channelId", async (c) => {

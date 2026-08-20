@@ -11,17 +11,25 @@ import {
 } from "@opengeni/sdk";
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
+  ArchiveIcon,
+  CalendarClockIcon,
   ChevronRightIcon,
+  CircleDashedIcon,
+  Clock3Icon,
   EllipsisIcon,
-  HashIcon,
-  InboxIcon,
-  LocateFixedIcon,
+  FolderIcon,
+  FolderPlusIcon,
+  FolderOpenIcon,
   ListFilterIcon,
+  Loader2Icon,
+  MailIcon,
+  MailOpenIcon,
   MessagesSquareIcon,
   PencilIcon,
   PinIcon,
   PlusIcon,
   SearchIcon,
+  Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -32,11 +40,13 @@ import {
   useRef,
   useState,
   type MouseEvent,
+  type DragEvent,
   type ReactNode,
 } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -98,18 +108,20 @@ import {
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
+  scheduledTaskIdOf,
+  selectedDescendantNode,
   sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
+  summarizeRailNodes,
+  type RailAggregateStatus,
   type SessionTreeNode,
   type SessionBrowseDateField,
   type SessionBrowseDateRange,
   type SessionBrowseGroupBy,
 } from "@/lib/sessions-group";
-import { creatorHue, creatorInitials } from "@/lib/creator-initials";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
-import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 import type { Channel, Session } from "@/types";
 
@@ -121,13 +133,19 @@ function isModifiedNavigationClick(
 }
 
 /** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
-function NewSessionLink(props: { className?: string; "aria-label"?: string; children: ReactNode }) {
+export function NewSessionLink(props: {
+  className?: string;
+  "aria-label"?: string;
+  channelId?: string;
+  children: ReactNode;
+}) {
   const rail = useRail();
   const context = useAppContext();
   return (
     <Link
       to="/workspaces/$workspaceId/sessions"
       params={{ workspaceId: rail.workspaceId }}
+      search={props.channelId ? { channelId: props.channelId } : {}}
       aria-label={props["aria-label"]}
       aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
       className={props.className}
@@ -152,6 +170,11 @@ type PinFn = (
   restoreFocusTo?: PinFocusTarget,
 ) => Promise<Session | null>;
 type MoveToChannelFn = (session: Session, channelId: string | null) => Promise<void>;
+type UpdateAttentionFn = (
+  session: Session,
+  update: { unread?: boolean; activelyWorking?: boolean },
+) => Promise<void>;
+type ArchiveFn = (session: Session, archived: boolean) => Promise<void>;
 type PinOverride = { session: Session; operation: number };
 type PendingPinFocus = {
   sessionId: string;
@@ -166,6 +189,21 @@ type ChildPageState = {
   failed: boolean;
 };
 
+const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
+
+function findSessionTreeNode(
+  nodes: readonly SessionTreeNode[],
+  sessionId: string | null,
+): SessionTreeNode | null {
+  if (!sessionId) return null;
+  for (const node of nodes) {
+    if (node.session.id === sessionId) return node;
+    const child = findSessionTreeNode(node.children, sessionId);
+    if (child) return child;
+  }
+  return null;
+}
+
 export function SessionList() {
   const rail = useRail();
   const context = useAppContext();
@@ -173,6 +211,7 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [browseGroupBy, setBrowseGroupBy] = useState<SessionBrowseGroupBy>("activity");
   const [browseDateField, setBrowseDateField] = useState<SessionBrowseDateField>("activity");
   const [browseDateRange, setBrowseDateRange] = useState<SessionBrowseDateRange>("any");
@@ -190,10 +229,20 @@ export function SessionList() {
     setBrowseDateRange("any");
     setBrowseCreator(null);
   }, []);
+
   const rootPage = useWorkspaceSessions({
     limit: 50,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
+    archivedOnly: false,
+    pollIntervalMs: 15_000,
+  });
+  // Archive is a closed folder at the end of the normal session rail. Keep
+  // its page independent so opening it never changes the active-session view.
+  const archivedRootPage = useWorkspaceSessions({
+    limit: 50,
+    parentSessionId: null,
+    archivedOnly: true,
     pollIntervalMs: 15_000,
   });
   // Pins are shortcuts and may point anywhere in a workstream. Fetch their
@@ -205,16 +254,25 @@ export function SessionList() {
     pinsOnly: true,
     pollIntervalMs: 15_000,
   });
-  // Workspace-shared channels. When at least one exists, the ordinary rail
-  // groups roots by channel instead of recency buckets; a workspace without
-  // channels keeps today's rail unchanged. The list is tiny and churn is rare,
-  // so it polls gently.
+  // Workspace-shared channels back the user-facing workstreams. Unfiled roots
+  // live in Recents even before the first workstream is created. The list is
+  // tiny and churn is rare, so it polls gently.
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
   const channels = channelsQuery.channels;
-  const { create: requestCreateChannel, moveSession: requestMoveSession } = channelsQuery;
+  const {
+    create: requestCreateChannel,
+    update: updateProject,
+    remove: removeProject,
+    reorder: reorderProjects,
+    moveSession: requestMoveSession,
+  } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
+  const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
+  const { sessions: archivedSessions, refresh: refreshArchivedSessions } = archivedRootPage;
   const {
     pinned: globalPinned,
     loading: globalPinsLoading,
@@ -228,8 +286,8 @@ export function SessionList() {
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
-    await Promise.all([refresh(), refreshGlobalPins()]);
-  }, [refresh, refreshGlobalPins]);
+    await Promise.all([refresh(), refreshArchivedSessions(), refreshGlobalPins()]);
+  }, [refresh, refreshArchivedSessions, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
@@ -276,6 +334,10 @@ export function SessionList() {
   const [pinOverrides, setPinOverrides] = useState<ReadonlyMap<string, PinOverride>>(
     () => new Map(),
   );
+  const [archiveTransitions, setArchiveTransitions] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const archiving = useRef(new Set<string>());
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
@@ -339,12 +401,20 @@ export function SessionList() {
   }, [creatorLabels]);
   const browseSessions = useMemo(
     () =>
-      filterSessionsForBrowse(allSessions, {
-        creator: browseCreator,
-        dateField: browseDateField,
-        dateRange: browseDateRange,
-      }),
-    [allSessions, browseCreator, browseDateField, browseDateRange],
+      filterSessionsForBrowse(
+        allSessions.filter((session) => {
+          if (archiveTransitions.has(session.rootSessionId)) return false;
+          // Child rows inherit their root's archive membership from the
+          // lineage query. Only roots carry the personal archive projection.
+          return session.parentSessionId !== null || !session.archived;
+        }),
+        {
+          creator: browseCreator,
+          dateField: browseDateField,
+          dateRange: browseDateRange,
+        },
+      ),
+    [allSessions, archiveTransitions, browseCreator, browseDateField, browseDateRange],
   );
 
   // A complete pins-only page makes presence authoritative, but absence does
@@ -501,9 +571,9 @@ export function SessionList() {
       return match?.[1] ?? null;
     },
   });
-  // Only a route transition, keyboard navigation, or the explicit "Show path"
-  // action may reveal a row. Polls and pagination replace `flat` too, so a
-  // derived focus index is not itself permission to move this scroll container.
+  // Only a route transition or keyboard navigation may reveal a row. Polls and
+  // pagination replace `flat` too, so a derived focus index is not itself
+  // permission to move this scroll container.
   const rowRevealIntent = useRef<string | null>(activeSessionId);
 
   // Search results are deliberately flat: a partial match set is not a tree.
@@ -531,11 +601,36 @@ export function SessionList() {
     [browseGroupBy, browseSessions, creatorLabels, railSections.ordinary],
   );
   const pinnedNodes = railSections.pinned;
-  const channelMode = hierarchyMode && channels.length > 0;
+  // The hierarchy rail always has the same shape: unfiled Recents first, then
+  // workstreams. A workspace with no created workstreams should not fall back
+  // to a completely different recency UI.
+  const channelMode = hierarchyMode;
   const channelSections = useMemo(
     () => (channelMode ? channelRailSections(forest, channels) : []),
     [channelMode, forest, channels],
   );
+  const archivedNodes = useMemo(() => {
+    const archiveForest = buildPinnedRailSections(
+      archivedSessions.filter((session) => !archiveTransitions.has(session.rootSessionId)),
+    ).complete;
+    return [...archiveForest.running, ...archiveForest.grouped.flatMap((group) => group.sessions)];
+  }, [archiveTransitions, archivedSessions]);
+  // Workstreams open on first paint. A user collapse is local interaction
+  // state; new or newly loaded sections therefore remain open by default.
+  const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    setCollapsedChannelSections(new Set());
+  }, [rail.workspaceId]);
+  const toggleChannelSection = useCallback((sectionKey: string) => {
+    setCollapsedChannelSections((current) => {
+      const next = new Set(current);
+      if (next.has(sectionKey)) next.delete(sectionKey);
+      else next.add(sectionKey);
+      return next;
+    });
+  }, []);
   const submitCreateChannel = useCallback(async () => {
     const name = channelNameDraft.trim();
     if (!name) return;
@@ -544,7 +639,7 @@ export function SessionList() {
       setChannelDialogOpen(false);
       setChannelNameDraft("");
     } else {
-      toast.error("Couldn't create the channel. The name may already be in use.");
+      toast.error("Couldn't create the project. The name may already be in use.");
     }
   }, [channelNameDraft, requestCreateChannel]);
   const onMoveToChannel = useCallback(
@@ -557,6 +652,125 @@ export function SessionList() {
       }
     },
     [requestMoveSession, refreshSessionPages],
+  );
+  const onToggleProjectPin = useCallback(
+    async (project: Channel) => {
+      const updated = await updateProject(project.id, { pinned: !project.pinned });
+      if (!updated) toast.error("Couldn't update the project pin.");
+    },
+    [updateProject],
+  );
+  const onDeleteProject = useCallback(async (): Promise<boolean> => {
+    if (!projectPendingDelete) return false;
+    const deleted = await removeProject(projectPendingDelete.id);
+    if (!deleted) {
+      toast.error("Couldn't delete the project.");
+      return false;
+    }
+    await refreshSessionPages();
+    return true;
+  }, [projectPendingDelete, refreshSessionPages, removeProject]);
+  const onReorderProjects = useCallback(
+    async (sourceProjectId: string, targetProjectId: string) => {
+      if (sourceProjectId === targetProjectId) return;
+      const sourceIndex = channels.findIndex((project) => project.id === sourceProjectId);
+      const sourceProject = channels[sourceIndex];
+      const targetProject = channels.find((project) => project.id === targetProjectId);
+      if (!sourceProject || !targetProject) return;
+      if (sourceProject.pinned !== targetProject.pinned) {
+        toast.error(
+          "Pinned projects stay at the top. Pin or unpin it before moving it between groups.",
+        );
+        return;
+      }
+      const ordered = [...channels];
+      const [moved] = ordered.splice(sourceIndex, 1);
+      if (!moved) return;
+      // Dropping on a project always places the dragged project immediately
+      // before it, regardless of whether the source began above or below.
+      ordered.splice(
+        ordered.findIndex((project) => project.id === targetProjectId),
+        0,
+        moved,
+      );
+      const result = await reorderProjects(ordered.map((project) => project.id));
+      if (!result) toast.error("Couldn't save the project order. Try again.");
+    },
+    [channels, reorderProjects],
+  );
+  const onUpdateAttention = useCallback<UpdateAttentionFn>(
+    async (session, update) => {
+      try {
+        const updated = await context.client.updateSessionAttention(rail.workspaceId, session.id, {
+          ...update,
+          expectedVersion: session.attentionVersion ?? 0,
+        });
+        // The open session has a separate detail/SSE projection from the rail
+        // page. Reflect the mutation there immediately; waiting for a later
+        // navigation or stream event left the action menu showing stale text.
+        context.setSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                unread: updated.unread,
+                activelyWorking: updated.activelyWorking,
+                attentionVersion: updated.attentionVersion,
+              }
+            : current,
+        );
+        await refreshSessionPages();
+      } catch (attentionError) {
+        toast.error("Couldn't update the session status.", {
+          description:
+            attentionError instanceof Error ? attentionError.message : String(attentionError),
+        });
+        await refreshSessionPages();
+      }
+    },
+    [context, rail.workspaceId, refreshSessionPages],
+  );
+  const onArchive = useCallback<ArchiveFn>(
+    async (session, archived) => {
+      if (archiving.current.has(session.id)) return;
+      archiving.current.add(session.id);
+      setArchiveTransitions((current) => new Set(current).add(session.id));
+      try {
+        const updated = await context.client.updateSessionArchive(rail.workspaceId, session.id, {
+          archived,
+          expectedVersion: session.archiveVersion ?? 0,
+        });
+        context.setSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                archived: updated.archived,
+                archivedAt: updated.archivedAt,
+                archiveVersion: updated.archiveVersion,
+                pinned: updated.pinned,
+                pinnedAt: updated.pinnedAt,
+                pinVersion: updated.pinVersion,
+                activelyWorking: updated.activelyWorking,
+                attentionVersion: updated.attentionVersion,
+              }
+            : current,
+        );
+        toast.success(archived ? "Chat archived" : "Chat restored");
+        await refreshSessionPages();
+      } catch (archiveError) {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+          description: archiveError instanceof Error ? archiveError.message : String(archiveError),
+        });
+        await refreshSessionPages();
+      } finally {
+        archiving.current.delete(session.id);
+        setArchiveTransitions((current) => {
+          const next = new Set(current);
+          next.delete(session.id);
+          return next;
+        });
+      }
+    },
+    [context, rail.workspaceId, refreshSessionPages],
   );
   const nodesById = useMemo(() => {
     const result = new Map<string, SessionTreeNode>();
@@ -619,6 +833,7 @@ export function SessionList() {
           limit: 50,
           parentSessionId,
           ...(cursor ? { cursor } : {}),
+          archivedOnly: false,
         });
         if (childLoadEpoch.current !== epoch) return;
         setChildPages((current) => {
@@ -677,29 +892,36 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
-  const revealActivePath = useCallback(() => {
-    rowRevealIntent.current = activeSessionId;
-    setManualExpanded((current) => new Set([...current, ...activeAncestorIds]));
-    setManualCollapsed((current) => {
-      const next = new Set(current);
-      for (const sessionId of activeAncestorIds) next.delete(sessionId);
-      return next;
-    });
-  }, [activeAncestorIds, activeSessionId]);
-
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     // Channel mode replaces the ordinary recency forest with channel sections;
     // the flattened order must match the rendered order or arrow keys drift.
     const ordinaryRows = channelMode
-      ? channelSections.flatMap((section) => visibleTreeRows(section.sessions, expanded))
-      : visibleForestRows(forest, expanded);
-    return [...visibleTreeRows(pinnedNodes, expanded), ...ordinaryRows].filter(({ node }) => {
-      if (seen.has(node.session.id)) return false;
-      seen.add(node.session.id);
-      return true;
-    });
-  }, [channelMode, channelSections, expanded, forest, pinnedNodes]);
+      ? channelSections.flatMap((section) =>
+          !collapsedChannelSections.has(section.key)
+            ? visibleTreeRows(section.sessions, expanded, activeSessionId)
+            : (() => {
+                const selected = findSessionTreeNode(section.sessions, activeSessionId);
+                return selected ? [{ node: selected, depth: 0 }] : [];
+              })(),
+        )
+      : visibleForestRows(forest, expanded, activeSessionId);
+    return [...visibleTreeRows(pinnedNodes, expanded, activeSessionId), ...ordinaryRows].filter(
+      ({ node }) => {
+        if (seen.has(node.session.id)) return false;
+        seen.add(node.session.id);
+        return true;
+      },
+    );
+  }, [
+    activeSessionId,
+    channelMode,
+    channelSections,
+    expanded,
+    collapsedChannelSections,
+    forest,
+    pinnedNodes,
+  ]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
   useLayoutEffect(() => {
@@ -770,6 +992,8 @@ export function SessionList() {
       if (pinning.current.has(target.id)) {
         return target;
       }
+      const acceptedTransition = context.captureWorkspaceInvocation(target.workspaceId);
+      if (!acceptedTransition) return null;
       pinning.current.add(target.id);
       const operation = ++pinOperation.current;
       // An optimistic pin moves the row between different group subtrees. That
@@ -798,6 +1022,7 @@ export function SessionList() {
           nextPinned,
           target.pinVersion ?? 0,
         );
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
         if (updated) {
           setPinOverrides((current) => {
             if (current.get(target.id)?.operation !== operation) return current;
@@ -808,6 +1033,7 @@ export function SessionList() {
           });
         }
         await refreshSessionPages();
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
         announcePinResult(
           updated
@@ -845,6 +1071,7 @@ export function SessionList() {
         ...(cursor ? { cursor } : {}),
         ...(search ? { search } : {}),
         ...(hierarchyMode ? { parentSessionId: null } : {}),
+        archivedOnly: false,
       });
     setLoadingMoreGeneration(requestGeneration);
     setContinuation((current) => ({
@@ -1049,30 +1276,13 @@ export function SessionList() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1 pt-1">
-        <span className="text-2xs font-semibold uppercase tracking-wider text-fg-muted">
-          {hierarchyMode ? "Workstreams" : search ? "Search results" : "Browse sessions"}
+      <div className="flex min-w-0 items-center justify-between gap-2 pb-1 pl-[18px] pr-3 pt-1">
+        <span className="text-sm font-normal text-fg-muted">
+          {hierarchyMode ? "Sessions" : search ? "Search results" : "Browse sessions"}
         </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              asChild
-              variant="ghost"
-              size="icon-xs"
-              className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-            >
-              <NewSessionLink aria-label="New session">
-                <PlusIcon className="size-3.5" />
-              </NewSessionLink>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
-          </TooltipContent>
-        </Tooltip>
       </div>
 
-      <div className="mx-2 mb-1 flex shrink-0 items-center gap-1">
+      <div className="mb-1 ml-2 mr-3 flex shrink-0 items-center gap-1">
         <label className="relative min-w-0 flex-1">
           <span className="sr-only">Search sessions</span>
           <SearchIcon
@@ -1095,6 +1305,23 @@ export function SessionList() {
             className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
           />
         </label>
+        {hierarchyMode ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="New project"
+                onClick={() => setChannelDialogOpen(true)}
+                className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+              >
+                <FolderPlusIcon className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">New project</TooltipContent>
+          </Tooltip>
+        ) : null}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -1207,7 +1434,7 @@ export function SessionList() {
       <div
         ref={listRef}
         role="region"
-        aria-label={hierarchyMode ? "Workstreams" : search ? "Session search results" : "Sessions"}
+        aria-label={hierarchyMode ? "Sessions" : search ? "Session search results" : "Sessions"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
         onPointerDown={() => {
@@ -1222,7 +1449,7 @@ export function SessionList() {
         onWheel={() => {
           cancelSessionRowRevealIntent(rowRevealIntent);
         }}
-        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
+        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-2 pl-2 pr-3"
       >
         <p className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
@@ -1230,8 +1457,8 @@ export function SessionList() {
         {(loading && allSessions.length === 0) ||
         (hierarchyMode && channelsQuery.loading && channels.length === 0) ? (
           // The second clause holds the skeleton until the initial channels
-          // read resolves, so a channel-using workspace paints channel
-          // sections directly instead of flashing the recency layout first.
+          // read resolves, so the rail paints Recents/workstreams directly
+          // instead of flashing the old recency layout first.
           <SessionListSkeleton />
         ) : error && allSessions.length === 0 ? (
           <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
@@ -1268,7 +1495,7 @@ export function SessionList() {
               Clear search and filters
             </button>
           </div>
-        ) : flat.length === 0 ? (
+        ) : browseSessions.length === 0 && !hierarchyMode ? (
           <EmptySessions />
         ) : (
           <>
@@ -1283,13 +1510,14 @@ export function SessionList() {
                   onFocusSession={setFocusedSessionId}
                   expanded={expanded}
                   onToggleExpand={toggleExpand}
-                  onRevealActivePath={revealActivePath}
                   childPages={childPages}
                   onLoadMoreChildren={loadChildPage}
                   onRename={context.updateSessionTitle}
                   onPin={onPin}
                   channels={channels}
                   onMoveToChannel={onMoveToChannel}
+                  onUpdateAttention={onUpdateAttention}
+                  onArchive={onArchive}
                 />
                 {pinnedTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
@@ -1303,8 +1531,31 @@ export function SessionList() {
                 <SessionGroup
                   key={section.key}
                   label={section.name}
+                  channelId={section.channelId}
                   sectionId={`channel-${section.key}`}
                   channelHeader
+                  project={
+                    section.channelId
+                      ? channels.find((project) => project.id === section.channelId)
+                      : undefined
+                  }
+                  onToggleProjectPin={onToggleProjectPin}
+                  onDeleteProject={setProjectPendingDelete}
+                  draggedProjectId={draggedProjectId}
+                  dragOverProjectId={dragOverProjectId}
+                  onProjectDragStart={setDraggedProjectId}
+                  onProjectDragOver={setDragOverProjectId}
+                  onProjectDrop={(sourceProjectId, targetProjectId) => {
+                    void onReorderProjects(sourceProjectId, targetProjectId);
+                    setDraggedProjectId(null);
+                    setDragOverProjectId(null);
+                  }}
+                  onProjectDragEnd={() => {
+                    setDraggedProjectId(null);
+                    setDragOverProjectId(null);
+                  }}
+                  sectionExpanded={!collapsedChannelSections.has(section.key)}
+                  onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
                   flat={flat}
                   activeSessionId={activeSessionId}
@@ -1312,13 +1563,14 @@ export function SessionList() {
                   onFocusSession={setFocusedSessionId}
                   expanded={expanded}
                   onToggleExpand={toggleExpand}
-                  onRevealActivePath={revealActivePath}
                   childPages={childPages}
                   onLoadMoreChildren={loadChildPage}
                   onRename={context.updateSessionTitle}
                   onPin={onPin}
                   channels={channels}
                   onMoveToChannel={onMoveToChannel}
+                  onUpdateAttention={onUpdateAttention}
+                  onArchive={onArchive}
                 />
               ))
             ) : (
@@ -1333,13 +1585,14 @@ export function SessionList() {
                     onFocusSession={setFocusedSessionId}
                     expanded={expanded}
                     onToggleExpand={toggleExpand}
-                    onRevealActivePath={revealActivePath}
                     childPages={childPages}
                     onLoadMoreChildren={loadChildPage}
                     onRename={context.updateSessionTitle}
                     onPin={onPin}
                     channels={channels}
                     onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
                   />
                 ) : null}
                 {forest.grouped.map((bucket) => (
@@ -1353,26 +1606,43 @@ export function SessionList() {
                     onFocusSession={setFocusedSessionId}
                     expanded={expanded}
                     onToggleExpand={toggleExpand}
-                    onRevealActivePath={revealActivePath}
                     childPages={childPages}
                     onLoadMoreChildren={loadChildPage}
                     onRename={context.updateSessionTitle}
                     onPin={onPin}
                     channels={channels}
                     onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
                   />
                 ))}
               </>
             )}
             {hierarchyMode ? (
-              <button
-                type="button"
-                onClick={() => setChannelDialogOpen(true)}
-                className="flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:min-h-11"
-              >
-                <PlusIcon className="size-3.5" />
-                New channel
-              </button>
+              <SessionGroup
+                label="Archived"
+                sectionId="archived"
+                channelHeader
+                allowNewSession={false}
+                showSummary={false}
+                sectionExpanded={archivedOpen}
+                onToggleSection={() => setArchivedOpen((current) => !current)}
+                nodes={archivedNodes}
+                flat={flat}
+                activeSessionId={activeSessionId}
+                focusIndex={focusIndex}
+                onFocusSession={setFocusedSessionId}
+                expanded={expanded}
+                onToggleExpand={toggleExpand}
+                childPages={childPages}
+                onLoadMoreChildren={loadChildPage}
+                onRename={context.updateSessionTitle}
+                onPin={onPin}
+                channels={channels}
+                onMoveToChannel={onMoveToChannel}
+                onUpdateAttention={onUpdateAttention}
+                onArchive={onArchive}
+              />
             ) : null}
             {continuationCursor ? (
               <div className="px-2 py-2 text-center">
@@ -1409,6 +1679,17 @@ export function SessionList() {
         }}
         onSubmit={() => void submitCreateChannel()}
       />
+      <ConfirmDialog
+        open={projectPendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setProjectPendingDelete(null);
+        }}
+        title={<>Delete project “{projectPendingDelete?.name}”?</>}
+        description="Its sessions will remain available in Default. This cannot be undone."
+        confirmLabel="Delete project"
+        cancelAutoFocus
+        onConfirm={onDeleteProject}
+      />
     </div>
   );
 }
@@ -1416,13 +1697,30 @@ export function SessionList() {
 function SessionGroup(props: {
   label: string;
   /**
-   * Stable DOM id suffix. Required for channel sections: labels are
+   * Stable DOM id suffix. Required for folder sections: labels are
    * user-controlled, so slugging them can collide with each other and with
-   * the fixed groups ("Pinned", the synthetic "inbox").
+   * the fixed groups ("Pinned", the synthetic "Recents").
    */
   sectionId?: string;
-  /** Channel-styled header: "# name" instead of the uppercase recency label. */
+  /** Real folder id. Null identifies the synthetic Recents section. */
+  channelId?: string | null;
+  /** Folder-styled, collapsible header instead of the recency label. */
   channelHeader?: boolean;
+  /** Archived folders are navigational only; new chats always start active. */
+  allowNewSession?: boolean;
+  project?: Channel;
+  onToggleProjectPin?: (project: Channel) => void;
+  onDeleteProject?: (project: Channel) => void;
+  draggedProjectId?: string | null;
+  dragOverProjectId?: string | null;
+  onProjectDragStart?: (projectId: string) => void;
+  onProjectDragOver?: (projectId: string) => void;
+  onProjectDrop?: (sourceProjectId: string, targetProjectId: string) => void;
+  onProjectDragEnd?: () => void;
+  /** Archive is a destination, not an attention summary. */
+  showSummary?: boolean;
+  sectionExpanded?: boolean;
+  onToggleSection?: () => void;
   nodes: SessionTreeNode[];
   flat: Session[];
   activeSessionId: string | null;
@@ -1430,68 +1728,170 @@ function SessionGroup(props: {
   onFocusSession: (sessionId: string) => void;
   expanded: ReadonlySet<string>;
   onToggleExpand: (sessionId: string) => void;
-  onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onRename: RenameFn;
   onPin: PinFn;
   channels: Channel[];
   onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
 }) {
+  const sectionId = `session-group-${
+    props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+  }`;
+  const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
+  const summary = summarizeRailNodes(props.nodes);
+  const collapsedSelection = props.channelHeader
+    ? findSessionTreeNode(props.nodes, props.activeSessionId)
+    : null;
+  const renderedNodes = sectionExpanded
+    ? props.nodes
+    : collapsedSelection
+      ? [collapsedSelection]
+      : [];
+  const treeExpanded = sectionExpanded ? props.expanded : EMPTY_SESSION_IDS;
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
-      <p
-        id={`session-group-${props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-        className={
-          props.channelHeader
-            ? "flex min-w-0 items-center gap-1 px-2 pb-0.5 pt-2 text-xs font-semibold text-fg-muted"
-            : "px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
-        }
-      >
-        {props.channelHeader ? (
-          <HashIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
-        ) : null}
-        <span className="truncate">{props.label}</span>
-      </p>
-      <div
-        role="list"
-        aria-label={`${props.label} sessions`}
-        className="grid min-w-0 grid-cols-1 gap-px"
-      >
-        {props.nodes.map((node) => (
-          <SessionTreeRow
-            key={node.session.id}
-            node={node}
-            depth={0}
-            flat={props.flat}
-            activeSessionId={props.activeSessionId}
-            focusIndex={props.focusIndex}
-            onFocusSession={props.onFocusSession}
-            expanded={props.expanded}
-            onToggleExpand={props.onToggleExpand}
-            onRevealActivePath={props.onRevealActivePath}
-            childPages={props.childPages}
-            onLoadMoreChildren={props.onLoadMoreChildren}
-            onRename={props.onRename}
-            onPin={props.onPin}
-            channels={props.channels}
-            onMoveToChannel={props.onMoveToChannel}
-          />
-        ))}
-      </div>
+      {props.channelHeader ? (
+        <div
+          draggable={Boolean(props.project)}
+          onDragStart={(event: DragEvent<HTMLDivElement>) => {
+            if (!props.project) return;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", props.project.id);
+            props.onProjectDragStart?.(props.project.id);
+          }}
+          onDragOver={(event: DragEvent<HTMLDivElement>) => {
+            if (!props.project) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            props.onProjectDragOver?.(props.project.id);
+          }}
+          onDrop={(event: DragEvent<HTMLDivElement>) => {
+            if (!props.project) return;
+            event.preventDefault();
+            const sourceProjectId = event.dataTransfer.getData("text/plain");
+            if (sourceProjectId) props.onProjectDrop?.(sourceProjectId, props.project.id);
+          }}
+          onDragEnd={props.onProjectDragEnd}
+          className={cn(
+            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
+            props.project && "cursor-grab active:cursor-grabbing",
+            props.project && props.draggedProjectId === props.project.id && "opacity-45",
+            props.project &&
+              props.dragOverProjectId === props.project.id &&
+              props.draggedProjectId !== props.project.id &&
+              "ring-1 ring-inset ring-accent",
+          )}
+        >
+          <button
+            id={sectionId}
+            type="button"
+            aria-expanded={sectionExpanded}
+            aria-controls={`${sectionId}-sessions`}
+            onClick={props.onToggleSection}
+            title={`${summary.label} · ${summary.total} total`}
+            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
+          >
+            <span className="flex w-4 shrink-0 items-center">
+              {sectionExpanded ? (
+                <FolderOpenIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              ) : (
+                <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate">{props.label}</span>
+            {props.showSummary !== false ? <RailTrailingMetadata summary={summary} /> : null}
+          </button>
+          {props.project ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Actions for ${props.label}`}
+                  className={cn(
+                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
+                    props.allowNewSession !== false ? "right-7" : "right-0.5",
+                  )}
+                >
+                  <EllipsisIcon aria-hidden="true" className="size-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" side="right">
+                <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
+                  <PinIcon
+                    aria-hidden="true"
+                    className={props.project.pinned ? "size-3.5 fill-current" : "size-3.5"}
+                  />
+                  {props.project.pinned ? "Unpin project" : "Pin project"}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => props.onDeleteProject?.(props.project!)}
+                >
+                  <Trash2Icon aria-hidden="true" className="size-3.5" />
+                  Delete project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          {props.allowNewSession !== false ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <NewSessionLink
+                  channelId={props.channelId ?? undefined}
+                  aria-label={`New chat in ${props.label}`}
+                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
+                >
+                  <PlusIcon aria-hidden="true" className="size-3.5" />
+                </NewSessionLink>
+              </TooltipTrigger>
+              <TooltipContent side="right">New chat in {props.label}</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </div>
+      ) : (
+        <p
+          id={sectionId}
+          className="px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+        >
+          {props.label}
+        </p>
+      )}
+      {renderedNodes.length > 0 ? (
+        <div
+          id={`${sectionId}-sessions`}
+          role="list"
+          aria-label={`${props.label} sessions`}
+          className="grid min-w-0 grid-cols-1 gap-px"
+        >
+          {renderedNodes.map((node) => (
+            <SessionTreeRow
+              key={node.session.id}
+              node={node}
+              depth={0}
+              flat={props.flat}
+              activeSessionId={props.activeSessionId}
+              focusIndex={props.focusIndex}
+              onFocusSession={props.onFocusSession}
+              expanded={treeExpanded}
+              onToggleExpand={props.onToggleExpand}
+              childPages={props.childPages}
+              onLoadMoreChildren={props.onLoadMoreChildren}
+              onRename={props.onRename}
+              onPin={props.onPin}
+              channels={props.channels}
+              onMoveToChannel={props.onMoveToChannel}
+              onUpdateAttention={props.onUpdateAttention}
+              onArchive={props.onArchive}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
-}
-
-/** Loaded node path from this ancestor to the URL-active session. */
-function descendantPath(node: SessionTreeNode, id: string | null): SessionTreeNode[] | null {
-  if (!id) return null;
-  if (node.session.id === id) return [node];
-  for (const child of node.children) {
-    const path = descendantPath(child, id);
-    if (path) return [node, ...path];
-  }
-  return null;
 }
 
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
@@ -1504,39 +1904,36 @@ function SessionTreeRow(props: {
   onFocusSession: (sessionId: string) => void;
   expanded: ReadonlySet<string>;
   onToggleExpand: (sessionId: string) => void;
-  onRevealActivePath: () => void;
   childPages: ReadonlyMap<string, ChildPageState>;
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onRename: RenameFn;
   onPin: PinFn;
   channels: Channel[];
   onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
 }) {
   const { node } = props;
   const index = props.flat.indexOf(node.session);
   const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
-  const childCount = node.session.treeStats?.totalDescendants ?? node.children.length;
+  // Server treeStats only counts spawned descendants. Repeat runs of a scheduled
+  // task are folded in client-side, so take whichever is larger or a grouped
+  // entry renders with no child region at all.
+  const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
   const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
-  const treeHasActiveDescendant = Boolean(
-    node.session.treeStats &&
-    node.session.treeStats.runningDescendants +
-      node.session.treeStats.queuedDescendants +
-      node.session.treeStats.attentionDescendants >
-      0,
-  );
+  const aggregateStatus = summarizeRailNodes([node]);
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
-  // Keep the current session findable without exploding a ten-level chain.
-  // The first collapsed ancestor gets one compact shortcut to the current leaf.
-  const hiddenActivePath = !isExpanded ? descendantPath(node, props.activeSessionId) : null;
-  const hiddenActiveSession =
-    hiddenActivePath && hiddenActivePath.length > 1
-      ? hiddenActivePath[hiddenActivePath.length - 1]!.session
-      : null;
+  // A collapsed branch keeps only its selected descendant visible, rendered as
+  // the same ordinary row used by the expanded list. This preserves context
+  // without opening the whole branch or introducing a second navigation shape.
+  const collapsedSelectedNode = !isExpanded
+    ? selectedDescendantNode(node, props.activeSessionId)
+    : null;
   const title =
     node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
-  const hasVisibleChildRegion = Boolean(hiddenActiveSession || (isExpanded && childCount > 0));
+  const hasVisibleChildRegion = Boolean(collapsedSelectedNode || (isExpanded && childCount > 0));
   return (
     <div role="listitem" className="min-w-0">
       <SessionRow
@@ -1547,7 +1944,7 @@ function SessionTreeRow(props: {
         childCountTruncated={childCountTruncated}
         hasChildren={hasChildren}
         expanded={isExpanded}
-        hasActiveDescendant={node.hasActiveDescendant || treeHasActiveDescendant}
+        aggregateStatus={aggregateStatus}
         onToggleExpand={() => props.onToggleExpand(node.session.id)}
         active={node.session.id === props.activeSessionId}
         focused={index >= 0 && index === props.focusIndex}
@@ -1556,15 +1953,29 @@ function SessionTreeRow(props: {
         onPin={props.onPin}
         channels={props.channels}
         onMoveToChannel={props.onMoveToChannel}
+        onUpdateAttention={props.onUpdateAttention}
+        onArchive={props.onArchive}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
-          {hiddenActiveSession ? (
-            <ActivePathShortcut
-              session={hiddenActiveSession}
+          {collapsedSelectedNode ? (
+            <SessionTreeRow
+              node={collapsedSelectedNode}
               depth={props.depth + 1}
-              hiddenLevels={hiddenActivePath!.length - 1}
-              onReveal={props.onRevealActivePath}
+              flat={props.flat}
+              activeSessionId={props.activeSessionId}
+              focusIndex={props.focusIndex}
+              onFocusSession={props.onFocusSession}
+              expanded={props.expanded}
+              onToggleExpand={props.onToggleExpand}
+              childPages={props.childPages}
+              onLoadMoreChildren={props.onLoadMoreChildren}
+              onRename={props.onRename}
+              onPin={props.onPin}
+              channels={props.channels}
+              onMoveToChannel={props.onMoveToChannel}
+              onUpdateAttention={props.onUpdateAttention}
+              onArchive={props.onArchive}
             />
           ) : null}
           {childCount > 0 && isExpanded
@@ -1579,13 +1990,14 @@ function SessionTreeRow(props: {
                   onFocusSession={props.onFocusSession}
                   expanded={props.expanded}
                   onToggleExpand={props.onToggleExpand}
-                  onRevealActivePath={props.onRevealActivePath}
                   childPages={props.childPages}
                   onLoadMoreChildren={props.onLoadMoreChildren}
                   onRename={props.onRename}
                   onPin={props.onPin}
                   channels={props.channels}
                   onMoveToChannel={props.onMoveToChannel}
+                  onUpdateAttention={props.onUpdateAttention}
+                  onArchive={props.onArchive}
                 />
               ))
             : null}
@@ -1610,47 +2022,6 @@ function SessionTreeRow(props: {
           ) : null}
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function ActivePathShortcut({
-  session,
-  depth,
-  hiddenLevels,
-  onReveal,
-}: {
-  session: Session;
-  depth: number;
-  hiddenLevels: number;
-  onReveal: () => void;
-}) {
-  const rail = useRail();
-  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
-  const state = sessionStateLabel(session);
-  const style = { paddingLeft: 10 + visualTreeDepth(depth) * 12 };
-  return (
-    <div role="listitem" className="min-w-0" style={style}>
-      <button
-        type="button"
-        onClick={onReveal}
-        aria-label={`Show ${hiddenLevels}-level path to current session ${title}`}
-        className={cn(
-          "group flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-brand/20 bg-brand/5 px-2 text-left text-xs text-fg outline-none hover:border-brand/35 hover:bg-brand/10 focus-visible:ring-2 focus-visible:ring-ring/40",
-          rail.isMobile && "h-12",
-        )}
-      >
-        <LocateFixedIcon className="size-3.5 shrink-0 text-brand" />
-        <span className="flex min-w-0 flex-1 flex-col leading-tight">
-          <span className="truncate font-medium">
-            <span className="text-brand">Current</span> · {title}
-          </span>
-          <span className="mt-0.5 truncate text-2xs font-normal text-fg-subtle">
-            {hiddenLevels} level{hiddenLevels === 1 ? "" : "s"} deeper · {state}
-          </span>
-        </span>
-        <span className="shrink-0 text-2xs font-medium text-brand">Show path</span>
-      </button>
     </div>
   );
 }
@@ -1696,8 +2067,8 @@ function SessionRow(props: {
   childCountTruncated: boolean;
   hasChildren: boolean;
   expanded: boolean;
-  /** A descendant is live — a collapsed parent shows a quiet activity dot. */
-  hasActiveDescendant: boolean;
+  /** One status for this session and every hidden descendant. */
+  aggregateStatus: RailAggregateStatus;
   onToggleExpand: () => void;
   active: boolean;
   focused: boolean;
@@ -1706,32 +2077,28 @@ function SessionRow(props: {
   onPin: PinFn;
   channels: Channel[];
   onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
 }) {
   const rail = useRail();
   const title =
     props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
-  // Creator monogram: who started this workstream, at a glance. Human subjects
-  // only — service/system creators stay unadorned.
-  const initials = creatorInitials(props.session.createdBy);
-  const creatorLabel = props.session.createdBy.label?.trim() || props.session.createdBy.subjectId;
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
   const stateLabel = sessionStateLabel(props.session);
   const descendantLabel = sessionDescendantLabel(props.session);
-  const childCountText = sessionDescendantCountText(props.childCount, props.childCountTruncated);
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(props.session.updatedAt);
-  // Indent nested rows; the leading affordance is a chevron for parents, else a
-  // spacer of the same width — reserved at every depth (root included) so every
-  // status dot sits in one column and the left edge is even whether a row is a
-  // leaf or a parent.
+  // Indent nested rows without changing the root title column. Parents and
+  // leaves reserve the same compact disclosure slot, so the chevron does not
+  // push a parent title away from the leaf titles beside it.
   const indentStyle =
-    props.depth > 0 ? { paddingLeft: visualTreeDepth(props.depth) * 12 } : undefined;
+    props.depth > 0 ? { marginLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     "hover:bg-surface-2",
     props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
@@ -1739,7 +2106,7 @@ function SessionRow(props: {
   );
 
   const lead = (
-    <span className="flex shrink-0 items-center" style={indentStyle}>
+    <span className="flex w-4 shrink-0 items-center" style={indentStyle}>
       {hasChildren ? (
         <button
           type="button"
@@ -1749,15 +2116,13 @@ function SessionRow(props: {
             event.stopPropagation();
             props.onToggleExpand();
           }}
-          className="inline-flex size-4 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:size-11"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
         >
           <ChevronRightIcon
-            className={cn("size-3 transition-transform", props.expanded && "rotate-90")}
+            className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-90")}
           />
         </button>
-      ) : (
-        <span className="size-4" />
-      )}
+      ) : null}
     </span>
   );
 
@@ -1768,7 +2133,6 @@ function SessionRow(props: {
       <div className={rowClassName}>
         <ActiveAccent active={props.active} />
         {lead}
-        <RailStatusDot status={props.session.status} />
         <input
           ref={rename.inputRef}
           data-session-index={props.index}
@@ -1794,6 +2158,11 @@ function SessionRow(props: {
           aria-label="Session title"
           className="min-w-0 flex-1 truncate rounded-sm bg-transparent text-sm outline-none ring-1 ring-ring/40 focus-visible:ring-ring"
         />
+        <RailTrailingMetadata
+          summary={props.aggregateStatus}
+          scheduled={Boolean(scheduledTaskIdOf(props.session))}
+          relativeTime={rail.isMobile ? undefined : relativeTime}
+        />
       </div>
     );
   }
@@ -1801,7 +2170,10 @@ function SessionRow(props: {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div title={`${title} — ${stateLabel}`} className={rowClassName}>
+        <div
+          title={`${title} — ${stateLabel} — ${props.aggregateStatus.label}`}
+          className={rowClassName}
+        >
           <ActiveAccent active={props.active} />
           {lead}
           <Link
@@ -1814,20 +2186,31 @@ function SessionRow(props: {
             aria-current={props.active ? "page" : undefined}
             aria-label={`Open ${title}. ${stateLabel}${
               props.session.pinned ? ". Pinned" : ""
-            }${hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""}`}
+            }. ${props.aggregateStatus.label}${
+              hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""
+            }`}
             onFocus={props.onFocus}
             onClick={(event) => {
               if (isModifiedNavigationClick(event)) return;
               rail.setDrawerOpen(false);
             }}
-            className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
+            className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
-            <RailStatusDot status={props.session.status} />
             <span className="sr-only">{stateLabel}. </span>
-            {/* min-w-0 + truncate: the title must always ellipsis, never butt the
-                rail border. */}
-            <span className="flex min-w-0 flex-1 flex-col pr-1 leading-tight">
-              <span className="truncate">{title}</span>
+            {/* Let long titles run toward the metadata and dissolve under a
+                short edge mask. This preserves more of the useful title than
+                a hard ellipsis while keeping the icon columns untouched. */}
+            <span className="flex min-w-0 flex-1 flex-col leading-tight">
+              <span
+                className="block overflow-hidden whitespace-nowrap"
+                style={{
+                  maskImage: "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
+                  WebkitMaskImage:
+                    "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
+                }}
+              >
+                {title}
+              </span>
               {rail.isMobile ? (
                 <span className="mt-0.5 truncate text-2xs font-normal text-fg-muted">
                   {[stateLabel, depthLabel, descendantLabel, relativeTime]
@@ -1836,39 +2219,11 @@ function SessionRow(props: {
                 </span>
               ) : null}
             </span>
-            {/* A collapsed parent with a live child shows a quiet pulsing dot so
-                the activity isn't hidden with the subtree; the count badge sits
-                beside it. Both stay visible on hover (the time yields instead). */}
-            {!rail.isMobile && hasChildren ? (
-              <span className="flex shrink-0 items-center gap-1 text-2xs tabular-nums text-fg-muted">
-                {!props.expanded && props.hasActiveDescendant ? (
-                  <span className="relative inline-flex size-1.5 rounded-full bg-status-running">
-                    <span className="absolute inset-0 animate-og-pulse rounded-full bg-status-running" />
-                  </span>
-                ) : null}
-                <span aria-label={childCountAria}>{childCountText}</span>
-              </span>
-            ) : null}
-            {initials ? (
-              <span
-                aria-hidden="true"
-                title={creatorLabel}
-                className="flex size-4 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90"
-                style={{
-                  background: `oklch(0.45 0.11 ${creatorHue(props.session.createdBy.subjectId)})`,
-                }}
-              >
-                {initials}
-              </span>
-            ) : null}
-            {/* Relative time is visible at rest (the list is grouped by recency),
-                and steps aside on hover/focus so the rename overflow can slot in.
-                On coarse pointers there is no hover, so the time stays visible. */}
-            {!rail.isMobile ? (
-              <span className="shrink-0 text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
-                {relativeTime}
-              </span>
-            ) : null}
+            <RailTrailingMetadata
+              summary={props.aggregateStatus}
+              scheduled={Boolean(scheduledTaskIdOf(props.session))}
+              relativeTime={rail.isMobile ? undefined : relativeTime}
+            />
           </Link>
           <RowActionsMenu
             session={props.session}
@@ -1876,6 +2231,8 @@ function SessionRow(props: {
             onPin={props.onPin}
             channels={props.channels}
             onMoveToChannel={props.onMoveToChannel}
+            onUpdateAttention={props.onUpdateAttention}
+            onArchive={props.onArchive}
           />
         </div>
       </ContextMenuTrigger>
@@ -1894,16 +2251,53 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
-        <ContextMenuItem
-          className="pointer-coarse:min-h-11"
-          onSelect={() => {
-            contextPinSelection.current = true;
-            void props.onPin(props.session, !props.session.pinned, "row");
-          }}
-        >
-          <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
-          {props.session.pinned ? "Unpin" : "Pin"}
-        </ContextMenuItem>
+        {!props.session.archived ? (
+          <>
+            <ContextMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() => {
+                contextPinSelection.current = true;
+                void props.onPin(props.session, !props.session.pinned, "row");
+              }}
+            >
+              <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
+              {props.session.pinned ? "Unpin" : "Pin"}
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() =>
+                void props.onUpdateAttention(props.session, { unread: !props.session.unread })
+              }
+            >
+              {props.session.unread ? (
+                <MailOpenIcon className="size-4" />
+              ) : (
+                <MailIcon className="size-4" />
+              )}
+              {props.session.unread ? "Mark as read" : "Mark as unread"}
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() =>
+                void props.onUpdateAttention(props.session, {
+                  activelyWorking: !props.session.activelyWorking,
+                })
+              }
+            >
+              <CircleDashedIcon className="size-4" />
+              {props.session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
+            </ContextMenuItem>
+          </>
+        ) : null}
+        {props.session.parentSessionId === null ? (
+          <ContextMenuItem
+            className="pointer-coarse:min-h-11"
+            onSelect={() => void props.onArchive(props.session, !props.session.archived)}
+          >
+            <ArchiveIcon className="size-4" />
+            {props.session.archived ? "Restore" : "Archive"}
+          </ContextMenuItem>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -1945,17 +2339,21 @@ function RowActionsMenu({
   onPin,
   channels,
   onMoveToChannel,
+  onUpdateAttention,
+  onArchive,
 }: {
   session: Session;
   onRename: () => void;
   onPin: PinFn;
   channels: Channel[];
   onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
 }) {
   const pinSelection = useRef(false);
   // Filing is a root-session concept: the rail groups a whole tree by its
   // root's channel, so children offer no move affordance.
-  const canMove = channels.length > 0 && session.parentSessionId === null;
+  const canMove = channels.length > 0 && session.parentSessionId === null && !session.archived;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1968,7 +2366,7 @@ function RowActionsMenu({
           }`}
           data-session-actions={session.id}
           onClick={(event) => event.stopPropagation()}
-          className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
+          className="absolute right-0.5 top-1/2 z-10 -translate-y-1/2 bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:right-0 pointer-coarse:size-11 pointer-coarse:opacity-100"
         >
           <EllipsisIcon className="size-3.5" />
         </Button>
@@ -1996,17 +2394,53 @@ function RowActionsMenu({
           <PencilIcon className="size-4" />
           Rename
         </DropdownMenuItem>
-        <DropdownMenuItem
-          className="pointer-coarse:min-h-11"
-          onSelect={() => {
-            pinSelection.current = true;
-            void onPin(session, !session.pinned, "actions");
-          }}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
-          {session.pinned ? "Unpin" : "Pin"}
-        </DropdownMenuItem>
+        {!session.archived ? (
+          <>
+            <DropdownMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() => {
+                pinSelection.current = true;
+                void onPin(session, !session.pinned, "actions");
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
+              {session.pinned ? "Unpin" : "Pin"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {session.unread ? (
+                <MailOpenIcon className="size-4" />
+              ) : (
+                <MailIcon className="size-4" />
+              )}
+              {session.unread ? "Mark as read" : "Mark as unread"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="pointer-coarse:min-h-11"
+              onSelect={() =>
+                void onUpdateAttention(session, { activelyWorking: !session.activelyWorking })
+              }
+              onClick={(event) => event.stopPropagation()}
+            >
+              <CircleDashedIcon className="size-4" />
+              {session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
+            </DropdownMenuItem>
+          </>
+        ) : null}
+        {session.parentSessionId === null ? (
+          <DropdownMenuItem
+            className="pointer-coarse:min-h-11"
+            onSelect={() => void onArchive(session, !session.archived)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArchiveIcon className="size-4" />
+            {session.archived ? "Restore" : "Archive"}
+          </DropdownMenuItem>
+        ) : null}
         {canMove ? (
           // Flat section, deliberately not a Radix submenu: the Sub primitives
           // are otherwise unused in the shell graph and pulling them in
@@ -2014,7 +2448,7 @@ function RowActionsMenu({
           <>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-              Move to channel
+              Move to project
             </DropdownMenuLabel>
             {channels.map((channel) => (
               <DropdownMenuItem
@@ -2024,7 +2458,6 @@ function RowActionsMenu({
                 onSelect={() => void onMoveToChannel(session, channel.id)}
                 onClick={(event) => event.stopPropagation()}
               >
-                <HashIcon className="size-4" />
                 <span className="truncate">{channel.name}</span>
               </DropdownMenuItem>
             ))}
@@ -2034,8 +2467,8 @@ function RowActionsMenu({
               onSelect={() => void onMoveToChannel(session, null)}
               onClick={(event) => event.stopPropagation()}
             >
-              <InboxIcon className="size-4" />
-              Inbox
+              <Clock3Icon className="size-4" />
+              Default
             </DropdownMenuItem>
           </>
         ) : null}
@@ -2044,41 +2477,90 @@ function RowActionsMenu({
   );
 }
 
-/**
- * Rail-local status dot with the app status tokens: running/queued pulse with
- * the running tone, requires-action pulses with the waiting tone, failures use
- * failed, and idle/terminal states fall back to cancelled.
- */
-function RailStatusDot({ status }: { status: Session["status"] }) {
-  const running = status === "running" || status === "queued" || status === "recovering";
-  const needsAttention = status === "requires_action" || status === "waiting_capacity";
-  const failed = status === "failed";
-  const tone = running
-    ? "bg-status-running"
-    : needsAttention
+/** The one descendant-aware status marker shared by rows and section headers. */
+function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
+  if (summary.kind === "neutral") return null;
+  if (summary.kind === "active") {
+    return (
+      <Loader2Icon
+        aria-hidden="true"
+        className="size-3 shrink-0 animate-spin text-fg-subtle motion-reduce:animate-none"
+      />
+    );
+  }
+  if (summary.kind === "active_work") {
+    return (
+      <span
+        aria-hidden="true"
+        className="inline-flex size-2.5 shrink-0 rounded-full border border-brand"
+        style={{
+          backgroundImage:
+            "repeating-linear-gradient(-12deg, var(--og-color-accent) 0 2px, transparent 2px 3.5px)",
+        }}
+      />
+    );
+  }
+  const tone =
+    summary.kind === "needs_attention"
       ? "bg-status-waiting"
-      : failed
+      : summary.kind === "failed"
         ? "bg-status-failed"
-        : "bg-status-cancelled";
+        : "bg-brand";
   return (
-    <span className={cn("relative inline-flex size-1.5 shrink-0 rounded-full", tone)}>
-      {running || needsAttention ? (
-        <span className={cn("absolute inset-0 animate-og-pulse rounded-full", tone)} />
-      ) : null}
+    <span
+      aria-hidden="true"
+      className={cn("relative inline-flex size-2 shrink-0 rounded-full", tone)}
+    />
+  );
+}
+
+function RailTrailingMetadata({
+  summary,
+  scheduled = false,
+  relativeTime,
+}: {
+  summary: RailAggregateStatus;
+  scheduled?: boolean;
+  relativeTime?: string | undefined;
+}) {
+  const hasStatusMarker = summary.kind !== "neutral";
+  return (
+    <span className="flex w-[3.625rem] shrink-0 items-center">
+      <span className="grid w-[3.625rem] shrink-0 grid-cols-[0.875rem_0.75rem_1.5rem] items-center gap-1">
+        <span className="flex size-3.5 items-center justify-center">
+          {scheduled && hasStatusMarker ? (
+            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
+          ) : null}
+        </span>
+        <span className="flex size-3 items-center justify-center" title={summary.label}>
+          {hasStatusMarker ? (
+            <RailAggregateDot summary={summary} />
+          ) : scheduled ? (
+            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
+          ) : null}
+        </span>
+        <span className="w-6 text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
+          {relativeTime}
+        </span>
+      </span>
     </span>
   );
 }
 
-function EmptySessions() {
+function EmptySessions({ archived = false }: { archived?: boolean }) {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
-      <p className="text-xs text-fg-subtle">No sessions yet</p>
-      <Button asChild size="sm" className="mx-auto">
-        <NewSessionLink>
-          <PlusIcon className="size-3.5" />
-          Start your first session
-        </NewSessionLink>
-      </Button>
+      <p className="text-xs text-fg-subtle">
+        {archived ? "No archived sessions" : "No sessions yet"}
+      </p>
+      {!archived ? (
+        <Button asChild size="sm" className="mx-auto">
+          <NewSessionLink>
+            <PlusIcon className="size-3.5" />
+            Start your first session
+          </NewSessionLink>
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -2129,18 +2611,6 @@ export function CollapsedSessionsButton() {
           </Button>
         </TooltipTrigger>
         <TooltipContent side="right">{tooltip}</TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button asChild variant="ghost" size="icon-sm" className="text-fg-muted hover:text-fg">
-            <NewSessionLink aria-label="New session">
-              <PlusIcon className="size-4" />
-            </NewSessionLink>
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="right">
-          New session · {shortcutLabel(NEW_SESSION_SHORTCUT)}
-        </TooltipContent>
       </Tooltip>
     </div>
   );

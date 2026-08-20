@@ -38,17 +38,40 @@ const budgets = {
   // graph to a worst observed 2,042,520 raw bytes. Truthful zero-step lifecycle
   // copy, the shared large-history disclosure scheduler, and durable sandbox-file
   // receipt/download controls bring the configured graph to 2,052,836 raw bytes
-  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The 2,006/559 KiB
-  // envelopes retain 1,308/829 bytes of headroom.
-  initialRaw: 1448 * kib,
+  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The always-loaded
+  // tenant-transition boundary, invocation fences, selected context semantics,
+  // the always-loaded managed self-context projection, and the organization
+  // section router bring the combined direct-session graph to 2,060,739 raw
+  // bytes locally. The configured Linux CI graph for the landed Personal
+  // projection measured 572,514 gzip bytes. The workspace scope/deep-link
+  // shell plus the landed catalog presentation measure 2,061,506 raw bytes on
+  // macOS/arm64. The public session-tenancy SDK activation brings the merged
+  // direct-session graph to 2,063,047 raw bytes on macOS/arm64. PR #1676's
+  // Linux/x64 production build measured the direct-session graph at 2,064,626
+  // raw and 573,599 gzip bytes. PR #1678's exact Linux/x64 production build
+  // then measured 2,065,995 raw and 573,851 gzip bytes, with raw 587 bytes over
+  // the prior envelope.
+  // PR #1680's project-aware session rail now has its own route-aware chunk:
+  // with current main's personal-resource controls, the combined graph measures
+  // 1,497,364 raw / 406,933 gzip bytes initially and 2,080,136 raw / 578,495 gzip
+  // bytes on a direct session load. The next whole-KiB envelopes narrowly bind
+  // those measurements while every unrelated graph and per-file cap stays fixed.
+  initialRaw: 1463 * kib,
+  // The managed personal-resource create/composer controls plus current main
+  // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
+  // macOS/arm64. The final uncertain-Send reconciliation repair measured
+  // 2,077,807 direct-session raw bytes in the exact production build, so its
+  // next full-KiB envelope is 2,030 KiB (2,078,720 bytes). The 1,450 KiB
+  // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
+  // graph and per-file cap, stay fixed.
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2006 * kib,
-  directSessionGzip: 559 * kib,
+  directSessionRaw: 2032 * kib,
+  directSessionGzip: 565 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

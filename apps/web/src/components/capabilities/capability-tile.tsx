@@ -51,8 +51,20 @@ export const CapabilityTile = memo(function CapabilityTile({
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <h3 className="truncate text-sm font-medium text-fg">{item.name}</h3>
+          <h3
+            data-capability-name
+            className="truncate text-sm font-medium text-fg"
+            title={item.name}
+          >
+            {item.name}
+          </h3>
+          <p className="mt-0.5 truncate text-xs text-fg-muted">
+            {item.description ?? "No description provided."}
+          </p>
+          <div
+            data-capability-metadata
+            className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden text-2xs text-fg-subtle"
+          >
             {curation.official ? (
               <span
                 data-capability-official
@@ -62,21 +74,11 @@ export const CapabilityTile = memo(function CapabilityTile({
                 Official
               </span>
             ) : null}
+            <span data-capability-kind className="min-w-0 truncate">
+              {capabilityItemKindLabel(item)}
+              {authHint ? ` · ${authHint}` : ""}
+            </span>
           </div>
-          <p className="mt-0.5 truncate text-xs text-fg-muted">
-            {item.description ?? "No description provided."}
-          </p>
-        </div>
-        <div className="hidden shrink-0 items-center gap-2 text-2xs text-fg-subtle sm:flex">
-          <span className="truncate">{capabilityItemKindLabel(item)}</span>
-          {authHint ? (
-            <>
-              <span aria-hidden className="text-fg-subtle/50">
-                ·
-              </span>
-              <span className="truncate">{authHint}</span>
-            </>
-          ) : null}
         </div>
       </button>
       <span className="flex shrink-0 items-center">
