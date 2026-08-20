@@ -238,7 +238,6 @@ describe("SessionTenancyControl", () => {
             tenancy: { ...baseSession.tenancy!, visibility: "private" as const, authorityEpoch: 5 },
           };
     });
-    const refresh = mock(async () => undefined);
     const client = { updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.append(container);
@@ -253,7 +252,7 @@ describe("SessionTenancyControl", () => {
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
           {...operationAuthority()}
-          onRefreshSession={refresh}
+          onRefreshSession={async () => undefined}
           onOpenSession={() => undefined}
         />,
       );
@@ -272,7 +271,6 @@ describe("SessionTenancyControl", () => {
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
     expect(getSession).toHaveBeenCalledTimes(2);
-    expect(refresh.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("Private");
 
     await act(async () => root.unmount());

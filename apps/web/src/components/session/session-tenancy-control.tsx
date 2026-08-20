@@ -1,5 +1,5 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import type { Session, SessionVisibility } from "@opengeni/sdk";
+import type { Session, SessionEvent, SessionVisibility } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import { CopyPlusIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,8 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
+import { ProblemPanel } from "@/components/common";
 import { useAppContext } from "@/context";
+import { isApiErrorStatus } from "@/api";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { workspaceSessionsPath } from "@/lib/routes";
+import { SessionUnavailableRoute } from "@/routes/session-unavailable";
 import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
@@ -18,7 +22,8 @@ import {
   type SessionTenancyTarget,
 } from "@/lib/session-tenancy";
 import {
-  SessionTenancyOperationController,
+  sessionTenancyOperationController,
+  type SessionTenancyOperationController,
   type SessionTenancyOperationScope,
 } from "@/lib/session-tenancy-operation-controller";
 import {
@@ -28,13 +33,43 @@ import {
 
 type Confirmation = { kind: "visibility"; visibility: SessionVisibility } | { kind: "fork" };
 
+export default function SessionRouteAuxiliary(
+  props:
+    | { session: Session; events: SessionEvent[]; workspaceId?: never; sessionId?: never }
+    | {
+        workspaceId: string;
+        sessionId: string;
+        loadError: unknown;
+        session?: never;
+        events?: never;
+      },
+) {
+  return props.session ? (
+    <SessionTenancyRouteControl session={props.session} events={props.events} />
+  ) : !isApiErrorStatus(props.loadError, 404) ? (
+    <ProblemPanel
+      title="Unable to open session"
+      description={
+        props.loadError instanceof Error ? props.loadError.message : String(props.loadError)
+      }
+      action={
+        <Button asChild type="button" variant="secondary">
+          <a href={workspaceSessionsPath(props.workspaceId)}>Back to sessions</a>
+        </Button>
+      }
+    />
+  ) : (
+    <SessionUnavailableRoute workspaceId={props.workspaceId} sessionId={props.sessionId} />
+  );
+}
+
 /** Route adapter kept inside the activation-gated lazy chunk. */
 export function SessionTenancyRouteControl({
   session,
-  onRefreshSession,
+  events,
 }: {
   session: Session;
-  onRefreshSession: () => Promise<void>;
+  events: SessionEvent[];
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -47,36 +82,39 @@ export function SessionTenancyRouteControl({
     : (workspace?.name ?? "this workspace");
 
   return (
-    <SessionTenancyControl
-      key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
-      session={session}
-      client={context.client}
-      managedSession={
-        context.clientConfig.auth.mode === "managedSession" && context.authSession !== null
-      }
-      scopeLabel={scopeLabel}
-      captureWorkspaceInvocation={context.captureWorkspaceInvocation}
-      ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
-      operationController={context.sessionTenancyOperationController}
-      operationScope={{
-        principalId: context.accessContext.subjectId,
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        workspaceTransitionRevision: transition.revision,
-      }}
-      onRefreshSession={onRefreshSession}
-      onOpenSession={(workspaceId, sessionId) =>
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId },
-        })
-      }
-    />
+    <div className="shrink-0 px-4 pt-2 sm:px-6">
+      <SessionTenancyControl
+        key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
+        session={session}
+        events={events}
+        client={context.client}
+        managedSession={
+          context.clientConfig.auth.mode === "managedSession" && context.authSession !== null
+        }
+        scopeLabel={scopeLabel}
+        captureWorkspaceInvocation={context.captureWorkspaceInvocation}
+        ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
+        operationController={sessionTenancyOperationController}
+        operationScope={{
+          principalId: context.accessContext.subjectId,
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          workspaceTransitionRevision: transition.revision,
+        }}
+        onOpenSession={(workspaceId, sessionId) =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId, sessionId },
+          })
+        }
+      />
+    </div>
   );
 }
 
 export function SessionTenancyControl({
   session,
+  events,
   client,
   managedSession,
   scopeLabel,
@@ -84,10 +122,10 @@ export function SessionTenancyControl({
   ownsWorkspaceInvocation,
   operationController,
   operationScope,
-  onRefreshSession,
   onOpenSession,
 }: {
   session: Session;
+  events?: SessionEvent[] | undefined;
   client: OpenGeniCoreClient;
   managedSession: boolean;
   scopeLabel: string;
@@ -95,7 +133,7 @@ export function SessionTenancyControl({
   ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
   operationController: SessionTenancyOperationController;
   operationScope: SessionTenancyOperationScope;
-  onRefreshSession: () => Promise<void>;
+  onRefreshSession?: (() => Promise<void>) | undefined;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
 }) {
   const target = useMemo<SessionTenancyTarget>(
@@ -106,6 +144,7 @@ export function SessionTenancyControl({
   targetRef.current = target;
   const mountedRef = useRef(false);
   const operationSequenceRef = useRef(0);
+  const visibilityEventSequenceRef = useRef(0);
   const operationSnapshot = operationController.snapshot(operationScope);
   const pendingVisibility = operationSnapshot.visibility;
   const pendingFork = operationSnapshot.fork;
@@ -183,11 +222,69 @@ export function SessionTenancyControl({
       });
       if (result.status === "stale") return null;
       setOverride(result.value.tenancy);
-      await onRefreshSession().catch(() => undefined);
       return result.value;
     },
-    [client, isCurrentInvocation, onRefreshSession],
+    [client, isCurrentInvocation],
   );
+
+  const latestVisibilitySequence = events?.reduce(
+    (latest, event) =>
+      event.type === "session.visibility.changed" ? Math.max(latest, event.sequence) : latest,
+    0,
+  );
+  useEffect(() => {
+    if (
+      !latestVisibilitySequence ||
+      latestVisibilitySequence <= visibilityEventSequenceRef.current
+    ) {
+      return;
+    }
+    visibilityEventSequenceRef.current = latestVisibilitySequence;
+    const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
+    if (!acceptedTransition) return;
+    let cancelled = false;
+    void client
+      .getSession(target.workspaceId, target.sessionId, { fresh: true })
+      .then((current) => {
+        if (
+          cancelled ||
+          !mountedRef.current ||
+          !isCurrentSessionTenancyTarget(targetRef.current, target) ||
+          !ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)
+        ) {
+          return;
+        }
+        setOverride(current.tenancy);
+        const retained = operationController.snapshot(operationScope).visibility;
+        if (
+          retained &&
+          (!current.tenancy || current.tenancy.authorityEpoch > retained.expectedAuthorityEpoch)
+        ) {
+          operationController.settleVisibility(operationScope, retained);
+          setControllerRevision((revision) => revision + 1);
+        }
+        setAnnouncement(
+          !current.tenancy
+            ? "Session access controls are no longer available."
+            : current.tenancy.visibility === "private"
+              ? "Session is private to you."
+              : `Session is visible to ${scopeLabel}.`,
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    captureWorkspaceInvocation,
+    client,
+    latestVisibilitySequence,
+    operationController,
+    operationScope,
+    ownsWorkspaceInvocation,
+    scopeLabel,
+    target,
+  ]);
 
   const changeVisibility = useCallback(
     async (visibility: SessionVisibility): Promise<boolean> => {
@@ -247,7 +344,6 @@ export function SessionTenancyControl({
             visibility: result.value.visibility,
             authorityEpoch: result.value.authorityEpoch,
           });
-          await onRefreshSession().catch(() => undefined);
         }
         operationController.settleVisibility(operationScope, attempt);
         const message =
@@ -308,7 +404,6 @@ export function SessionTenancyControl({
       displayedTenancy,
       isCurrentInvocation,
       mayManage,
-      onRefreshSession,
       operationController,
       operationScope,
       reconcileSource,

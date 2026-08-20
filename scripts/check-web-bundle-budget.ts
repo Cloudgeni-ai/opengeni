@@ -43,12 +43,12 @@ const budgets = {
   // the always-loaded managed self-context projection, and the organization
   // section router bring the combined direct-session graph to 2,060,739 raw
   // bytes locally. The configured Linux CI graph for the landed Personal
-  // projection measured 572,514 gzip bytes. The 2,013 KiB raw and 560 KiB gzip
-  // envelopes preserved that landed CI mapping. The activation-gated session
-  // tenancy control stays lazy, but its route-level projection check, durable
-  // refresh trigger, and Suspense boundary bring the local graph to 2,063,149
-  // raw bytes. A 2,016 KiB raw envelope keeps a bounded 1,235-byte margin while
-  // every gzip, file-count, lazy-chunk, and CSS cap remains unchanged.
+  // projection measured 572,514 gzip bytes. The workspace scope/deep-link
+  // shell plus the landed catalog presentation measure 2,061,506 raw bytes on
+  // macOS/arm64. The public session-tenancy SDK activation brings the merged
+  // direct-session graph to 2,063,047 raw bytes on macOS/arm64. The 2,015 KiB
+  // raw and 560 KiB gzip envelopes preserve the landed CI mapping while
+  // bounding the combined graph.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -56,7 +56,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2016 * kib,
+  directSessionRaw: 2015 * kib,
   directSessionGzip: 560 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

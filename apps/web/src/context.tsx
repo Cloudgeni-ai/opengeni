@@ -76,7 +76,6 @@ import {
   type RepoDraft,
   type RepositoryGroup,
 } from "@/lib/session-tools";
-import { SessionTenancyOperationController } from "@/lib/session-tenancy-operation-controller";
 import { upsertWorkspace } from "@/lib/workspaces";
 import {
   beginWorkspaceOperation,
@@ -139,6 +138,8 @@ export type AppContextValue = {
   managedSelfContext: ManagedSelfContext | null;
   /** Token-free continuation identity retained across Root/provider remounts. */
   slackLinkContinuationWorkspaceId: string | null;
+  /** Token-free initial-route marker for a rejected legacy query bearer. */
+  invalidSlackLinkQueryWorkspaceId: string | null;
   /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
   preparePendingSlackLink: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
   clearSlackLinkContinuation: () => void;
@@ -204,8 +205,6 @@ export type AppContextValue = {
   captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
   /** True only while an invocation still owns the routed workspace/principal UI. */
   ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
-  /** Retains exact outcome-unknown session-tenancy attempts for this app/principal lifetime. */
-  sessionTenancyOperationController: SessionTenancyOperationController;
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
@@ -364,6 +363,10 @@ export function createSlackLinkPrepareController<Request>(value: PendingSlackLin
 // controller survives Root/provider remounts, but releases the raw bearer as
 // soon as exactly one prepare request has been created.
 const bootstrappedPendingSlackLink = pendingSlackLinkFromBrowserLocation();
+const bootstrappedInvalidSlackLinkQueryWorkspaceId =
+  typeof window === "undefined"
+    ? null
+    : invalidSlackLinkQueryWorkspaceIdFromUrl(window.location.href);
 stripSlackLinkFromBrowserLocation();
 const slackLinkPrepareController = createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
   bootstrappedPendingSlackLink,
@@ -436,6 +439,9 @@ export function RootRouteComponent() {
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
     string | null
   >(slackLinkPrepareController.workspaceId);
+  const [invalidSlackLinkQueryWorkspaceId, setInvalidSlackLinkQueryWorkspaceId] = useState<
+    string | null
+  >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
@@ -446,9 +452,6 @@ export function RootRouteComponent() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
-  const [sessionTenancyOperationController] = useState(
-    () => new SessionTenancyOperationController(),
-  );
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -528,6 +531,15 @@ export function RootRouteComponent() {
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
   const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
+  useEffect(() => {
+    if (
+      invalidSlackLinkQueryWorkspaceId &&
+      pathname !==
+        `/workspaces/${encodeURIComponent(invalidSlackLinkQueryWorkspaceId)}/capabilities`
+    ) {
+      setInvalidSlackLinkQueryWorkspaceId(null);
+    }
+  }, [invalidSlackLinkQueryWorkspaceId, pathname]);
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -576,7 +588,6 @@ export function RootRouteComponent() {
         return;
       }
       workspaceTransitionIdentity.current = transition.identity;
-      sessionTenancyOperationController.invalidate();
       activeCreateOperation.current = null;
       activeGitHubManifestOperation.current = null;
       activeGitHubDisconnectOperation.current = null;
@@ -602,7 +613,7 @@ export function RootRouteComponent() {
       resetWorkspaceIntegrations();
       setWorkspaceStateOwnerId(workspaceId);
     },
-    [resetSessionView, resetWorkspaceIntegrations, sessionTenancyOperationController],
+    [resetSessionView, resetWorkspaceIntegrations],
   );
 
   const prepareWorkspaceTransition = useCallback(
@@ -1706,6 +1717,7 @@ export function RootRouteComponent() {
           workspaces,
           managedSelfContext,
           slackLinkContinuationWorkspaceId,
+          invalidSlackLinkQueryWorkspaceId,
           preparePendingSlackLink,
           clearSlackLinkContinuation,
           accessKeyVersion,
@@ -1755,7 +1767,6 @@ export function RootRouteComponent() {
           prepareWorkspaceTransition,
           captureWorkspaceInvocation,
           ownsWorkspaceInvocation,
-          sessionTenancyOperationController,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
@@ -1813,6 +1824,7 @@ export function RootRouteComponent() {
     githubStatusFailed,
     githubCatalogReady,
     inspectorOpen,
+    invalidSlackLinkQueryWorkspaceId,
     keyAuthRequired,
     manualRepos,
     manualReposOpen,
@@ -1838,7 +1850,6 @@ export function RootRouteComponent() {
     selectedRepoRefs,
     session,
     sessionEventFeedStore,
-    sessionTenancyOperationController,
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,
@@ -1943,6 +1954,12 @@ export function pendingSlackLinkFromUrl(value: string): PendingSlackLink | null 
   const token = fragment.get("slack_link");
   if (!token || token.length > 2_048) return null;
   return { workspaceId: decodeURIComponent(match[1]), token };
+}
+
+export function invalidSlackLinkQueryWorkspaceIdFromUrl(value: string): string | null {
+  const url = new URL(value, "https://opengeni.invalid");
+  const match = /^\/workspaces\/([^/]+)\/capabilities\/?$/.exec(url.pathname);
+  return match?.[1] && url.searchParams.has("slack_link") ? decodeURIComponent(match[1]) : null;
 }
 
 function pendingSlackLinkFromBrowserLocation(): PendingSlackLink | null {

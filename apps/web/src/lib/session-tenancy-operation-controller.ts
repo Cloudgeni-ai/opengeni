@@ -99,3 +99,6 @@ export class SessionTenancyOperationController {
     this.fork = null;
   }
 }
+
+/** One retained controller for the activation-gated web module's app lifetime. */
+export const sessionTenancyOperationController = new SessionTenancyOperationController();

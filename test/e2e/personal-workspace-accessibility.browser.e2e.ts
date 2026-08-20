@@ -60,4 +60,39 @@ describe("Personal workspace accessibility in Chromium", () => {
       "Private fork",
     );
   });
+
+  test("a suspended membership never labels the workspace Personal", async () => {
+    const menuitem = page.locator("#suspended-personal-menuitem");
+    const snapshot = await menuitem.ariaSnapshot();
+    expect(snapshot).toContain("Roadmap Paused");
+    expect(snapshot).not.toContain("Personal");
+    expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(0);
+  });
+
+  test("scope navigation is screen-reader legible and keyboard operable", async () => {
+    const disclosure = page.locator("#desktop-scope-navigation details");
+    const summary = disclosure.locator("summary");
+    await summary.focus();
+    await page.keyboard.press("Enter");
+    expect(await disclosure.getAttribute("open")).not.toBeNull();
+
+    const snapshot = await disclosure.ariaSnapshot();
+    expect(snapshot).toContain("Scope & access");
+    expect(snapshot).toContain("Personal workspace inside this organization");
+    expect(snapshot).toContain("Northstar Organization administration");
+    expect(snapshot).toContain("Variable sets Organization, Workspace, or Only me");
+
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => document.activeElement?.textContent)).toContain("Northstar");
+  });
+
+  test("the mobile scope list remains usable at phone width", async () => {
+    await page.setViewportSize({ width: 320, height: 640 });
+    const navigation = page.locator("#mobile-scope-navigation");
+    expect(await navigation.getByRole("navigation", { name: "Scope and access" }).count()).toBe(1);
+    expect(await navigation.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    for (const link of await navigation.getByRole("link").all()) {
+      expect((await link.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(40);
+    }
+  });
 });

@@ -67,6 +67,7 @@ export function personalWorkspaceMembership(
   return (
     selfContext.memberships.find(
       (membership) =>
+        membership.status === "active" &&
         membership.organizationId === workspace.accountId &&
         membership.personalWorkspaceId === workspace.id,
     ) ?? null

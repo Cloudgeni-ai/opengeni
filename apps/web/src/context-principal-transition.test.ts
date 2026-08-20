@@ -177,17 +177,6 @@ describe("principal transition contract", () => {
     });
   });
 
-  test("workspace and principal invalidation retire retained session-tenancy operations", () => {
-    const resetWorkspace = sourceBetween(
-      "const resetWorkspaceState = useCallback",
-      "const prepareWorkspaceTransition = useCallback",
-    );
-    expect(resetWorkspace).toContain("sessionTenancyOperationController.invalidate()");
-    expect(resetWorkspace.indexOf("sessionTenancyOperationController.invalidate()")).toBeLessThan(
-      resetWorkspace.indexOf("resetSessionView()"),
-    );
-  });
-
   test("session creation and MCP refresh consume the shared transition fences", () => {
     const startSession = sourceBetween(
       "async function startSession(",

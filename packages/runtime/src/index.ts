@@ -2402,9 +2402,11 @@ export function buildOpenGeniAgent(
  * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
  * exact MCP objects may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
- * that catalog is ready. Generic providers receive only stable ordinary
- * tool_search/tool_invoke schemas; a valid dispatcher call is renamed to the
- * real tool and bound by the same hook before approval and execution.
+ * that catalog is ready. Classification is origin, not transport: the same
+ * always-visible base set and eager MCP tools are in the first request on
+ * every path. Generic providers add stable ordinary tool_search/tool_invoke
+ * schemas; a valid dispatcher call is renamed to the real tool and bound by
+ * the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,

@@ -5,6 +5,7 @@ import {
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
   personalWorkspaceMembership,
+  type ManagedSelfContext,
   type ManagedSelfContextIdentity,
 } from "./managed-self-context";
 
@@ -56,6 +57,14 @@ describe("managed self context", () => {
     expect(isPersonalWorkspace({ id: personalWorkspaceId, accountId: organizationId }, null)).toBe(
       false,
     );
+    for (const status of ["suspended", "revoked"] as const) {
+      expect(
+        isPersonalWorkspace({ id: personalWorkspaceId, accountId: organizationId }, {
+          identity,
+          memberships: [{ ...membership, status }],
+        } as unknown as ManagedSelfContext),
+      ).toBe(false);
+    }
   });
 
   test("discards a delayed membership response after credential/principal replacement", async () => {
