@@ -25,23 +25,25 @@ export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-ima
 
 export type ModelHistoryItem = Record<string, unknown>;
 
-type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = Omit<
-  T,
-  "status" | "providerData"
-> &
-  ("providerData" extends keyof T
-    ? undefined extends T["providerData"]
+type WithoutOutputOnlyProviderDataFields<T> = T extends ModelHistoryItem ? Omit<T, "status"> : T;
+
+type WithoutOutputOnlyProviderDataField<T extends ModelHistoryItem> = "providerData" extends keyof T
+  ? string extends keyof T
+    ? {
+        providerData?: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
+      }
+    : object extends Pick<T, Extract<keyof T, "providerData">>
       ? {
-          providerData?: Exclude<T["providerData"], undefined> extends ModelHistoryItem
-            ? Omit<Exclude<T["providerData"], undefined>, "status">
-            : Exclude<T["providerData"], undefined>;
+          providerData?: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
         }
       : {
-          providerData: T["providerData"] extends ModelHistoryItem
-            ? Omit<T["providerData"], "status">
-            : T["providerData"];
+          providerData: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
         }
-    : object);
+  : object;
+
+type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends unknown
+  ? Omit<T, "status" | "providerData"> & WithoutOutputOnlyProviderDataField<T>
+  : never;
 
 /**
  * Responses output items carry `status` (`in_progress` / `completed` /

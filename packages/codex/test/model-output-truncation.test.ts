@@ -534,6 +534,54 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(withNested.providerData.status).toBe("completed");
   });
 
+  test("preserves discriminated union fields while omitting output-only status types", () => {
+    type UnionItem =
+      | {
+          type: "function_call_result";
+          status: "completed";
+          output: { text: string };
+        }
+      | {
+          type: "reasoning";
+          content: string[];
+          providerData?: {
+            status: "completed";
+            encrypted_content: string;
+          };
+        };
+
+    const verify = (item: UnionItem) => {
+      const omitted = omitOutputOnlyHistoryItemFields(item);
+      if (omitted.type === "function_call_result") {
+        expect(omitted.output.text).toBe("done");
+        // @ts-expect-error output-only status is absent from the canonical type
+        void omitted.status;
+      } else {
+        expect(omitted.content).toEqual([]);
+        expect(omitted.providerData?.encrypted_content).toBe("opaque");
+        // @ts-expect-error nested output-only status is absent from the canonical type
+        void omitted.providerData?.status;
+      }
+    };
+
+    verify({
+      type: "function_call_result",
+      status: "completed",
+      output: { text: "done" },
+    });
+    verify({
+      type: "reasoning",
+      content: [],
+      providerData: { status: "completed", encrypted_content: "opaque" },
+    });
+
+    const requiredProviderData = omitOutputOnlyHistoryItemFields({
+      type: "reasoning",
+      providerData: { status: "completed", encrypted_content: "required" },
+    });
+    expect(requiredProviderData.providerData.encrypted_content).toBe("required");
+  });
+
   test("persist canonicalize drops status then bounds tool output", () => {
     const item = {
       type: "function_call_result",
