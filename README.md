@@ -156,10 +156,12 @@ bun run dev
 The first development start also prepares the current-host editable-artifact
 kernel. OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
 invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
-system Rust binaries earlier on `PATH` are ignored. Missing pinned toolchains
-and declared targets are installed without changing the rustup default or the
-shell `PATH`. Set `RUSTUP_AUTO_INSTALL=0` to forbid that setup and receive the
-exact manual install command instead.
+system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
+pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
+and user Cargo configuration cannot substitute another rustc. Missing pinned
+toolchains and declared targets are installed without changing the rustup
+default or the shell `PATH`. Set `RUSTUP_AUTO_INSTALL=0` to forbid that setup
+and receive the exact manual install command instead.
 
 Open:
 

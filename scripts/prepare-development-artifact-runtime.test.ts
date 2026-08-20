@@ -27,8 +27,17 @@ beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), "opengeni-development-rust-"));
   roots.push(root);
   const binRoot = join(root, "bin");
+  const toolchainBinRoot = join(root, "toolchain-bin");
   directRustLog = join(root, "direct-rust.log");
-  await mkdir(binRoot, { recursive: true });
+  await Promise.all([
+    mkdir(binRoot, { recursive: true }),
+    mkdir(toolchainBinRoot, { recursive: true }),
+  ]);
+  for (const tool of ["cargo", "rustc"] as const) {
+    const path = join(toolchainBinRoot, tool);
+    await writeFile(path, `#!/bin/sh\nprintf '%s\\n' '${tool} 1.97.0 (pinned fixture)'\n`);
+    await chmod(path, 0o755);
+  }
   const rustup = join(binRoot, "rustup");
   await writeFile(
     rustup,
@@ -38,6 +47,12 @@ if [ "$1" = run ] && [ "$3" = rustc ]; then
   printf '%s\\n' 'rustc 1.97.0 (pinned fixture)'
 elif [ "$1" = run ] && [ "$3" = cargo ]; then
   printf '%s\\n' 'cargo 1.97.0 (pinned fixture)'
+elif [ "$1" = which ] && [ "$2" = --toolchain ] && [ "$3" = 1.97.0 ]; then
+  case "$4" in
+    cargo) printf '%s\\n' '${join(toolchainBinRoot, "cargo")}' ;;
+    rustc) printf '%s\\n' '${join(toolchainBinRoot, "rustc")}' ;;
+    *) exit 2 ;;
+  esac
 elif [ "$1" = target ] && [ "$2" = list ]; then
   printf '%s\\n' 'wasm32-unknown-unknown'
 else

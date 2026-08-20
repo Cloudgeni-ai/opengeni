@@ -84,7 +84,9 @@ not silently omit a runtime. Rust compiler and Cargo commands always go through
 the exact repository pin; direct `cargo` or `rustc` binaries earlier on `PATH`
 cannot select a different compiler. Missing pinned toolchains, targets, and
 required components are installed unless `RUSTUP_AUTO_INSTALL=0` explicitly
-forbids setup.
+forbids setup. Ambient Cargo compiler and compiler-wrapper overrides, including
+user-level `build.rustc` and wrapper configuration, cannot replace the pinned
+compiler.
 
 Production native publishing must build one `.node` artifact per supported
 target in CI (at minimum macOS arm64/x64, Linux arm64/x64 glibc, and Windows

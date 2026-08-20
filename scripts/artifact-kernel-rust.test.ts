@@ -15,6 +15,15 @@ const originalAutoInstall = process.env.RUSTUP_AUTO_INSTALL;
 const originalRustupLog = process.env.FAKE_RUSTUP_LOG;
 const originalDirectLog = process.env.FAKE_DIRECT_LOG;
 const originalRustupState = process.env.FAKE_RUSTUP_STATE;
+const originalPinnedCargo = process.env.FAKE_PINNED_CARGO;
+const originalCargoHome = process.env.CARGO_HOME;
+const originalCargo = process.env.CARGO;
+const originalRustc = process.env.RUSTC;
+const originalCargoBuildRustc = process.env.CARGO_BUILD_RUSTC;
+const originalRustcWrapper = process.env.RUSTC_WRAPPER;
+const originalCargoBuildRustcWrapper = process.env.CARGO_BUILD_RUSTC_WRAPPER;
+const originalRustcWorkspaceWrapper = process.env.RUSTC_WORKSPACE_WRAPPER;
+const originalCargoBuildRustcWorkspaceWrapper = process.env.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER;
 
 afterEach(async () => {
   process.env.PATH = originalPath;
@@ -23,6 +32,18 @@ afterEach(async () => {
   restoreEnvironment("FAKE_RUSTUP_LOG", originalRustupLog);
   restoreEnvironment("FAKE_DIRECT_LOG", originalDirectLog);
   restoreEnvironment("FAKE_RUSTUP_STATE", originalRustupState);
+  restoreEnvironment("FAKE_PINNED_CARGO", originalPinnedCargo);
+  restoreEnvironment("CARGO_HOME", originalCargoHome);
+  restoreEnvironment("CARGO", originalCargo);
+  restoreEnvironment("RUSTC", originalRustc);
+  restoreEnvironment("CARGO_BUILD_RUSTC", originalCargoBuildRustc);
+  restoreEnvironment("RUSTC_WRAPPER", originalRustcWrapper);
+  restoreEnvironment("CARGO_BUILD_RUSTC_WRAPPER", originalCargoBuildRustcWrapper);
+  restoreEnvironment("RUSTC_WORKSPACE_WRAPPER", originalRustcWorkspaceWrapper);
+  restoreEnvironment(
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    originalCargoBuildRustcWorkspaceWrapper,
+  );
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -52,6 +73,45 @@ describe("artifact kernel Rust toolchain runner", () => {
     const rustupLog = await readFile(fixture.rustupLog, "utf8");
     expect(rustupLog).toContain("run 1.97.0 rustc -Vv");
     expect(rustupLog).toContain("run 1.97.0 cargo -V");
+  });
+
+  test("binds Cargo to pinned compiler paths despite ambient and user config overrides", async () => {
+    const fixture = await createFixture({ installed: true, targetInstalled: true });
+    const toolchain = await resolveArtifactKernelRustToolchain(fixture.repositoryRoot);
+    await writeFile(
+      join(fixture.cargoHome, "config.toml"),
+      `[build]\nrustc = "${fixture.wrongRustc}"\nrustc-wrapper = "${fixture.wrongWrapper}"\nrustc-workspace-wrapper = "${fixture.wrongWrapper}"\n`,
+    );
+    process.env.CARGO_HOME = fixture.cargoHome;
+    process.env.CARGO = fixture.wrongCargo;
+    process.env.RUSTC = fixture.wrongRustc;
+    process.env.CARGO_BUILD_RUSTC = fixture.wrongRustc;
+    process.env.RUSTC_WRAPPER = fixture.wrongWrapper;
+    process.env.CARGO_BUILD_RUSTC_WRAPPER = fixture.wrongWrapper;
+    process.env.RUSTC_WORKSPACE_WRAPPER = fixture.wrongWrapper;
+    process.env.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER = fixture.wrongWrapper;
+
+    const reportedCompiler = await captureArtifactKernelRustTool(
+      toolchain,
+      "cargo",
+      ["compiler-probe"],
+      {
+        environment: {
+          RUSTC: fixture.wrongRustc,
+          CARGO_BUILD_RUSTC: fixture.wrongRustc,
+          RUSTC_WRAPPER: fixture.wrongWrapper,
+          CARGO_BUILD_RUSTC_WRAPPER: fixture.wrongWrapper,
+          RUSTC_WORKSPACE_WRAPPER: fixture.wrongWrapper,
+          CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: fixture.wrongWrapper,
+        },
+      },
+    );
+
+    expect(reportedCompiler.trim()).toBe("rustc 1.97.0 (pinned fixture)");
+    expect(await Bun.file(fixture.directLog).exists()).toBe(false);
+    const rustupLog = await readFile(fixture.rustupLog, "utf8");
+    expect(rustupLog).toContain("which --toolchain 1.97.0 cargo");
+    expect(rustupLog).toContain("which --toolchain 1.97.0 rustc");
   });
 
   test("bootstraps a missing exact toolchain and target without changing the default", async () => {
@@ -100,6 +160,18 @@ describe("artifact kernel Rust toolchain runner", () => {
     const rustupLog = await readFile(fixture.rustupLog, "utf8");
     expect(rustupLog).not.toContain("target add");
   });
+
+  test("respects RUSTUP_AUTO_INSTALL=0 with an actionable missing-component error", async () => {
+    const fixture = await createFixture({ installed: true, targetInstalled: true });
+    process.env.RUSTUP_AUTO_INSTALL = "0";
+    const toolchain = await resolveArtifactKernelRustToolchain(fixture.repositoryRoot);
+
+    await expect(
+      ensureArtifactKernelRustToolchain(toolchain, { components: ["rustfmt"] }),
+    ).rejects.toThrow("rustup component add --toolchain 1.97.0 rustfmt");
+    const rustupLog = await readFile(fixture.rustupLog, "utf8");
+    expect(rustupLog).not.toContain("component add");
+  });
 });
 
 async function createFixture(
@@ -115,10 +187,14 @@ async function createFixture(
   const repositoryRoot = join(root, "repository");
   const kernelRoot = join(repositoryRoot, "packages", "artifact-tool", "kernel");
   const binRoot = join(root, "bin");
+  const toolchainBinRoot = join(root, "toolchain-bin");
+  const cargoHome = join(root, "cargo-home");
   const stateRoot = join(root, "state");
   await Promise.all([
     mkdir(kernelRoot, { recursive: true }),
     mkdir(binRoot, { recursive: true }),
+    mkdir(toolchainBinRoot, { recursive: true }),
+    mkdir(cargoHome, { recursive: true }),
     mkdir(stateRoot, { recursive: true }),
   ]);
   await writeFile(
@@ -127,18 +203,29 @@ async function createFixture(
   );
   const rustupLog = join(root, "rustup.log");
   const directLog = join(root, "direct.log");
+  const wrongRustc = join(binRoot, "rustc");
+  const wrongCargo = join(binRoot, "cargo");
+  const wrongWrapper = join(binRoot, "rustc-wrapper");
+  const pinnedRustc = join(toolchainBinRoot, "rustc");
+  const pinnedCargo = join(toolchainBinRoot, "cargo");
   if (options.installed) await writeFile(join(stateRoot, "toolchain"), "installed\n");
   if (options.targetInstalled) {
     await writeFile(join(stateRoot, "targets"), "wasm32-unknown-unknown\n");
   }
   await executable(
-    join(binRoot, "rustc"),
+    wrongRustc,
     `#!/bin/sh\nprintf '%s\\n' rustc >> "$FAKE_DIRECT_LOG"\nprintf '%s\\n' 'rustc 9.99.0 (wrong direct compiler)'\n`,
   );
   await executable(
-    join(binRoot, "cargo"),
+    wrongCargo,
     `#!/bin/sh\nprintf '%s\\n' cargo >> "$FAKE_DIRECT_LOG"\nprintf '%s\\n' 'cargo 9.99.0 (wrong direct cargo)'\n`,
   );
+  await executable(
+    wrongWrapper,
+    `#!/bin/sh\nprintf '%s\\n' wrapper >> "$FAKE_DIRECT_LOG"\nexec "$@"\n`,
+  );
+  await executable(pinnedRustc, `#!/bin/sh\nprintf '%s\\n' 'rustc 1.97.0 (pinned fixture)'\n`);
+  await executable(pinnedCargo, `#!/bin/sh\nprintf '%s\\n' 'cargo 1.97.0 (pinned fixture)'\n`);
   await executable(
     join(binRoot, "rustup"),
     `#!/bin/sh
@@ -151,9 +238,29 @@ if [ "$1" = run ]; then
   if [ "$tool" = rustc ]; then
     printf '%s\\n' 'rustc 1.97.0 (pinned fixture)'
   elif [ "$tool" = cargo ]; then
-    printf '%s\\n' 'cargo 1.97.0 (pinned fixture)'
+    if [ "\${4:-}" = compiler-probe ]; then
+      [ "$CARGO" = "$FAKE_PINNED_CARGO" ] || exit 10
+      [ -z "\${CARGO_BUILD_RUSTC+x}" ] || exit 11
+      [ -z "\${CARGO_BUILD_RUSTC_WRAPPER+x}" ] || exit 12
+      [ -z "\${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER+x}" ] || exit 13
+      [ -n "\${RUSTC:-}" ] || exit 14
+      [ "\${RUSTC_WRAPPER+x}" = x ] && [ -z "$RUSTC_WRAPPER" ] || exit 15
+      [ "\${RUSTC_WORKSPACE_WRAPPER+x}" = x ] && [ -z "$RUSTC_WORKSPACE_WRAPPER" ] || exit 16
+      [ -f "$CARGO_HOME/config.toml" ] || exit 17
+      "$RUSTC" --version
+    else
+      printf '%s\\n' 'cargo 1.97.0 (pinned fixture)'
+    fi
   else
     exit 2
+  fi
+elif [ "$1" = which ] && [ "$2" = --toolchain ] && [ "$3" = 1.97.0 ]; then
+  if [ "$4" = rustc ]; then
+    printf '%s\\n' '${pinnedRustc}'
+  elif [ "$4" = cargo ]; then
+    printf '%s\\n' '${pinnedCargo}'
+  else
+    exit 4
   fi
 elif [ "$1" = toolchain ] && [ "$2" = install ]; then
   touch "$state/toolchain"
@@ -176,8 +283,17 @@ fi
   process.env.FAKE_RUSTUP_LOG = rustupLog;
   process.env.FAKE_DIRECT_LOG = directLog;
   process.env.FAKE_RUSTUP_STATE = stateRoot;
+  process.env.FAKE_PINNED_CARGO = pinnedCargo;
   delete process.env.RUSTUP_AUTO_INSTALL;
-  return { repositoryRoot, rustupLog, directLog };
+  return {
+    repositoryRoot,
+    rustupLog,
+    directLog,
+    cargoHome,
+    wrongCargo,
+    wrongRustc,
+    wrongWrapper,
+  };
 }
 
 async function executable(path: string, contents: string): Promise<void> {

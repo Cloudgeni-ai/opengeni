@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type ArtifactKernelRustTool = "cargo" | "rustc";
 
@@ -154,9 +154,15 @@ export async function runArtifactKernelRustTool(
   }
   const rustup = requireRustup();
   const command = [rustup, "run", toolchain.channel, tool, ...args];
+  const environment = await artifactKernelRustToolEnvironment(
+    rustup,
+    toolchain,
+    tool,
+    options.environment,
+  );
   const child = Bun.spawn([...command], {
     cwd: options.cwd ?? toolchain.kernelRoot,
-    env: { ...process.env, ...options.environment },
+    env: environment,
     stdin: options.stdin ?? "inherit",
     stdout: options.stdout ?? "inherit",
     stderr: options.stderr ?? "inherit",
@@ -182,10 +188,17 @@ export async function captureArtifactKernelRustTool(
   }
   const rustup = requireRustup();
   const command = [rustup, "run", toolchain.channel, tool, ...args];
+  const environment = await artifactKernelRustToolEnvironment(
+    rustup,
+    toolchain,
+    tool,
+    options.environment,
+  );
   const result = await captureCommand(
     command,
     options.cwd ?? toolchain.kernelRoot,
-    options.environment,
+    environment,
+    false,
   );
   if (result.exitCode !== 0) {
     throw new Error(result.stderr.trim() || `Command failed: ${renderCommand(command)}`);
@@ -244,11 +257,12 @@ async function installOrExplain(
 async function captureCommand(
   command: readonly string[],
   cwd: string,
-  environment: Readonly<Record<string, string>> = {},
+  environment: Readonly<Record<string, string | undefined>> = {},
+  inheritEnvironment = true,
 ): Promise<CapturedCommand> {
   const child = Bun.spawn([...command], {
     cwd,
-    env: { ...process.env, ...environment },
+    env: inheritEnvironment ? { ...process.env, ...environment } : environment,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -259,6 +273,52 @@ async function captureCommand(
     child.exited,
   ]);
   return { stdout, stderr, exitCode };
+}
+
+async function artifactKernelRustToolEnvironment(
+  rustup: string,
+  toolchain: ArtifactKernelRustToolchain,
+  tool: ArtifactKernelRustTool,
+  overrides: Readonly<Record<string, string>> = {},
+): Promise<Record<string, string | undefined>> {
+  const environment: Record<string, string | undefined> = { ...process.env, ...overrides };
+  if (tool !== "cargo") return environment;
+
+  const [cargo, rustc] = await Promise.all([
+    resolveRustupTool(rustup, toolchain, "cargo"),
+    resolveRustupTool(rustup, toolchain, "rustc"),
+  ]);
+  // Explicit Cargo env wins over user config; empty wrapper vars also suppress configured wrappers.
+  delete environment.CARGO_BUILD_RUSTC;
+  delete environment.CARGO_BUILD_RUSTC_WRAPPER;
+  delete environment.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER;
+  environment.CARGO = cargo;
+  environment.RUSTC = rustc;
+  environment.RUSTC_WRAPPER = "";
+  environment.RUSTC_WORKSPACE_WRAPPER = "";
+  return environment;
+}
+
+async function resolveRustupTool(
+  rustup: string,
+  toolchain: ArtifactKernelRustToolchain,
+  tool: ArtifactKernelRustTool,
+): Promise<string> {
+  const command = [rustup, "which", "--toolchain", toolchain.channel, tool];
+  const result = await captureCommand(
+    command,
+    toolchain.kernelRoot,
+    { ...process.env, RUSTUP_AUTO_INSTALL: "0" },
+    false,
+  );
+  const executable = result.stdout.trim();
+  if (result.exitCode !== 0 || !isAbsolute(executable)) {
+    throw new Error(
+      result.stderr.trim() ||
+        `rustup did not resolve an absolute pinned ${tool} executable: ${renderCommand(command)}`,
+    );
+  }
+  return executable;
 }
 
 function requireRustup(): string {

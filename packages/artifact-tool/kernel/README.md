@@ -148,8 +148,10 @@ OPENGENI_ARTIFACT_BENCH_PINNED=1 bun --cwd packages/artifact-tool run bench:rele
 
 The repository runner parses this crate's exact `rust-toolchain.toml`, safely
 installs missing toolchain requirements unless `RUSTUP_AUTO_INSTALL=0`, and
-executes Cargo through `rustup run`. It never changes the user's rustup default
-or shell `PATH`.
+executes Cargo through `rustup run`. Cargo receives the pinned toolchain's
+absolute compiler path and cleared compiler-wrapper settings after ambient
+environment merging, overriding user Cargo configuration without changing the
+user's rustup default or shell `PATH`.
 
 The dependency-free benchmark is intentionally a normal executable rather than
 a benchmark-framework contract. It exercises dense command ingestion, sparse
