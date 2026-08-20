@@ -3,7 +3,7 @@
 // session-contextual actions around every workspace-scoped route.
 import { OpenGeniProvider } from "@opengeni/react";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
@@ -11,9 +11,11 @@ import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
 import { Button } from "@/components/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
-import { useAppContext } from "@/context";
+import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
+import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
+import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
   workspaceOwnedValue,
@@ -43,11 +45,22 @@ export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspac
   );
 }
 
-export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
-  const context = useAppContext();
-  const navigate = useNavigate();
-  const activeWorkspace =
-    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+export function WorkspaceShellRouteContent({
+  workspaceId,
+  context,
+  navigate,
+  onAuthorizedShellMount,
+}: {
+  workspaceId: string;
+  context: AppContextValue;
+  navigate: ReturnType<typeof useNavigate>;
+  onAuthorizedShellMount?: () => void;
+}) {
+  const activeWorkspace = authorizedWorkspaceFromList({
+    workspaceId,
+    workspaces: context.workspaces,
+    accessContext: context.accessContext,
+  });
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const {
     accessKeyVersion,
@@ -56,8 +69,8 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     client,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
+    revalidatePrincipalAccess,
     resetWorkspaceIntegrations,
-    refreshWorkspace,
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
@@ -114,12 +127,27 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   );
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
+  const hasNarrowSlackFlow =
+    hasSlackLinkContinuation || slackAccessRequest !== null || slackAccessError !== null;
 
   useEffect(() => {
     activeSlackOperation.current = null;
     slackMutationBusy.current = false;
     setOwnedSlackAccess({ workspaceId, value: emptySlackAccessState() });
   }, [context.accessKeyVersion, workspaceId]);
+
+  const completeSlackAccess = useCallback(
+    (operation: WorkspaceOperationIdentity): boolean => {
+      if (!ownsSlackOperation(operation)) return false;
+      toast.success("Slack identity linked", {
+        description: "You can return to Slack and invoke OpenGeni again.",
+      });
+      clearSlackLinkContinuation();
+      revalidatePrincipalAccess();
+      return true;
+    },
+    [clearSlackLinkContinuation, ownsSlackOperation, revalidatePrincipalAccess],
+  );
 
   const refreshSlackAccess = useCallback(
     async (request: SlackUserLinkAccessRequest, options?: { polling?: boolean }) => {
@@ -140,21 +168,15 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
       if (!ownsSlackOperation(operation)) return null;
       updateSlackAccess(workspaceId, (current) => ({ ...current, request: next }));
       if (next.status === "completed") {
-        toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke OpenGeni again.",
-        });
-        await refreshWorkspace(workspaceId);
-        if (!ownsSlackOperation(operation)) return null;
-        clearSlackLinkContinuation();
+        completeSlackAccess(operation);
       }
       return next;
     },
     [
       beginSlackOperation,
-      clearSlackLinkContinuation,
       client,
+      completeSlackAccess,
       ownsSlackOperation,
-      refreshWorkspace,
       updateSlackAccess,
       workspaceId,
     ],
@@ -167,16 +189,11 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     if (!operation) return;
     updateSlackAccess(workspaceId, (current) => ({ ...current, error: null }));
     void preparePendingSlackLink(workspaceId)
-      .then(async (request) => {
+      .then((request) => {
         if (disposed || !request || !ownsSlackOperation(operation)) return;
         updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
         if (request.status === "completed") {
-          toast.success("Slack identity linked", {
-            description: "You can return to Slack and invoke OpenGeni again.",
-          });
-          await refreshWorkspace(workspaceId);
-          if (disposed || !ownsSlackOperation(operation)) return;
-          clearSlackLinkContinuation();
+          completeSlackAccess(operation);
         }
       })
       .catch((error) => {
@@ -194,11 +211,10 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     };
   }, [
     beginSlackOperation,
-    clearSlackLinkContinuation,
+    completeSlackAccess,
     hasSlackLinkContinuation,
     ownsSlackOperation,
     preparePendingSlackLink,
-    refreshWorkspace,
     updateSlackAccess,
     workspaceId,
   ]);
@@ -308,6 +324,17 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     workspaceId,
   ]);
 
+  if (!activeWorkspace && !hasNarrowSlackFlow) {
+    return (
+      <WorkspaceUnavailableRoute
+        requestedWorkspaceId={workspaceId}
+        workspaces={context.workspaces}
+        accessContext={context.accessContext}
+        suppressAuthorizedFallback={context.invalidSlackLinkQueryWorkspaceId === workspaceId}
+      />
+    );
+  }
+
   if (!workspaceStateReady) {
     return (
       <WorkspaceTenantBoundary
@@ -321,7 +348,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   if (!activeWorkspace) {
-    if (hasSlackLinkContinuation || slackAccessRequest || slackAccessError) {
+    if (hasNarrowSlackFlow) {
       const workspaceName = slackAccessRequest?.workspaceDisplayName ?? "this workspace";
       const activePendingState =
         slackAccessRequest?.status === "prepared" || slackAccessRequest?.status === "pending";
@@ -332,77 +359,46 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
             ? "This Slack access request was cancelled. Request a fresh link from Slack to try again."
             : "This Slack link is invalid or expired. Request a fresh link from Slack.";
       return (
-        <OpenGeniProvider
-          client={context.client}
-          workspaceId={workspaceId}
-          onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+        <section
+          aria-label="Slack workspace access"
+          className="flex min-h-full items-center justify-center bg-canvas p-4"
         >
-          <RailProvider workspaceId={workspaceId}>
-            <RailShell>
-              {!slackAccessRequest && !slackAccessError ? (
-                <LoadingPanel label="Checking Slack access" />
-              ) : activePendingState ? (
-                <ProblemPanel
-                  title={
-                    slackAccessRequest?.status === "pending"
-                      ? "Access requested"
-                      : "Workspace access required"
-                  }
-                  description={<SlackLinkAccessRequiredDescription workspaceName={workspaceName} />}
-                  action={
-                    <div className="flex flex-wrap justify-center gap-2">
-                      {slackAccessRequest?.status === "prepared" ? (
-                        <Button
-                          type="button"
-                          disabled={slackAccessBusy}
-                          onClick={() => void requestAccess()}
-                        >
-                          Request access
-                        </Button>
-                      ) : null}
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        disabled={slackAccessBusy}
-                        onClick={() => void cancelSlackAccess()}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  }
-                />
-              ) : (
-                <ProblemPanel
-                  title="Slack link unavailable"
-                  description={slackAccessError ?? terminalGuidance}
-                  action={
-                    <Button asChild type="button" variant="secondary">
-                      <Link to="/" onClick={context.clearSlackLinkContinuation}>
-                        Open default workspace
-                      </Link>
-                    </Button>
-                  }
-                />
-              )}
-            </RailShell>
-          </RailProvider>
-        </OpenGeniProvider>
-      );
-    }
-    // Still wrap OpenGeniProvider: RailShell mounts SessionList, which needs
-    // the provider. Without it this path hard-crashes the rail (looks like a
-    // "broken server") instead of showing the unavailable panel.
-    return (
-      <OpenGeniProvider
-        client={context.client}
-        workspaceId={workspaceId}
-        onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
-      >
-        <RailProvider workspaceId={workspaceId}>
-          <RailShell>
+          {!slackAccessRequest && !slackAccessError ? (
+            <LoadingPanel label="Checking Slack access" />
+          ) : activePendingState ? (
             <ProblemPanel
-              title="Workspace unavailable"
-              description="You don't have access to this workspace."
+              title={
+                slackAccessRequest?.status === "pending"
+                  ? "Access requested"
+                  : "Workspace access required"
+              }
+              description={<SlackLinkAccessRequiredDescription workspaceName={workspaceName} />}
+              action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  {slackAccessRequest?.status === "prepared" ? (
+                    <Button
+                      type="button"
+                      disabled={slackAccessBusy}
+                      onClick={() => void requestAccess()}
+                    >
+                      Request access
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={slackAccessBusy}
+                    onClick={() => void cancelSlackAccess()}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              }
+            />
+          ) : (
+            <ProblemPanel
+              title="Slack link unavailable"
+              description={slackAccessError ?? terminalGuidance}
               action={
                 <Button asChild type="button" variant="secondary">
                   <Link to="/" onClick={context.clearSlackLinkContinuation}>
@@ -411,12 +407,38 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
                 </Button>
               }
             />
-          </RailShell>
-        </RailProvider>
-      </OpenGeniProvider>
-    );
+          )}
+        </section>
+      );
+    }
+    return null;
   }
 
+  return (
+    <AuthorizedWorkspaceShell
+      context={context}
+      workspaceId={workspaceId}
+      onMount={onAuthorizedShellMount}
+    >
+      <Outlet />
+    </AuthorizedWorkspaceShell>
+  );
+}
+
+function AuthorizedWorkspaceShell({
+  context,
+  workspaceId,
+  children,
+  onMount,
+}: {
+  context: AppContextValue;
+  workspaceId: string;
+  children: ReactNode;
+  onMount?: () => void;
+}) {
+  useEffect(() => {
+    onMount?.();
+  }, [onMount]);
   return (
     <OpenGeniProvider
       client={context.client}
@@ -424,10 +446,16 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
       onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
     >
       <RailProvider workspaceId={workspaceId}>
-        <RailShell>
-          <Outlet />
-        </RailShell>
+        <RailShell>{children}</RailShell>
       </RailProvider>
     </OpenGeniProvider>
+  );
+}
+
+export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  return (
+    <WorkspaceShellRouteContent workspaceId={workspaceId} context={context} navigate={navigate} />
   );
 }

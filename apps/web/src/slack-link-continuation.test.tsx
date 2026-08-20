@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   createSlackLinkPrepareController,
+  invalidSlackLinkQueryWorkspaceIdFromUrl,
   pendingSlackLinkFromUrl,
   preserveSlackLinkForManagedAuth,
 } from "./context";
@@ -33,6 +34,19 @@ describe("Slack link continuation", () => {
     expect(
       pendingSlackLinkFromUrl(
         `https://app.example.test/workspaces/${workspaceId}/sessions#slack_link=signed.fragment`,
+      ),
+    ).toBeNull();
+  });
+
+  test("retains only a token-free route marker for rejected legacy query bearers", () => {
+    expect(
+      invalidSlackLinkQueryWorkspaceIdFromUrl(
+        "https://app.test/workspaces/workspace-1/capabilities?slack_link=legacy-secret",
+      ),
+    ).toBe("workspace-1");
+    expect(
+      invalidSlackLinkQueryWorkspaceIdFromUrl(
+        "https://app.test/workspaces/workspace-1/sessions?slack_link=legacy-secret",
       ),
     ).toBeNull();
   });
