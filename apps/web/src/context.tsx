@@ -71,8 +71,13 @@ import {
 } from "@/lib/session-tools";
 import { upsertWorkspace } from "@/lib/workspaces";
 import {
+  beginWorkspaceOperation,
   beginWorkspaceTransition,
-  ownsWorkspaceTransition,
+  invalidateWorkspaceTransition,
+  ownsWorkspaceOperation,
+  runCurrentWorkspaceRequest,
+  settleWorkspaceOperation,
+  type WorkspaceOperationIdentity,
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
 import type {
@@ -424,6 +429,10 @@ export function RootRouteComponent() {
     workspaceId: null,
     revision: 0,
   });
+  const workspaceOperationSequence = useRef(0);
+  const activeCreateOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const authPrincipalIdRef = useRef<string | null>(null);
+  const accessPrincipalIdRef = useRef<string | null>(null);
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
@@ -488,6 +497,72 @@ export function RootRouteComponent() {
     });
   }, []);
 
+  const resetSessionView = useCallback(() => {
+    setSession(null);
+    setConnectionState("idle");
+    sessionEventFeedStore.set(null);
+  }, [sessionEventFeedStore, setSession]);
+
+  const resetWorkspaceIntegrations = useCallback(() => {
+    setGithubStatus(null);
+    setGithubStatusFailed(false);
+    setGithubRepos([]);
+    setGithubCatalogReady(false);
+    setWorkspaceMcpServers([]);
+    setWorkspaceCapabilityCatalog([]);
+    setWorkspaceMcpCatalogReady(false);
+  }, []);
+
+  const resetWorkspaceState = useCallback(
+    (workspaceId: string | null, force: boolean) => {
+      const transition =
+        workspaceId === null
+          ? {
+              identity: invalidateWorkspaceTransition(workspaceTransitionIdentity.current),
+              changed: true,
+            }
+          : beginWorkspaceTransition(workspaceTransitionIdentity.current, workspaceId);
+      if (!force && !transition.changed) {
+        return;
+      }
+      workspaceTransitionIdentity.current = transition.identity;
+      activeCreateOperation.current = null;
+      // Fence late non-abortable catalog/status responses before clearing the
+      // projections they would otherwise be able to repopulate.
+      githubRefreshId.current += 1;
+      mcpRefreshId.current += 1;
+      pendingCreateAttempt.current = null;
+      resetSessionView();
+      setInspectorOpen(false);
+      setManualRepos([]);
+      setManualReposOpen(false);
+      setNextRepoId(1);
+      setSelectedRepoIds(new Set());
+      setSelectedRepoRefs({});
+      setSelectedCapabilityToolIds(new Set());
+      previousCapabilityToolIds.current = new Set();
+      setGithubAppOpen(false);
+      setGithubOrg("");
+      setBusy(false);
+      setRepoBusy(false);
+      setGithubAppBusy(false);
+      resetWorkspaceIntegrations();
+      setWorkspaceStateOwnerId(workspaceId);
+    },
+    [resetSessionView, resetWorkspaceIntegrations],
+  );
+
+  const prepareWorkspaceTransition = useCallback(
+    (workspaceId: string) => resetWorkspaceState(workspaceId, false),
+    [resetWorkspaceState],
+  );
+
+  const invalidatePrincipalWorkspaceState = useCallback(() => {
+    authPrincipalIdRef.current = null;
+    accessPrincipalIdRef.current = null;
+    resetWorkspaceState(null, true);
+  }, [resetWorkspaceState]);
+
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
@@ -524,6 +599,9 @@ export function RootRouteComponent() {
       return;
     }
     if (clientConfig.auth.mode !== "managedSession") {
+      if (authPrincipalIdRef.current !== null) {
+        invalidatePrincipalWorkspaceState();
+      }
       setAuthSession(null);
       return;
     }
@@ -532,6 +610,14 @@ export function RootRouteComponent() {
     void fetchAuthSession()
       .then((nextSession) => {
         if (!cancelled) {
+          const nextPrincipalId = nextSession?.user.id ?? null;
+          if (
+            authPrincipalIdRef.current !== null &&
+            authPrincipalIdRef.current !== nextPrincipalId
+          ) {
+            invalidatePrincipalWorkspaceState();
+          }
+          authPrincipalIdRef.current = nextPrincipalId;
           setAuthSession(nextSession);
         }
       })
@@ -543,7 +629,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, [clientConfig]);
+  }, [clientConfig, invalidatePrincipalWorkspaceState]);
 
   useEffect(() => {
     if (!clientConfig || !authReady) {
@@ -561,6 +647,13 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
+        if (
+          accessPrincipalIdRef.current !== null &&
+          accessPrincipalIdRef.current !== context.subjectId
+        ) {
+          invalidatePrincipalWorkspaceState();
+        }
+        accessPrincipalIdRef.current = context.subjectId;
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
       })
@@ -583,7 +676,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, [clientConfig, authReady, client]);
+  }, [clientConfig, authReady, client, invalidatePrincipalWorkspaceState]);
 
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
   const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
@@ -911,17 +1004,24 @@ export function RootRouteComponent() {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
-      const [catalog, apiIntegrations] = await Promise.all([
-        runSingleFlight(
-          mcpCatalogRequests.current,
-          requestKey,
-          async () => await client.listCapabilities(workspaceId),
-        ),
-        client.listApiIntegrations(workspaceId),
-      ]);
-      if (signal?.aborted || mcpRefreshId.current !== refreshId) {
+      const result = await runCurrentWorkspaceRequest({
+        signal,
+        requestId: refreshId,
+        currentRequestId: () => mcpRefreshId.current,
+        request: async () =>
+          await Promise.all([
+            runSingleFlight(
+              mcpCatalogRequests.current,
+              requestKey,
+              async () => await client.listCapabilities(workspaceId),
+            ),
+            client.listApiIntegrations(workspaceId),
+          ]),
+      });
+      if (!result) {
         return;
       }
+      const [catalog, apiIntegrations] = result;
       setWorkspaceMcpServers(
         mergeMcpServerOptions(
           enabledWorkspaceCapabilityMcpServers(catalog.items),
@@ -948,7 +1048,13 @@ export function RootRouteComponent() {
       startMode?: "realtime";
     },
   ): Promise<Session | null> {
-    const acceptedWorkspaceTransition = workspaceTransitionIdentity.current;
+    const startedOperation = beginWorkspaceOperation(
+      workspaceOperationSequence.current,
+      workspaceTransitionIdentity.current,
+    );
+    workspaceOperationSequence.current = startedOperation.sequence;
+    const operation = startedOperation.operation;
+    activeCreateOperation.current = operation;
     setBusy(true);
     try {
       const sessionTools = options?.sessionTools;
@@ -996,9 +1102,10 @@ export function RootRouteComponent() {
       // server result remains valid, but it must not repopulate or navigate the
       // new workspace's UI with the previous tenant's session.
       if (
-        !ownsWorkspaceTransition(
+        !ownsWorkspaceOperation(
+          activeCreateOperation.current,
           workspaceTransitionIdentity.current,
-          acceptedWorkspaceTransition,
+          operation,
           workspaceId,
         )
       ) {
@@ -1018,12 +1125,26 @@ export function RootRouteComponent() {
     } catch (error) {
       // Keep the attempt on failure. An exact retry dedups against a create that
       // may have landed server-side; an edited request acquires a fresh key.
-      toast.error("Failed to start session", {
-        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
-      });
+      if (
+        ownsWorkspaceOperation(
+          activeCreateOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        toast.error("Failed to start session", {
+          description:
+            error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
+        });
+      }
       return null;
     } finally {
-      setBusy(false);
+      const settlement = settleWorkspaceOperation(activeCreateOperation.current, operation);
+      activeCreateOperation.current = settlement.active;
+      if (settlement.settledCurrent) {
+        setBusy(false);
+      }
     }
   }
 
@@ -1115,6 +1236,7 @@ export function RootRouteComponent() {
       toast.error("Enter an access key");
       return;
     }
+    invalidatePrincipalWorkspaceState();
     setStoredAccessKey(key);
     setHasAccessKey(true);
     setAccessKeyDraft("");
@@ -1123,6 +1245,7 @@ export function RootRouteComponent() {
   }
 
   function forgetAccessKey() {
+    invalidatePrincipalWorkspaceState();
     clearStoredAccessKey();
     setHasAccessKey(false);
     setSession(null);
@@ -1136,6 +1259,7 @@ export function RootRouteComponent() {
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) {
+    invalidatePrincipalWorkspaceState();
     if (mode === "signup") {
       await signUpEmail(input);
       captureProductAnalyticsEvent("signup_submitted", {
@@ -1150,6 +1274,7 @@ export function RootRouteComponent() {
       });
     }
     const nextSession = await fetchAuthSession();
+    authPrincipalIdRef.current = nextSession?.user.id ?? null;
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
     if (!nextSession && mode === "signup") {
@@ -1158,7 +1283,19 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
-    await signOutManaged();
+    const previousAuthSession = authSession;
+    invalidatePrincipalWorkspaceState();
+    // Hide the authenticated tree while the cookie mutation is in flight. If
+    // the request fails, force a fresh authoritative session/access read rather
+    // than reopening the cached principal.
+    setAuthSession(undefined);
+    try {
+      await signOutManaged();
+    } catch (error) {
+      setAuthSession(previousAuthSession);
+      setAccessKeyVersion((version) => version + 1);
+      throw error;
+    }
     setAuthSession(null);
     setAccessContext(null);
     setWorkspaces([]);
@@ -1167,54 +1304,6 @@ export function RootRouteComponent() {
     setAccessKeyVersion((version) => version + 1);
     await navigate({ to: "/", replace: true });
   }
-
-  const resetSessionView = useCallback(() => {
-    setSession(null);
-    setConnectionState("idle");
-    sessionEventFeedStore.set(null);
-  }, [sessionEventFeedStore, setSession]);
-
-  const resetWorkspaceIntegrations = useCallback(() => {
-    setGithubStatus(null);
-    setGithubStatusFailed(false);
-    setGithubRepos([]);
-    setGithubCatalogReady(false);
-    setWorkspaceMcpServers([]);
-    setWorkspaceCapabilityCatalog([]);
-    setWorkspaceMcpCatalogReady(false);
-  }, []);
-
-  const prepareWorkspaceTransition = useCallback(
-    (workspaceId: string) => {
-      const transition = beginWorkspaceTransition(workspaceTransitionIdentity.current, workspaceId);
-      if (!transition.changed) {
-        return;
-      }
-      workspaceTransitionIdentity.current = transition.identity;
-      // Fence late non-abortable catalog/status responses before clearing the
-      // projections they would otherwise be able to repopulate.
-      githubRefreshId.current += 1;
-      mcpRefreshId.current += 1;
-      pendingCreateAttempt.current = null;
-      resetSessionView();
-      setInspectorOpen(false);
-      setManualRepos([]);
-      setManualReposOpen(false);
-      setNextRepoId(1);
-      setSelectedRepoIds(new Set());
-      setSelectedRepoRefs({});
-      setSelectedCapabilityToolIds(new Set());
-      previousCapabilityToolIds.current = new Set();
-      setGithubAppOpen(false);
-      setGithubOrg("");
-      setBusy(false);
-      setRepoBusy(false);
-      setGithubAppBusy(false);
-      resetWorkspaceIntegrations();
-      setWorkspaceStateOwnerId(workspaceId);
-    },
-    [resetSessionView, resetWorkspaceIntegrations],
-  );
 
   // Context actions keep one identity while reading the newest committed state
   // through the callback ref. This prevents unrelated provider renders

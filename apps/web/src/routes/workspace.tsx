@@ -158,7 +158,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     setSelectedRepoRefs({});
     void refreshGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
-      if (!isAbortError(error)) {
+      if (!abortController.signal.aborted && !isAbortError(error)) {
         toast.error("Failed to load workspace MCP tools", { description: String(error) });
       }
     });
