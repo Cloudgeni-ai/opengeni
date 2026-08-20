@@ -2,7 +2,7 @@
 // on the docker sandbox backend through the running dev stack (API :8001 +
 // worker + docker box) via the public SDK seed harness, then inspects the
 // persisted capture: the DB rows (postgres, superuser bypasses RLS) and the
-// manifest/after-image blobs (minio). This proves the DISK-PROBE thesis — that
+// manifest/after-image blobs (object storage). This proves the DISK-PROBE thesis — that
 // files an agent mutates via bash (which emit no fs events) appear in the
 // capture because it re-probes the live box at turn end.
 //
@@ -11,11 +11,15 @@
 //   • API on OPENGENI_SEED_BASE_URL (default :8001), worker polling, docker
 //     backend, `opengeni-sandbox-pin` alive, migration 0045 applied.
 //   • OPENGENI_DATABASE_URL + OPENGENI_OBJECT_STORAGE_* pointing at the SAME
-//     postgres/minio the worker writes to (host: DB :15542, minio :19110).
+//     postgres/object-storage the worker writes to (host: DB :15542, S3 :19110).
 // Run: bun test test/integration/workspace-capture.integration.ts
 import { afterAll, describe, expect, test } from "bun:test";
 import { createObjectStorage } from "../../packages/storage/src/index";
-import { testSettings } from "@opengeni/testing";
+import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
+  testSettings,
+} from "@opengeni/testing";
 import { WorkspaceCaptureManifest } from "@opengeni/contracts";
 import {
   computeWorkspaceCaptureGcPlan,
@@ -35,7 +39,8 @@ import {
 
 const DB_URL =
   process.env.OPENGENI_DATABASE_URL ?? "postgres://opengeni:opengeni@127.0.0.1:15542/opengeni";
-const MINIO_ENDPOINT = process.env.OPENGENI_OBJECT_STORAGE_ENDPOINT ?? "http://127.0.0.1:19110";
+const OBJECT_STORAGE_ENDPOINT =
+  process.env.OPENGENI_OBJECT_STORAGE_ENDPOINT ?? "http://127.0.0.1:19110";
 const TURN_TIMEOUT = 220_000;
 
 const dbClient = createDb(DB_URL);
@@ -43,10 +48,12 @@ const db = dbClient.db;
 const storage = createObjectStorage(
   testSettings({
     objectStorageBackend: "s3-compatible",
-    objectStorageEndpoint: MINIO_ENDPOINT,
+    objectStorageEndpoint: OBJECT_STORAGE_ENDPOINT,
     objectStorageBucket: "opengeni-files",
-    objectStorageAccessKeyId: "minioadmin",
-    objectStorageSecretAccessKey: "minioadmin",
+    objectStorageAccessKeyId:
+      process.env.OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID ?? GARAGE_FIXTURE_ACCESS_KEY_ID,
+    objectStorageSecretAccessKey:
+      process.env.OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY ?? GARAGE_FIXTURE_SECRET_ACCESS_KEY,
     objectStorageForcePathStyle: true,
   }),
 )!;

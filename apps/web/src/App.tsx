@@ -38,6 +38,8 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
+type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
+
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
 const LazyCapabilitiesRoute = lazyRouteComponent(
@@ -337,9 +339,18 @@ const workspaceOrganizationRoute = createRoute({
   path: "organization",
   // `?checkout=success|cancelled` arrives via the /billing Stripe-return
   // redirect so the organization page can confirm the top-up.
-  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { checkout?: CheckoutOutcome; section?: OrganizationAdminSection } => {
     const checkout = parseCheckoutOutcome(search);
-    return checkout ? { checkout } : {};
+    const section =
+      search.section === "overview" ||
+      search.section === "people" ||
+      search.section === "retention" ||
+      search.section === "billing"
+        ? search.section
+        : undefined;
+    return { ...(checkout ? { checkout } : {}), ...(section ? { section } : {}) };
   },
   component: Organization,
 });
@@ -578,8 +589,8 @@ function EditableArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout } = workspaceOrganizationRoute.useSearch();
-  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} />;
+  const { checkout, section } = workspaceOrganizationRoute.useSearch();
+  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} section={section} />;
 }
 
 function AccountRedirect() {

@@ -1233,7 +1233,7 @@ export function channelAOperationFailureDiagnostic(
       errorCode: "sandbox_channel_a_lifecycle_conflict",
     };
   }
-  if (error instanceof ChannelAUnavailableError) {
+  if (error instanceof ChannelAUnavailableError || error instanceof BrowserControlTransportError) {
     return {
       reason: "provider_unavailable",
       status: 503,

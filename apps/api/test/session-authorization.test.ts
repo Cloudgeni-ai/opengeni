@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionAuthorizationOperation } from "@opengeni/contracts";
+import { SessionTenancyConflictError, SessionTenancyNotActivatedError } from "@opengeni/db";
+import { SessionTenancyPersistenceOutcomeUnknownError } from "@opengeni/core";
+import { ApiHttpError } from "../src/http/api-error";
 import {
   goalProposalMatchesExpectedRevision,
   sessionAuthorizationOperationForHttp,
+  sessionTenancyHttpError,
 } from "../src/routes/sessions";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
@@ -14,6 +18,8 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["PUT", "/pin", "session.pin.write"],
   ["PUT", "/attention", "session.attention.write"],
   ["PUT", "/archive", "session.archive.write"],
+  ["PUT", "/visibility", "session.visibility.write"],
+  ["POST", "/forks", "session.fork.create"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
   ["GET", "/lineage", "session.lineage.read"],
@@ -83,6 +89,32 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
 ];
 
 describe("session HTTP authorization classification", () => {
+  test("maps stable tenancy conflicts and unknown outcomes into public error envelopes", () => {
+    const blocked = sessionTenancyHttpError(
+      new SessionTenancyConflictError("not_quiescent", "shared_sandbox_group"),
+    );
+    expect(blocked).toBeInstanceOf(ApiHttpError);
+    expect(blocked).toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: false,
+      details: { reason: "not_quiescent", blocker: "shared_sandbox_group" },
+    });
+    expect(sessionTenancyHttpError(new SessionTenancyNotActivatedError())).toMatchObject({
+      status: 409,
+      code: "conflict",
+      details: { reason: "not_activated" },
+    });
+    expect(
+      sessionTenancyHttpError(new SessionTenancyPersistenceOutcomeUnknownError()),
+    ).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: true,
+      outcomeUnknown: true,
+    });
+  });
+
   test("an old proposal cannot be applied using the newer current revision as its fence", () => {
     expect(goalProposalMatchesExpectedRevision({ baseObjectiveRevision: 2 }, 3)).toBe(false);
     expect(goalProposalMatchesExpectedRevision({ baseObjectiveRevision: 2 }, 2)).toBe(true);

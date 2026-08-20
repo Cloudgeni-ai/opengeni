@@ -9,7 +9,7 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import { isSearchableMcpFunctionTool, searchMcpTools, searchToolPool } from "./codex-tool-search";
+import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
@@ -17,6 +17,23 @@ export type LazyToolTransport = "codex_native" | "openai_native" | "generic_disp
 
 const TOOL_SEARCH_NAME = "tool_search";
 const TOOL_INVOKE_NAME = "tool_invoke";
+/**
+ * Base runtime tools that stay in the first request on every transport. These
+ * have no MCP connection to prepare, so "eager" here means schema visibility
+ * only, not a first-request preparation barrier. Literal rather than
+ * HUMAN_INPUT_TOOL_NAME: run-events imports this module.
+ */
+const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "exec_command",
+  "write_stdin",
+  "view_image",
+  // A plain function tool on Chat Completions; Responses uses type apply_patch.
+  "apply_patch",
+  // The SDK skills capability prints the skill index in the instructions and
+  // mandates this call before any SKILL.md read.
+  "load_skill",
+  "request_human_input",
+]);
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
@@ -262,18 +279,19 @@ export class LazyToolRuntime {
     for (const tool of tools) {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
+      if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
+      // Origin, not transport: deferred MCP plus every non-MCP function tool
+      // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
-        this.transport === "generic_dispatch"
-          ? !isSearchableMcpFunctionTool(tool, this.mcpServerIds) ||
-            isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds)
-          : isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds);
+        isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds) ||
+        !isSearchableMcpFunctionTool(tool, this.mcpServerIds);
       if (lazy) {
         // After the preparation fence, deferred tools stay off the Agent
         // list. Search teaches names; a remembered raw name binds later
         // through resolveMissingFunctionTool. Do not use the SDK's
-        // deferLoading gate — installLazyToolRuntime clears it. Generic
-        // dispatch also hides first-party Browser/Computer schemas behind
-        // the stable search/invoke pair even without an MCP server.
+        // deferLoading gate — installLazyToolRuntime clears it. Browser,
+        // Computer, and image/video schemas hide behind search on every
+        // transport; the base set stays in the first request.
         tool.deferLoading = false;
         this.searchableToolNames.add(tool.name);
       }
@@ -321,15 +339,12 @@ export class LazyToolRuntime {
     return wrapped;
   }
 
+  private searchableTools(tools: readonly Tool[]): Tool[] {
+    return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
+  }
+
   search(rawArguments: unknown): Tool[] {
-    return this.transport === "generic_dispatch"
-      ? searchToolPool(
-          this.currentTools.filter(
-            (tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name),
-          ),
-          rawArguments,
-        )
-      : searchMcpTools(this.currentTools, rawArguments, this.deferredMcpServerIds);
+    return searchToolPool(this.searchableTools(this.currentTools), rawArguments);
   }
 
   genericSearchOutput(rawArguments: unknown): string {
@@ -358,10 +373,11 @@ export class LazyToolRuntime {
         const tools = args.agent
           ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
           : (args.availableTools ?? []);
-        // Eager MCP tools are already direct configured tools on this request.
-        // Search may disclose only the exact deferred server set; returning an
-        // eager tool again would create a second routed identity for one tool.
-        return searchMcpTools(tools, args.toolCall?.arguments, this.deferredMcpServerIds);
+        // Eager MCP and the always-visible base set are already direct
+        // configured tools on this request. Search may disclose only the
+        // lazy set; returning an eager tool again would create a second
+        // routed identity for one tool.
+        return searchToolPool(this.searchableTools(tools), args.toolCall?.arguments);
       }) as never,
     }) as unknown as Tool;
   }
@@ -419,8 +435,9 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
  * Install native OpenAI/Azure or generic progressive disclosure on an agent.
  * Deferred schemas stay off the first-request tool block. A remembered raw
  * name binds through resolveMissingFunctionTool after the catalog is ready.
- * Generic dispatch still projects every function schema behind its stable
- * search/invoke pair on the wire.
+ * Classification is origin, not transport: the always-visible base set and
+ * eager MCP tools stay in the first request; everything else is searchable.
+ * Generic dispatch adds stable ordinary tool_search/tool_invoke schemas.
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,

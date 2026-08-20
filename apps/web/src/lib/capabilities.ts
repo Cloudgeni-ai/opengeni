@@ -379,11 +379,13 @@ export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem
 
 /**
  * Curation facts written by the catalog import from `data/catalog/curated.json`.
- * Both are checkable claims, not a security review: `official` means the
- * provider publishes the server on its own domain; `featured` means we chose
- * to promote it. Neither must ever be rendered as "reviewed" or "verified".
+ * `curated` records that a row has a reviewed presentation overlay; `featured`
+ * means we chose to promote it. `official` is the separate evidence-backed
+ * claim that the provider publishes the server on its own domain. None is a
+ * security review and must never be rendered as "reviewed" or "verified".
  */
 export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">): {
+  curated: boolean;
   featured: boolean;
   official: boolean;
 } {
@@ -391,6 +393,7 @@ export function capabilityCuration(item: Pick<CapabilityCatalogItem, "metadata">
   const record =
     raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
   return {
+    curated: record?.curated === true,
     featured: record?.featured === true,
     official: record?.official === true,
   };

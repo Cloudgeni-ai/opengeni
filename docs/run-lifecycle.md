@@ -403,8 +403,11 @@ five-hour reset semantics, and rollout fence are canonical in
 SuperGrok/xAI uses the same provider-tagged durable same-turn wait protocol but
 with its explicit workspace-or-user authority pool. A definitive typed or
 marked 401, 403, or 429 may quarantine only the exact leased credential while
-the attempt is atomically closed and preserved; ambiguous 5xx, partial streams,
-and unrelated errors never walk the pool. See
+the attempt is atomically closed and preserved. HTTP 200 SSE terminals match
+that 429 path only for known overload/rate-limit codes or the observed Grok
+sentence "The model is currently at capacity due to high demand..."; isolated
+"high demand"/"overloaded" wording is not enough. Ambiguous 5xx, partial
+streams, and unrelated errors never walk the pool. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
 When every allocator-enabled Codex credential is unavailable, this recovery
@@ -1160,6 +1163,17 @@ audit reads may return it, so it is never a secret boundary.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
+   Model-visible tool results stay at or below 1 MiB. Overflow is a successful
+   tool: exact serialized bytes become a workspace File, a current-turn copy
+   lands at `/workspace/tool-results/<operationId>.json` when compute is
+   active, and history/events keep the compact `{ sandboxPath, fileId,
+   byteSize, mediaType }` receipt. Later turns do not rematerialize; retrieve
+   old bytes through Files MCP plus shell. Spill write failure is a bounded
+   `result_too_large` error and never puts the huge payload in history.
+   Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
+   `session_attempt_codemode_calls` is unchanged. See
+   `packages/runtime/src/tool-result-spill.ts` and
+   `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    User attachments use a separate one-turn delivery rule. The accepted user
    row stores private stable file references beside the message. Only that
    triggering turn resolves metadata, optionally inlines supported bytes, and
@@ -1368,6 +1382,12 @@ strips provider item ids from every model-call input by default
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
 self-contained and reasoning continuity does not hinge on provider storage.
+New history rows omit Responses output-only item `status` at persist
+(`canonicalizePersistedHistoryItem`); pairing is `call_id`. The Codex
+subscription fetch still strips leftover item `status` on the wire for
+already-stored SuperGrok rows and mid-turn SDK items because the
+ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
+strip is request-local and does not rewrite stored history.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
 the exact active reasoning/compaction row IDs and the current turn's latest
@@ -1451,6 +1471,7 @@ persists only `started`, `headers`, `first_event`, and terminal checkpoints—no
 every streamed event—and the terminal checkpoint carries bounded event-count,
 last-event-type, last-progress-duration, and silence facts. An HTTP 200 SSE
 error/failed/incomplete terminal is not forwarded into the Agents SDK; the
-transport throws the bounded exact provider message and `turn.failed` stores
-that diagnostic. Lifecycle audit stays metadata-only; worker stdout stays
-sanitized.
+transport throws the bounded exact provider message. Rate-limit/capacity
+refusals are marked 429 and enter the durable same-turn waiter; other
+terminals persist that diagnostic on `turn.failed`. Lifecycle audit stays
+metadata-only; worker stdout stays sanitized.

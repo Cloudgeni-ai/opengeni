@@ -1632,6 +1632,47 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
+  test("production modal+desktop requires a digest-pinned image ref", () => {
+    const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("digest-pinned");
+    expect(
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_IMAGE_REF: digestRef,
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ).modalImageRef,
+    ).toBe(digestRef);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "local",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
+  });
+
   test("parses and validates an immutable Modal image ID", () => {
     const imageId = "im-1234567890123456789012";
     expect(

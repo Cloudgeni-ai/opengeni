@@ -450,13 +450,17 @@ export function useSlackIntegration({
       toast.error("Reconnect Slack to allow reading reactions before turning this on");
       return false;
     }
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
     setReactionBusy(true);
     try {
       const updated = await context.updateWorkspaceSettings(workspaceId, {
         slackReactionSummon: { ...next, emoji: OPENGENI_REACTION_EMOJI },
       });
-      if (updated) toast.success("Slack reaction shortcut saved");
-      return updated !== null;
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success("Slack reaction shortcut saved");
+      }
+      return updated !== null && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition);
     } finally {
       setReactionBusy(false);
     }

@@ -40,6 +40,13 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import {
+  assertConnectionOwnershipAllowedForPrincipal,
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+} from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
 import {
   DEFAULT_OAUTH_PROFILE,
@@ -79,6 +86,12 @@ export type OAuthStartContext = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /**
+   * False for every principal that cannot own a personal Connection (API keys,
+   * the configured key, services, agent attempts). Resolved by the route from
+   * the live authenticated principal, never inferred here.
+   */
+  personalOwnershipAllowed: boolean;
   requestUrl: string;
   payload: OAuthStartRequest;
 };
@@ -126,6 +139,8 @@ type OAuthStatePayload = {
   workspaceId: string;
   subjectId: string;
   ownership: ConnectionOwnership;
+  /** Signed proof that a live managed human authorized personal ownership. */
+  personalOwnerVerified: boolean;
   providerDomain: string;
   mcpUrl: string;
   resource: string;
@@ -364,6 +379,13 @@ async function startMcpOAuthWithinDeadline(
   // A reconnect of a legacy row must not renew an ownership the profile no
   // longer allows (e.g. shared authority over one human's hosted-Slack grant).
   assertOwnershipAllowed(profile, ownership);
+  // Only a managed human can own a personal Connection: personal-authority
+  // execution resolves through a delegation snapshot frozen on a human's causal
+  // turn, and migration 0256 can mint the `user` authority scope only for a
+  // subject that holds an active organization membership. For a personal-only
+  // profile (Gmail, hosted Slack MCP) this refuses the whole flow rather than
+  // silently downgrading to the workspace ownership those profiles forbid.
+  assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
   assertDiscoveredAuthorizationServer(settings, discovery.as, profile, providerDomain);
@@ -396,6 +418,9 @@ async function startMcpOAuthWithinDeadline(
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
     ownership,
+    // Signed record that a live principal was checked; the callback has no
+    // principal of its own and enforces exactly this decision.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
     providerDomain,
     mcpUrl,
     resource,
@@ -580,6 +605,18 @@ async function completeMcpOAuthCallbackWithinDeadline(
     });
     if (builtInCallbackProfile) {
       assertOwnershipAllowed(builtInCallbackProfile, state.ownership);
+    }
+    // Only a managed human may own a personal Connection. This callback has no
+    // live principal, so it enforces the signed start-time decision; a state
+    // minted before that fence existed carries no claim and is refused, which
+    // closes the in-flight window across a rolling deploy. The legacy
+    // `?? "personal"` decode above therefore cannot land a machine-owned row.
+    if (!personalOwnerStateAccepted(state)) {
+      throw new OAuthCallbackStageError(
+        "state_verify",
+        "state_invalid",
+        new HTTPException(422, { message: PERSONAL_CONNECTION_PRINCIPAL_MESSAGE }),
+      );
     }
     if (!input.code) {
       return {
@@ -1386,6 +1423,8 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     // OAuth states minted before ownership was explicit were always personal.
     // Preserve that meaning for in-flight reconnects during a rolling deploy.
     ownership: connectionOwnership(payload.ownership) ?? "personal",
+    // Absent on a legacy state, which therefore cannot land a personal owner.
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
     resource,

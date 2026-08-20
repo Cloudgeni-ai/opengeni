@@ -27,6 +27,7 @@ jobs:
   verify:
     name: Verify accepted historical release train
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -73,9 +74,9 @@ jobs:
           }
           [ "$(git rev-parse HEAD)" = "$CONTROLLER_SHA" ] || exit 1
           [ "$(git -C .release/source rev-parse HEAD)" = "$SOURCE_SHA" ] || exit 1
-          git -C .release/source fetch --no-tags origin main
-          git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "accepted source is no longer an ancestor of current main" >&2
+          git -C .release/source fetch --no-tags origin production
+          git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "accepted source is no longer an ancestor of current production; promote main first" >&2
             exit 1
           }
           bun scripts/verify-release-provenance.ts \

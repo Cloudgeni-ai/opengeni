@@ -47,6 +47,44 @@ target workspace must belong to the same organization and remain accessible to
 the owner. `workspace_shared` requires an explicit durable shared-output
 acknowledgement. Revocation is immediate and advances grant generation.
 
+Migration `0305_personal_resource_grant_management.sql` replaces the ambient
+owner-management seam with the activated product contract. Only a canonical
+managed-cookie context for the exact subject may use it; API keys, delegated or
+service principals, agents, and account/organization administrators receive no
+ambient personal-resource authority. Lists are deterministic bounded keyset
+pages for one exact resource kind, include the opaque resource/origin identity,
+and return only grants targeting the route workspace. Resource kind derives the
+only accepted action (`connection.use`, `document.read`, `variable_set.use`,
+`rig.use`, or `connected_machine.use`) and its exact product permission gate.
+
+Public issuance supports `session` and `always`. Session grants are authorized
+through the ordinary session authorization seam after all target-free
+principal, permission, and activation gates, and require the caller's expected
+authority epoch; missing and inaccessible targets share the ordinary
+non-enumerating session denial. Always grants remain unbound and require
+session-create authority. Shared context requires the durable acknowledgement.
+The server returns the complete credential-free `UserResourceDelegation`,
+including organization, authority generation, grant generation, and session
+epoch. Revocation proves the grant's route workspace but intentionally remains
+available after a resource permission is removed because it only narrows
+authority. Expiry is not authorable on this public surface; historical active
+rows already past expiry are normalized to `expired` and no longer block exact
+reissuance, and every projected timestamp is RFC3339 UTC. Historical active
+grants whose action is arbitrary or belongs to a different resource kind are
+deterministically revoked; invalid terminal history remains durable but is
+omitted from typed management lists rather than rewritten or misrepresented.
+The migration performs those backfills as the non-bypass table owner inside one
+transactional `NO FORCE`/`FORCE` window over both the grant table and its
+authority join, then restores FORCE RLS. Runtime list/issue/revoke uses a narrow
+lifecycle policy marker inside schema-local, PUBLIC-revoked SECURITY DEFINER
+functions with `pg_catalog`, the target schema, and `pg_temp` as their exact
+search path; the app role retains zero direct table DML. The Connection-specific
+REST wrappers converge on this lifecycle, including permission-independent
+revocation after baseline route-workspace access is proved.
+Standalone `once`, custom expiry, new-session atomic attachment, cross-workspace
+grant/fork UX, schedules, MCP/agent administration, and web UI remain outside
+this backend prerequisite.
+
 For direct and scheduled personal Variable Set/Rig use, personal-workspace and
 origin-workspace columns are provenance/lifecycle facts only. Authorization is
 the active server-derived owner organization membership, same organization,
@@ -128,6 +166,211 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### Session ownership at the mint (migration 0302)
+
+Because that workspace has no membership row, migration 0225's session write
+fence could never attribute a session created there and minted a NULL owner
+instead. Migration `0302_personal_workspace_session_ownership.sql` repairs it:
+the fence now accepts an active membership's own `personal_workspace_id`
+pointer as an alternative to the `workspace_memberships` row, the same
+stated-authority shape 0258 already uses for personal Documents. It is
+authority read from the authority row, not inference from `created_by`, a
+default workspace, or current access; the ordinary shared-workspace path is
+unchanged, and the pointer is 1:1 through
+`organization_memberships_personal_workspace_idx`. The disjunct is restricted
+to `user:%` subjects, matching the lifecycle gate in 0219/0263. A
+subject-created session that still resolves to no owner inside an active
+membership's personal workspace raises SQLSTATE `55000` instead of silently
+writing NULL; service, API-key, unanchored, and suspended-member sessions
+remain legitimately ownerless. Rows already durable before 0302 remain the
+existing `bun run db:backfill-session-ownership` seam's job.
+
+### `getWorkspaceGrant` is not an authority answer
+
+`getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
+`workspace_memberships` join. Because a managed personal workspace deliberately
+has no row there, it returns `null` for the one human who always belongs. Any
+seam that re-derives "does this subject still hold workspace authority here"
+from that join denies the owner inside their own private workspace.
+
+`subjectHasLiveWorkspaceAuthorityInScope`
+(`packages/db/src/workspace-authority.ts`) models both halves - the membership
+row whose owning organization membership is active, and the active
+organization membership whose `personal_workspace_id` pointer is exactly this
+workspace. `namedSubjectHasLiveWorkspaceAuthority` (`packages/db/src/index.ts`)
+is the exported scope-setting wrapper over that canonical implementation.
+Predicate-style authority probes should use the appropriate variant rather
+than re-deriving the rule.
+
+**It is an oracle, not an authorization. Its safety is caller discipline, and
+every call site must establish that discipline locally.** The name says
+"named subject" because that is exactly what it answers about: whatever subject
+the caller hands it.
+
+It is tempting to believe otherwise, and an earlier revision of this document
+claimed it. The claim was: the pointer branch reads
+`list_self_organization_memberships`, a SECURITY DEFINER seam that raises
+`42501` unless the requested subject equals `opengeni.subject_id`, so the
+function must be self-limiting. **That is false, and it is worth understanding
+why, because the shape recurs.** The seam's guard compares its argument to a GUC
+that the caller sets - `namedSubjectHasLiveWorkspaceAuthority` sets it from its
+own `subjectId` argument one statement earlier, through an ordinary `set_config`
+available to the plain `opengeni_app` role. The predicate therefore only checks
+that the caller supplied the same value twice. It constrains the caller to be
+self-consistent; it does not constrain the caller to be anyone.
+
+Proven against real Postgres as `opengeni_app` with RLS engaged, from a process
+that never authenticated as anyone: naming a victim returned that victim's full
+organization-membership row including the private `personalWorkspaceId`, and
+`namedSubjectHasLiveWorkspaceAuthority` returned `true` for the victim's personal
+workspace. The same self-set-GUC pattern makes
+`list_self_organization_memberships` a general read primitive for any
+application-role connection;
+`ensureManagedAccessForUserWithOrganizationMemberships` uses it the same way.
+The SECURITY DEFINER wrapper is not buying the isolation its name implies. Do
+not treat any `*_self_*` definer routine here as a caller check without
+re-reading its guard.
+
+So a call site is correct only if it has **independently** proven the caller is
+entitled to ask about that exact subject. The two entitled shapes in the
+codebase today:
+
+- the subject is the authenticated request principal's own subject, taken from
+  an already-authorized grant - and **not** a delegated/bearer grant, whose
+  `subjectId` and `workspaceId` are unvalidated signed-token payload built by
+  `delegatedAccessContext` with no database row behind them; or
+- the subject is the frozen `ownerSubjectId` of a delegation already persisted
+  for the workspace the caller is already authorized in.
+
+Anything else - a subject that was looked up, inferred, or supplied by a caller
+- is a vulnerability. Prefer plumbing the caller's own identity to the call site
+over widening what the oracle is asked.
+
+The in-scope variant refuses to set the subject GUC, making the
+arbitrary-subject oracle shape unrepresentable at its session-list, pin, and
+composer-draft call sites. It keeps the authority read in the caller's
+transaction and checks that the requested subject matches the applied scope.
+That check is a consistency tripwire, not an authorization: the application
+role can set the scope itself. The actual owner exception at those session
+surfaces is the positive `canonicalManagedHumanSession` provenance stamp, set
+only by the access branch that verified a Better Auth cookie. An absent stamp
+fails closed, so delegated/bearer principals, API keys, service initiators,
+same-organization co-members, and account or organization administrators do
+not receive personal-workspace access by exclusion-list inference.
+
+For the same reason, "make
+`list_self_organization_memberships` read the GUC instead of taking the subject
+as a parameter" is **not** the structural fix it appears to be: reading the GUC
+rather than a parameter changes nothing about *who may set that GUC*.
+`setSubjectRlsContext` is an ordinary `set_config` that accepts any string from
+any `opengeni_app` connection, so the caller still names whoever it likes - the
+name just arrives by a different route. Reaching for that design because it
+"feels" safer is the exact reasoning error this section exists to correct.
+
+The genuine structural fix is to stop letting the application role set
+`opengeni.subject_id` freely at all - a definer-only setter, or an attested
+subject established once at authentication and immutable thereafter. That is a
+much larger conversation than either variant, and nothing short of it converts
+this oracle into an authorization.
+
+> **Convergence note.** The session-surface prerequisite introduced the
+> scope-derived `subjectHasLiveWorkspaceAuthorityInScope` and repaired
+> `listSessionsForSubject`, `setSessionPin`, and the composer draft. The two
+> resolver variants live side by side on purpose: several connection callers
+> legitimately ask about a frozen delegation owner rather than the caller and
+> can only use the named-subject oracle.
+>
+> The naming is deliberate and worth preserving. The **dangerous** function
+> carries the qualifier (`namedSubjectHasLiveWorkspaceAuthority` - it answers
+> about a *named* subject) and the safer one reads as scoped. Do not "simplify"
+> by giving the oracle the shorter name: at the point of use the name is the
+> most visible warning either function has.
+>
+> **The subject-GUC restore under the mechanical traps below is load-bearing and
+> must survive any refactor of the wrapper.** A wrapper that sets
+> `opengeni.subject_id` and returns without restoring it reopens the leak
+> silently - no failing test, no conflict marker. Anything that rewrites the
+> wrapper must re-prove the restore with the test that pins it.
+>
+> The session surface's positive owner-exception provenance is a better shape
+> than this path's delegated blocklist. Converging connection authority on that
+> shape is a tracked follow-up and is deliberately not hidden in this merge
+> resolution.
+
+The personal-connection authority path uses the oracle at every hop -
+`freezePersonalConnectionDelegations` and the `*ForGrant` connection resolvers
+in `packages/core/src/domain/personal-connection-delegations.ts`, the per-turn
+`ownerHasWorkspaceMembership` port and
+`resolveGoogleDrivePublicationTarget` in `apps/worker/src/activities/` - and the
+stream-token mint recheck in `apps/api/src/sandbox/viewer.ts`. Do not
+reintroduce a `getWorkspaceGrant` boolean in those positions, and do not widen
+`getWorkspaceGrant` itself: it is also the fallback inside
+`accessGrantAuthorization`, where a delegated bearer or API-key principal would
+inherit any widening. `getWorkspaceGrant` and the oracle answer genuinely
+different questions - a *grant with permissions* for a request principal versus
+a *boolean about a named subject* - and are not interchangeable at an
+authorization site.
+
+Two mechanical traps on this path, both now closed and both worth not
+reopening:
+
+- The probe sets `opengeni.subject_id`, `withRlsContext` restores only
+  `account_id`/`workspace_id`, and `SET LOCAL` survives savepoint release - so
+  on a transaction handle the probed subject leaked into the rest of the
+  caller's transaction. `namedSubjectHasLiveWorkspaceAuthority` now restores the
+  prior subject itself.
+- The account and the workspace passed to a probe must come from one object.
+  Scoping RLS by a grant's account while reading memberships for a different
+  object's workspace silently filters every row out and drops authority.
+- `personalConnectionDelegationSourceForGrant` checks the `{sessionId, turnId}`
+  turn branch **above** its delegated filter, which is safe only because
+  `DelegatedAccessTokenPayload` forbids a `human_session` principal from
+  carrying attempt claims. That coupling is load-bearing; it is pinned by
+  `packages/contracts/test/delegated-access-token-attempt-claims.test.ts`.
+  Relaxing the refinement means moving the filter above the turn branch.
+
+**Delegated grants carry no personal-connection authority anywhere.** The
+delegated filter collapses the source before the workspace is consulted, so a
+delegated bearer freezes zero personal connections in ordinary **shared**
+workspaces as well as personal ones. That is a deliberate widening of the
+denial, not a side effect of the personal-workspace fix: a delegated payload's
+`subjectId` is signed token content with no row behind it, so letting it borrow
+someone's private provider credentials in a shared workspace is the same defect
+as letting it reach their personal workspace. Operator-facing consequences are
+in [`docs/embedding.md`](embedding.md).
+
+The session list, pin, and composer-draft seams are repaired by the landed
+session-surface prerequisite. Other seams still on the bare join, and therefore
+still wrong for a personal workspace, are known and deliberately out of scope
+of this connection change. They deny the owner rather than leaking to anyone
+else, so each is a broken feature, not an authority hole:
+
+- `listWorkspaceMembers` / `listWorkspacesForSubject`
+  (`packages/db/src/index.ts`) - empty roster; the workspace-list fallback is
+  latent only because `managedPersonalWorkspacePermissions` carries
+  `workspace:read`.
+- `withCodexAppsRequestAuthorization`, `designateCodexAppsCredential`,
+  `clearCodexAppsCredential` (`packages/db/src/index.ts`) and
+  `resolveCodexAppsCredentialIdForRun`
+  (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
+  execution.
+- The OAuth-callback grant rechecks over the signed `state.subjectId` in
+  `apps/api/src/integrations/{oauth-client,provider-oauth,google-drive,atlassian,fiken,social-oauth}.ts`
+  and `apps/api/src/routes/connections.ts` - connecting a provider *from* a
+  personal workspace fails at callback even though `connections:write` is in
+  the personal permission set.
+- SQL seams without the personal-workspace disjunct: the xAI subscription
+  authority views/functions in 0234. Migration 0303 repairs
+  `transition_session_visibility` and `fork_session_content` with the exact
+  active-membership personal-workspace-or-ordinary-membership disjunction. The
+  API/core/SDK caller is now active for explicitly activated organizations;
+  the web console is its managed-owner caller, while worker, MCP, runtime, and
+  React package callers remain future work. 0225's
+  `guard_session_authority_write` was the same defect and is repaired by
+  migration 0302 (described above); do not add these back to this list. (Many
+  other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
+  disjunct.)
+
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
 capability with a fixed schema-plus-`pg_catalog` search path, PUBLIC execution
@@ -185,6 +428,29 @@ The managed-human API surface is:
 These routes require a direct managed-human cookie session; API keys and
 delegated bearer requests are rejected. Provider email delivery and invitations
 for people who have not registered remain separate integrations.
+
+The managed web console exposes this lifecycle as a bounded organization
+administration surface with separate Overview, People & invitations, Retention,
+and Billing sections. It lists the organization roster and invitation state,
+supports the role and lifecycle transitions authorized above, accepts incoming
+invitations, and gives owners a version-fenced 30–90 day retention editor while
+administrators receive the read-only policy. The browser binds every read and
+mutation result to the exact managed principal generation, organization, and
+route workspace; reads and mutations use independent operation lanes so a
+refresh cannot supersede an accepted mutation. An organization transition or
+keyed unmount invalidates both lanes before a delayed result can update state,
+navigate, announce success, or revalidate authority. A conflict refreshes
+authoritative state and requires a new human action rather than replaying the
+mutation.
+
+The roster intentionally uses a stable masked subject identifier because the
+lifecycle API does not expose a safe profile name or email. It never links or
+derives identity from another member's `personalWorkspaceId`, and organization
+administration does not grant access to that member's Personal workspace,
+private sessions, credentials, Connections, or personal resources. Workspace
+access remains a separately labelled administration surface. Provider email
+delivery and invitations for unregistered recipients remain non-goals; the web
+surface accurately requires an already-registered user.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
@@ -326,8 +592,7 @@ wrapped `organization_membership_command_0263`, and the 0275
 (`workspace_inference_controls FOR SHARE` -> `workspaces FOR KEY SHARE`) only
 afterwards. An ordinary workspace writer is forced into the opposite order and
 cannot avoid it: it locks its own `workspaces` row first - AGENTS.md's canonical
-event-write prefix, and `transition_session_visibility` (0225) takes that row
-`FOR UPDATE` - and only then reaches `managed_accounts` *implicitly*, through
+event-write prefix - and only then reaches `managed_accounts` *implicitly*, through
 the account foreign-key check of a row it inserts. `sessions`,
 `session_events`, `session_turns`, `session_goals`, and
 `session_system_updates` all reference `managed_accounts`, and an FK check takes
@@ -488,12 +753,13 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
-## Session-visibility and fork surfaces: shipped, deliberately inert
+## Session-visibility and private-fork public activation
 
-`0225_session_visibility_fork_activation.sql` is rolling, and it is the one
-place in this document where the schema is ahead of the product. Read this
-section before concluding either that session visibility "does not exist yet"
-or that it is a usable feature. Both are wrong.
+`0225_session_visibility_fork_activation.sql` shipped the first database
+surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
+mutation contract. The database prerequisite and first public caller are now
+both present, but the caller remains inert for every organization without its
+exact version-1 activation receipt.
 
 **Active today.** These parts of 0225 run in production on every deployment:
 
@@ -514,48 +780,89 @@ or that it is a usable feature. Both are wrong.
 - The `authority_change` interruption kind and the runtime `EXECUTE` grants on
   both lifecycle functions.
 
-**Inert today.** `transition_session_visibility` and `fork_session_content`
-exist, are SECURITY DEFINER, are granted to the runtime role, are listed in
+Migration 0304 aligns `session_private_actor_visible` with the same exact
+personal-workspace-or-ordinary-membership disjunction. Without that repair, a
+valid personal-workspace transition to private committed successfully and then
+hid the session and its event from its owner because personal workspaces never
+carry a `workspace_memberships` row.
+
+**Mutation-active only after an explicit per-organization cutover.**
+`transition_session_visibility` and `fork_session_content` exist, are SECURITY
+DEFINER, are granted to the runtime role, are listed in
 `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and have a first-class adapter at
-`@opengeni/db/session-tenancy`. Nothing in `apps/api`, `apps/worker`,
-`apps/web`, `@opengeni/core`, `@opengeni/runtime`, `@opengeni/sdk`, or
-`@opengeni/react` calls either one. Their only invocations are the
-`packages/db` test lane, which uses them both to prove 0225's own fences and as
-the only way to manufacture a `user_private` session for later migrations' RLS
-coverage. The matching `SessionAuthorizationOperation` literals
-`session.visibility.write` and `session.fork.create` are declared in
-`@opengeni/contracts` and authorized nowhere, and the
-`session.visibility.changed` event type has no TypeScript emitter - only the
-SQL function writes it.
+`@opengeni/db/session-tenancy`. `@opengeni/core` now owns the sole product
+adapter call, reached by `PUT .../sessions/:id/visibility` and
+`POST .../sessions/:id/forks`; `@opengeni/sdk` exposes matching methods. Both
+routes require the canonical managed-cookie owner, the exact workspace/session
+permissions, and the corresponding host authorization operation. The web
+console calls only these SDK methods after the activation-gated `tenancy`
+projection proves current ownership; worker, MCP, runtime, and the React
+package remain non-callers. The SQL function remains the sole
+writer of `session.visibility.changed`; core fetches the returned durable event
+id and sequence and performs best-effort live publication without appending a
+second event or waking a workflow.
 
-The practical consequence: **every production session is `workspace_shared`**,
-so the restrictive policy always takes its `visibility = 'workspace_shared'`
-branch and the private lane is exercised only by tests.
+Migration 0303 itself is rolling and activates no organization. The drained
+`bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
+command verifies the canonical opt-in, required migrations, zero-valued tenancy
+parity gates plus exact drainable/bounded lanes, while retaining the inventory
+as contextual evidence, before inserting one immutable
+`session_tenancy_activations` receipt. A mutation without that exact version-1
+organization receipt fails closed.
 
-**This is a decision, not an oversight.** The functions stay in place because
-dropping a shipped SECURITY DEFINER surface is its own migration risk, and
-because the db test lane depends on them. They stay unwired because a
-user-facing private toggle is not yet safe:
+0303 is also an intentional signature cutover: it removes the historical
+eight-argument transition and fork routines and installs only the corresponding
+nine-argument routines with a mandatory activation-version argument and no SQL
+default. There is no compatibility wrapper because no legacy product caller
+existed at the signature cutover, and an omitted version must fail with
+undefined-function rather than infer or bypass activation. The 0225/0289
+migration bodies remain historical checkpoints;
+anything running against the fully migrated schema, including later migration
+tests, must supply version `1` and operate under the exact durable receipt.
 
-- `session_list_snapshots` caches a paginated result as a bare `uuid[]` of
-  session ids with no foreign key to `sessions`, so it receives none of the
-  restrictive policies. A snapshot captured before a transition keeps returning
-  a now-private session id to other members until its TTL expires. This is the
-  "cache/pin stripping" item below.
-- `session_pins` *is* covered by the policy, which means a non-owner's existing
-  pin row for a newly private session becomes both invisible and undeletable to
-  them rather than being stripped.
-- `fork_session_content` copies durable history into another workspace and has
-  no destination-selection contract, permission check, or UI.
-- Owner-only grants and cancellation semantics for personal attachment to
-  shared sessions are still unbuilt.
+The activated database contract is intentionally narrow:
 
-`test/session-visibility-contract-surface.test.ts` pins this boundary: it fails
-if any product package starts naming either entry point or authorizing either
-operation. The first real caller must land together with an update to this
-section and to that test. Later migrations may replace `fork_session_content`
-only to copy newly required session columns (0289 copies typed reasoning and
-latency); they still must not wire a product caller.
+- Access is the exact disjunction of an active membership whose own
+  `personal_workspace_id` names the workspace, or an ordinary
+  `workspace_memberships` row. Names, creators, defaults, roles, and permission
+  strings are never authority.
+- A transition rejects with a typed conflict unless turns/attempts,
+  interruptions, updates, human/tool/RunState receipts, goals/capacity waits,
+  realtime, schedules, workspace writers/processes, and sandbox viewer or
+  interaction holders are all quiescent. The stale 0225 auto-cancellation
+  behavior is not ported. The nested quiescence helper is owner-internal and
+  ungranted; only the fully authorized lifecycle functions may invoke it.
+- Transition-to-private additionally requires a singleton sandbox group. A
+  proven transition advances the epoch, revokes old-epoch personal grants,
+  clears staged personal delegations, preserves 0301 cache/pin behavior, and
+  appends one event without a workflow wake.
+- The first fork contract is same-workspace and private-only. It serializes a
+  quiescent source, creates a new root and singleton group, copies the durable
+  content allowlist (including typed reasoning/latency), and copies no live
+  goal/turn, MCP, Variable Set, Rig, sandbox identity, credential, or personal
+  grant.
+- Both adapters return the exact durable event id and sequence required by a
+  later core publisher.
+
+The practical product consequence is deliberately bounded. Only an activated
+organization's canonical managed-human owner may change an otherwise quiescent
+same-workspace session between `workspace_shared` and `user_private`, or make an
+independent same-workspace private fork. API keys, delegated/service callers,
+administrators acting on another human's session, workers, MCP, runtime, React,
+and external non-cookie clients have no product control. The SDK requires an explicit idempotency key, and
+visibility changes additionally require the current public authority epoch.
+Subject-authorized session reads expose the secret-safe `tenancy` projection
+only after activation. The console renders state only when that projection is
+present. Its app-lifetime controller retains one exact operation key across
+same-target component reload and outcome-unknown/replay recovery, while exact
+principal, workspace-transition, and session changes retire old keys. A replay
+refetches current tenancy before presentation, so a superseding epoch or missing
+projection cannot be mistaken for the historical receipt. Same-workspace fork
+navigation additionally requires a fresh owned-private destination. Route and
+principal transitions make delayed browser outcomes inert.
+`test/session-visibility-contract-surface.test.ts` pins the server caller
+boundary; the web component and Chromium acceptance tests pin the browser
+boundary.
 
 ## Referential integrity
 
@@ -603,15 +910,16 @@ remains future work at this phase; old writers remain accepted. Migration 0222
 separately delivers the accepted-attempt authority snapshot and stale
 activity-write fence described in the Legacy behavior section, and migration
 0225 subsequently activates new-session owner derivation and visibility-aware
-reads while leaving visibility mutation and fork without a caller.
+reads. The later bounded API/core/SDK activation described above does not widen
+the personal-workspace exception or add another durable membership row.
 
 ### C. Membership lifecycle (0263 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
-described above are active. Provider email delivery, unregistered-recipient
-invitations, automatic scheduling of the operator command, and member-management
-UI remain deferred.
+described above are active. The bounded managed web administration surface
+described above is also active. Provider email delivery, unregistered-recipient
+invitations, and automatic scheduling of the operator command remain deferred.
 
 ### D. Backfill
 
@@ -1113,18 +1421,13 @@ security-definer lifecycle functions. Switch one subsystem at a time to
 authority ids and immutable accepted-work delegations. Accepted-attempt epoch
 fencing is delivered by migration 0222.
 
-Migration 0225 then delivered the database half: the owner-derivation and
-direct-write fence trigger, visibility-aware read authorization, and the
-`transition_session_visibility` / `fork_session_content` lifecycle functions.
-Those two functions are shipped with runtime grants but have no caller outside
-the `packages/db` test lane, so no production session leaves
-`workspace_shared`. See "Session-visibility and fork surfaces: shipped,
-deliberately inert" for exactly what is live and why the rest is held back.
-
-Remaining activation work is therefore the *product* half plus its
-prerequisites: an authorized API/SDK/UI surface for visibility mutation and
-independent fork, cancellation semantics, and owner-only grants before
-enabling personal attachment to shared sessions.
+Migration 0225 delivered the first database half. Migration 0303 replaces its
+auto-cancelling mutation functions with the activated, proven-quiescent
+contract described in "Session-visibility and private-fork public activation".
+The bounded API/core/SDK owner caller is now active behind the per-organization
+receipt, and the bounded managed web UI is its active owning-human SDK caller.
+Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace or
+public fork, attachments, and personal-resource grant UX remain out of scope.
 
 Cache and pin stripping is delivered by migration
 `0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
@@ -1163,9 +1466,11 @@ key. 0301 closes both halves of that gap:
   it is inert in every product projection while the session is private, and it
   becomes meaningful again if the owner re-shares.
 
-Severity was bounded: `transition_session_visibility` still has no product
-caller, so this is a correctness fix ahead of activation rather than a live
-exposure.
+Severity was bounded when the repair landed because
+`transition_session_visibility` had no product caller then. The later
+API/core/SDK activation now depends on this prerequisite; the bounded managed
+web owner surface is active, while worker, MCP, runtime, and React package
+surfaces remain out of scope.
 
 ### G. Retire
 
@@ -1206,7 +1511,9 @@ before canonical activation" is a per-subsystem statement:
   compatible earlier application image can still read and write them and an
   image rollback remains an ordinary deployment decision.
 - **Already one way.** Two tenancy migrations declare
-  `-- deployment-mode: maintenance` and have already crossed their boundary.
+  `-- deployment-mode: maintenance` and have globally crossed their boundary;
+  session tenancy additionally crosses per organization through a durable
+  activation receipt.
   - `0264_connection_authority_runtime_activation.sql` proves there are no other
     `opengeni_app` sessions both before and after taking `ACCESS EXCLUSIVE` locks
     on `sessions`, `session_turns`, `session_system_updates`,
@@ -1228,6 +1535,14 @@ before canonical activation" is a per-subsystem statement:
     active organization member. An old writer must never be restarted after it
     either; see [`architecture.md`](architecture.md) and
     [`deployment.md`](deployment.md).
+  - `0303_session_tenancy_product_activation.sql` is rolling and inert at
+    migration time, but each per-organization activation receipt is a one-way
+    boundary. The operator command requires the exact application-role
+    inventory, canonical env opt-in, required migrations, and clean
+    inventory/parity evidence, then inserts the receipt only under a
+    double-checked drain and write-blocking locks. Earlier images fail the
+    current runtime-posture contract because they do not declare the receipt
+    table or hardened routine signatures.
 
 The remaining phase-F work named in [F. Activate](#f-activate) has therefore not
 crossed its boundary yet.
@@ -1261,15 +1576,25 @@ Once an activation migration commits for a subsystem:
 All of the following must hold, per organization, before an activation migration
 is run:
 
-1. **Complete backfill.** `bun run db:inventory-tenancy --organization-id <uuid>`
-   (migration 0285) must report zero for every population the activated subsystem
-   consumes: `organizationMemberships.activeWithoutPersonalWorkspace`,
-   `workspaceMemberSubjectsWithoutMembershipAnchor`, `sessions.ownerless`,
-   `documents.legacyPersonalNullAuthority`,
-   `codexCredentials.unattributedConnector`,
-   `workspaceWriters.admissions.legacyUnattributed`, and
-   `workspaceWriters.retainedProcesses.legacyUnattributed`. A single non-zero
-   counter for a consumed population is a blocker.
+1. **Complete backfill and quiet observation window.** Run both
+   `bun run db:inventory-tenancy --organization-id <uuid>` and the canonical
+   migration-0298 parity report. The inventory is retained and hashed as the
+   content-free population snapshot; it is not a universal drain-to-zero gate.
+   The parity report must have zero violations in every invariant gate and zero
+   in each current activation lane: `connectionsLegacyUser`,
+   `workspaceWriterAdmissionsLegacyUnattributedInWindow`,
+   `workspaceWriterProcessesLegacyUnattributedInWindow`,
+   `documentsLegacyPersonalNullAuthority`,
+   `codexCredentialsUnattributedConnector`,
+   `workspaceMemberSubjectsWithoutMembershipAnchor`,
+   `sessionsAttributableButUnattributed`, and
+   `connectionUseLegacyResolutionsInWindow`. The bounded writer/use lanes prove
+   the legacy path is no longer exercised; the attributable-session lane is the
+   actually repairable subset of ownerless sessions. Total `sessions.ownerless`
+   and the all-time `workspaceWriters.*.legacyUnattributed` inventory counts are
+   deliberately not blockers: service/API-key sessions can remain ownerless,
+   and pre-0277 direct/process writer rows are immutable historical evidence.
+   A single non-zero required parity lane or invariant violation is a blocker.
    Variable Sets, Rigs, and Connected Machines contribute no drain-to-zero
    counter here, and one must not be invented: nothing in their schema separates
    an unmigrated legacy row from a deliberately organization- or
@@ -1317,16 +1642,18 @@ What the switch is not:
 - **not a data migration toggle.** Rolling tenancy migrations are applied
   independently of it.
 
-As of the slice that introduced it, no runtime path reads the switch: canonical
-activation is unshipped, so it reserves the name, pins the safe default in the
-chart and `.env.example`, and gives every future activation slice one gate to
-consult.
+Migration 0303 is the first slice to enforce this switch. Its ordinary rolling
+migration remains inert with the default `false`; the drained activation
+command refuses to write a per-organization receipt unless the switch is true.
+Once any receipt exists, API/worker startup and readiness also require true.
+That startup interlock is forward-only posture, not a rollback mechanism.
 
 ### What an operator must not do
 
 - Do not restart a pre-activation image after an activation migration has
   committed, and do not attempt a mixed-version rolling rollback across one.
-  This already applies to `0264` and `0275`.
+  This already applies to `0264`, `0275`, and an organization activated through
+  `0303`.
 - Do not run an activation migration with a live application. The
   `opengeni_app` session guard aborts with SQLSTATE `55000` and rolls its
   transaction back cleanly; treat that as the contract, not as a race to retry.
@@ -1344,16 +1671,18 @@ consult.
 
 ## Remaining non-goals
 
-- member-management UI and provider invitation email;
+- provider invitation email delivery;
 - invitations for unregistered humans;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
-- a caller for the shipped `transition_session_visibility` and
-  `fork_session_content` lifecycle functions: no API, SDK, worker, MCP, or UI
-  surface for session visibility mutation, session sharing, or independent
-  fork. Visibility-aware reads are *not* a non-goal - they are active (see
-  "Session-visibility and fork surfaces: shipped, deliberately inert");
+- worker, MCP, runtime, or `packages/react` callers for the activated
+  `transition_session_visibility` and `fork_session_content` lifecycle
+  functions; cross-workspace/public fork, session sharing, attachment APIs, and
+  personal-grant UI also remain out of scope. The bounded API/core/SDK owner
+  caller, bounded managed web owning-human SDK caller, and activation-gated
+  subject read projection are active (see "Session-visibility and private-fork
+  public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
 - an always-on retention deletion worker (0263 exposes a supported bounded

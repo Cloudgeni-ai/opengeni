@@ -992,6 +992,8 @@ export function SessionList() {
       if (pinning.current.has(target.id)) {
         return target;
       }
+      const acceptedTransition = context.captureWorkspaceInvocation(target.workspaceId);
+      if (!acceptedTransition) return null;
       pinning.current.add(target.id);
       const operation = ++pinOperation.current;
       // An optimistic pin moves the row between different group subtrees. That
@@ -1020,6 +1022,7 @@ export function SessionList() {
           nextPinned,
           target.pinVersion ?? 0,
         );
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
         if (updated) {
           setPinOverrides((current) => {
             if (current.get(target.id)?.operation !== operation) return current;
@@ -1030,6 +1033,7 @@ export function SessionList() {
           });
         }
         await refreshSessionPages();
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
         announcePinResult(
           updated

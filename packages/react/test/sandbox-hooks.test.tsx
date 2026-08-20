@@ -81,6 +81,29 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("ownership-disabled 404 is on-demand, not Sandbox unavailable", async () => {
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        throw new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            status: 404,
+            code: "not_found",
+            message: "sandbox ownership is not enabled for this deployment",
+          }),
+        );
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("a draining lease without intent stays on-demand and never polls or attaches", async () => {
     let capabilityCalls = 0;
     let attachCalls = 0;

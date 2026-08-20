@@ -12,6 +12,7 @@ import {
   RUNTIME_READ_UPDATE_TABLES,
   RUNTIME_TABLE_PRIVILEGES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
@@ -223,6 +224,7 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
+    sessionTenancyProductActivationPresent: false,
     tables: [
       {
         name: "tenant_rows",
@@ -274,15 +276,24 @@ function safePosture(): RuntimeDatabasePosture {
         delete: false,
       },
     ],
-    targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
-      name,
-      owner: "opengeni_migrator",
-      execute: true,
-      publicExecute: false,
-      securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+    targetRoutines: [
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
         name,
-      ),
-    })),
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
+      })),
+      ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+      })),
+    ],
     privateRoutines: [
       {
         name: "workspace_rls_visible(uuid, uuid)",
@@ -352,15 +363,15 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 263],
+            [FORCE_RLS_TABLES, 264],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 135],
-            [RUNTIME_READ_ONLY_TABLES, 18],
+            [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
             [PROTECTED_NO_DIRECT_DML_TABLES, 44],
-            [RUNTIME_DML_TABLES, 230],
+            [RUNTIME_DML_TABLES, 231],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 192],
@@ -384,7 +395,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 274 : 203;
+      const tableCount = hasCurrentMainActivityLedger ? 275 : 203;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -1088,5 +1099,34 @@ describe("runtime database posture evaluator", () => {
         targetSchema: "embedded",
       }),
     ).toEqual([]);
+  });
+
+  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+    const posture = safePosture();
+    posture.sessionTenancyProductActivationPresent = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        organizationTenancyCanonicalActivationEnabled: true,
+      }),
+    ).toEqual([]);
+  });
+
+  test("rejects runtime or PUBLIC execution of the owner-internal quiescence helper", () => {
+    const posture = safePosture();
+    const helper = posture.targetRoutines.find(
+      (routine) => routine.name === RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES[0],
+    )!;
+    helper.execute = true;
+    helper.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("runtime role has forbidden owner-internal helper"),
+        expect.stringContaining("PUBLIC has forbidden owner-internal helper"),
+      ]),
+    );
   });
 });

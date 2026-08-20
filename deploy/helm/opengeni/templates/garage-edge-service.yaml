@@ -1,0 +1,22 @@
+{{- if and .Values.garage.enabled .Values.garage.edgeService.enabled }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-garage-edge
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+spec:
+  type: {{ .Values.garage.edgeService.type }}
+  ports:
+    - name: api
+      port: {{ .Values.garage.service.apiPort }}
+      targetPort: api
+      {{- with .Values.garage.edgeService.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+{{- end }}

@@ -198,6 +198,16 @@ function releasePushEnv(overrides: Record<string, string> = {}) {
   };
 }
 
+function openVersionPrEnv(overrides: Record<string, string> = {}) {
+  return releasePushEnv({
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_WORKFLOW_REF:
+      `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
+      `${RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath}@refs/heads/main`,
+    ...overrides,
+  });
+}
+
 function automationCiEnv(overrides: Record<string, string> = {}) {
   return {
     GITHUB_API_URL: RELEASE_AUTOMATION_CONTRACT.apiUrl,
@@ -295,6 +305,27 @@ describe("Version PR dispatch identity", () => {
     const fixture = dispatchFixture();
     const result = await validateVersionPrDispatch({
       env: releasePushEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toEqual({ prNumber: pullNumber, headSha, baseSha });
+    const dispatch = fixture.requests.find((request) => request.method === "POST");
+    expect(dispatch?.body).toEqual({
+      ref: "main",
+      inputs: {
+        automation_pr_number: String(pullNumber),
+        automation_head_sha: headSha,
+        automation_base_sha: baseSha,
+        source_release_run_id: String(runId),
+        source_release_run_attempt: String(runAttempt),
+      },
+    });
+  });
+
+  test("dispatches trusted main CI from the manual Open Version PR workflow", async () => {
+    const fixture = dispatchFixture();
+    const result = await validateVersionPrDispatch({
+      env: openVersionPrEnv(),
       fetchImpl: fixture.fetchImpl,
       logger: { log() {} },
     });
@@ -438,6 +469,7 @@ function admissionFixture(
     sourceAdmissionConclusion?: string;
     sourceConclusion?: string | null;
     sourceEvent?: string;
+    sourcePath?: string;
     sourceStatus?: string;
     pullBaseSha?: string;
     pullBaseTreeSha?: string;
@@ -512,7 +544,7 @@ function admissionFixture(
         event: options.sourceEvent ?? "push",
         status: options.sourceStatus ?? "completed",
         conclusion: options.sourceConclusion === undefined ? "success" : options.sourceConclusion,
-        path: RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
+        path: options.sourcePath ?? RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
         head_branch: "main",
         head_sha: baseSha,
         repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
@@ -647,15 +679,28 @@ describe("automation CI admission", () => {
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
-  test("rejects a source run that was not an exact push-triggered Release run", async () => {
-    const fixture = admissionFixture({ sourceEvent: "workflow_dispatch" });
+  test("rejects a source run that is not a trusted Version PR producer", async () => {
+    const fixture = admissionFixture({ sourceEvent: "pull_request" });
     await expect(
       validateVersionPrCiAdmission({
         env: automationCiEnv(),
         fetchImpl: fixture.fetchImpl,
         logger: { log() {} },
       }),
-    ).rejects.toThrow("source Release run was not triggered by a push");
+    ).rejects.toThrow("source run is not a trusted Version PR producer");
+  });
+
+  test("admits a workflow_dispatch Open Version PR producer run", async () => {
+    const fixture = admissionFixture({
+      sourceEvent: "workflow_dispatch",
+      sourcePath: RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath,
+    });
+    const result = await validateVersionPrCiAdmission({
+      env: automationCiEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
   });
 
   test("rejects a failed source Release run", async () => {
@@ -2862,7 +2907,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("terminal release main ancestry comparison is incomplete");
   });
 
-  test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
+  test("records merged-source identity instead of a GitHub review PASS", async () => {
     const fixture = approvalFixture({
       mergeMethod: "single",
       reviewState: "COMMENTED",
@@ -2877,26 +2922,20 @@ describe("release approval provenance", () => {
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
         review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
+          type: "merged-source",
+          id: pullNumber,
         }),
       }),
     );
   });
 
-  test("accepts a configured secondary maintainer's provider-bound admin PASS", async () => {
-    const secondaryMaintainer = RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1];
-    expect(secondaryMaintainer).toEqual({
-      login: "davletd",
-      id: 2204825,
-      type: "User",
-    });
+  test("does not require a configured maintainer GitHub review", async () => {
     const fixture = approvalFixture({
       mergeMethod: "single",
       reviewState: "COMMENTED",
-      author: secondaryMaintainer,
-      merger: secondaryMaintainer,
-      reviewer: secondaryMaintainer,
-      reviewerLoginSnapshot: secondaryMaintainer.login,
+      author: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
+      merger: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
+      reviewer: RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1],
     });
     await expect(
       verifyApprovedMerge({
@@ -2908,7 +2947,7 @@ describe("release approval provenance", () => {
       expect.objectContaining({
         mergeMethod: "single-commit-squash-or-rebase",
         review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
+          type: "merged-source",
         }),
       }),
     );
@@ -2998,129 +3037,6 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("canonical recovered source-admission check is not unique");
   });
 
-  test("accepts reviewer login movement while preserving stable provider identity", async () => {
-    const reviewer = {
-      ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-      login: "renamed-maintainer",
-    };
-    const fixture = approvalFixture({
-      reviewer,
-      reviewDetailReviewer: { ...reviewer, login: "Renamed-Maintainer" },
-    });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: fixture.fetchImpl,
-        logger: { log() {} },
-      }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        review: expect.objectContaining({ type: "independent-approval" }),
-      }),
-    );
-  });
-
-  test("treats the legacy v3 reviewer login as a snapshot, not account authority", async () => {
-    const fixture = approvalFixture({
-      mergeMethod: "single",
-      reviewState: "COMMENTED",
-      reviewer: {
-        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-        login: "renamed-maintainer",
-      },
-      reviewDetailReviewer: {
-        ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-        login: "RENAMED-MAINTAINER",
-      },
-      reviewerLoginSnapshot: "former-maintainer-login",
-    });
-    const result = await verifyApprovedMerge({
-      env: approvalEnv(),
-      fetchImpl: fixture.fetchImpl,
-      logger: { log() {} },
-    });
-    expect(result).toEqual(
-      expect.objectContaining({
-        review: expect.objectContaining({
-          type: "single-maintainer-admin-pass",
-        }),
-      }),
-    );
-  });
-
-  test("rejects reviewer identity substitution and missing provider identity", async () => {
-    for (const [reviewDetailReviewer, message] of [
-      [
-        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, id: 999 },
-        "trusted review detail actor numeric identity changed",
-      ],
-      [
-        { ...RELEASE_AUTOMATION_CONTRACT.releaseApprover, type: "Bot" },
-        "trusted review detail actor account type changed",
-      ],
-      [
-        {
-          login: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
-          type: RELEASE_AUTOMATION_CONTRACT.releaseApprover.type,
-        },
-        "trusted review detail actor numeric identity is not a positive integer",
-      ],
-    ] as const) {
-      const fixture = approvalFixture({ reviewDetailReviewer });
-      await expect(
-        verifyApprovedMerge({
-          env: approvalEnv(),
-          fetchImpl: fixture.fetchImpl,
-        }),
-      ).rejects.toThrow(message);
-    }
-
-    const missingSnapshot = approvalFixture({
-      mergeMethod: "single",
-      reviewState: "COMMENTED",
-      reviewerLoginSnapshot: "",
-    });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: missingSnapshot.fetchImpl,
-      }),
-    ).rejects.toThrow("single-maintainer admin PASS reviewer login snapshot is missing");
-  });
-
-  test("rejects stale-head and post-merge approvals", async () => {
-    const stale = approvalFixture({ reviewCommit: "9".repeat(40) });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: stale.fetchImpl }),
-    ).rejects.toThrow("did not review the exact PR head");
-    const sameSecond = approvalFixture({ reviewTime: "2026-07-23T12:00:00Z" });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: sameSecond.fetchImpl }),
-    ).rejects.toThrow("was not submitted before merge");
-    const late = approvalFixture({ reviewTime: "2026-07-23T12:01:00Z" });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: late.fetchImpl }),
-    ).rejects.toThrow("was not submitted before merge");
-  });
-
-  test("rejects self-approval and a non-approval decision", async () => {
-    const self = approvalFixture({
-      authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
-    });
-    await expect(
-      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: self.fetchImpl }),
-    ).rejects.toThrow("trusted reviewer authored the independently approved pull request");
-    const requested = approvalFixture({ reviewState: "CHANGES_REQUESTED" });
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: requested.fetchImpl,
-      }),
-    ).rejects.toThrow(
-      "neither independent approval nor a provider-bound single-maintainer admin PASS",
-    );
-  });
-
   test("rejects direct pushes, ambiguous associations, and reopened or unmerged PRs", async () => {
     await expect(
       verifyApprovedMerge({
@@ -3151,7 +3067,7 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("exactly one provider merge event");
   });
 
-  test("rejects tree, head, topology, effective-review, and terminal-main drift", async () => {
+  test("rejects tree, topology, and terminal-main drift", async () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -3162,32 +3078,11 @@ describe("release approval provenance", () => {
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: approvalFixture({
-          pullHeadSha: "8".repeat(40),
-          reviewCommit: headSha,
-        }).fetchImpl,
-      }),
-    ).rejects.toThrow("did not review the exact PR head");
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({
           mergeMethod: "rebase",
           discontinuousCompare: true,
         }).fetchImpl,
       }),
     ).rejects.toThrow("discontinuity");
-    await expect(
-      verifyApprovedMerge({
-        env: approvalEnv(),
-        fetchImpl: approvalFixture({
-          requestedReview: true,
-          requestedReviewer: {
-            ...RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-            login: "renamed-maintainer",
-          },
-        }).fetchImpl,
-      }),
-    ).rejects.toThrow("review was re-requested");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -3504,7 +3399,10 @@ describe("workflow contracts", () => {
       (step: any) => step.name === "Dispatch exact-head Version PR CI",
     );
     expect(dispatch.run).toContain("dispatch-version-ci");
-    expect(ci.on.push.branches).toEqual(["main"]);
+    expect(release.jobs.version.if).toBe(
+      "${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}",
+    );
+    expect(ci.on.push.branches).toEqual(["main", "production"]);
     expect(ci.on.pull_request).not.toBeUndefined();
     expect(ci.on.schedule).toEqual([{ cron: "0 3 * * 1" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(
@@ -3521,7 +3419,7 @@ describe("workflow contracts", () => {
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(
-      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     const imageLeaves = [
       "api-image",
@@ -3539,7 +3437,7 @@ describe("workflow contracts", () => {
       expect(ci.jobs[jobName].if).toBe(ci.jobs.images.if);
     }
     for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
-      expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.mode == 'full'");
+      expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.bake_images == 'true'");
       expect(ci.jobs[jobName].if).toContain("needs.artifact-runtime.result == 'success'");
     }
     const imageSteps = imageLeaves.flatMap((jobName) =>
@@ -3555,7 +3453,9 @@ describe("workflow contracts", () => {
       "Build headless sandbox image",
     ]);
     for (const imageStep of imageSteps)
-      expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
+      expect(imageStep.with.push).toBe(
+        "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+      );
   });
 
   test("keeps admission least-privilege and candidate execution exact-head-bound", () => {
@@ -3672,6 +3572,16 @@ describe("workflow contracts", () => {
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);
+    const sourceInstallIndex = source.steps.findIndex(
+      (step: any) => step.name === "Install dependencies",
+    );
+    const sourceInstall = source.steps[sourceInstallIndex];
+    expect(sourceInstall.run.trim().split("\n")).toEqual([
+      "bun install --frozen-lockfile --ignore-scripts",
+      "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
+    ]);
+    expect(source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run)).toEqual([]);
+    expect(source.steps.filter((step: any) => step.run)[0]?.name).toBe("Install dependencies");
     for (const stepName of [
       "Validate changeset release plan",
       "Profile impacted TypeScript 7 projects",
@@ -3751,8 +3661,7 @@ describe("workflow contracts", () => {
       ],
       "browser-acceptance": [
         "Stabilize Ubuntu package downloads",
-        "Install pinned Chromium runtime",
-        "Install pinned cross-browser runtimes",
+        "Install pinned lane browser runtimes",
         "Editable artifact browser acceptance",
         "Install pinned artifact native toolchain",
         "Editable artifact full-stack browser acceptance",
@@ -3870,24 +3779,26 @@ describe("workflow contracts", () => {
     ).if = "${{ matrix.lane == 'knowledge' }}";
     expect(hasCompleteBrowserLaneContract(misroutedWorkbenchGate)).toBe(false);
 
+    // Browser runtimes install through the shared composite action so the
+    // download is cached and every attempt is bounded by a hard wall clock. An
+    // unbounded install can wedge for the 360-minute job default while holding
+    // a runner, which starves every other pull request in the account.
     const browserInstalls = browser.steps.filter((step: any) =>
-      String(step.run ?? "").includes("playwright install"),
+      String(step.uses ?? "").includes("playwright-browsers"),
     );
     expect(browserInstalls).toEqual([
       {
-        name: "Install pinned Chromium runtime",
-        if: "${{ matrix.lane != 'workbench' }}",
-        run: "bun x playwright install --with-deps chromium",
-      },
-      {
-        name: "Install pinned cross-browser runtimes",
-        if: "${{ matrix.lane == 'workbench' }}",
-        run: "bun x playwright install --with-deps chromium firefox webkit",
+        name: "Install pinned lane browser runtimes",
+        uses: "./.github/actions/playwright-browsers",
+        "timeout-minutes": 17,
+        with: {
+          browsers: "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+        },
       },
     ]);
     expect(
       browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
-    ).toEqual(browserInstalls);
+    ).toEqual([]);
     for (const stepName of [
       "Editable artifact browser acceptance",
       "Install pinned artifact native toolchain",
@@ -3903,6 +3814,10 @@ describe("workflow contracts", () => {
     ).toBe(
       "${{ always() && matrix.lane == 'workbench' && (steps.editable_artifact_browser.outcome == 'success' || steps.editable_artifact_browser.outcome == 'failure') }}",
     );
+    // Supersedes the former "browser lanes never cache ms-playwright" lock.
+    // The browser cache now lives one level down in the shared composite
+    // action, so assert it there rather than asserting its absence here - an
+    // absence check against this job would silently guard nothing.
     expect(
       browser.steps.some(
         (step: any) =>
@@ -3910,6 +3825,11 @@ describe("workflow contracts", () => {
           JSON.stringify(step.with ?? {}).includes("ms-playwright"),
       ),
     ).toBe(false);
+    const browserAction = readFileSync(
+      join(root, ".github/actions/playwright-browsers/action.yml"),
+      "utf8",
+    );
+    expect(browserAction).toContain("path: ~/.cache/ms-playwright");
     expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota and entitlement browser acceptance",
@@ -4030,6 +3950,7 @@ describe("workflow contracts", () => {
       E2E_COUNT: "${{ needs.plan.outputs.e2e_count }}",
       BROWSER_LANE_COUNT: "${{ needs.plan.outputs.browser_lane_count }}",
       ARTIFACT_RUNTIME_REQUIRED: "${{ needs.plan.outputs.artifact_runtime_required }}",
+      BAKE_IMAGES: "${{ needs.plan.outputs.bake_images }}",
       BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
     });
     expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
@@ -4114,7 +4035,7 @@ describe("workflow contracts", () => {
     expect(release.jobs.publish.needs).toBe("admission");
     expect(releasePublicationAdmissionText).toContain("ref: ${{ github.sha }}");
     expect(releasePublicationAdmissionText).toContain(
-      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main',
+      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/production',
     );
     expect(releasePublicationAdmissionText).toContain("--kind candidate");
     expect(releasePublicationAdmissionText).toContain("--kind acceptance");

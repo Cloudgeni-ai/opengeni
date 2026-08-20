@@ -54,7 +54,7 @@ describe("Helm database upgrade contract", () => {
 
     for (const worker of [workerDeployment, turnWorkerDeployment]) {
       expect(worker).toContain(
-        '"objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)',
+        '"objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)',
       );
       expect(worker).not.toContain("- name: OPENGENI_OBJECT_STORAGE_ENDPOINT");
     }
@@ -121,7 +121,7 @@ describe("Helm database upgrade contract", () => {
     expect(job).toContain("key: OPENGENI_MIGRATIONS_DATABASE_URL");
     expect(job).toContain("app.kubernetes.io/component: catalog-import");
     expect(dependencyPolicy.match(/app\.kubernetes\.io\/component: catalog-import/g)).toHaveLength(
-      2,
+      3,
     );
   });
 
@@ -157,6 +157,7 @@ describe("Helm database upgrade contract", () => {
     const natsEdge = await source(
       "deploy/helm/opengeni/templates/nats-websocket-edge-service.yaml",
     );
+    const garageEdge = await source("deploy/helm/opengeni/templates/garage-edge-service.yaml");
     const minioEdge = await source("deploy/helm/opengeni/templates/minio-edge-service.yaml");
 
     expect(values).toContain("replicaCount: 1");
@@ -179,6 +180,10 @@ describe("Helm database upgrade contract", () => {
     expect(natsEdge).toContain("targetPort: websocket");
     expect(natsEdge).not.toContain("targetPort: client");
     expect(natsEdge).not.toContain("targetPort: monitor");
+    expect(values).toContain("garage:\n  enabled: true");
+    expect(values).toContain("minio:\n  enabled: false");
+    expect(garageEdge).toContain("targetPort: api");
+    expect(garageEdge).not.toContain("targetPort: rpc");
     expect(minioEdge).toContain("targetPort: api");
     expect(minioEdge).not.toContain("targetPort: console");
   });

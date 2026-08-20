@@ -7,8 +7,12 @@
 //      `guard_session_authority_write` trigger already derives ownership on
 //      INSERT, so the first `measured population` test drives real inserts
 //      through that live trigger and pins exactly which shapes it reaches and
-//      which it silently leaves NULL. If 0225's derivation ever changes, this
-//      test - not production - is where it surfaces.
+//      which it silently leaves NULL. If the derivation ever changes, this
+//      test - not production - is where it surfaces. It did change:
+//      migration 0302 added the personal-workspace pointer as stated authority
+//      and made an unresolved personal workspace raise, so the live-trigger
+//      expectations here moved and the backfill's own fixtures now seed
+//      pre-0302 rows explicitly (`insertHistoricalSession`).
 //   2. Only two populations are deterministically repairable, and the seam
 //      refuses every other one with a fixed reason code instead of guessing.
 //   3. The backfill is idempotent, resumable, bounded, dry-run by default, and
@@ -112,7 +116,7 @@ type SessionRow = {
 };
 
 /**
- * Insert one session through the LIVE 0225 authority trigger.
+ * Insert one session through the LIVE 0225/0302 authority trigger.
  *
  * Migration 0214's `sessions_mark_activity_pending` is disabled around the
  * insert. That trigger is unrelated workspace-activity-revision bookkeeping
@@ -120,11 +124,20 @@ type SessionRow = {
  * off the row lands in the same quiescent state (`activity_revision = 0`, no
  * pending xid) a finalized gate produces. `sessions_authority_write_fence` -
  * the trigger actually under test - stays enabled throughout.
+ *
+ * `historical: true` ALSO disables the authority fence, which is the only way
+ * to reproduce a pre-0302 row now that the live fence attributes a managed
+ * human's own personal-workspace session at INSERT. That is the population the
+ * backfill exists for: rows already durable when 0302 shipped. Simulating them
+ * by disabling the fence is honest - the alternative would be to write the
+ * owner columns by hand, which 0225 block C rejects without the lifecycle
+ * capability anyway.
  */
 async function insertSession(
   fixture: Fixture,
   workspaceId: string,
   overrides: Record<string, unknown>,
+  options: { historical?: boolean } = {},
 ): Promise<SessionRow> {
   const id = crypto.randomUUID();
   const row = {
@@ -141,7 +154,11 @@ async function insertSession(
     tool_policy: admin.json({ mode: "workspace_default", inheritedFromSessionId: null }),
     ...overrides,
   };
-  await admin.unsafe("alter table sessions disable trigger sessions_mark_activity_pending");
+  const disabled = ["sessions_mark_activity_pending"];
+  if (options.historical) disabled.push("sessions_authority_write_fence");
+  for (const trigger of disabled) {
+    await admin.unsafe(`alter table sessions disable trigger ${trigger}`);
+  }
   try {
     const [inserted] = await admin<SessionRow[]>`
       insert into sessions ${admin(row as never)}
@@ -150,8 +167,19 @@ async function insertSession(
     `;
     return inserted!;
   } finally {
-    await admin.unsafe("alter table sessions enable trigger sessions_mark_activity_pending");
+    for (const trigger of disabled) {
+      await admin.unsafe(`alter table sessions enable trigger ${trigger}`);
+    }
   }
+}
+
+/** A pre-0302 row: durable state the backfill is meant to repair. */
+async function insertHistoricalSession(
+  fixture: Fixture,
+  workspaceId: string,
+  overrides: Record<string, unknown>,
+): Promise<SessionRow> {
+  return await insertSession(fixture, workspaceId, overrides, { historical: true });
 }
 
 async function readSession(sessionId: string): Promise<SessionRow> {
@@ -274,14 +302,26 @@ describe("migration 0297 session ownership", () => {
     expect(attributed.owner_subject_id).toBe(`user:alice-${label}`);
     expect(attributed.authority_epoch).toBe(1);
 
-    // A managed human in HER OWN personal workspace is NOT attributed:
-    // slice B's personal workspace deliberately has no workspace_memberships
-    // row, so the trigger's second branch fails its EXISTS guard.
+    // A managed human in HER OWN personal workspace IS attributed since
+    // migration 0302: the membership row's own personal_workspace_id pointer is
+    // stated authority, and slice B deliberately gives that workspace no
+    // workspace_memberships row to find. Before 0302 this came out ownerless,
+    // which is the whole population the backfill below exists for.
     const personal = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: `user:alice-${label}`,
     });
-    expect(personal.owner_organization_membership_id).toBeNull();
+    expect(personal.owner_organization_membership_id).toBe(fixture.aliceMembershipId);
+    expect(personal.owner_subject_id).toBe(`user:alice-${label}`);
+
+    // ...and the pre-0302 shape of that same row, still durable, is exactly
+    // what the classifier calls repairable.
+    const historicalPersonal = await insertHistoricalSession(
+      fixture,
+      fixture.alicePersonalWorkspaceId,
+      { created_by_kind: "subject", created_by_subject_id: `user:alice-${label}` },
+    );
+    expect(historicalPersonal.owner_organization_membership_id).toBeNull();
 
     // An active managed human with no workspace membership in a shared
     // workspace: also not attributed.
@@ -321,8 +361,24 @@ describe("migration 0297 session ownership", () => {
     expect(childOfOwned.owner_organization_membership_id).toBe(fixture.aliceMembershipId);
 
     // Bob's session inside ALICE's personal workspace: the workspace anchor
-    // and the creator disagree, so it must stay unresolved forever.
-    const crossPersonal = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    // and the creator disagree. Since 0302 the live fence REFUSES to mint that
+    // row rather than silently writing NULL, because a personal workspace has
+    // exactly one possible owner.
+    let crossPersonalFailure: unknown;
+    try {
+      await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+        created_by_kind: "subject",
+        created_by_subject_id: `user:bob-${label}`,
+      });
+    } catch (error) {
+      crossPersonalFailure = error;
+    }
+    expect(String(crossPersonalFailure)).toContain(
+      "session owner authority is unresolved in a personal workspace",
+    );
+    // Durable pre-0302 rows of that shape still exist, and stay unresolved
+    // forever.
+    const crossPersonal = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: `user:bob-${label}`,
     });
@@ -330,8 +386,8 @@ describe("migration 0297 session ownership", () => {
 
     const report = await classify(fixture.organizationId);
     expect(report.rewroteSessionRows).toBe(false);
-    expect(report.sessions.total).toBe(8);
-    expect(report.sessions.ownerAttributed).toBe(2);
+    expect(report.sessions.total).toBe(9);
+    expect(report.sessions.ownerAttributed).toBe(3);
     expect(report.sessions.repairablePersonalWorkspace).toBe(1);
     expect(report.sessions.repairableParentInheritance).toBe(0);
     expect(report.sessions.unresolvedByReason).toEqual({
@@ -391,7 +447,7 @@ describe("migration 0297 session ownership", () => {
   test("backfill is dry-run by default and writes nothing", async () => {
     if (!shared) return;
     const fixture = await seedOrganization("dry-run");
-    const personal = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const personal = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:alice-dry-run",
     });
@@ -410,24 +466,24 @@ describe("migration 0297 session ownership", () => {
   test("backfill attributes the personal-workspace convergence and its inheritance closure", async () => {
     if (!shared) return;
     const fixture = await seedOrganization("apply");
-    const root = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const root = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:alice-apply",
     });
     // A whole ownerless subtree under that root, including a grandchild and a
     // child whose own creator is an API key.
-    const child = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const child = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "api_key:00000000-0000-4000-8000-000000000002",
       parent_session_id: root.id,
     });
-    const grandchild = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const grandchild = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "service",
       created_by_subject_id: "scheduler",
       parent_session_id: child.id,
     });
     // Bob's session in Alice's personal workspace must be left alone.
-    const crossPersonal = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const crossPersonal = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:bob-apply",
     });
@@ -464,7 +520,7 @@ describe("migration 0297 session ownership", () => {
     if (!shared) return;
     const fixture = await seedOrganization("batched");
     for (let index = 0; index < 5; index += 1) {
-      await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+      await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
         created_by_kind: "subject",
         created_by_subject_id: "user:alice-batched",
       });
@@ -483,7 +539,7 @@ describe("migration 0297 session ownership", () => {
   test("a revoked personal-workspace anchor is never a candidate", async () => {
     if (!shared) return;
     const fixture = await seedOrganization("revoked");
-    const session = await insertSession(fixture, fixture.bobPersonalWorkspaceId, {
+    const session = await insertHistoricalSession(fixture, fixture.bobPersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:bob-revoked",
     });
@@ -726,11 +782,11 @@ describe("migration 0297 session ownership", () => {
     // to a synthetic NOSUPERUSER NOBYPASSRLS role and proves a real, non-zero
     // attribution still happens.
     const fixture = await seedOrganization("rls-owner");
-    const root = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const root = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:alice-rls-owner",
     });
-    const child = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const child = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "service",
       created_by_subject_id: "scheduler",
       parent_session_id: root.id,
@@ -882,7 +938,7 @@ describe("migration 0297 session ownership", () => {
 
     // A `user:` sibling in the same organization still converges, so the fence
     // is a fence and not a switch that turned the backfill off.
-    const human = await insertSession(fixture, fixture.alicePersonalWorkspaceId, {
+    const human = await insertHistoricalSession(fixture, fixture.alicePersonalWorkspaceId, {
       created_by_kind: "subject",
       created_by_subject_id: "user:alice-external-lane-write",
     });

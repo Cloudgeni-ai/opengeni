@@ -62,6 +62,11 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
     name: "Task note owner",
   });
   const grant = access.workspaceGrants[0]!;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   const root = await withSessionRlsActorContext(
     { subjectId: ownerSubjectId },
     async () =>

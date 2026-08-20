@@ -228,6 +228,11 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
+  ListUserResourceAuthoritiesOptions,
+  ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
+  RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
@@ -284,6 +289,8 @@ import type {
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
+  ForkSessionRequest,
+  ForkSessionResponse,
   Session,
   SessionListResponse,
   AgentTopologyPageResponse,
@@ -291,6 +298,8 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionPinRequest,
+  UpdateSessionVisibilityRequest,
+  UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
   SessionEvent,
@@ -877,6 +886,32 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /** Change an owned, fully quiescent session between private and workspace visibility. */
+  async updateSessionVisibility(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionVisibilityRequest,
+  ): Promise<UpdateSessionVisibilityResponse> {
+    return await this.requestJson<UpdateSessionVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/visibility`,
+      request,
+    );
+  }
+
+  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  async forkSession(
+    workspaceId: string,
+    sessionId: string,
+    request: ForkSessionRequest,
+  ): Promise<ForkSessionResponse> {
+    return await this.requestJson<ForkSessionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/forks`,
       request,
     );
   }
@@ -3599,6 +3634,47 @@ export class OpenGeniClient {
     return await this.requestJson<ListManagedOrganizationMembershipsResponse>(
       "GET",
       "/v1/organization-memberships",
+    );
+  }
+
+  /** Bounded owner-only personal-resource authority page for one exact resource kind. */
+  async listUserResourceAuthorities(
+    workspaceId: string,
+    options: ListUserResourceAuthoritiesOptions,
+  ): Promise<ListUserResourceAuthoritiesResponse> {
+    const query = new URLSearchParams({
+      scope: "user",
+      resourceKind: options.resourceKind,
+    });
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return await this.requestJson<ListUserResourceAuthoritiesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities?${query.toString()}`,
+    );
+  }
+
+  /** Issue an exact-session or standing personal-resource grant. */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
+  /** Revoke an owner grant through the exact workspace it targets. */
+  async revokeUserResourceGrant(
+    workspaceId: string,
+    grantId: string,
+  ): Promise<RevokeUserResourceGrantResponse> {
+    return await this.requestJson<RevokeUserResourceGrantResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
     );
   }
 

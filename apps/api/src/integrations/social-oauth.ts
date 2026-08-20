@@ -22,6 +22,12 @@ import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import {
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_CONNECTION_PRINCIPAL_MESSAGE,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+} from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
 import {
   integrationBaseUrl,
@@ -132,6 +138,11 @@ export type SocialOAuthStartContext = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /**
+   * False for every principal that cannot own a personal Connection. Resolved
+   * by the route from the live authenticated principal, never inferred here.
+   */
+  personalOwnershipAllowed: boolean;
   requestUrl: string;
   payload: SocialOAuthStartRequest;
 };
@@ -142,6 +153,8 @@ type SocialOAuthStatePayload = {
   workspaceId: string;
   subjectId: string;
   ownership: "workspace" | "personal";
+  /** Signed proof that a live managed human authorized personal ownership. */
+  personalOwnerVerified: boolean;
   provider: SocialOAuthProviderId;
   scopes: string[];
   encryptedPkceVerifier?: string;
@@ -192,6 +205,9 @@ export async function startSocialOAuth(
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
     ownership: context.payload.ownership,
+    // Signed record that a live principal was checked; the callback has no
+    // principal of its own and enforces exactly this decision.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
     provider: provider.id,
     scopes,
     ...(verifier && key ? { encryptedPkceVerifier: encryptEnvironmentValue(key, verifier) } : {}),
@@ -274,6 +290,13 @@ export async function completeSocialOAuthCallback(
   // the MCP OAuth client — a grant revoked inside the state TTL must not be
   // able to land a workspace credential.
   try {
+    // Only a managed human may own a personal Connection. This callback has no
+    // live principal, so it enforces the signed start-time decision; a state
+    // minted before that fence existed carries no claim and is refused, which
+    // closes the in-flight window across a rolling deploy.
+    if (!personalOwnerStateAccepted(state)) {
+      throw new HTTPException(422, { message: PERSONAL_CONNECTION_PRINCIPAL_MESSAGE });
+    }
     const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
     if (
       !grant ||
@@ -687,6 +710,8 @@ function readSocialOAuthState(
     workspaceId: requiredStateString(payload.workspaceId, "workspaceId"),
     subjectId: requiredStateString(payload.subjectId, "subjectId"),
     ownership: payload.ownership === "personal" ? "personal" : "workspace",
+    // Absent on a legacy state, which therefore cannot land a personal owner.
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     provider,
     scopes: Array.isArray(payload.scopes)
       ? payload.scopes.filter((scope): scope is string => typeof scope === "string")

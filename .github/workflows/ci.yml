@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - production
   pull_request:
   schedule:
     # Weekly full-mode drift coverage complements impact-selected pull-request
@@ -52,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      actions: read # authenticate the exact push-triggered Release run
+      actions: read # authenticate the exact Version PR producer run
       checks: write # publish idempotent checks on the candidate head SHA
       contents: write # retain the exact head before any check can make the Version PR mergeable
       pull-requests: read # authenticate the bot PR and provider projection
@@ -146,6 +147,7 @@ jobs:
       e2e_count: ${{ steps.plan.outputs.e2e_count }}
       browser_lane_count: ${{ steps.plan.outputs.browser_lane_count }}
       artifact_runtime_required: ${{ steps.plan.outputs.artifact_runtime_required }}
+      bake_images: ${{ steps.plan.outputs.bake_images }}
       build_count: ${{ steps.plan.outputs.build_count }}
       unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
@@ -165,6 +167,7 @@ jobs:
           bun-version-file: .bun-version
 
       - name: Install exact dependency tree
+        timeout-minutes: 11
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: >-
@@ -186,10 +189,16 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
-          else
-            # Main, scheduled, and exact-head automation CI are the mapping-drift
-            # safety net and therefore never trust change selection.
+          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             bun scripts/ci/impact.ts --full --output impact-plan.json
+          else
+            BEFORE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+            if [ -z "$BEFORE" ] || [[ "$BEFORE" =~ ^0+$ ]]; then
+              bun scripts/ci/impact.ts --full --output impact-plan.json
+            else
+              bun scripts/ci/impact.ts --base "$BEFORE" --head "$HEAD" --output impact-plan.json
+            fi
           fi
           jq '{schemaVersion, mode, changedCount:(.changedFiles|length), affectedPackageCount:(.affectedPackages|length), typecheckProjectCount:(.typecheckProjects|length), unitCount:(.unitTests|length), integrationCount:(.integrationTests|length), e2eCount:(.e2eTests|length), browserAcceptanceLanes, artifactRuntimeRequired, buildCount:(.buildPackages|length), exampleBuildCount:(.exampleBuildProjects|length), guardCount:(.guards|length), reasonCount:(.reasons|length)}' impact-plan.json
           echo "mode=$(jq -r .mode impact-plan.json)" >> "$GITHUB_OUTPUT"
@@ -197,7 +206,16 @@ jobs:
           echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "e2e_count=$(jq '.e2eTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_count=$(jq '.browserAcceptanceLanes | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "artifact_runtime_required=$(jq -r .artifactRuntimeRequired impact-plan.json)" >> "$GITHUB_OUTPUT"
+          artifact_runtime_required="$(jq -r .artifactRuntimeRequired impact-plan.json)"
+          bake_images=false
+          if [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            bake_images=true
+            artifact_runtime_required=true
+          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            bake_images=true
+          fi
+          echo "artifact_runtime_required=$artifact_runtime_required" >> "$GITHUB_OUTPUT"
+          echo "bake_images=$bake_images" >> "$GITHUB_OUTPUT"
           echo "build_count=$(jq '.buildPackages | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           matrix() {
             local selected="$1" maximum="$2" total
@@ -255,6 +273,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -277,7 +296,9 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
 
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
@@ -341,6 +362,7 @@ jobs:
           fi
 
       - name: Profile impacted TypeScript 7 projects
+        timeout-minutes: 11
         run: >-
           bun scripts/ci/profile-command.ts
           --name typecheck
@@ -350,6 +372,7 @@ jobs:
           --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
 
       - name: Run exactly the explained source guards
+        timeout-minutes: 16
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
@@ -383,7 +406,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -418,6 +441,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Unit test shard
+        timeout-minutes: 21
         env:
           # The per-subject FORCE-RLS/OCC suite remains fail-closed on every shard.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -443,7 +467,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: true
       matrix:
@@ -469,6 +493,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Run real PostgreSQL, pgvector, Temporal, NATS, and object-storage tests
+        timeout-minutes: 31
         run: >-
           bun scripts/ci/profile-command.ts
           --name integration-${{ matrix.number }}
@@ -494,7 +519,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: true
       matrix:
@@ -551,14 +576,18 @@ jobs:
       # launch Firefox; a Chromium-only install fails those shards on any
       # web-broad candidate.
       - name: Install pinned browser runtimes
-        run: bun x playwright install --with-deps chromium firefox
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: chromium firefox
 
       - name: Run exactly the impacted E2E tests
+        timeout-minutes: 13
         run: >-
           bun scripts/ci/profile-command.ts
           --name e2e-${{ matrix.number }}
           --output ci-profile/e2e-${{ matrix.number }}.json
-          --timeout-seconds 1800
+          --timeout-seconds 720
           -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
           --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
@@ -579,6 +608,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -607,6 +637,7 @@ jobs:
         run: bun run test:react:clean
 
       - name: Real workspace capture acceptance
+        timeout-minutes: 13
         run: >-
           bun test --max-concurrency=1 --timeout 720000
           --test-name-pattern
@@ -618,6 +649,7 @@ jobs:
       # suite split cannot silently drop either the exactly-once/active-goal proof
       # or the real-Postgres shrink proof.
       - name: Recovery integration regressions
+        timeout-minutes: 5
         run: |
           bun test --timeout 30000 \
             --test-name-pattern \
@@ -633,6 +665,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -680,13 +713,11 @@ jobs:
             'Acquire::https::Timeout "30";' \
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
-      - name: Install pinned Chromium runtime
-        if: ${{ matrix.lane != 'workbench' }}
-        run: bun x playwright install --with-deps chromium
-
-      - name: Install pinned cross-browser runtimes
-        if: ${{ matrix.lane == 'workbench' }}
-        run: bun x playwright install --with-deps chromium firefox webkit
+      - name: Install pinned lane browser runtimes
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}
 
       - name: Editable artifact browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
@@ -744,6 +775,7 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
+        timeout-minutes: 4
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -751,6 +783,7 @@ jobs:
 
       - name: Responsive knowledge surfaces browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
+        timeout-minutes: 6
         env:
           # This gate traverses the public configured-principal API and must fail
           # rather than skip when its real PostgreSQL boundary is unavailable.
@@ -760,6 +793,7 @@ jobs:
       - name: Workbench browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
         id: workbench_browser
+        timeout-minutes: 4
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
       - name: Upload session pin visual evidence
@@ -864,6 +898,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -911,6 +946,7 @@ jobs:
             bun run --cwd packages/artifact-tool test:production-native
 
       - name: Build client packages (contracts + SDK + React)
+        timeout-minutes: 21
         env:
           OPENGENI_BUILD_CACHE_REPORT: ci-profile/package-cache.json
         run: >-
@@ -946,7 +982,11 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       - name: Install Chromium for packed WASM package proof
-        run: bun x playwright install --with-deps --only-shell chromium
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: chromium
+          only-shell: "true"
 
       - name: Packed SDK Worker and modality WASM packages
         run: bun run test:artifact-kernel-wasm-consumer
@@ -985,6 +1025,7 @@ jobs:
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, package-contracts, deployment, artifact-runtime, images]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require successful impact planning before candidate execution
         env:
@@ -1007,6 +1048,7 @@ jobs:
           E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
           BROWSER_LANE_COUNT: ${{ needs.plan.outputs.browser_lane_count }}
           ARTIFACT_RUNTIME_REQUIRED: ${{ needs.plan.outputs.artifact_runtime_required }}
+          BAKE_IMAGES: ${{ needs.plan.outputs.bake_images }}
           BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
         run: |
           set -euo pipefail
@@ -1023,6 +1065,7 @@ jobs:
             --argjson e2e "$E2E_COUNT" \
             --argjson browser "$BROWSER_LANE_COUNT" \
             --argjson artifactRuntime "$ARTIFACT_RUNTIME_REQUIRED" \
+            --argjson bakeImages "$BAKE_IMAGES" \
             --argjson build "$BUILD_COUNT" \
             -f scripts/ci/required-results.jq \
             <<<"$RESULTS"
@@ -1032,6 +1075,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -1173,6 +1217,52 @@ jobs:
           for node_port in 30080 30081 30222 30443 30900; do
             grep -q "^      nodePort: $node_port$" /tmp/opengeni-single-rendered.yaml
           done
+          if ! grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile did not render Garage" >&2
+            exit 1
+          fi
+          if grep -q 'app.kubernetes.io/component: minio$' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile still rendered MinIO" >&2
+            exit 1
+          fi
+          grep -q 'name: OPENGENI_OBJECT_STORAGE_S3_PROVIDER' /tmp/opengeni-single-rendered.yaml
+          grep -q 'value: "Other"' /tmp/opengeni-single-rendered.yaml
+          helm template opengeni-garage deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=false \
+            >/tmp/opengeni-garage-only-rendered.yaml
+          grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-garage-only-rendered.yaml
+          helm template opengeni-garage-registry deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=false \
+            --set global.imageRegistry=registry.example.com \
+            >/tmp/opengeni-garage-registry-rendered.yaml
+          grep -q 'dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690' /tmp/opengeni-garage-registry-rendered.yaml
+          if grep -q 'registry.example.com/dxflrs/garage' /tmp/opengeni-garage-registry-rendered.yaml; then
+            echo "Garage image must not take global.imageRegistry" >&2
+            exit 1
+          fi
+          helm template opengeni-local-k8s deploy/helm/opengeni \
+            --namespace opengeni-local \
+            -f deploy/helm/opengeni/values.local-kubernetes.example.yaml \
+            >/tmp/opengeni-local-k8s-rendered.yaml
+          grep -q 'app.kubernetes.io/component: garage$' /tmp/opengeni-local-k8s-rendered.yaml
+          if helm template opengeni-both-fixtures deploy/helm/opengeni \
+            --namespace opengeni \
+            --set garage.enabled=true \
+            --set minio.enabled=true \
+            >/tmp/opengeni-both-fixtures-rendered.yaml \
+            2>/tmp/opengeni-both-fixtures.err; then
+            echo "helm must fail when garage and minio are both enabled" >&2
+            exit 1
+          fi
+          grep -q 'garage.enabled or minio.enabled, not both' /tmp/opengeni-both-fixtures.err
+          if grep -qE 'app.kubernetes.io/component: (garage|minio)$' /tmp/opengeni-azure-rendered.yaml; then
+            echo "azure-managed profile rendered an in-cluster object-storage fixture" >&2
+            exit 1
+          fi
           for component in api worker-control worker-turns web; do
             if awk -v name="opengeni-preview-$component" '
               $1 == "kind:" && $2 == "PodDisruptionBudget" { pdb = 1; next }
@@ -1209,11 +1299,12 @@ jobs:
   api-image:
     name: Build API workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       api_digest: ${{ steps.api_image.outputs.digest }}
     steps:
@@ -1229,24 +1320,24 @@ jobs:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
 
-      # Jorgebot and other exact-main-SHA dogfood deployments install their
-      # connected-machine agent from this API image. Bake the signed agent only
-      # for a protected main push: PR, scheduled, and automation image builds are
-      # never deployed under dogfood-sha-* and must not receive the signing key.
-      - name: Install Rust toolchain for dogfood agent bake
-        if: ${{ github.event_name == 'push' }}
+      # Exact-main-SHA canary deployments install their connected-machine agent
+      # from this API image. Bake the signed agent only for a protected main
+      # push: PR, scheduled, and automation image builds are never deployed
+      # under canary-sha-* and must not receive the signing key.
+      - name: Install Rust toolchain for canary agent bake
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           rustup toolchain install 1.97.1 --profile minimal --no-self-update
           rustup default 1.97.1
 
-      - name: Bake and sign exact-SHA dogfood agent
-        if: ${{ github.event_name == 'push' }}
+      - name: Bake and sign exact-SHA canary agent
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         run: scripts/bake-agent.sh
 
-      - name: Require complete exact-SHA dogfood agent bake
-        if: ${{ github.event_name == 'push' }}
+      - name: Require complete exact-SHA canary agent bake
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
@@ -1277,21 +1368,22 @@ jobs:
           file: docker/opengeni.Dockerfile
           target: api
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:dogfood-sha-{0}', github.sha) || 'opengeni-api:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-api:canary-sha-{0}', github.sha) || 'opengeni-api:ci' }}
           cache-from: type=gha,scope=opengeni-ci-api
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
   worker-web-images:
     name: Build worker and web workload images
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
       web_digest: ${{ steps.web_image.outputs.digest }}
@@ -1323,10 +1415,10 @@ jobs:
           file: docker/opengeni.Dockerfile
           target: worker
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:dogfood-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-worker:canary-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
           cache-from: type=gha,scope=opengeni-ci-worker
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
@@ -1338,10 +1430,10 @@ jobs:
           file: docker/opengeni.Dockerfile
           target: web
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:dogfood-sha-{0}', github.sha) || 'opengeni-web:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-web:canary-sha-{0}', github.sha) || 'opengeni-web:ci' }}
           cache-from: type=gha,scope=opengeni-ci-web
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-web,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-web,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
             OPENGENI_DEPLOYMENT_REVISION=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -1349,11 +1441,12 @@ jobs:
   artifact-materializer-image:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       artifact_materializer_digest: ${{ steps.artifact_materializer_image.outputs.digest }}
     steps:
@@ -1390,21 +1483,22 @@ jobs:
           file: docker/opengeni.Dockerfile
           target: artifact-materializer
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:dogfood-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:canary-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
           cache-from: type=gha,scope=opengeni-ci-artifact-materializer
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-artifact-materializer,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-artifact-materializer,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
   artifact-outbox-dispatcher-image:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       artifact_outbox_dispatcher_digest: ${{ steps.artifact_outbox_dispatcher_image.outputs.digest }}
     steps:
@@ -1435,21 +1529,22 @@ jobs:
           file: docker/opengeni.Dockerfile
           target: artifact-outbox-dispatcher
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:dogfood-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:canary-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
           cache-from: type=gha,scope=opengeni-ci-artifact-outbox-dispatcher
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-artifact-outbox-dispatcher,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-artifact-outbox-dispatcher,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
   relay-image:
     name: Build relay workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       relay_digest: ${{ steps.relay_image.outputs.digest }}
     steps:
@@ -1479,18 +1574,19 @@ jobs:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:dogfood-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-relay:canary-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
           cache-from: type=gha,scope=opengeni-ci-relay
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
   sandbox-image:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}
     steps:
@@ -1525,10 +1621,10 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:canary-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
           cache-from: type=gha,scope=opengeni-ci-sandbox
-          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
 
   images:
     name: Workload image builds
@@ -1541,8 +1637,9 @@ jobs:
       - artifact-outbox-dispatcher-image
       - relay-image
       - sandbox-image
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1568,8 +1665,8 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Write exact-main-SHA dogfood receipt
-        if: ${{ github.event_name == 'push' }}
+      - name: Write exact-main-SHA canary receipt
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           API_DIGEST: ${{ needs.api-image.outputs.api_digest }}
           WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}
@@ -1601,7 +1698,7 @@ jobs:
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
             --arg chartVersion "$chart_version" \
-            --arg tag "dogfood-sha-${GITHUB_SHA}" \
+            --arg tag "canary-sha-${GITHUB_SHA}" \
             --arg apiDigest "$API_DIGEST" \
             --arg workerDigest "$WORKER_DIGEST" \
             --arg webDigest "$WEB_DIGEST" \
@@ -1632,17 +1729,17 @@ jobs:
                 "artifact-materializer": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-materializer", digest: $artifactMaterializerDigest },
                 "artifact-outbox-dispatcher": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher", digest: $artifactOutboxDispatcherDigest }
               }
-            }' > dogfood-images.json
-          sha256sum dogfood-images.json > dogfood-images.sha256
+            }' > canary-images.json
+          sha256sum canary-images.json > canary-images.sha256
 
-      - name: Upload exact-main-SHA dogfood receipt
-        if: ${{ github.event_name == 'push' }}
+      - name: Upload exact-main-SHA canary receipt
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dogfood-images-${{ github.sha }}
+          name: canary-images-${{ github.sha }}
           path: |
-            dogfood-images.json
-            dogfood-images.sha256
+            canary-images.json
+            canary-images.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -1651,6 +1748,7 @@ jobs:
     needs: [automation-admission, test, deployment, images]
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       checks: write
       contents: read

@@ -27,6 +27,8 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
+const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
+  "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -81,6 +83,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
@@ -207,6 +210,26 @@ describe("fail-closed change impact", () => {
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
 
+  test("Personal workspace accessibility coverage follows only its web dependency", () => {
+    for (const path of [
+      "apps/web/src/components/personal-workspace-badge.tsx",
+      "apps/web/src/components/rail/switcher-block.tsx",
+      "apps/web/src/components/rail/workspace-scope-nav.tsx",
+      "apps/web/src/lib/workspace-scope-context.ts",
+      "apps/web/test/personal-workspace-accessibility-fixture.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).toContain(PERSONAL_WORKSPACE_ACCESSIBILITY_E2E);
+    }
+
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).not.toContain(PERSONAL_WORKSPACE_ACCESSIBILITY_E2E);
+    }
+  });
+
   test("artifact database migrations retain the full schema and service safety net", () => {
     const plan = createImpactPlan(["packages/db/drizzle/0191_editable_artifact_engine.sql"]);
     expect(plan.mode).toBe("full");
@@ -228,6 +251,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
@@ -320,6 +344,7 @@ describe("deterministic bounded execution", () => {
   test("browser runner selection includes ordinary and named browser suites", () => {
     expect(usesBrowserRunner("test/e2e/browser.e2e.ts")).toBe(true);
     expect(usesBrowserRunner("test/e2e/codex-overview.e2e.ts")).toBe(true);
+    expect(usesBrowserRunner(PERSONAL_WORKSPACE_ACCESSIBILITY_E2E)).toBe(true);
     expect(usesBrowserRunner("test/e2e/queue-surface.browser.e2e.ts")).toBe(true);
     expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
   });
@@ -374,6 +399,7 @@ function requiredResult(
     browser: number;
     artifactRuntime: boolean;
     build: number;
+    bakeImages?: boolean;
   },
 ): boolean {
   const result = spawnSync(
@@ -401,6 +427,9 @@ function requiredResult(
       "--argjson",
       "artifactRuntime",
       String(options.artifactRuntime),
+      "--argjson",
+      "bakeImages",
+      String(options.bakeImages ?? options.mode === "full"),
       "--argjson",
       "build",
       String(options.build),
@@ -515,6 +544,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("bun-version-file: .bun-version");
     expect(ci).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(ci).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
+    expect(ci).toContain('bun scripts/ci/impact.ts --base "$BEFORE" --head "$HEAD"');
+    expect(ci).toContain("bake_images");
     expect(ci).not.toContain("jq . impact-plan.json");
     expect(ci).toContain("changedCount:(.changedFiles|length)");
 
@@ -544,7 +575,7 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("web_digest: ${{ steps.web_image.outputs.digest }}");
     expect(ci).toContain("relay_digest: ${{ steps.relay_image.outputs.digest }}");
     expect(ci).toContain("sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}");
-    expect(ci).toContain("dogfood-images-${{ github.sha }}");
+    expect(ci).toContain("canary-images-${{ github.sha }}");
   });
 
   test("selected CI work is profiled and memory bounded", () => {

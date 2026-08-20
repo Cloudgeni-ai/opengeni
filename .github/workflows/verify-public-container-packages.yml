@@ -14,6 +14,7 @@ jobs:
   verify:
     name: Verify anonymous OpenGeni image access
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Verify anonymous image discovery
         run: |

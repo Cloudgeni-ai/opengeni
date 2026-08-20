@@ -1224,6 +1224,13 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         'owner', '[]'::jsonb
       )
     `;
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${workspace.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'worker-test'
+      ) on conflict (account_id) do nothing
+    `;
     const rig = await createRig(client.db, {
       accountId: workspace.accountId,
       workspaceId: personalWorkspace!.id,
@@ -1237,15 +1244,17 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         accountId: workspace.accountId,
         workspaceId: personalWorkspace!.id,
         subjectId: workspace.subjectId,
+        resourceKind: "rig",
+        limit: 50,
       })
-    ).find((candidate) => candidate.resourceKind === "rig");
+    ).authorities.find((candidate) => candidate.resourceId === rig.id);
     if (!authority) throw new Error("personal Rig authority missing");
     await issueSelfUserResourceGrant(client.db, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: workspace.subjectId,
       authorityId: authority.authorityId,
-      action: "rig.use",
+      resourceKind: "rig",
       mode: "always",
       context: "workspace_shared",
       workspaceSharedAcknowledged: true,

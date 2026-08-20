@@ -1054,6 +1054,52 @@ export type IntegrationClientMetadata = {
   response_types: ["code"];
 };
 
+export type SessionVisibility = "private" | "workspace";
+
+export type SessionTenancyPublicProjection = {
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  ownedByCurrentUser: boolean;
+  fork: {
+    sourceVisibility: SessionVisibility;
+    sourceAuthorityEpoch: number;
+    forkedAt: string;
+  } | null;
+};
+
+export type UpdateSessionVisibilityRequest = {
+  visibility: SessionVisibility;
+  expectedAuthorityEpoch: number;
+  idempotencyKey: string;
+};
+
+export type UpdateSessionVisibilityResponse = {
+  operationId: string;
+  eventId: string | null;
+  eventSequence: number | null;
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  changed: boolean;
+  replay: boolean;
+  revokedGrantCount: number;
+};
+
+export type ForkSessionRequest = {
+  idempotencyKey: string;
+};
+
+export type ForkSessionResponse = {
+  operationId: string;
+  eventId: string;
+  eventSequence: number;
+  sessionId: string;
+  workspaceId: string;
+  visibility: "private";
+  authorityEpoch: 1;
+  copiedHistoryItemCount: number;
+  replay: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -1074,6 +1120,8 @@ export type Session = {
   toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
+  /** Present only when session-tenancy product activation is enabled for the organization. */
+  tenancy?: SessionTenancyPublicProjection | undefined;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;
@@ -3351,6 +3399,83 @@ export type ManagedOrganizationMembership = {
 
 export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
+};
+
+export type UserResourceKind =
+  | "connection"
+  | "document"
+  | "variable_set"
+  | "rig"
+  | "connected_machine";
+export type UserResourceGrantAction =
+  | "connection.use"
+  | "document.read"
+  | "variable_set.use"
+  | "rig.use"
+  | "connected_machine.use";
+export type UserResourceAuthorityGrant = {
+  grantId: string;
+  targetWorkspaceId: string;
+  targetSessionId: string | null;
+  action: UserResourceGrantAction;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  generation: number;
+  status: "active" | "consumed" | "revoked" | "expired";
+  expiresAt: string | null;
+  delegation: UserResourceDelegation;
+};
+export type UserResourceAuthoritySummary = {
+  authorityId: string;
+  resourceKind: UserResourceKind;
+  resourceId: string;
+  originWorkspaceId: string | null;
+  generation: number;
+  status: "active" | "retained" | "revoked";
+  grants: UserResourceAuthorityGrant[];
+};
+export type ListUserResourceAuthoritiesOptions = {
+  resourceKind: UserResourceKind;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+};
+export type ListUserResourceAuthoritiesResponse = {
+  scope: "user";
+  authorities: UserResourceAuthoritySummary[];
+  nextCursor: string | null;
+};
+export type IssueUserResourceGrantRequest =
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "session";
+      context: "user_private" | "workspace_shared";
+      sessionId: string;
+      expectedAuthorityEpoch: number;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    }
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "always";
+      context: "user_private" | "workspace_shared";
+      sessionId?: null | undefined;
+      expectedAuthorityEpoch?: null | undefined;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    };
+export type UserResourceGrantMutationResponse = {
+  scope: "user";
+  grant: UserResourceAuthorityGrant;
+};
+export type RevokeUserResourceGrantResponse = {
+  scope: "user";
+  grant: {
+    grantId: string;
+    generation: number;
+    status: "revoked";
+    revokedAt: string;
+  };
 };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";

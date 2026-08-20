@@ -21,6 +21,7 @@ jobs:
   desktop-image:
     name: Desktop image build + stack assertions
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -46,4 +47,5 @@ jobs:
       # live-Modal half stays skipped (no OPENGENI_P41_LIVE_MODAL). Docker is
       # available on ubuntu-latest, so dockerAvailable() is true here.
       - name: Desktop image e2e
+        timeout-minutes: 36
         run: bun test --timeout 2100000 ./apps/worker/test/desktop-image.e2e.ts

@@ -3,7 +3,9 @@ import {
   MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
+  canonicalizePersistedHistoryItem,
   modelToolOutputSerializationBudgetTokens,
+  omitOutputOnlyHistoryItemFields,
   truncateMiddleWithTokenBudget,
 } from "../src/model-output-truncation";
 
@@ -494,5 +496,64 @@ describe("Codex-parity model tool-output truncation", () => {
       output: { type: "text", text: "" },
     };
     expect(boundModelToolOutputItem(empty)).toBe(empty);
+  });
+
+  test("omits Responses output-only status without cloning items that lack it", () => {
+    const withStatus = {
+      type: "function_call",
+      callId: "call-4",
+      name: "sessions_list",
+      arguments: "{}",
+      status: "completed",
+    };
+    const withoutStatus = {
+      type: "function_call",
+      callId: "call-4",
+      name: "sessions_list",
+      arguments: "{}",
+    };
+    expect(omitOutputOnlyHistoryItemFields(withStatus) as Record<string, unknown>).toEqual(
+      withoutStatus,
+    );
+    expect(omitOutputOnlyHistoryItemFields(withStatus)).not.toHaveProperty("status");
+    expect(omitOutputOnlyHistoryItemFields(withoutStatus)).toBe(withoutStatus);
+  });
+
+  test("omits nested providerData.status that the SDK flattens onto the wire", () => {
+    const withNested = {
+      type: "reasoning",
+      id: "rs_1",
+      content: [],
+      providerData: { id: "rs_1", type: "reasoning", status: "completed", encrypted_content: "x" },
+    };
+    const omitted = omitOutputOnlyHistoryItemFields(withNested);
+    expect(omitted).not.toHaveProperty("status");
+    expect(omitted.providerData as Record<string, unknown>).toEqual({
+      id: "rs_1",
+      type: "reasoning",
+      encrypted_content: "x",
+    });
+    expect(withNested.providerData.status).toBe("completed");
+  });
+
+  test("persist canonicalize drops status then bounds tool output", () => {
+    const item = {
+      type: "function_call_result",
+      name: "sessions_list",
+      callId: "call-5",
+      status: "completed",
+      output: { type: "text", text: "x".repeat(100) },
+    };
+    const persisted = canonicalizePersistedHistoryItem(item, 5);
+    expect(persisted).not.toHaveProperty("status");
+    expect(persisted).toMatchObject({
+      type: "function_call_result",
+      name: "sessions_list",
+      callId: "call-5",
+      output: { type: "text" },
+    });
+    expect((persisted.output as { text: string }).text).toContain("tokens truncated");
+    expect(item.status).toBe("completed");
+    expect(item.output.text).toHaveLength(100);
   });
 });

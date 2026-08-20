@@ -21,6 +21,7 @@ import {
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
@@ -318,15 +319,24 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
     expect(posture.targetRoutines).toEqual(
-      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
-        name,
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+      [
+        ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
           name,
-        ),
-      })).sort((left, right) => left.name.localeCompare(right.name)),
+          owner: "postgres",
+          execute: true,
+          publicExecute: false,
+          securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+            name,
+          ),
+        })),
+        ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+          name,
+          owner: "postgres",
+          execute: false,
+          publicExecute: false,
+          securityDefiner: true,
+        })),
+      ].sort((left, right) => left.name.localeCompare(right.name)),
     );
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
       FORCE_RLS_TABLES.length,
@@ -568,6 +578,55 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       expect(routine.publicExecute).toBe(false);
       expect(routine.settings).toContain(`search_path=pg_catalog, ${SCHEMA}, pg_temp`);
       expect(routine.appExecute).toBe(appExecutableTaskNoteFunctions.has(routine.name));
+    }
+  });
+
+  test("0305 grant routines keep exact dedicated-schema proconfig and lifecycle-only RLS", async () => {
+    if (!available) return;
+    const routines = await admin<Array<{ name: string; settings: string[] | null }>>`
+      select procedure.proname as name, procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname in (
+          'list_self_user_resource_authorities',
+          'issue_self_user_resource_grant',
+          'revoke_self_user_resource_grant'
+        )
+        and pg_catalog.oidvectortypes(procedure.proargtypes) in (
+          'uuid, uuid, text, uuid, integer',
+          'uuid, uuid, uuid, text, text, text, uuid, integer, boolean',
+          'uuid, uuid, uuid'
+        )
+      order by procedure.proname`;
+    expect(Array.from(routines)).toEqual([
+      {
+        name: "issue_self_user_resource_grant",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "list_self_user_resource_authorities",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "revoke_self_user_resource_grant",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+    const policies = await admin<Array<{ tableName: string; usingExpression: string }>>`
+      select tablename as "tableName", qual as "usingExpression"
+      from pg_policies
+      where schemaname = ${SCHEMA}
+        and policyname = 'organization_tenancy_lifecycle'
+        and tablename in (
+          'organization_memberships',
+          'organization_user_resource_authorities',
+          'organization_user_resource_grants'
+        )
+      order by tablename`;
+    expect(policies).toHaveLength(3);
+    for (const policy of policies) {
+      expect(policy.usingExpression).toContain("personal_resource_grant_management");
     }
   });
 
@@ -1180,6 +1239,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       name: "Dedicated context owner",
     });
     const grant = access.workspaceGrants[0]!;
+    await admin`
+      insert into ${admin(SCHEMA)}.session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const session = await withSessionRlsActorContext({ subjectId }, async () =>
       createSession(db, {
         accountId: grant.accountId,

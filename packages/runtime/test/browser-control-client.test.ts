@@ -850,6 +850,21 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("placement controller execs do not inherit a session working directory", async () => {
+    const workdirs: Array<string | undefined> = [];
+    const placement = await localPlacement({ fakeControllerStartup: true });
+    const inner = placement.session.exec!;
+    placement.session.exec = async (args) => {
+      workdirs.push(args.workdir);
+      return inner(args);
+    };
+    await provisionBrowserControlClient(placement.session, {
+      adminToken: `ogb_${"a".repeat(48)}`,
+    });
+    expect(workdirs.length).toBeGreaterThan(0);
+    expect(workdirs.every((workdir) => workdir === "/tmp")).toBe(true);
+  });
+
   test("uses agent-supervised sidecar and typed browser relay on connected machines", async () => {
     const ensured: unknown[] = [];
     const opened: unknown[] = [];
