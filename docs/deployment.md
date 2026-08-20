@@ -715,66 +715,33 @@ live `main` stay mergeable). Drop `Current-base source admission` from the
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
-Release approval is bound to GitHub's native PR author, reviewer, merge actor,
-review state, reviewed head, and submission time:
 
-- a `github-actions[bot]`-authored Version PR requires a native pre-merge
-  `APPROVED` review from a configured human release maintainer;
-- the structured `COMMENTED` admin-PASS form is valid only for a
-  single-maintainer PR whose author, exact-head reviewer, and merge actor are
-  the same configured human; it is never a substitute for approving a
-  bot-authored Version PR;
-- a candidate-head update invalidates a head-bound verdict. For the structured
-  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
-  requires replacement evidence on the same candidate head. Ordinary protected
-  `main` movement is not itself a candidate update and must not trigger a source
-  merge/rebase; and
-- a review submitted after merge is not release evidence.
+Ordinary candidate and operator admission bind the **merged associated PR**, not
+a later GitHub `APPROVE` or structured PASS body on the exact head:
 
-Candidate or operator admission must fail closed when those provider identities
-do not match; do not weaken the provenance check or recreate approval from a
-comment, commit message, or local record.
+- the source SHA must be that PR's `merge_commit_sha`;
+- reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- trees, merge provenance, `opengeni-release-head-<head>` retention, and the
+  required main CI jobs remain fail-closed;
+- GitHub branch protection may still require a review to merge into `main`;
+  that is a merge-time GitHub rule, not a second operator PASS check.
 
-GitHub account identity is authoritative by the provider's positive numeric
-account ID plus account type (`User` or `Bot`). The provider login is still
-required as a non-empty audit snapshot, but login spelling, case normalization,
-or an account rename does not replace that stable identity. A changed numeric
-ID, changed account type, or missing identity field fails closed. The legacy v3
-structured admin-PASS `reviewerLogin` field is likewise an informational login
-snapshot: the native provider review actor's configured numeric ID and account
-type provide reviewer authority, while every other v3 field and the canonical
-body continue to bind the exact base/head verdict.
+Do not recreate admission from a live review list, a review comment, a commit
+message, or a local record. The ordinary operator still records identity fields
+(`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on
+the ledger; those are identity/digest, not a re-fetched GitHub PASS.
 
-For a single-maintainer source PR, generate the exact structured review body
-before merging. Submit the result as a native `COMMENTED` pull-request review;
-the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact. Use the exact provider-retained PR base SHA
-from the pull-request detail (`pull.base.sha`) as `--base`; this is the
-reviewed-base identity that the release verifier reconstructs, not the latest
-SHA currently at the tip of protected `main`:
+GitHub account identity remains authoritative by the provider's positive numeric
+account ID plus account type (`User` or `Bot`) wherever merge provenance names
+an actor. The provider login is an audit snapshot only; login spelling, case
+normalization, or an account rename does not replace that stable identity.
 
-```bash
-bun scripts/release-review.ts \
-  --base <exact-provider-retained-pull.base.sha> \
-  --head <exact-reviewed-pr-head-sha> \
-  --reviewer <trusted-maintainer-login>
-
-bun scripts/release-review.ts \
-  --base <exact-provider-retained-pull.base.sha> \
-  --head <exact-reviewed-pr-head-sha> \
-  --reviewer <trusted-maintainer-login> \
-  --digest
-```
-
-Regenerate the body and verdict when the candidate head or its provider-retained
-`pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
-An ordinary protected-`main` advance does not itself change that base-bound
-review artifact. Separately, let the merge authority refresh latest-current-main
-mergeability and material-compatibility evidence on the same candidate head;
-that evidence is not `reviewedBaseSha` and does not require replacing the review
-or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
-evidence, and do not edit a submitted review after merge to manufacture
-evidence retroactively.
+Use the exact provider-retained PR base SHA from the pull-request detail
+(`pull.base.sha`) as the reviewed-base identity the verifier reconstructs, not
+the latest SHA currently at the tip of protected `main`. Ordinary protected
+`main` movement after merge is not itself a candidate update and must not
+trigger a source merge/rebase. Do not merge or rebase `main` into the source
+branch solely to refresh evidence.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -881,8 +848,8 @@ fails closed.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
-prerelease are retention evidence, not approval: the native pre-merge review
-and every later source/acceptance gate remain mandatory. A missing, moved,
+prerelease are retention evidence, not a GitHub review PASS. Later source,
+candidate, and acceptance gates remain mandatory. A missing, moved,
 indirect, mutable, non-provider-authored, or post-hoc substitute outside the
 fenced merged-source recovery above fails release provenance. Retained-head
 prereleases and their tags intentionally accumulate for the lifetime of their
@@ -923,25 +890,16 @@ does not require the event base to equal continuously moving `main`. The
 base-owned workflow/helper SHA must remain in protected `production` ancestry
 for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
-and terminal head identity remain fail-closed. Exact-head review stays bound to
-the candidate. The merge authority separately performs the fresh latest-main
+and terminal head identity remain fail-closed. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR before the
-exact-head release review is submitted. Release admission compares GitHub's
-provider-recorded review and merge timestamps and requires the decisive review
-to precede the merge. A review added after auto-merge is intentionally not
-release evidence and cannot rehabilitate that source commit; stop that train
-and use a fresh, normally reviewed release-source PR instead of retrying or
-weakening admission.
-
-Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
-`autoMergeRequest` from the PR and the exact-head review from the provider API.
-Require the PR to remain open, auto-merge to remain null, and the canonical
-review to bind the unchanged head with a strictly earlier provider timestamp;
-equal review and merge timestamps are not ordering evidence. Then merge with an
-exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
+Do not enable or leave auto-merge armed on a generated Version PR until trusted
+CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
+`headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
+remain open and auto-merge to remain null, then merge with an exact head-SHA
+fence. Never rely on an earlier UI observation for this boundary. Ordinary
+candidate/operator admission does not re-read GitHub reviews after merge.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -961,7 +919,7 @@ workflow from that retained controller tag and pass the release source only as
 data. The complete job graph, reusable admission gate, and local publication
 actions therefore come from reviewed controller bytes. Every job that checks
 out or executes candidate source depends on the read-only gate, which
-reconstructs the provider-owned merge, exact-head review, retention, and
+reconstructs the provider-owned merge, merged-source identity, retention, and
 required-check evidence. A merge composed against a different base fails before
 candidate source runs or candidate bytes exist. Acceptance, embedded
 distribution, and final publication all require that same controller SHA and
