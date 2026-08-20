@@ -46,6 +46,7 @@ import {
   isUserMessage,
   jsonSerializedLength,
   jsonSerializedUtf8ByteLength,
+  omitOpaqueArtifactsFromPortableCompactionHistory,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
   renderCompactionPromptInputForChat,
@@ -992,6 +993,31 @@ describe("bounded checkpoint input", () => {
     expect(prepared.droppedHistoryItems).toBe(4);
     expect(history).toEqual(recent);
     expect(sanitizeHistoryItemsForModel(history)).toEqual(history);
+  });
+
+  test("omits SuperGrok encrypted_content from the portable summarizer copy", () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_grok",
+      content: [{ type: "input_text", text: "keep this plaintext" }],
+      providerData: { id: "rs_grok", type: "reasoning", encrypted_content: "gAAAA-foreign" },
+    };
+    const opaqueCheckpoint = { type: "compaction", encrypted_content: "cmp-foreign" };
+    const raw = [user("continue"), reasoning, opaqueCheckpoint];
+    const projected = omitOpaqueArtifactsFromPortableCompactionHistory(raw);
+    const prepared = prepareCompactionPromptInput(raw, 10_000);
+
+    expect(projected).toHaveLength(2);
+    expect(projected[1]).toEqual({
+      type: "reasoning",
+      content: [{ type: "input_text", text: "keep this plaintext" }],
+      providerData: { id: "rs_grok", type: "reasoning" },
+    });
+    expect(JSON.stringify(prepared.input)).not.toContain("gAAAA-foreign");
+    expect(JSON.stringify(prepared.input)).not.toContain("cmp-foreign");
+    expect(JSON.stringify(prepared.input)).toContain("keep this plaintext");
+    expect(raw[1]).toBe(reasoning);
+    expect(reasoning.providerData.encrypted_content).toBe("gAAAA-foreign");
   });
 
   test("never mutates the raw history used to build the durable replacement", () => {
