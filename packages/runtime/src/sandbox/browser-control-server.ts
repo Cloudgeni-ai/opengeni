@@ -165,10 +165,7 @@ function isMissingBrowserControlServer(exitCode: number, output: string): boolea
 function inferExitCode(output: string): number {
   if (/OPENGENI_BROWSERD_UP\b/u.test(output)) return 0;
   if (/occupied by an unmanaged process/u.test(output)) return 15;
-  if (
-    /no supported Chromium engine/u.test(output) ||
-    isMissingBrowserControlServer(-1, output)
-  ) {
+  if (/no supported Chromium engine/u.test(output) || isMissingBrowserControlServer(-1, output)) {
     return 16;
   }
   if (/exited during startup|failed to become ready/u.test(output)) return 14;

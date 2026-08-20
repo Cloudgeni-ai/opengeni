@@ -11,7 +11,7 @@ describe("desktop Modal image pin", () => {
     const helpers = await source("../templates/_helpers.tpl");
     const configmap = await source("../templates/configmap.yaml");
 
-    expect(values).toContain("desktop:\n  imageRef: \"\"");
+    expect(values).toContain('desktop:\n  imageRef: ""');
     expect(helpers).toContain("opengeni.assertDesktopModalImagePin");
     expect(helpers).toContain("docker/desktop.Dockerfile");
     expect(configmap).toContain("opengeni.assertDesktopModalImagePin");
