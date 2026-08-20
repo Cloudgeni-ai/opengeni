@@ -11,6 +11,11 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
+import {
+  defineLocalMcpBridgeDescriptor,
+  type LocalMcpBridgeDescriptor,
+  type LocalMcpBridgeServer,
+} from "./mcp-bridge";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -255,13 +260,23 @@ export function discoverOpenApiAuth(document: Record<string, unknown>): OpenApiA
   return { kind: "none" };
 }
 
-export class OpenApiMcpServer implements MCPServer {
+export class OpenApiMcpServer implements LocalMcpBridgeServer {
   readonly cacheToolsList = true;
   readonly useStructuredContent = true;
   readonly name: string;
+  readonly bridge: LocalMcpBridgeDescriptor;
 
   constructor(private readonly options: OpenApiServerOptions) {
     this.name = `openapi:${stableToolId(options.revision.definitionId)}`;
+    this.bridge = defineLocalMcpBridgeDescriptor({
+      adapterId: "openapi",
+      providerId: options.revision.source.provider ?? options.revision.definitionId,
+      catalogIdentity: `integration-definition:${options.revision.definitionId}@${options.revision.id}`,
+      authority: options.authority.connectionRef ? "connection" : "none",
+      toolSurface: "immutable_revision",
+      mutationReplay: "safe_reads_only",
+      destinations: openApiBridgeDestinations(options.revision),
+    });
   }
 
   async connect(): Promise<void> {}
@@ -316,6 +331,18 @@ export class OpenApiMcpServer implements MCPServer {
 
 export function createOpenApiMcpServer(options: OpenApiServerOptions): MCPServer {
   return new OpenApiMcpServer(options);
+}
+
+function openApiBridgeDestinations(revision: OpenApiRevision) {
+  const destinations = new Map<string, { origin: string; pathPrefix: string }>();
+  for (const binding of Object.values(revision.bindings)) {
+    const url = new URL(binding.serverUrl);
+    const pathPrefix = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+    destinations.set(`${url.origin}${pathPrefix}`, { origin: url.origin, pathPrefix });
+  }
+  return [...destinations.values()].sort((left, right) =>
+    `${left.origin}${left.pathPrefix}`.localeCompare(`${right.origin}${right.pathPrefix}`),
+  );
 }
 
 export async function invokeOpenApiOperation(

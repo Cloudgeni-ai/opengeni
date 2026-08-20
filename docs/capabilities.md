@@ -73,6 +73,17 @@ one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
+Provider APIs exposed through an in-process MCP adapter implement the shared
+local bridge contract in `packages/capabilities/src/mcp-bridge.ts`. The
+secret-free descriptor identifies the catalog identity, existing Connection,
+host, or no-credential authority class, exact HTTPS destinations, immutable or
+reviewed tool surface, and safe-read-only replay policy. It grants no authority:
+the concrete adapter still revalidates its existing authority before every
+physical request. Generic adapter selection rejects ambiguous matches and keeps
+provider matching out of the catalog importer, OAuth client/profiles, and web
+row/sheet components. See
+[`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
+
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
 flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
 Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
