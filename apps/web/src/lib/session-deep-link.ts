@@ -40,6 +40,24 @@ export function sessionReadWorkspaceIds(grants: readonly SessionReadGrant[]): st
   ];
 }
 
+export function authorizedSessionReadWorkspaceIds(
+  context: AccessContext,
+  workspaces: readonly { id: string; accountId: string }[],
+): string[] {
+  return workspaces
+    .filter((workspace) =>
+      context.workspaceGrants.some(
+        (grant) =>
+          grant.workspaceId === workspace.id &&
+          grant.accountId === workspace.accountId &&
+          grant.subjectId === context.subjectId &&
+          (grant.permissions.includes("sessions:read") ||
+            grant.permissions.includes("workspace:admin")),
+      ),
+    )
+    .map((workspace) => workspace.id);
+}
+
 /**
  * Resolve only through workspace-scoped session reads that the caller already
  * has permission to make. A 401/403/404 is intentionally indistinguishable

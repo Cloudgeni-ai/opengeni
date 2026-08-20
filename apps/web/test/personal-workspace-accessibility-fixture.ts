@@ -8,7 +8,10 @@ import {
   WorkspaceScopeNavigationContent,
   type ScopeNavigationLink,
 } from "../src/components/rail/workspace-scope-nav";
-import { managedSelfContextIdentity } from "../src/lib/managed-self-context";
+import {
+  managedSelfContextIdentity,
+  type ManagedSelfContext,
+} from "../src/lib/managed-self-context";
 import type { Workspace } from "../src/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -92,6 +95,18 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           workspace: personalWorkspace,
           activeWorkspaceId: "another-workspace",
           managedSelfContext: selfContext,
+        }),
+      ),
+      createElement(
+        "div",
+        { id: "suspended-personal-menuitem", role: "menuitem" },
+        createElement(WorkspaceMenuItemContent, {
+          workspace: personalWorkspace,
+          activeWorkspaceId: "another-workspace",
+          managedSelfContext: {
+            ...selfContext,
+            memberships: [{ ...selfContext.memberships[0], status: "suspended" }],
+          } as unknown as ManagedSelfContext,
         }),
       ),
       createElement(

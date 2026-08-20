@@ -1,21 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import {
+  authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
   resolveAuthorizedSessionWorkspace,
-  sessionReadWorkspaceIds,
 } from "@/lib/session-deep-link";
 import { workspaceSessionsPath } from "@/lib/routes";
 
 export function SessionUnavailableRoute(props: { workspaceId: string; sessionId: string }) {
   const context = useAppContext();
   const [state, setState] = useState<"resolving" | "not-found" | "error">("resolving");
-  const listedWorkspaceIds = new Set(context.workspaces.map((workspace) => workspace.id));
-  const sessionWorkspaceIds = sessionReadWorkspaceIds(context.accessContext.workspaceGrants).filter(
-    (workspaceId) => listedWorkspaceIds.has(workspaceId),
+  const sessionWorkspaceIds = useMemo(
+    () => authorizedSessionReadWorkspaceIds(context.accessContext, context.workspaces),
+    [context.accessContext, context.workspaces],
   );
   const backWorkspaceId = sessionWorkspaceIds.includes(props.workspaceId)
     ? props.workspaceId
@@ -33,7 +33,7 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
       context.accessContext.workspaceGrants,
       props.sessionId,
       {
-        authorizedWorkspaceIds: context.workspaces.map((workspace) => workspace.id),
+        authorizedWorkspaceIds: sessionWorkspaceIds,
         excludeWorkspaceId: props.workspaceId,
       },
     ).then((resolution) => {
@@ -52,7 +52,7 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
   }, [
     context.accessContext.workspaceGrants,
     context.client,
-    context.workspaces,
+    sessionWorkspaceIds,
     props.sessionId,
     props.workspaceId,
   ]);

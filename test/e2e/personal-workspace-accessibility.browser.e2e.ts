@@ -35,6 +35,14 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(await page.locator("#personal-menuitem").getAttribute("aria-label")).toBeNull();
   });
 
+  test("a suspended membership never labels the workspace Personal", async () => {
+    const menuitem = page.locator("#suspended-personal-menuitem");
+    const snapshot = await menuitem.ariaSnapshot();
+    expect(snapshot).toContain("Roadmap Paused");
+    expect(snapshot).not.toContain("Personal");
+    expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(0);
+  });
+
   test("scope navigation is screen-reader legible and keyboard operable", async () => {
     const disclosure = page.locator("#desktop-scope-navigation details");
     const summary = disclosure.locator("summary");

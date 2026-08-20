@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { managedSelfContextIdentity } from "./managed-self-context";
-import { resolveWorkspaceScopeContext } from "./workspace-scope-context";
+import { managedSelfContextIdentity, type ManagedSelfContext } from "./managed-self-context";
+import {
+  authorizedWorkspaceFromList,
+  resolveWorkspaceScopeContext,
+} from "./workspace-scope-context";
 import type { AccessContext, Workspace } from "@/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -72,6 +75,30 @@ const selfContext = {
 };
 
 describe("workspace scope context", () => {
+  test("requires the server list and exact current-subject/account grant to agree", () => {
+    expect(
+      authorizedWorkspaceFromList({
+        workspaceId: sharedWorkspaceId,
+        workspaces: [shared],
+        accessContext: access(),
+      }),
+    ).toEqual(shared);
+    expect(
+      authorizedWorkspaceFromList({
+        workspaceId: sharedWorkspaceId,
+        workspaces: [shared],
+        accessContext: access("user:someone-else"),
+      }),
+    ).toBeNull();
+    expect(
+      authorizedWorkspaceFromList({
+        workspaceId: sharedWorkspaceId,
+        workspaces: [],
+        accessContext: access(),
+      }),
+    ).toBeNull();
+  });
+
   test("derives Organization, Workspace, and Personal facts from exact server tuples", () => {
     expect(
       resolveWorkspaceScopeContext({
@@ -132,6 +159,21 @@ describe("workspace scope context", () => {
         workspaces: [shared],
         accessContext: access(),
         managedSelfContext: selfContext,
+      }),
+    ).toMatchObject({ workspaceKind: "shared", personalWorkspaceId: null });
+  });
+
+  test("a suspended organization membership neither classifies nor links Personal", () => {
+    const suspended = {
+      ...selfContext,
+      memberships: [{ ...selfContext.memberships[0]!, status: "suspended" as const }],
+    } as unknown as ManagedSelfContext;
+    expect(
+      resolveWorkspaceScopeContext({
+        workspace: personal,
+        workspaces: [shared, personal],
+        accessContext: access(),
+        managedSelfContext: suspended,
       }),
     ).toMatchObject({ workspaceKind: "shared", personalWorkspaceId: null });
   });

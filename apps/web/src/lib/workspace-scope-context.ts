@@ -13,6 +13,27 @@ export type WorkspaceScopeContext = {
 };
 
 /**
+ * A workspace shell is eligible only when the current server list and the
+ * current principal's exact workspace/account grant agree on the same row.
+ */
+export function authorizedWorkspaceFromList(input: {
+  workspaceId: string;
+  workspaces: readonly Workspace[];
+  accessContext: AccessContext;
+}): Workspace | null {
+  const workspace = input.workspaces.find((candidate) => candidate.id === input.workspaceId);
+  if (!workspace) return null;
+  return input.accessContext.workspaceGrants.some(
+    (grant) =>
+      grant.workspaceId === workspace.id &&
+      grant.accountId === workspace.accountId &&
+      grant.subjectId === input.accessContext.subjectId,
+  )
+    ? workspace
+    : null;
+}
+
+/**
  * Build display context only from the exact server-issued workspace grant and,
  * for Personal facts, the current managed principal's organization membership.
  * Names, permissions, defaults, and creator fields are never treated as scope
@@ -27,13 +48,15 @@ export function resolveWorkspaceScopeContext(input: {
   const { accessContext, managedSelfContext, workspace, workspaces } = input;
   if (!workspace) return null;
 
-  const workspaceGrant = accessContext.workspaceGrants.find(
-    (grant) =>
-      grant.workspaceId === workspace.id &&
-      grant.accountId === workspace.accountId &&
-      grant.subjectId === accessContext.subjectId,
-  );
-  if (!workspaceGrant) return null;
+  if (
+    !authorizedWorkspaceFromList({
+      workspaceId: workspace.id,
+      workspaces,
+      accessContext,
+    })
+  ) {
+    return null;
+  }
 
   const currentManagedContext =
     managedSelfContext?.identity.subjectId === accessContext.subjectId ? managedSelfContext : null;
