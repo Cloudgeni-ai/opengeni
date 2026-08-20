@@ -23,11 +23,17 @@ type AccessUiState = {
   prepareBodies: Record<string, unknown>[];
   requestBodies: Record<string, unknown>[];
   cancelBodies: Record<string, unknown>[];
+  accessReads: number;
+  workspaceListReads: number;
+  workspaceDetailReads: number;
+  workspaceDetailReadsBeforeRevalidation: number;
   requestReads: number;
   prepareGate: Promise<void> | null;
   requestGate: Promise<void> | null;
   cancelGate: Promise<void> | null;
   authorizeLinkedWorkspaceOnCompletion: boolean;
+  linkedWorkspaceAuthorized: boolean;
+  rejectWorkspaceDetail: boolean;
 };
 
 describe("Slack access-link browser acceptance", () => {
@@ -79,6 +85,7 @@ describe("Slack access-link browser acceptance", () => {
     state.prepareGate = prepareGate.promise;
     state.requestGate = requestGate.promise;
     state.authorizeLinkedWorkspaceOnCompletion = true;
+    state.rejectWorkspaceDetail = true;
     const context = await browser.newContext({ viewport: { width: 1180, height: 850 } });
     const page = await context.newPage();
     try {
@@ -137,11 +144,17 @@ describe("Slack access-link browser acceptance", () => {
       state.requestStatus = "completed";
       state.requestVersion = 3;
       const readsBeforeCompletion = state.requestReads;
+      const accessReadsBeforeCompletion = state.accessReads;
+      const workspaceListReadsBeforeCompletion = state.workspaceListReads;
       await waitForCondition(() => state.requestReads > readsBeforeCompletion, 12_000);
       await expectVisible(page.getByRole("navigation", { name: "Primary" }));
       expect(await page.locator("main").count()).toBe(1);
       await expectMainCountNeverExceededOne(page);
       expect(state.requestReads).toBeGreaterThan(0);
+      expect(state.accessReads).toBe(accessReadsBeforeCompletion + 1);
+      expect(state.workspaceListReads).toBe(workspaceListReadsBeforeCompletion + 1);
+      expect(state.workspaceDetailReadsBeforeRevalidation).toBe(0);
+      await expectNoBrowserErrors(page);
       expect(new URL(page.url()).hash).toBe("");
       await page.reload({ waitUntil: "networkidle" });
       await expectVisible(page.getByRole("navigation", { name: "Primary" }));
@@ -153,6 +166,45 @@ describe("Slack access-link browser acceptance", () => {
       await context.close();
     }
   }, 90_000);
+
+  test("direct completion revalidates once without starting the delayed rejecting workspace refresh", async () => {
+    const state = freshState();
+    const prepareGate = deferredGate();
+    state.signedIn = true;
+    state.requestStatus = "completed";
+    state.requestVersion = 2;
+    state.prepareGate = prepareGate.promise;
+    state.authorizeLinkedWorkspaceOnCompletion = true;
+    state.rejectWorkspaceDetail = true;
+    const context = await browser.newContext({ viewport: { width: 1180, height: 850 } });
+    const page = await context.newPage();
+    try {
+      await installAccessApi(page, state);
+      await page.goto(
+        `${webBaseUrl}/workspaces/${workspaceId}/capabilities#slack_link=${encodeURIComponent(signedLink)}`,
+        { waitUntil: "domcontentloaded" },
+      );
+
+      await expectText(page.locator("main"), "Checking Slack access");
+      await expectSingleMainWithoutRail(page);
+      expect(state.accessReads).toBe(1);
+      expect(state.workspaceListReads).toBe(1);
+      prepareGate.resolve();
+
+      await expectVisible(page.getByRole("navigation", { name: "Primary" }));
+      expect(state.accessReads).toBe(2);
+      expect(state.workspaceListReads).toBe(2);
+      expect(state.workspaceDetailReadsBeforeRevalidation).toBe(0);
+      expect(state.workspaceDetailReads).toBeGreaterThan(0);
+      expect(await page.locator("main").count()).toBe(1);
+      await expectMainCountNeverExceededOne(page);
+      await expectNoBrowserErrors(page);
+      expect(await page.getByText("Slack link unavailable").count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Request access" }).count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("keeps the scrubbed one-shot bearer across a failed managed sign-in retry", async () => {
     const state = freshState();
@@ -302,11 +354,17 @@ function freshState(): AccessUiState {
     prepareBodies: [],
     requestBodies: [],
     cancelBodies: [],
+    accessReads: 0,
+    workspaceListReads: 0,
+    workspaceDetailReads: 0,
+    workspaceDetailReadsBeforeRevalidation: 0,
     requestReads: 0,
     prepareGate: null,
     requestGate: null,
     cancelGate: null,
     authorizeLinkedWorkspaceOnCompletion: false,
+    linkedWorkspaceAuthorized: false,
+    rejectWorkspaceDetail: false,
   };
 }
 
@@ -314,6 +372,12 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
   await page.addInitScript(() => {
     const mainCounts: number[] = [];
     Object.defineProperty(window, "__opengeniMainCounts", { value: mainCounts });
+    const browserErrors: string[] = [];
+    Object.defineProperty(window, "__opengeniBrowserErrors", { value: browserErrors });
+    window.addEventListener("error", (event) => browserErrors.push(event.message));
+    window.addEventListener("unhandledrejection", (event) =>
+      browserErrors.push(String(event.reason)),
+    );
     const record = () => mainCounts.push(document.querySelectorAll("main").length);
     new MutationObserver(record).observe(document, { childList: true, subtree: true });
     document.addEventListener("DOMContentLoaded", record, { once: true });
@@ -370,8 +434,8 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json({ user: { id: "browser-user" } });
     }
     if (url.pathname === "/v1/access/me") {
-      const linkedWorkspaceAuthorized =
-        state.authorizeLinkedWorkspaceOnCompletion && state.requestStatus === "completed";
+      state.accessReads += 1;
+      const linkedWorkspaceAuthorized = state.linkedWorkspaceAuthorized;
       return json({
         mode: "managed",
         subjectId: "user:browser-user",
@@ -422,14 +486,20 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json({ memberships: [] });
     }
     if (url.pathname === "/v1/workspaces") {
+      state.workspaceListReads += 1;
       return json([
         ...(state.hasDefaultWorkspace ? [defaultWorkspace()] : []),
-        ...(state.authorizeLinkedWorkspaceOnCompletion && state.requestStatus === "completed"
-          ? [linkedWorkspace()]
-          : []),
+        ...(state.linkedWorkspaceAuthorized ? [linkedWorkspace()] : []),
       ]);
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}` && state.requestStatus === "completed") {
+    if (url.pathname === `/v1/workspaces/${workspaceId}`) {
+      state.workspaceDetailReads += 1;
+      const beforeRevalidation = Math.min(state.accessReads, state.workspaceListReads) < 2;
+      if (beforeRevalidation) state.workspaceDetailReadsBeforeRevalidation += 1;
+      if (state.rejectWorkspaceDetail && beforeRevalidation) {
+        await Bun.sleep(100);
+        return json({ error: { message: "delayed workspace refresh rejection" } }, 503);
+      }
       return json(linkedWorkspace());
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) {
@@ -475,6 +545,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     ) {
       state.prepareBodies.push((request.postDataJSON() ?? {}) as Record<string, unknown>);
       await state.prepareGate;
+      if (state.authorizeLinkedWorkspaceOnCompletion && state.requestStatus === "completed") {
+        state.linkedWorkspaceAuthorized = true;
+      }
       return json(accessRequest(state), 201);
     }
     if (
@@ -505,6 +578,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       request.method() === "GET"
     ) {
       state.requestReads += 1;
+      if (state.authorizeLinkedWorkspaceOnCompletion && state.requestStatus === "completed") {
+        state.linkedWorkspaceAuthorized = true;
+      }
       return json(accessRequest(state));
     }
     if (url.pathname.endsWith("/sessions")) {
@@ -597,6 +673,18 @@ async function expectMainCountNeverExceededOne(page: Page): Promise<void> {
       ),
     ),
   ).toBe(1);
+}
+
+async function expectNoBrowserErrors(page: Page): Promise<void> {
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __opengeniBrowserErrors?: string[] })
+          .__opengeniBrowserErrors ?? [],
+    ),
+  ).toEqual([]);
+  expect(await page.locator('[data-sonner-toast][data-type="error"]').count()).toBe(0);
+  expect((await page.locator("body").textContent()) ?? "").not.toContain("Something went wrong");
 }
 
 function deferredGate(): { promise: Promise<void>; resolve: () => void } {

@@ -71,7 +71,6 @@ export function WorkspaceShellRouteContent({
     preparePendingSlackLink,
     revalidatePrincipalAccess,
     resetWorkspaceIntegrations,
-    refreshWorkspace,
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
@@ -137,6 +136,19 @@ export function WorkspaceShellRouteContent({
     setOwnedSlackAccess({ workspaceId, value: emptySlackAccessState() });
   }, [context.accessKeyVersion, workspaceId]);
 
+  const completeSlackAccess = useCallback(
+    (operation: WorkspaceOperationIdentity): boolean => {
+      if (!ownsSlackOperation(operation)) return false;
+      toast.success("Slack identity linked", {
+        description: "You can return to Slack and invoke OpenGeni again.",
+      });
+      clearSlackLinkContinuation();
+      revalidatePrincipalAccess();
+      return true;
+    },
+    [clearSlackLinkContinuation, ownsSlackOperation, revalidatePrincipalAccess],
+  );
+
   const refreshSlackAccess = useCallback(
     async (request: SlackUserLinkAccessRequest, options?: { polling?: boolean }) => {
       const operation = beginSlackOperation(options);
@@ -156,23 +168,15 @@ export function WorkspaceShellRouteContent({
       if (!ownsSlackOperation(operation)) return null;
       updateSlackAccess(workspaceId, (current) => ({ ...current, request: next }));
       if (next.status === "completed") {
-        toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke OpenGeni again.",
-        });
-        await refreshWorkspace(workspaceId);
-        if (!ownsSlackOperation(operation)) return null;
-        clearSlackLinkContinuation();
-        revalidatePrincipalAccess();
+        completeSlackAccess(operation);
       }
       return next;
     },
     [
       beginSlackOperation,
-      clearSlackLinkContinuation,
       client,
+      completeSlackAccess,
       ownsSlackOperation,
-      refreshWorkspace,
-      revalidatePrincipalAccess,
       updateSlackAccess,
       workspaceId,
     ],
@@ -185,17 +189,11 @@ export function WorkspaceShellRouteContent({
     if (!operation) return;
     updateSlackAccess(workspaceId, (current) => ({ ...current, error: null }));
     void preparePendingSlackLink(workspaceId)
-      .then(async (request) => {
+      .then((request) => {
         if (disposed || !request || !ownsSlackOperation(operation)) return;
         updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
         if (request.status === "completed") {
-          toast.success("Slack identity linked", {
-            description: "You can return to Slack and invoke OpenGeni again.",
-          });
-          await refreshWorkspace(workspaceId);
-          if (disposed || !ownsSlackOperation(operation)) return;
-          clearSlackLinkContinuation();
-          revalidatePrincipalAccess();
+          completeSlackAccess(operation);
         }
       })
       .catch((error) => {
@@ -213,12 +211,10 @@ export function WorkspaceShellRouteContent({
     };
   }, [
     beginSlackOperation,
-    clearSlackLinkContinuation,
+    completeSlackAccess,
     hasSlackLinkContinuation,
     ownsSlackOperation,
     preparePendingSlackLink,
-    refreshWorkspace,
-    revalidatePrincipalAccess,
     updateSlackAccess,
     workspaceId,
   ]);
