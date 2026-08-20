@@ -240,10 +240,13 @@ import type {
   AcceptOrganizationInvitationResponse,
   CreateOrganizationInvitationRequest,
   OrganizationInvitation,
+  OrganizationAdministrationOverview,
   OrganizationMember,
   OrganizationRetentionPolicy,
+  OrganizationSummary,
   RevokeOrganizationInvitationRequest,
   UpdateOrganizationMemberRequest,
+  UpdateOrganizationNameRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
@@ -294,6 +297,7 @@ import type {
   ForkSessionResponse,
   Session,
   SessionListResponse,
+  SessionTenancyCreateCapabilities,
   AgentTopologyPageResponse,
   UpdateSessionChannelRequest,
   UpdateSessionAttentionRequest,
@@ -889,6 +893,16 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
       request,
+    );
+  }
+
+  /** Whether this exact authenticated principal may atomically create a private session. */
+  async getSessionTenancyCreateCapabilities(
+    workspaceId: string,
+  ): Promise<SessionTenancyCreateCapabilities> {
+    return await this.requestJson<SessionTenancyCreateCapabilities>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-tenancy/capabilities`,
     );
   }
 
@@ -3747,6 +3761,28 @@ export class OpenGeniClient {
     return await this.requestJson<ListOrganizationMembersResponse>(
       "GET",
       `/v1/organizations/${organizationId}/members`,
+    );
+  }
+
+  /** Canonical organization identity and every non-personal workspace access roster. */
+  async getOrganizationAdministrationOverview(
+    organizationId: string,
+  ): Promise<OrganizationAdministrationOverview> {
+    return await this.requestJson<OrganizationAdministrationOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/overview`,
+    );
+  }
+
+  /** Rename the organization under an exact optimistic-concurrency fence. */
+  async updateOrganizationName(
+    organizationId: string,
+    request: UpdateOrganizationNameRequest,
+  ): Promise<OrganizationSummary> {
+    return await this.requestJson<OrganizationSummary>(
+      "PATCH",
+      `/v1/organizations/${organizationId}`,
+      request,
     );
   }
 

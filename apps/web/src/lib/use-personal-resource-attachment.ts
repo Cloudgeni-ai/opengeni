@@ -64,6 +64,7 @@ export function usePersonalResourceAttachment(input: {
   session?: Pick<Session, "id" | "tenancy"> | null;
   fixed: FixedPersonalResources;
   personalWorkspaceTarget: boolean;
+  createVisibility?: "private" | "workspace";
   enabled?: boolean | undefined;
   onReloadSession?: (() => Promise<void>) | undefined;
 }): PersonalResourceAttachmentController {
@@ -204,7 +205,7 @@ export function usePersonalResourceAttachment(input: {
       : "private"
     : input.personalWorkspaceTarget
       ? "private"
-      : "workspace";
+      : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
   const fixedResourceCount =
     Number(input.fixed.variableSetId !== null) + Number(input.fixed.rigId !== null);

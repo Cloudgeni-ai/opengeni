@@ -4,6 +4,7 @@ import {
   ListOrganizationMembersResponse,
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
+  OrganizationAdministrationOverview,
   OrganizationMember,
   OrganizationRetentionDeletionClaim,
   OrganizationRetentionDatabaseFinalization,
@@ -11,6 +12,8 @@ import {
   OrganizationRetentionDeletionPreview,
   OrganizationRetentionDeletionResult,
   OrganizationRetentionPolicy,
+  OrganizationSummary,
+  type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
   type OrganizationMembershipRole,
@@ -20,6 +23,7 @@ import {
   type OrganizationRetentionDeletionPreview as OrganizationRetentionDeletionPreviewType,
   type OrganizationRetentionDeletionResult as OrganizationRetentionDeletionResultType,
   type OrganizationRetentionPolicy as OrganizationRetentionPolicyType,
+  type OrganizationSummary as OrganizationSummaryType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
@@ -455,6 +459,57 @@ export async function listOrganizationMembers(
       return ListOrganizationMembersResponse.parse({
         members: row?.result ?? [],
       }).members;
+    },
+  );
+}
+
+export async function getOrganizationAdministrationOverview(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationAdministrationOverviewType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select get_organization_administration_overview(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return OrganizationAdministrationOverview.parse(row?.result);
+    },
+  );
+}
+
+export async function updateOrganizationName(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    name: string;
+    expectedUpdatedAt: string;
+    operationId: string;
+  },
+): Promise<OrganizationSummaryType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select update_organization_name(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId},
+          ${input.name},
+          ${input.expectedUpdatedAt}::timestamptz,
+          ${input.operationId}::uuid
+        ) as result`,
+      );
+      return OrganizationSummary.parse(row?.result);
     },
   );
 }

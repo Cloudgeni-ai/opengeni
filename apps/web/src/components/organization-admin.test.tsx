@@ -11,6 +11,7 @@ import {
   type OrganizationAdminIdentity,
 } from "@/lib/organization-admin";
 import type {
+  OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationRetentionPolicy,
@@ -53,7 +54,7 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
-const { OrganizationPeopleSection, OrganizationRetentionSection } =
+const { OrganizationOverviewSection, OrganizationPeopleSection, OrganizationRetentionSection } =
   await import("./organization-admin");
 
 const identityA: OrganizationAdminIdentity = {
@@ -113,6 +114,46 @@ function policy(identity: OrganizationAdminIdentity, retentionDays: number | nul
     version: 1,
     updatedAt: timestamp,
   } satisfies OrganizationRetentionPolicy;
+}
+
+function overview(identity: OrganizationAdminIdentity): OrganizationAdministrationOverview {
+  return {
+    organization: {
+      id: identity.organizationId,
+      name: "Acme Engineering",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    workspaces: [
+      {
+        id: "workspace-company",
+        name: "Company platform",
+        slug: "company-platform",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        members: [
+          {
+            membershipId: "workspace-member-a",
+            subjectId: "user:alice",
+            subjectLabel: "Alice Example",
+            principalKind: "human",
+            role: "admin",
+            permissions: ["workspace:read", "sessions:read"],
+            createdAt: timestamp,
+          },
+          {
+            membershipId: "workspace-service-a",
+            subjectId: "service:deploy",
+            subjectLabel: "Deployment automation",
+            principalKind: "service",
+            role: "service",
+            permissions: ["workspace:read"],
+            createdAt: timestamp,
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function deferred<Value>() {
@@ -175,6 +216,175 @@ beforeEach(() => {
 });
 
 describe("organization administration component fences", () => {
+  test("renders shared workspace access and keeps rename owned through StrictMode", async () => {
+    const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
+    const updateOrganizationName = mock(async () => ({
+      ...overview(identityA).organization,
+      name: "Acme Research",
+      updatedAt: "2026-08-20T11:00:00.000Z",
+    }));
+    const onOrganizationChanged = mock(() => undefined);
+    const client = {
+      getOrganizationAdministrationOverview,
+      updateOrganizationName,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrganizationOverviewSection
+            client={client}
+            identity={identityA}
+            actorRole="owner"
+            managedSession
+            accessibleWorkspaceIds={new Set(["workspace-company"])}
+            onOrganizationChanged={onOrganizationChanged}
+          />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(getOrganizationAdministrationOverview.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Acme Engineering");
+    expect(container.textContent).toContain("Company platform");
+    expect(container.textContent).toContain("2 members");
+    expect(container.textContent).not.toContain("Private roadmap");
+    await act(async () => button(container, "Rename").click());
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing organization name input");
+    await enterText(nameInput, "Acme Research");
+    await act(async () => button(container, "Save").click());
+    await flush();
+
+    expect(updateOrganizationName).toHaveBeenCalledWith(identityA.organizationId, {
+      name: "Acme Research",
+      expectedUpdatedAt: timestamp,
+      operationId: expect.any(String),
+    });
+    expect(container.textContent).toContain("Acme Research");
+    expect(onOrganizationChanged).toHaveBeenCalledTimes(1);
+    expect(toastSuccess).toHaveBeenCalledWith("Organization name updated");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("retries an outcome-unknown rename with the exact operation id", async () => {
+    const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
+    const uncertain = Object.assign(new Error("response lost"), { outcomeUnknown: true });
+    const updateOrganizationName = mock(async (...args: unknown[]) => {
+      if (updateOrganizationName.mock.calls.length === 1) throw uncertain;
+      const request = args[1] as { name: string };
+      return {
+        ...overview(identityA).organization,
+        name: request.name,
+        updatedAt: "2026-08-20T11:00:00.000Z",
+      };
+    });
+    const client = {
+      getOrganizationAdministrationOverview,
+      updateOrganizationName,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => undefined}
+        />,
+      );
+    });
+    await flush();
+    await act(async () => button(container, "Rename").click());
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing organization name input");
+    await enterText(nameInput, "Acme Research");
+    await act(async () => button(container, "Save").click());
+    await flush();
+    await act(async () => button(container, "Save").click());
+    await flush();
+
+    expect(updateOrganizationName).toHaveBeenCalledTimes(2);
+    const firstRequest = updateOrganizationName.mock.calls[0]?.[1] as {
+      operationId: string;
+    };
+    const secondRequest = updateOrganizationName.mock.calls[1]?.[1] as {
+      operationId: string;
+    };
+    expect(secondRequest.operationId).toBe(firstRequest.operationId);
+    expect(container.textContent).toContain("Acme Research");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("reports a failed account-menu refresh without misreporting a committed rename", async () => {
+    const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
+    const updateOrganizationName = mock(async () => ({
+      ...overview(identityA).organization,
+      name: "Acme Research",
+      updatedAt: "2026-08-20T11:00:00.000Z",
+    }));
+    const client = {
+      getOrganizationAdministrationOverview,
+      updateOrganizationName,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => Promise.reject(new Error("access refresh unavailable"))}
+        />,
+      );
+    });
+    await flush();
+    await act(async () => button(container, "Rename").click());
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing organization name input");
+    await enterText(nameInput, "Acme Research");
+    await act(async () => button(container, "Save").click());
+    await flush();
+
+    expect(container.textContent).toContain("Acme Research");
+    expect(toastSuccess).toHaveBeenCalledWith("Organization name updated");
+    expect(toastError).toHaveBeenCalledWith(
+      "Organization name updated, but the account menu couldn't refresh",
+      { description: "access refresh unavailable" },
+    );
+    expect(toastError).not.toHaveBeenCalledWith(
+      "Couldn't update organization name",
+      expect.anything(),
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("keeps people reads and mutations owned through StrictMode setup cleanup setup", async () => {
     const actor = member(identityA, "strict-actor");
     const secondOwner = { ...member(identityA, "strict-owner-2"), subjectId: "user:owner-2" };

@@ -33,20 +33,38 @@ import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  ResourceScopePicker,
+  resourceScopeLabel,
+  type ResourceScope,
+} from "@/components/resource-scope-picker";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
 import { listViewState } from "@/lib/load-state";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type { CreateRigRequest, Rig } from "@/types";
 
 export function RigsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const canManageOrganization = Boolean(
+    workspace?.accountId &&
+    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
+  );
+  const canCreatePersonal = Boolean(
+    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId &&
+    workspace?.accountId &&
+    context.managedSelfContext.memberships.some(
+      (membership) =>
+        membership.status === "active" && membership.organizationId === workspace.accountId,
+    ),
+  );
   const rigs = useRigs({ enabled: canView });
   const defaultRigId =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId ?? null;
+    context.workspaces.find((candidate) => candidate.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);
   const rigsView = listViewState({
     loading: rigs.loading,
@@ -106,6 +124,8 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
       {createOpen && canManage ? (
         <CreateRigForm
           mutating={rigs.mutating}
+          canManageOrganization={canManageOrganization}
+          canCreatePersonal={canCreatePersonal}
           onCancel={() => setCreateOpen(false)}
           onCreate={async (request) => {
             const created = await rigs.create(request);
@@ -266,7 +286,7 @@ function RigCard({
 }
 
 export function RigScopeChip({ scope }: { scope: Rig["scope"] }) {
-  const label = scope === "user" ? "Personal" : `${scope[0]!.toUpperCase()}${scope.slice(1)}`;
+  const label = resourceScopeLabel(scope);
   return (
     <span data-rig-scope={scope}>
       <MetaChip title={`${scope} access`}>{label}</MetaChip>
@@ -276,16 +296,21 @@ export function RigScopeChip({ scope }: { scope: Rig["scope"] }) {
 
 function CreateRigForm({
   mutating,
+  canManageOrganization,
+  canCreatePersonal,
   onCreate,
   onCancel,
 }: {
   mutating: boolean;
+  canManageOrganization: boolean;
+  canCreatePersonal: boolean;
   onCreate: (request: CreateRigRequest) => Promise<Rig | null>;
   onCancel: () => void;
 }) {
   const variableSets = useVariableSets();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [scope, setScope] = useState<ResourceScope>("workspace");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [definition, setDefinition] = useState<RigDefinitionDraft>(emptyRigDefinitionDraft());
 
@@ -296,6 +321,7 @@ function CreateRigForm({
       return;
     }
     await onCreate({
+      scope,
       name: trimmed,
       ...(description.trim() ? { description: description.trim() } : {}),
       ...(definition.image.trim() ? { image: definition.image.trim() } : {}),
@@ -308,6 +334,30 @@ function CreateRigForm({
 
   return (
     <div className="mt-4 grid gap-4 rounded-lg border border-border bg-surface p-4">
+      <ResourceScopePicker
+        id="rig"
+        value={scope}
+        onChange={(nextScope) => {
+          setScope(nextScope);
+          setDefinition((current) => ({
+            ...current,
+            defaultVariableSetIds: current.defaultVariableSetIds.filter((id) => {
+              const variableSet = variableSets.variableSets.find(
+                (candidate) => candidate.id === id,
+              );
+              return (
+                variableSet !== undefined &&
+                (nextScope === "user" ||
+                  variableSet.scope === "organization" ||
+                  (nextScope === "workspace" && variableSet.scope === "workspace"))
+              );
+            }),
+          }));
+        }}
+        organizationEnabled={canManageOrganization}
+        personalEnabled={canCreatePersonal}
+        disabled={mutating}
+      />
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="grid gap-1.5">
           <Label htmlFor="rig-name">Name</Label>
@@ -349,6 +399,7 @@ function CreateRigForm({
             value={definition}
             onChange={setDefinition}
             variableSets={variableSets.variableSets}
+            rigScope={scope}
             disabled={mutating}
             idPrefix="create-rig"
           />

@@ -3,12 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
 import { WorkspaceMenuItemContent } from "../src/components/rail/switcher-block";
-import {
-  WorkspaceScopeMenu,
-  WorkspaceScopeNavigationContent,
-  type ScopeNavigationLink,
-} from "../src/components/rail/workspace-scope-nav";
+import { ResourceScopePicker } from "../src/components/resource-scope-picker";
 import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
+import { SessionVisibilityPicker } from "../src/components/session-visibility-picker";
 import {
   managedSelfContextIdentity,
   type ManagedSelfContext,
@@ -54,38 +51,6 @@ const selfContext = {
 };
 
 export function renderPersonalWorkspaceAccessibilityFixture(): string {
-  const scope = {
-    organizationId,
-    organizationLabel: "Northstar",
-    workspaceId: personalWorkspaceId,
-    workspaceLabel: "Roadmap",
-    workspaceKind: "personal" as const,
-    personalWorkspaceId,
-  };
-  const links: ScopeNavigationLink[] = [
-    {
-      href: `/workspaces/${personalWorkspaceId}/organization`,
-      label: "Northstar",
-      description: "Organization administration",
-    },
-    {
-      href: `/workspaces/${personalWorkspaceId}/settings`,
-      label: "Roadmap",
-      description: "Personal workspace settings",
-    },
-    {
-      href: `/workspaces/${personalWorkspaceId}/sessions`,
-      label: "Personal",
-      description: "Current owner-only workspace",
-    },
-  ];
-  const resources: ScopeNavigationLink[] = [
-    {
-      href: `/workspaces/${personalWorkspaceId}/variable-sets`,
-      label: "Variable sets",
-      description: "Organization, Workspace, or Only me",
-    },
-  ];
   return renderToStaticMarkup(
     createElement(
       "main",
@@ -149,21 +114,45 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
       ),
       createElement(
         "section",
-        { id: "desktop-scope-navigation" },
-        createElement(WorkspaceScopeMenu, {
-          scope,
-          links,
-          resources,
-          collapsed: false,
+        { id: "resource-scope-picker" },
+        createElement(ResourceScopePicker, {
+          id: "rig",
+          value: "workspace",
+          organizationEnabled: true,
+          personalEnabled: true,
+          onChange: () => undefined,
         }),
       ),
       createElement(
         "section",
-        { id: "mobile-scope-navigation", style: { width: "320px" } },
-        createElement(WorkspaceScopeNavigationContent, {
-          scope,
-          links,
-          resources,
+        { id: "session-visibility-picker" },
+        createElement(SessionVisibilityPicker, {
+          id: "session",
+          personalWorkspace: false,
+          value: "workspace",
+          capabilities: {
+            activated: true,
+            canCreatePrivate: true,
+            reason: "available",
+          },
+          disabled: false,
+          onChange: () => undefined,
+        }),
+      ),
+      createElement(
+        "section",
+        { id: "inactive-session-visibility-picker" },
+        createElement(SessionVisibilityPicker, {
+          id: "inactive-session",
+          personalWorkspace: false,
+          value: "workspace",
+          capabilities: {
+            activated: false,
+            canCreatePrivate: false,
+            reason: "not_activated",
+          },
+          disabled: false,
+          onChange: () => undefined,
         }),
       ),
     ),

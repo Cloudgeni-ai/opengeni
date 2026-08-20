@@ -1,5 +1,6 @@
 import {
   ForkSessionResponse,
+  SessionTenancyCreateCapabilities,
   UpdateSessionVisibilityResponse,
   sessionVisibilityFromPublic,
   sessionVisibilityToPublic,
@@ -49,6 +50,40 @@ export function requireCanonicalManagedHuman(
   ) {
     throw new SessionTenancyManagedHumanRequiredError();
   }
+}
+
+export async function getManagedHumanSessionCreateCapabilities(
+  deps: Pick<SessionTenancyDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<SessionTenancyCreateCapabilities> {
+  requirePermission(authorization.grant, "sessions:create");
+  try {
+    requireCanonicalManagedHuman(authorization, workspaceId);
+  } catch (error) {
+    if (error instanceof SessionTenancyManagedHumanRequiredError) {
+      return SessionTenancyCreateCapabilities.parse({
+        activated: false,
+        canCreatePrivate: false,
+        reason: "managed_session_required",
+      });
+    }
+    throw error;
+  }
+  const activated = await sessionTenancyProductActivated(deps.db, workspaceId);
+  return SessionTenancyCreateCapabilities.parse({
+    activated,
+    canCreatePrivate: activated,
+    reason: activated ? "available" : "not_activated",
+  });
+}
+
+export async function requireManagedHumanPrivateSessionCreate(
+  deps: Pick<SessionTenancyDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<void> {
+  await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:create"]);
 }
 
 async function requireSessionTenancyMutationGate(

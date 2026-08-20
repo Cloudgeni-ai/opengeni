@@ -136,6 +136,11 @@ describe("buildCreateSessionRequest", () => {
     ).toBe("fast");
   });
 
+  test("threads the selected session visibility and defaults to workspace access", () => {
+    expect(build([], []).visibility).toBe("workspace");
+    expect(build([], [], { visibility: "private" }).visibility).toBe("private");
+  });
+
   test("threads one atomic personal-resource command into create identity", () => {
     const personalResourceAttachment = {
       mode: "once" as const,
@@ -386,6 +391,7 @@ describe("new-session draft option mapping", () => {
 
     const options = newSessionDraftOptionsFromSessionDraft(draft);
     expect(options).toEqual({
+      visibility: "workspace",
       sandboxBackend: "modal",
       variableSetId: "00000000-0000-4000-8000-000000000011",
       rigId: "00000000-0000-4000-8000-000000000012",
@@ -419,6 +425,7 @@ describe("new-session draft option mapping", () => {
       },
     });
     expect(options).toEqual({
+      visibility: "workspace",
       targetSandboxId: "00000000-0000-4000-8000-000000000021",
       workingDir: "/srv/opengeni",
     });

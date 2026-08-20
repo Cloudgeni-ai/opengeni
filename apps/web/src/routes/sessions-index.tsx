@@ -49,6 +49,7 @@ import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
+import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
@@ -160,6 +161,43 @@ function SessionsIndexRouteContent({
     emptySessionDraft(firstPartyMcpToolPolicy.default),
   );
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [tenancyCapabilities, setTenancyCapabilities] = useState<{
+    activated: boolean;
+    canCreatePrivate: boolean;
+    reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+  } | null>(null);
+  const tenancyCapabilityGeneration = useRef(0);
+  useEffect(() => {
+    const generation = ++tenancyCapabilityGeneration.current;
+    if (personalWorkspace) {
+      setTenancyCapabilities({ activated: true, canCreatePrivate: true, reason: "available" });
+      return;
+    }
+    setTenancyCapabilities(null);
+    void context.client
+      .getSessionTenancyCreateCapabilities(workspaceId)
+      .then((capabilities) => {
+        if (tenancyCapabilityGeneration.current !== generation) return;
+        setTenancyCapabilities(capabilities);
+        if (!capabilities.canCreatePrivate) {
+          setDraft((current) =>
+            current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+          );
+        }
+      })
+      .catch(() => {
+        if (tenancyCapabilityGeneration.current !== generation) return;
+        setTenancyCapabilities({
+          activated: false,
+          canCreatePrivate: false,
+          reason: "unavailable",
+        });
+        setDraft((current) =>
+          current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+        );
+      });
+  }, [context.client, personalWorkspace, workspaceId]);
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -173,6 +211,7 @@ function SessionsIndexRouteContent({
       rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    createVisibility: personalWorkspace ? "private" : draft.visibility,
   });
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -320,6 +359,10 @@ function SessionsIndexRouteContent({
     resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
+  const privateCreateUnavailable =
+    !personalWorkspace &&
+    draft.visibility === "private" &&
+    tenancyCapabilities?.canCreatePrivate !== true;
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
@@ -366,6 +409,7 @@ function SessionsIndexRouteContent({
         newSessionDraft.loading ||
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
+        privateCreateUnavailable ||
         (createdSessionAuthority === null && personalAttachment.requiresDecision) ||
         (createdSessionAuthority === null && personalAttachment.loading) ||
         (createdSessionAuthority === null && personalAttachment.refreshing)
@@ -410,6 +454,7 @@ function SessionsIndexRouteContent({
                   channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
+                  visibility: personalWorkspace ? "workspace" : submission.options.visibility,
                 },
               );
               if (!created) return null;
@@ -444,6 +489,7 @@ function SessionsIndexRouteContent({
                 channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
+                visibility: personalWorkspace ? "workspace" : submission.options.visibility,
                 onFailure: ({ error, request }) =>
                   personalAttachment.onDeliveryError(error, request, "create"),
               },
@@ -741,6 +787,15 @@ function SessionsIndexRouteContent({
                 }}
               />
             }
+          />
+
+          <SessionVisibilityPicker
+            id="new-session"
+            personalWorkspace={personalWorkspace}
+            value={personalWorkspace ? "private" : draft.visibility}
+            capabilities={tenancyCapabilities}
+            disabled={busy || newSessionDraft.loading}
+            onChange={(visibility) => setDraft((current) => ({ ...current, visibility }))}
           />
 
           <ComputeTargetControl

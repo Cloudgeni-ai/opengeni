@@ -11,7 +11,6 @@ import {
   Loader2Icon,
   LockIcon,
   RefreshCwIcon,
-  SettingsIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -19,9 +18,9 @@ import { toast } from "sonner";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import {
   OrganizationPeopleSection,
+  OrganizationOverviewSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
-import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
@@ -32,7 +31,6 @@ import {
   validTopupAmount,
 } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   beginOrganizationAdminOperation,
   organizationAdminIdentityKey,
@@ -69,7 +67,6 @@ export function OrgSettingsRoute({
   const organizationLabel = accountId
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
-  const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingOwnerKey, setBillingOwnerKey] = useState("");
   const [billingError, setBillingError] = useState<Error | null>(null);
@@ -246,11 +243,7 @@ export function OrgSettingsRoute({
         <PageHeader
           icon={<BuildingIcon className="size-4" />}
           title="Organization"
-          description={
-            context.authSession?.user.email ??
-            context.accessContext.subjectLabel ??
-            context.accessContext.subjectId
-          }
+          description={organizationLabel}
           actions={
             context.clientConfig.auth.mode === "managedSession" ? (
               <Button
@@ -304,46 +297,15 @@ export function OrgSettingsRoute({
         </nav>
 
         {section === "overview" ? (
-          <>
-            <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <h2 className="text-sm font-medium">Organization overview</h2>
-                  <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
-                  <p className="mt-1 text-xs text-fg-subtle">
-                    Your organization role is {actorRole ?? "unavailable"}. Organization roles
-                    govern administration and billing; they never grant access to another
-                    member&apos;s Personal workspace or personal content.
-                  </p>
-                </div>
-                <span className="rounded-full border border-border px-2 py-1 text-xs capitalize text-fg-muted">
-                  {actorRole ?? "role unavailable"}
-                </span>
-              </div>
-            </section>
-            <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-medium">Workspace access</h2>
-                  <p className="mt-1 text-xs text-fg-muted">
-                    Shared-workspace membership and permissions are separate from organization
-                    authority.
-                  </p>
-                </div>
-                <Button asChild type="button" variant="secondary" size="sm">
-                  <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
-                    <SettingsIcon className="size-3.5" />
-                    {personal ? "Your Personal workspace" : "Current workspace access"}
-                    {personal ? <PersonalWorkspaceBadge decorative /> : null}
-                  </Link>
-                </Button>
-              </div>
-              <p className="text-xs text-fg-subtle">
-                Organization administration does not expose private sessions, credentials,
-                Connections, or personal resources. Personal workspaces remain owner-only.
-              </p>
-            </section>
-          </>
+          <OrganizationOverviewSection
+            key={identityKey}
+            client={client}
+            identity={adminIdentity}
+            actorRole={actorRole}
+            managedSession={context.clientConfig.auth.mode === "managedSession"}
+            accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
+            onOrganizationChanged={context.revalidatePrincipalAccess}
+          />
         ) : null}
 
         {section === "people" ? (

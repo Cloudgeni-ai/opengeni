@@ -1,4 +1,4 @@
-// Variable sets: named, workspace-scoped sets of secret variables that the
+// Variable sets: named organization-, workspace-, or user-scoped sets of secret variables that the
 // worker decrypts and injects into the sandbox as variable set variables at
 // session start. Generic reads are metadata-only; an explicitly permissioned
 // and audited endpoint reveals one value on demand.
@@ -31,8 +31,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ResourceScopePicker, resourceScopeLabel } from "@/components/resource-scope-picker";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
@@ -65,6 +65,14 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const canManageOrganization = Boolean(
     workspaceGrant?.accountId &&
     hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
+  const canCreatePersonal = Boolean(
+    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId &&
+    workspaceGrant?.accountId &&
+    context.managedSelfContext.memberships.some(
+      (membership) =>
+        membership.status === "active" && membership.organizationId === workspaceGrant.accountId,
+    ),
   );
   const variableSets = useVariableSets({ enabled: canList });
   // Attachment views: which sessions and scheduled tasks carry each variableSet.
@@ -163,61 +171,56 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
           <Notice tone="info">You don&apos;t have permission to list variable sets.</Notice>
         </div>
       ) : createOpen && canWriteSet ? (
-        <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[11rem_14rem_minmax(0,1fr)_auto]">
-          <div className="grid gap-1.5">
-            <Label htmlFor="variableSet-scope">Scope</Label>
-            <Select
-              id="variableSet-scope"
-              value={createScope}
-              onChange={(event) =>
-                setCreateScope(event.target.value as WorkspaceVariableSet["scope"])
-              }
-              aria-label="Variable set scope"
-            >
-              <option value="user">Only me</option>
-              <option value="workspace">Workspace</option>
-              {canManageOrganization ? <option value="organization">Organization</option> : null}
-            </Select>
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="variableSet-name">Name</Label>
-            <Input
-              id="variableSet-name"
-              name="variable-set-name"
-              value={createName}
-              onChange={(event) => setCreateName(event.target.value)}
-              placeholder="staging-aws"
-              autoComplete="off"
-              className="h-9 pointer-coarse:min-h-10"
-              autoFocus
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="variableSet-description">Description</Label>
-            <Input
-              id="variableSet-description"
-              name="variable-set-description"
-              value={createDescription}
-              onChange={(event) => setCreateDescription(event.target.value)}
-              placeholder="What these credentials reach"
-              autoComplete="off"
-              className="h-9 pointer-coarse:min-h-10"
-            />
-          </div>
-          <div className="flex items-end">
-            <Button
-              type="button"
-              disabled={variableSets.mutating || !createName.trim()}
-              onClick={() => void createVariableSet()}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              {variableSets.mutating ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : (
-                <CheckIcon className="size-3.5" />
-              )}
-              Create
-            </Button>
+        <div className="mt-4 grid gap-4 rounded-lg border border-border bg-surface p-4">
+          <ResourceScopePicker
+            id="variable-set"
+            value={createScope}
+            onChange={setCreateScope}
+            organizationEnabled={canManageOrganization}
+            personalEnabled={canCreatePersonal}
+            disabled={variableSets.mutating}
+          />
+          <div className="grid gap-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
+            <div className="grid gap-1.5">
+              <Label htmlFor="variableSet-name">Name</Label>
+              <Input
+                id="variableSet-name"
+                name="variable-set-name"
+                value={createName}
+                onChange={(event) => setCreateName(event.target.value)}
+                placeholder="staging-aws"
+                autoComplete="off"
+                className="h-9 pointer-coarse:min-h-10"
+                autoFocus
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="variableSet-description">Description</Label>
+              <Input
+                id="variableSet-description"
+                name="variable-set-description"
+                value={createDescription}
+                onChange={(event) => setCreateDescription(event.target.value)}
+                placeholder="What these credentials reach"
+                autoComplete="off"
+                className="h-9 pointer-coarse:min-h-10"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                disabled={variableSets.mutating || !createName.trim()}
+                onClick={() => void createVariableSet()}
+                className="h-9 pointer-coarse:min-h-10"
+              >
+                {variableSets.mutating ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <CheckIcon className="size-3.5" />
+                )}
+                Create
+              </Button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -477,12 +480,8 @@ export function VariableSetCard(props: {
                 >
                   {variableSet.name}
                 </span>
-                <MetaChip>
-                  {variableSet.scope === "user"
-                    ? "Only me"
-                    : variableSet.scope === "organization"
-                      ? "Organization"
-                      : "Workspace"}
+                <MetaChip title={`${resourceScopeLabel(variableSet.scope)} access`}>
+                  {resourceScopeLabel(variableSet.scope)}
                 </MetaChip>
               </div>
               <div className="mt-0.5 break-words text-xs text-fg-muted [overflow-wrap:anywhere]">
