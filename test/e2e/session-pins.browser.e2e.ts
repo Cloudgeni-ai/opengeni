@@ -170,12 +170,27 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.keyboard.press("Enter");
     const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
     await pinMenuItem.waitFor();
-    await pinMenuItem.focus();
-    const initialPinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
-      timeout: 10_000,
-    });
-    await pageA.keyboard.press("Enter");
-    await initialPinMutation;
+    const initialPinMutation = pageA.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          response.request().method() === "PUT" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`
+        );
+      },
+      {
+        timeout: 10_000,
+      },
+    );
+    // Press through the locator so the keyboard action remains bound to the
+    // menu item even if Radix completes its initial-focus microtask after the
+    // item first becomes visible.
+    await pinMenuItem.press("Enter");
+    const initialPinResponse = await initialPinMutation;
+    expect({
+      status: initialPinResponse.status(),
+      body: await initialPinResponse.text(),
+    }).toEqual({ status: 200, body: expect.any(String) });
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
@@ -1222,6 +1237,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         // merely the header behind a closed drawer.
         await page.getByRole("button", { name: "Open navigation" }).click();
         const navigation = page.getByRole("navigation", { name: "Primary" });
+        expect(await navigation.count()).toBe(1);
         await navigation.waitFor();
         expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
           "Session navigation",

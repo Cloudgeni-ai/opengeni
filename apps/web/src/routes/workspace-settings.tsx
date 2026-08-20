@@ -24,6 +24,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
+import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
@@ -414,6 +415,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             Preferences
           </h2>
           <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
+            <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
             <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
             <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
             <VideoGenerationPreferenceRow

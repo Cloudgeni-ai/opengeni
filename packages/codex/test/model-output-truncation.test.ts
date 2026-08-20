@@ -512,7 +512,9 @@ describe("Codex-parity model tool-output truncation", () => {
       name: "sessions_list",
       arguments: "{}",
     };
-    expect(omitOutputOnlyHistoryItemFields(withStatus)).toEqual(withoutStatus);
+    expect(omitOutputOnlyHistoryItemFields(withStatus) as Record<string, unknown>).toEqual(
+      withoutStatus,
+    );
     expect(omitOutputOnlyHistoryItemFields(withStatus)).not.toHaveProperty("status");
     expect(omitOutputOnlyHistoryItemFields(withoutStatus)).toBe(withoutStatus);
   });
@@ -526,7 +528,7 @@ describe("Codex-parity model tool-output truncation", () => {
     };
     const omitted = omitOutputOnlyHistoryItemFields(withNested);
     expect(omitted).not.toHaveProperty("status");
-    expect(omitted.providerData).toEqual({
+    expect(omitted.providerData as Record<string, unknown>).toEqual({
       id: "rs_1",
       type: "reasoning",
       encrypted_content: "x",

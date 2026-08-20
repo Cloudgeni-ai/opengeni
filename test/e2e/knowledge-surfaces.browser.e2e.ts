@@ -838,7 +838,7 @@ async function expectSchedulesScroll(
   expect(await scrollOwner.count()).toBe(1);
   await expectContentPageScrollAndFocus(
     page,
-    tailCard.getByRole("button", { name: "Edit", exact: true }),
+    tailCard.getByRole("button", { name: `More actions for ${tailTask.name}`, exact: true }),
   );
   await expectNoPageOverflow(page);
   const documentScroll = await page.evaluate(() => ({

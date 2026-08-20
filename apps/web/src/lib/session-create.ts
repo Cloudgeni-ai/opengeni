@@ -144,6 +144,7 @@ export type BuildCreateSessionRequestInput = {
   idempotencyKey: string;
   targetSandboxId?: string | null;
   workingDir?: string | null;
+  channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
@@ -244,6 +245,7 @@ export function buildCreateSessionRequest(
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
+    ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
           expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,

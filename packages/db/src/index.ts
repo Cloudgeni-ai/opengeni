@@ -16181,6 +16181,8 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     workspaceId: row.workspaceId,
     name: row.name,
     description: row.description ?? null,
+    pinned: row.pinned,
+    sortOrder: row.sortOrder,
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -16202,6 +16204,15 @@ export async function createChannel(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       try {
+        const nextSortOrder =
+          (
+            await scopedDb
+              .select({
+                nextSortOrder: sql<number>`coalesce(max(${schema.channels.sortOrder}), -1) + 1`,
+              })
+              .from(schema.channels)
+              .where(eq(schema.channels.workspaceId, input.workspaceId))
+          )[0]?.nextSortOrder ?? 0;
         const [row] = await scopedDb
           .insert(schema.channels)
           .values({
@@ -16209,6 +16220,7 @@ export async function createChannel(
             workspaceId: input.workspaceId,
             name: input.name,
             description: input.description ?? null,
+            sortOrder: nextSortOrder,
             createdBy: input.createdBy ?? null,
           })
           .returning();
@@ -16232,7 +16244,11 @@ export async function listChannels(db: Database, workspaceId: string): Promise<C
       .select()
       .from(schema.channels)
       .where(eq(schema.channels.workspaceId, workspaceId))
-      .orderBy(asc(schema.channels.name), asc(schema.channels.id));
+      .orderBy(
+        desc(schema.channels.pinned),
+        asc(schema.channels.sortOrder),
+        asc(schema.channels.id),
+      );
     return rows.map(mapChannel);
   });
 }
@@ -16256,7 +16272,11 @@ export async function updateChannel(
   db: Database,
   workspaceId: string,
   channelId: string,
-  input: { name?: string | undefined; description?: string | null | undefined },
+  input: {
+    name?: string | undefined;
+    description?: string | null | undefined;
+    pinned?: boolean | undefined;
+  },
 ): Promise<Channel | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     try {
@@ -16265,6 +16285,7 @@ export async function updateChannel(
         .set({
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -16291,6 +16312,58 @@ export async function deleteChannel(
       .returning({ id: schema.channels.id });
     return rows.length > 0;
   });
+}
+
+/**
+ * Replaces the complete project order in one workspace-scoped transaction.
+ * Callers must supply every current project exactly once so a stale drag can
+ * never silently discard a concurrently created project.
+ */
+export async function reorderChannels(
+  db: Database,
+  workspaceId: string,
+  channelIds: readonly string[],
+): Promise<Channel[] | null> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const existing = await tx
+          .select({ id: schema.channels.id })
+          .from(schema.channels)
+          .where(eq(schema.channels.workspaceId, workspaceId))
+          .orderBy(asc(schema.channels.sortOrder), asc(schema.channels.id))
+          .for("update");
+        const existingIds = new Set(existing.map((channel) => channel.id));
+        if (
+          existing.length !== channelIds.length ||
+          new Set(channelIds).size !== channelIds.length ||
+          channelIds.some((channelId) => !existingIds.has(channelId))
+        ) {
+          return null;
+        }
+        const updatedAt = new Date();
+        for (const [sortOrder, channelId] of channelIds.entries()) {
+          await tx
+            .update(schema.channels)
+            .set({ sortOrder, updatedAt })
+            .where(
+              and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)),
+            );
+        }
+        const rows = await tx
+          .select()
+          .from(schema.channels)
+          .where(eq(schema.channels.workspaceId, workspaceId))
+          .orderBy(
+            desc(schema.channels.pinned),
+            asc(schema.channels.sortOrder),
+            asc(schema.channels.id),
+          );
+        return rows.map(mapChannel);
+      }),
+  );
 }
 
 // Re-files one session (rail organization only). Resolves the target channel
@@ -26800,6 +26873,7 @@ export type SessionListCursor = {
   offset: number;
   parentSessionFilter: string;
   search: string | null;
+  archiveMode: "active" | "archived";
 };
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions & {
@@ -26808,6 +26882,8 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   search?: string | undefined;
   /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
   pinsOnly?: boolean | undefined;
+  /** List personally archived chats instead of active chats. */
+  archivedOnly?: boolean | undefined;
   /** Materialize a continuation snapshot. Disable for legacy one-page array reads. */
   materializeSnapshot?: boolean | undefined;
   authorizationScope?: SessionAuthorizationListScope | undefined;
@@ -26843,6 +26919,20 @@ export class SessionPinVersionConflictError extends Error {
   constructor(readonly current: Pick<Session, "pinned" | "pinnedAt" | "pinVersion">) {
     super("session pin version conflict");
     this.name = "SessionPinVersionConflictError";
+  }
+}
+
+export class SessionAttentionVersionConflictError extends Error {
+  constructor(readonly current: Pick<Session, "unread" | "activelyWorking" | "attentionVersion">) {
+    super("session attention version conflict");
+    this.name = "SessionAttentionVersionConflictError";
+  }
+}
+
+export class SessionArchiveVersionConflictError extends Error {
+  constructor(readonly current: Pick<Session, "archived" | "archivedAt" | "archiveVersion">) {
+    super("session archive version conflict");
+    this.name = "SessionArchiveVersionConflictError";
   }
 }
 
@@ -26920,7 +27010,15 @@ async function lockSessionPersonalStateExclusive(
 
 type SessionPinRow = Pick<
   typeof schema.sessionPins.$inferSelect,
-  "pinned" | "pinnedAt" | "version"
+  | "pinned"
+  | "pinnedAt"
+  | "version"
+  | "acknowledgedSequence"
+  | "activelyWorking"
+  | "attentionVersion"
+  | "archived"
+  | "archivedAt"
+  | "archiveVersion"
 >;
 
 function mapSessionPin(
@@ -26935,6 +27033,38 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
+function mapSessionAttention(
+  session: Pick<typeof schema.sessions.$inferSelect, "lastSequence">,
+  row: SessionPinRow | null | undefined,
+): Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> {
+  return row
+    ? {
+        unread: session.lastSequence > row.acknowledgedSequence,
+        activelyWorking: row.activelyWorking,
+        attentionVersion: Number(row.attentionVersion),
+      }
+    : {
+        // An absent personal row means this subject has never acknowledged a
+        // completion. Existing and newly discovered finished work therefore
+        // remains visible until the member explicitly marks it read.
+        unread: session.lastSequence > 0,
+        activelyWorking: false,
+        attentionVersion: 0,
+      };
+}
+
+function mapSessionArchive(
+  row: SessionPinRow | null | undefined,
+): Pick<Session, "archived" | "archivedAt" | "archiveVersion"> {
+  return row
+    ? {
+        archived: row.archived,
+        archivedAt: row.archivedAt?.toISOString() ?? null,
+        archiveVersion: Number(row.archiveVersion),
+      }
+    : { archived: false, archivedAt: null, archiveVersion: 0 };
+}
+
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
 
 type SessionTreeStatsRow = {
@@ -26946,6 +27076,8 @@ type SessionTreeStatsRow = {
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
+  unreadDescendants: number | string;
+  activelyWorkingDescendants: number | string;
   truncated: boolean;
 };
 
@@ -26962,6 +27094,8 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   attentionDescendants: 0,
   pausedDescendants: 0,
   failedDescendants: 0,
+  unreadDescendants: 0,
+  activelyWorkingDescendants: 0,
   truncated: false,
 };
 
@@ -27053,6 +27187,7 @@ export async function sessionTreeStatsForSessions(
   db: Database,
   workspaceId: string,
   rootIds: string[],
+  subjectId?: string,
 ): Promise<Map<string, SessionTreeStats>> {
   const uniqueRootIds = [...new Set(rootIds)];
   if (uniqueRootIds.length === 0) return new Map();
@@ -27073,17 +27208,20 @@ export async function sessionTreeStatsForSessions(
         stats."attentionDescendants",
         stats."pausedDescendants",
         stats."failedDescendants",
+        stats."unreadDescendants",
+        stats."activelyWorkingDescendants",
         stats.truncated
       from ${schema.sessions} root
       cross join lateral (
-        with recursive descendants(id, status, depth, path) as (
-          select root.id, root.status, 0, array[root.id]::uuid[]
+        with recursive descendants(id, status, last_sequence, depth, path) as (
+          select root.id, root.status, root.last_sequence, 0, array[root.id]::uuid[]
 
           union all
 
           select
             child.id,
             child.status,
+            child.last_sequence,
             descendants.depth + 1,
             descendants.path || child.id
           from descendants
@@ -27097,11 +27235,11 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, depth, path
+          select id, status, last_sequence, depth, path
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
-          select id, status, depth, path, row_number() over () as ordinal
+          select id, status, last_sequence, depth, path, row_number() over () as ordinal
           from bounded
         )
         select
@@ -27131,6 +27269,31 @@ export async function sessionTreeStatsForSessions(
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
               and depth > 0 and status = 'failed'
           )::int as "failedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0
+              and ${subjectId ?? null}::text is not null
+              and last_sequence > coalesce((
+                select personal.acknowledged_sequence
+                from ${schema.sessionPins} personal
+                where personal.workspace_id = ${workspaceId}
+                  and personal.subject_id = ${subjectId ?? null}
+                  and personal.session_id = numbered.id
+              ), 0)
+          )::int as "unreadDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0
+              and ${subjectId ?? null}::text is not null
+              and exists (
+                select 1
+                from ${schema.sessionPins} personal
+                where personal.workspace_id = ${workspaceId}
+                  and personal.subject_id = ${subjectId ?? null}
+                  and personal.session_id = numbered.id
+                  and personal.actively_working
+              )
+          )::int as "activelyWorkingDescendants",
           coalesce(bool_or(
             ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
             or (
@@ -27171,6 +27334,8 @@ export async function sessionTreeStatsForSessions(
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
+        unreadDescendants: Number(row.unreadDescendants),
+        activelyWorkingDescendants: Number(row.activelyWorkingDescendants),
         truncated: row.truncated,
       },
     ]),
@@ -27180,7 +27345,7 @@ export async function sessionTreeStatsForSessions(
 function sessionFilters(
   options: Pick<
     ListSessionsForSubjectOptions,
-    "authorizationScope" | "parentSessionId" | "search" | "subjectId"
+    "authorizationScope" | "parentSessionId" | "search" | "subjectId" | "archivedOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -27193,6 +27358,15 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  const archivedRoot = sql`exists (
+    select 1
+    from ${schema.sessionPins} archive_state
+    where archive_state.workspace_id = ${schema.sessions.workspaceId}
+      and archive_state.subject_id = ${options.subjectId}
+      and archive_state.session_id = ${schema.sessions.rootSessionId}
+      and archive_state.archived = true
+  )`;
+  filters.push(options.archivedOnly ? archivedRoot : sql`not (${archivedRoot})`);
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
   }
@@ -27341,6 +27515,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
       offset: cursor.offset,
       parentSessionFilter: cursor.parentSessionFilter,
       search: cursor.search,
+      archiveMode: cursor.archiveMode,
     }),
   ).toString("base64url");
 }
@@ -27353,10 +27528,12 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       offset?: unknown;
       parentSessionFilter?: unknown;
       search?: unknown;
+      archiveMode?: unknown;
     };
     const parentSessionFilter = parsed.parentSessionFilter;
     const search = parsed.search;
     const offset = parsed.offset;
+    const archiveMode = parsed.archiveMode ?? "active";
     if (
       typeof parsed.snapshotId !== "string" ||
       !UUID_PATTERN.test(parsed.snapshotId) ||
@@ -27366,7 +27543,8 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       (parentSessionFilter !== "all" &&
         parentSessionFilter !== "null" &&
         (typeof parentSessionFilter !== "string" || !UUID_PATTERN.test(parentSessionFilter))) ||
-      (search !== null && (typeof search !== "string" || search.length > 200))
+      (search !== null && (typeof search !== "string" || search.length > 200)) ||
+      (archiveMode !== "active" && archiveMode !== "archived")
     ) {
       return null;
     }
@@ -27375,6 +27553,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       offset,
       parentSessionFilter: parentSessionFilter as string,
       search: search as string | null,
+      archiveMode,
     };
   } catch {
     return null;
@@ -27473,10 +27652,19 @@ export async function listSessionsForSubject(
         );
 
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
+        const ordinaryPinFilter = options.archivedOnly
+          ? sql`true`
+          : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
+        const archiveMode = options.archivedOnly ? "archived" : "active";
         const now = new Date();
 
+        if (options.pinsOnly && options.archivedOnly) {
+          throw new SessionListCursorError(
+            "pins-only and archived session lists cannot be combined",
+          );
+        }
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
         }
@@ -27490,7 +27678,11 @@ export async function listSessionsForSubject(
           pageIds = [];
         } else if (options.cursor) {
           const cursor = options.cursor;
-          if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
+          if (
+            cursor.parentSessionFilter !== parentFilter ||
+            cursor.search !== searchFilter ||
+            cursor.archiveMode !== archiveMode
+          ) {
             throw new SessionListCursorError("session list cursor does not match its filters");
           }
           const [snapshot] = await tx
@@ -27510,6 +27702,7 @@ export async function listSessionsForSubject(
           if (
             snapshot.parentSessionFilter !== parentFilter ||
             (snapshot.search ?? null) !== searchFilter ||
+            snapshot.archiveMode !== archiveMode ||
             cursor.offset > snapshot.ordinarySessionIds.length
           ) {
             throw new SessionListCursorError();
@@ -27566,6 +27759,7 @@ export async function listSessionsForSubject(
               offset: nextOffset,
               parentSessionFilter: snapshot.parentSessionFilter,
               search: snapshot.search ?? null,
+              archiveMode: snapshot.archiveMode,
             });
           }
         } else if (options.materializeSnapshot === false) {
@@ -27580,12 +27774,7 @@ export async function listSessionsForSubject(
                 eq(schema.sessionPins.sessionId, schema.sessions.id),
               ),
             )
-            .where(
-              and(
-                ...filters,
-                or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
-              ),
-            )
+            .where(and(...filters, ordinaryPinFilter))
             .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
@@ -27615,6 +27804,7 @@ export async function listSessionsForSubject(
                 eq(schema.sessionListSnapshots.workspaceId, workspaceId),
                 eq(schema.sessionListSnapshots.subjectId, options.subjectId),
                 eq(schema.sessionListSnapshots.parentSessionFilter, parentFilter),
+                eq(schema.sessionListSnapshots.archiveMode, archiveMode),
                 snapshotSearchFilter,
                 gt(
                   schema.sessionListSnapshots.createdAt,
@@ -27641,12 +27831,7 @@ export async function listSessionsForSubject(
                   eq(schema.sessionPins.sessionId, schema.sessions.id),
                 ),
               )
-              .where(
-                and(
-                  ...filters,
-                  or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
-                ),
-              )
+              .where(and(...filters, ordinaryPinFilter))
               .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
               .limit(SESSION_LIST_SNAPSHOT_MAX_IDS + 1);
             if (ordinaryIdRows.length > SESSION_LIST_SNAPSHOT_MAX_IDS) {
@@ -27694,6 +27879,7 @@ export async function listSessionsForSubject(
                   subjectId: options.subjectId,
                   parentSessionFilter: parentFilter,
                   search: searchFilter,
+                  archiveMode,
                   ordinarySessionIds: ordinaryIds,
                   expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
                 })
@@ -27707,23 +27893,26 @@ export async function listSessionsForSubject(
               offset: limit,
               parentSessionFilter: parentFilter,
               search: searchFilter,
+              archiveMode,
             });
           }
         }
-        const pinnedLookaheadRows = await tx
-          .select({ session: schema.sessions, pin: schema.sessionPins })
-          .from(schema.sessionPins)
-          .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
-          .where(
-            and(
-              eq(schema.sessionPins.workspaceId, workspaceId),
-              eq(schema.sessionPins.subjectId, options.subjectId),
-              eq(schema.sessionPins.pinned, true),
-              ...filters,
-            ),
-          )
-          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
-          .limit(SESSION_LIST_MAX_PINNED + 1);
+        const pinnedLookaheadRows = options.archivedOnly
+          ? []
+          : await tx
+              .select({ session: schema.sessions, pin: schema.sessionPins })
+              .from(schema.sessionPins)
+              .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
+              .where(
+                and(
+                  eq(schema.sessionPins.workspaceId, workspaceId),
+                  eq(schema.sessionPins.subjectId, options.subjectId),
+                  eq(schema.sessionPins.pinned, true),
+                  ...filters,
+                ),
+              )
+              .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
+              .limit(SESSION_LIST_MAX_PINNED + 1);
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
@@ -27747,7 +27936,7 @@ export async function listSessionsForSubject(
                     ...(options.authorizationScope
                       ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
                       : []),
-                    or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+                    ordinaryPinFilter,
                   ),
                 );
         const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
@@ -27766,7 +27955,12 @@ export async function listSessionsForSubject(
           ids,
           options.authorizationScope,
         );
-        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, [...rootRelatedIds]);
+        const treeStats = await sessionTreeStatsForSessions(
+          tx,
+          workspaceId,
+          [...rootRelatedIds],
+          options.subjectId,
+        );
         const controls = await sessionControlProjections(tx, workspaceId, ids);
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
@@ -27780,6 +27974,8 @@ export async function listSessionsForSubject(
                 control,
                 mcpServers.get(row.session.id) ?? [],
                 mapSessionPin(row.pin),
+                mapSessionAttention(row.session, row.pin),
+                mapSessionArchive(row.pin),
                 { subjectId: options.subjectId, activated: tenancyActivated },
               ),
               treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
@@ -27866,6 +28062,8 @@ export async function getSessionForSubject(
         row.session,
         mcpServers.get(sessionId) ?? [],
         mapSessionPin(row.pin),
+        mapSessionAttention(row.session, row.pin),
+        mapSessionArchive(row.pin),
         undefined,
         { subjectId, activated: tenancyActivated },
       ),
@@ -27968,6 +28166,8 @@ export async function setSessionPin(
             session,
             mcpServers.get(session.id) ?? [],
             mapSessionPin(existing),
+            mapSessionAttention(session, existing),
+            mapSessionArchive(existing),
           );
         }
         if (input.expectedVersion !== undefined && input.expectedVersion !== current.pinVersion) {
@@ -27987,6 +28187,8 @@ export async function setSessionPin(
               // version zero instead of manufacturing an OCC revision.
               pinned: true,
               pinnedAt: new Date(),
+              attentionVersion: 0,
+              archiveVersion: 0,
             })
             .returning();
           pin = inserted ?? null;
@@ -28016,6 +28218,291 @@ export async function setSessionPin(
           session,
           mcpServers.get(session.id) ?? [],
           mapSessionPin(pin),
+          mapSessionAttention(session, pin),
+          mapSessionArchive(pin),
+        );
+      }),
+  );
+}
+
+/**
+ * Idempotently update one member's explicit follow-up state. Opening a route is
+ * intentionally absent from this protocol: acknowledgment is a deliberate
+ * action, and the next durable session event makes the session unread again.
+ */
+export async function setSessionAttention(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    unread?: boolean | undefined;
+    activelyWorking?: boolean | undefined;
+    expectedVersion?: number | undefined;
+  },
+): Promise<Session | null> {
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
+        const [membership] = await tx
+          .select({ id: schema.workspaceMemberships.id })
+          .from(schema.workspaceMemberships)
+          .where(
+            and(
+              eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+              eq(schema.workspaceMemberships.subjectId, input.subjectId),
+            ),
+          )
+          .limit(1);
+        if (!membership) throw new SessionPinAccessError();
+
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return null;
+
+        const [existing] = await tx
+          .select()
+          .from(schema.sessionPins)
+          .where(
+            and(
+              eq(schema.sessionPins.workspaceId, input.workspaceId),
+              eq(schema.sessionPins.subjectId, input.subjectId),
+              eq(schema.sessionPins.sessionId, input.sessionId),
+            ),
+          )
+          .limit(1);
+        const current = mapSessionAttention(session, existing);
+        const desiredUnread = input.unread ?? current.unread;
+        const desiredActivelyWorking = input.activelyWorking ?? current.activelyWorking;
+        if (
+          desiredUnread === current.unread &&
+          desiredActivelyWorking === current.activelyWorking
+        ) {
+          const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+            session.id,
+          ]);
+          return await mapSessionWithControl(
+            tx as unknown as Database,
+            session,
+            mcpServers.get(session.id) ?? [],
+            mapSessionPin(existing),
+            current,
+          );
+        }
+        if (
+          input.expectedVersion !== undefined &&
+          input.expectedVersion !== current.attentionVersion
+        ) {
+          throw new SessionAttentionVersionConflictError(current);
+        }
+
+        const acknowledgedSequence =
+          input.unread === undefined
+            ? (existing?.acknowledgedSequence ?? 0)
+            : input.unread
+              ? Math.max(-1, session.lastSequence - 1)
+              : session.lastSequence;
+        let state = existing ?? null;
+        if (!existing) {
+          const [inserted] = await tx
+            .insert(schema.sessionPins)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              sessionId: input.sessionId,
+              pinned: false,
+              pinnedAt: null,
+              version: 0,
+              acknowledgedSequence,
+              activelyWorking: desiredActivelyWorking,
+              attentionVersion: 1,
+              archiveVersion: 0,
+            })
+            .returning();
+          state = inserted ?? null;
+        } else {
+          const [updated] = await tx
+            .update(schema.sessionPins)
+            .set({
+              acknowledgedSequence,
+              activelyWorking: desiredActivelyWorking,
+              attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
+            })
+            .where(
+              and(
+                eq(schema.sessionPins.workspaceId, input.workspaceId),
+                eq(schema.sessionPins.subjectId, input.subjectId),
+                eq(schema.sessionPins.sessionId, input.sessionId),
+              ),
+            )
+            .returning();
+          state = updated ?? null;
+        }
+        const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+          session.id,
+        ]);
+        return await mapSessionWithControl(
+          tx as unknown as Database,
+          session,
+          mcpServers.get(session.id) ?? [],
+          mapSessionPin(state),
+          mapSessionAttention(session, state),
+          mapSessionArchive(state),
+        );
+      }),
+  );
+}
+
+/**
+ * Archive or restore one root chat for a single member. Archiving also removes
+ * personal pin/follow-up labels so hidden work cannot remain in active rail
+ * sections. Descendants inherit visibility from the archived root at list time.
+ */
+export async function setSessionArchive(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    archived: boolean;
+    expectedVersion?: number | undefined;
+  },
+): Promise<Session | null> {
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
+        const [membership] = await tx
+          .select({ id: schema.workspaceMemberships.id })
+          .from(schema.workspaceMemberships)
+          .where(
+            and(
+              eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+              eq(schema.workspaceMemberships.subjectId, input.subjectId),
+            ),
+          )
+          .limit(1);
+        if (!membership) throw new SessionPinAccessError();
+
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              isNull(schema.sessions.parentSessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return null;
+
+        const [existing] = await tx
+          .select()
+          .from(schema.sessionPins)
+          .where(
+            and(
+              eq(schema.sessionPins.workspaceId, input.workspaceId),
+              eq(schema.sessionPins.subjectId, input.subjectId),
+              eq(schema.sessionPins.sessionId, input.sessionId),
+            ),
+          )
+          .limit(1);
+        const current = mapSessionArchive(existing);
+        if (current.archived === input.archived) {
+          return await mapSessionWithControl(
+            tx as unknown as Database,
+            session,
+            [],
+            mapSessionPin(existing),
+            mapSessionAttention(session, existing),
+            current,
+          );
+        }
+        if (
+          input.expectedVersion !== undefined &&
+          input.expectedVersion !== current.archiveVersion
+        ) {
+          throw new SessionArchiveVersionConflictError(current);
+        }
+
+        let state = existing ?? null;
+        if (!existing) {
+          const [inserted] = await tx
+            .insert(schema.sessionPins)
+            .values({
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              sessionId: input.sessionId,
+              pinned: false,
+              pinnedAt: null,
+              version: 0,
+              activelyWorking: false,
+              archived: true,
+              archivedAt: new Date(),
+              attentionVersion: 0,
+              archiveVersion: 1,
+            })
+            .returning();
+          state = inserted ?? null;
+        } else {
+          const [updated] = await tx
+            .update(schema.sessionPins)
+            .set({
+              archived: input.archived,
+              archivedAt: input.archived ? new Date() : null,
+              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+              ...(input.archived
+                ? {
+                    pinned: false,
+                    pinnedAt: null,
+                    activelyWorking: false,
+                    version: existing.pinned
+                      ? sql`${schema.sessionPins.version} + 1`
+                      : sql`${schema.sessionPins.version}`,
+                    attentionVersion: existing.activelyWorking
+                      ? sql`${schema.sessionPins.attentionVersion} + 1`
+                      : sql`${schema.sessionPins.attentionVersion}`,
+                  }
+                : {}),
+            })
+            .where(
+              and(
+                eq(schema.sessionPins.workspaceId, input.workspaceId),
+                eq(schema.sessionPins.subjectId, input.subjectId),
+                eq(schema.sessionPins.sessionId, input.sessionId),
+              ),
+            )
+            .returning();
+          state = updated ?? null;
+        }
+        const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+          session.id,
+        ]);
+        return await mapSessionWithControl(
+          tx as unknown as Database,
+          session,
+          mcpServers.get(session.id) ?? [],
+          mapSessionPin(state),
+          mapSessionAttention(session, state),
+          mapSessionArchive(state),
         );
       }),
   );
@@ -61322,6 +61809,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           sessionRow,
           [],
           undefined,
+          undefined,
+          undefined,
           locks.control ?? undefined,
         );
         const built = await build(mappedSession, {
@@ -61359,6 +61848,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
                   tx as unknown as Database,
                   row,
                   [],
+                  undefined,
+                  undefined,
                   undefined,
                   locks.control ?? undefined,
                 )
@@ -61479,13 +61970,19 @@ async function mapSessionWithControl(
   row: typeof schema.sessions.$inferSelect,
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
+  attention: Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> = {
+    unread: false,
+    activelyWorking: false,
+    attentionVersion: 0,
+  },
+  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  return mapSession(row, control, mcpServers, pin, tenancyViewer);
+  return mapSession(row, control, mcpServers, pin, attention, archive, tenancyViewer);
 }
 
 function mapSessionTenancy(
@@ -61522,6 +62019,12 @@ function mapSession(
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
+  attention: Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> = {
+    unread: false,
+    activelyWorking: false,
+    attentionVersion: 0,
+  },
+  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
   return {
@@ -61594,6 +62097,8 @@ function mapSession(
         ? row.codexCompactionMode
         : "portable",
     ...pin,
+    ...attention,
+    ...archive,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

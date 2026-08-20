@@ -55,6 +55,8 @@ import {
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionChannelRequest,
+  UpdateSessionAttentionRequest,
+  UpdateSessionArchiveRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -119,7 +121,11 @@ import {
   withSessionCodexCapacityMutation,
   setSessionChannel,
   ChannelNotFoundError,
+  setSessionAttention,
+  setSessionArchive,
   setSessionPin,
+  SessionAttentionVersionConflictError,
+  SessionArchiveVersionConflictError,
   SessionPinVersionConflictError,
   SessionPinAccessError,
   SessionListAccessError,
@@ -586,6 +592,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.cursor ? { cursor: query.cursor } : {}),
         ...(query.search ? { search: query.search } : {}),
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
+        ...(query.archivedOnly ? { archivedOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
@@ -1472,6 +1479,93 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             message: "session pin changed in another client",
             current: error.current,
           },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Personal follow-up state. Viewing a session never acknowledges it; the
+  // member must explicitly mark it read/unread, and the actively-working label
+  // remains independent of that acknowledgment.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/attention", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = UpdateSessionAttentionRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session attention request" });
+    }
+    try {
+      const session = await setSessionAttention(db, {
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+        ...parsed.data,
+      });
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      return c.json(
+        await withEffectivePolicy(
+          deps,
+          workspaceId,
+          grant.subjectId,
+          projectSessionForRelatedAccess(session, relatedSessionAccessFor(c)),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof SessionPinAccessError) {
+        throw new HTTPException(403, { message: error.message });
+      }
+      if (error instanceof SessionAttentionVersionConflictError) {
+        return c.json(
+          {
+            message: "session attention changed in another client",
+            current: error.current,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Personal chat organization: archived roots leave the ordinary rail only
+  // for this member and remain recoverable through the archived list view.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    const parsed = UpdateSessionArchiveRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session archive request" });
+    }
+    try {
+      const session = await setSessionArchive(db, {
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+        ...parsed.data,
+      });
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      return c.json(
+        await withEffectivePolicy(
+          deps,
+          workspaceId,
+          grant.subjectId,
+          projectSessionForRelatedAccess(session, relatedSessionAccessFor(c)),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof SessionPinAccessError) {
+        throw new HTTPException(403, { message: error.message });
+      }
+      if (error instanceof SessionArchiveVersionConflictError) {
+        return c.json(
+          { message: "session archive changed in another client", current: error.current },
           409,
         );
       }
@@ -3885,6 +3979,8 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
+  if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
@@ -4128,6 +4224,7 @@ function sessionListQuery(
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
+  archivedOnly: boolean;
 } {
   const parentSessionId = query.parentSessionId;
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -4159,6 +4256,10 @@ function sessionListQuery(
     });
   }
   const pinsOnly = query.pinsOnly === "true";
+  if (query.archivedOnly !== undefined && query.archivedOnly !== "true") {
+    throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
+  }
+  const archivedOnly = query.archivedOnly === "true";
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
@@ -4166,6 +4267,9 @@ function sessionListQuery(
     throw new HTTPException(400, {
       message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
     });
+  }
+  if (pinsOnly && archivedOnly) {
+    throw new HTTPException(400, { message: "pinsOnly cannot be combined with archivedOnly" });
   }
   return {
     limit: query.limit,
@@ -4178,6 +4282,7 @@ function sessionListQuery(
     cursor,
     search: search || undefined,
     pinsOnly,
+    archivedOnly,
   };
 }
 

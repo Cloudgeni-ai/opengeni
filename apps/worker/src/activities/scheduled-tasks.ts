@@ -56,6 +56,7 @@ import {
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
   updateScheduledTaskRun,
+  updateSessionTitle,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
 } from "@opengeni/db";
@@ -119,6 +120,112 @@ export function scheduledTaskRunProducerKey(
     namespace: info.namespace,
     workflowId: info.workflowExecution.workflowId,
   })}`;
+}
+
+// Same bound the manual rename field and the set_session_title tool enforce.
+const SCHEDULED_SESSION_TITLE_MAX_LENGTH = 200;
+
+/**
+ * Display title for a session the scheduler generates for a task.
+ *
+ * A scheduled session's `initialMessage` is the task prompt, byte-identical for
+ * every run, so an untitled scheduled session falls back to that prompt in the
+ * rail and reads exactly like every other run of the task. The task name is the
+ * short human-chosen label that actually identifies it, so that is the title.
+ *
+ * The title is the task name and NOTHING else. It deliberately does not name the
+ * run's fire instant, for two independent reasons:
+ *
+ *   - No run mode guarantees one run per session. `reusable_session` generates
+ *     its session on the first fire and then reuses it forever, and even under
+ *     `new_session_per_run` alert-occurrence redelivery converges several runs
+ *     onto one canonical responder session. `existing_session` never generates a
+ *     session at all, so the scheduler never titles one. A run-specific fact
+ *     frozen into the title is therefore right for the generating run and a lie
+ *     for every run that lands in the same session afterwards.
+ *   - A title is one stored string shown to every viewer, while every surface
+ *     that renders a run's fire instant renders it viewer-local: the rail row
+ *     prints the title beside `relativeTimeLabel(session.updatedAt)`, and the
+ *     Schedules run list prints `formatTimestamp(run.firedAt)`, which is
+ *     `toLocaleString()`. A wall clock stored in the title therefore disagrees
+ *     with the time printed next to it for every viewer outside whichever zone
+ *     it was rendered in. The task's own `timeZone` is no escape: it labels the
+ *     schedule rule ("Mon Wed 09:00 Europe/Oslo"), not the rendering of a run,
+ *     which stays viewer-local. No stored clock can agree with a viewer-local
+ *     one, so the title carries none and the instant stays on the surfaces that
+ *     already render it correctly.
+ *
+ * Dropping the clock settles the determinism constraint outright rather than
+ * working around it: the same run titled by the normal dispatch or by a later
+ * recovery in a different worker process derives one string from `task.name`
+ * alone, with no Intl call and so no host ICU or tzdata build to make the two
+ * texts differ.
+ */
+export function scheduledTaskSessionTitle(taskName: string): string {
+  // `ScheduledTask.name` has no length bound of its own, so it is bounded here
+  // to the same ceiling a human rename and set_session_title are held to.
+  const name = taskName.trim() || "Scheduled run";
+  if (name.length <= SCHEDULED_SESSION_TITLE_MAX_LENGTH) return name;
+  return `${name.slice(0, SCHEDULED_SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
+/**
+ * Title a session the scheduler generated, and emit the same `session.title_set`
+ * event every other title write in the product emits.
+ *
+ * This is the write half of the shared path in `@opengeni/core`
+ * `updateSessionTitle`: the db `updateSessionTitle` UPDATE (which is where the
+ * clobber guard lives in full) followed by the identical `session.title_set`
+ * append, emitted only on a real write. Without the event a live subscriber sees
+ * nothing: `packages/react/src/hooks/use-session.ts` patches an open session's
+ * title exclusively on `session.title_set`, so a bare row write leaves the
+ * viewer on the stale title until an unrelated refetch.
+ *
+ * The core wrapper itself is not called, because its only additional behavior is
+ * `requireSessionAuthorization(grant, ...)` - a check on an HTTP/MCP caller's
+ * grant. The scheduler has no such grant; it is naming a session it just created
+ * itself moments earlier. Satisfying that gate would mean fabricating a subject,
+ * and the gate would then answer for it: a session later transitioned to
+ * `user_private` denies any actor whose subject is not the owner
+ * (`packages/core/src/session-authorization.ts`), which would turn naming a
+ * session into a way to fail a dispatch. Authorization belongs to callers with
+ * grants; the durable write and its event are the part that is shared.
+ *
+ * Only an untitled row is stamped. A keyed create replay can hand back a session
+ * that has already run, and recovery re-enters this path for a session the dead
+ * dispatch may already have titled; in both cases whatever the agent or a human
+ * chose is newer truth than this stamp.
+ *
+ * `source: "agent"` is deliberate, and is the only system-assigned value the
+ * schema offers (`Session.titleSource` is "user" | "agent" | null). The database
+ * clobber guard pins only a `user` title, so this title still lets the agent
+ * rename its own session through set_session_title, and a human rename still
+ * wins permanently. Writing "user" here would quietly make every scheduled
+ * session unrenameable by the agent that runs in it.
+ *
+ * Returns the appended events so the caller can route them through the same
+ * defer-or-publish path as every other event this dispatch produces.
+ */
+async function stampScheduledSessionTitle(
+  db: Database,
+  input: {
+    workspaceId: string;
+    session: { id: string; title: string | null };
+    taskName: string;
+  },
+): Promise<Awaited<ReturnType<typeof appendSessionEvents>>> {
+  if (input.session.title !== null) return [];
+  const title = scheduledTaskSessionTitle(input.taskName);
+  const result = await updateSessionTitle(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.session.id,
+    title,
+    source: "agent",
+  });
+  if (!result.updated) return [];
+  return await appendSessionEvents(db, input.workspaceId, input.session.id, [
+    { type: "session.title_set", payload: { title: result.title ?? title, source: "agent" } },
+  ]);
 }
 
 export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
@@ -1108,6 +1215,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 });
               }
             }
+            // After both start branches, so the timeline reads session.created
+            // then session.title_set rather than titling a session that has not
+            // announced itself yet. `session.created` is what carries the row
+            // into the rail, and this lands on its heels.
+            const titleEvents = await stampScheduledSessionTitle(dispatchDb, {
+              workspaceId: task.workspaceId,
+              session,
+              taskName: task.name,
+            });
+            if (titleEvents.length > 0) {
+              if (deferPublications) {
+                deferredEvents.push({ sessionId: session.id, events: titleEvents });
+              } else {
+                await publishDurableSessionEvents(bus, task.workspaceId, session.id, titleEvents);
+              }
+            }
             const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
               dispatchDb,
               {
@@ -1955,6 +2078,17 @@ async function recoverBoundScheduledTaskDispatch(input: {
         sourceTaskAuthorityRevision: input.run.taskAuthorityRevision!,
         sourceExecutionDigest: input.run.taskExecutionDigest!,
       });
+    }
+    // Same title the normal dispatch writes, from the same durable task row, in
+    // the same position relative to session.created. A session the dead dispatch
+    // already titled is left alone.
+    const titleEvents = await stampScheduledSessionTitle(input.db, {
+      workspaceId: task.workspaceId,
+      session,
+      taskName: task.name,
+    });
+    if (titleEvents.length > 0) {
+      await publishDurableSessionEvents(input.bus, task.workspaceId, session.id, titleEvents);
     }
   }
   if (!generatedSession && task.runMode === "reusable_session" && task.agentConfig.goal) {

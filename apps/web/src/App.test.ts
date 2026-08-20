@@ -362,6 +362,38 @@ describe("rail session grouping", () => {
     expect(expanded[1]?.depth).toBe(1);
   });
 
+  test("a collapsed tree projects only the selected descendant as one ordinary child row", () => {
+    const forest = buildRailForest(
+      [
+        railSession({ id: "schedule-latest", updatedAt: "2026-06-19T11:00:00.000Z" }),
+        railSession({
+          id: "schedule-run-a",
+          parentSessionId: "schedule-latest",
+          updatedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "schedule-run-b",
+          parentSessionId: "schedule-latest",
+          updatedAt: "2026-06-19T09:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    const collapsed = visibleForestRows(forest, new Set(), "schedule-run-b");
+    expect(collapsed.map((row) => [row.node.session.id, row.depth])).toEqual([
+      ["schedule-latest", 0],
+      ["schedule-run-b", 1],
+    ]);
+
+    const expanded = visibleForestRows(forest, new Set(["schedule-latest"]), "schedule-run-b");
+    expect(expanded.map((row) => row.node.session.id)).toEqual([
+      "schedule-latest",
+      "schedule-run-a",
+      "schedule-run-b",
+    ]);
+  });
+
   test("promotes every explicit pin globally while a parent pin owns only unpinned children", () => {
     const sections = buildPinnedRailSections(
       [

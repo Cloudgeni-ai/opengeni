@@ -733,6 +733,10 @@ describe("SDK / contracts parity", () => {
     const settings: UpdateWorkspaceSettingsRequest = {
       memoryEnabled: true,
       memoryPromptMode: "retrieval_only",
+      sessionDefaults: {
+        model: "codex/gpt-5.6-sol",
+        reasoningEffort: "high",
+      },
     };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);

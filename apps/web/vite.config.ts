@@ -54,6 +54,18 @@ export default defineConfig({
               priority: 4,
             },
             {
+              // The hierarchy rail is substantial and belongs to the lazy
+              // workspace shell. Its channel, browse, pin, and row-action
+              // expansion must not turn route-shared helpers into startup
+              // dependencies for signed-out and non-workspace pages.
+              name: "session-rail",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]session-list\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 192 * 1024,
+              priority: 3,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.

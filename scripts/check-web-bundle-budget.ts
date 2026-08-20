@@ -51,8 +51,12 @@ const budgets = {
   // raw and 573,599 gzip bytes. PR #1678's exact Linux/x64 production build
   // then measured 2,065,995 raw and 573,851 gzip bytes, with raw 587 bytes over
   // the prior envelope.
-  // The next full-KiB raw envelope is 2,066,432 (2,018 KiB); the unchanged
-  // 574,464 gzip (561 KiB) envelope continues to bound the measured gzip graph.
+  // PR #1680's project-aware session rail now has its own route-aware chunk:
+  // with current main's personal-resource controls, the combined graph measures
+  // 1,497,364 raw / 406,933 gzip bytes initially and 2,080,136 raw / 578,495 gzip
+  // bytes on a direct session load. The next whole-KiB envelopes narrowly bind
+  // those measurements while every unrelated graph and per-file cap stays fixed.
+  initialRaw: 1463 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -60,15 +64,14 @@ const budgets = {
   // next full-KiB envelope is 2,030 KiB (2,078,720 bytes). The 1,450 KiB
   // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
   // graph and per-file cap, stay fixed.
-  initialRaw: 1450 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2030 * kib,
-  directSessionGzip: 564 * kib,
+  directSessionRaw: 2032 * kib,
+  directSessionGzip: 565 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

@@ -109,6 +109,7 @@ describe("buildCreateSessionRequest", () => {
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
       expectedNewSessionDraftRevision: 7,
     });
 
@@ -120,6 +121,7 @@ describe("buildCreateSessionRequest", () => {
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
       expectedNewSessionDraftRevision: 7,
     });
     expect(result.resources).not.toBe(currentResources);

@@ -1907,6 +1907,15 @@ export const WorkspaceVoiceInputSettings = z
   .strict();
 export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
 
+/** Model policy inherited by newly created chats and scheduled tasks. */
+export const WorkspaceSessionDefaults = z
+  .object({
+    model: z.string().trim().min(1).max(256),
+    reasoningEffort: ReasoningEffort,
+  })
+  .strict();
+export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
   .object({
@@ -2029,6 +2038,7 @@ export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -2056,6 +2066,14 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Explicit defaults for new chats/schedules, or null for deployment defaults. */
+export function resolveWorkspaceSessionDefaults(
+  settings: unknown,
+): WorkspaceSessionDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.sessionDefaults ?? null) : null;
 }
 
 /**
@@ -2140,6 +2158,7 @@ export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -5404,6 +5423,32 @@ export const UpdateSessionPinRequest = z.object({
 });
 export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
 
+/**
+ * A member's durable follow-up state for one session. Reading the session does
+ * not acknowledge it: `unread` changes only through this explicit mutation.
+ * `activelyWorking` is an independent personal label that survives read state.
+ */
+export const UpdateSessionAttentionRequest = z
+  .object({
+    unread: z.boolean().optional(),
+    activelyWorking: z.boolean().optional(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
+    message: "unread or activelyWorking is required",
+  });
+export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
+
+/** A member's personal archive state for a root chat. */
+export const UpdateSessionArchiveRequest = z
+  .object({
+    archived: z.boolean(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
+
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
 // the human↔agent channel stays plain chat. Both require `sessions:control`.
@@ -5840,6 +5885,8 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.attention.write",
+  "session.archive.write",
   "session.codex_account.write",
   "session.realtime.start",
   "session.realtime.control",
@@ -7225,6 +7272,8 @@ export const Channel = z.object({
   workspaceId: z.string().uuid(),
   name: z.string(),
   description: z.string().nullable(),
+  pinned: z.boolean(),
+  sortOrder: z.number().int().nonnegative(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -7240,8 +7289,15 @@ export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
 export const UpdateChannelRequest = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   description: z.string().max(2000).nullable().optional(),
+  pinned: z.boolean().optional(),
 });
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export const ReorderChannelsRequest = z
+  .object({ channelIds: z.array(z.string().uuid()).min(1).max(200) })
+  .strict();
+export type ReorderChannelsRequest = z.infer<typeof ReorderChannelsRequest>;
 
 // Re-files one session (rail organization only). null moves it back to the
 // unfiled inbox.
@@ -10121,6 +10177,17 @@ export const Session = z.object({
   pinnedAt: z.string().nullable().default(null),
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion: z.number().int().nonnegative().default(0),
+  /** Personal explicit acknowledgment state; opening the session never clears it. */
+  unread: z.boolean().default(false),
+  /** Personal power-user label for work the member intends to continue. */
+  activelyWorking: z.boolean().default(false),
+  /** Optimistic revision for unread/actively-working state. */
+  attentionVersion: z.number().int().nonnegative().default(0),
+  /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
+  archived: z.boolean().default(false),
+  archivedAt: z.string().nullable().default(null),
+  /** Optimistic archive-state revision; zero represents an absent personal relation. */
+  archiveVersion: z.number().int().nonnegative().default(0),
   /**
    * Server-authoritative hierarchy summary populated on session-list reads.
    * Detail reads may omit it. The rail uses this instead of guessing a tree
@@ -10135,6 +10202,8 @@ export const Session = z.object({
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       failedDescendants: z.number().int().nonnegative(),
+      unreadDescendants: z.number().int().nonnegative().optional(),
+      activelyWorkingDescendants: z.number().int().nonnegative().optional(),
       /** Counts are lower bounds rather than exact totals when true. */
       truncated: z.boolean().default(false),
     })

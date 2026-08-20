@@ -195,6 +195,10 @@ describe("Slack access-link browser acceptance", () => {
       expect(state.accessReads).toBe(2);
       expect(state.workspaceListReads).toBe(2);
       expect(state.workspaceDetailReadsBeforeRevalidation).toBe(0);
+      // The authorized shell renders from the refreshed list before its live
+      // provider starts the workspace-detail read. Wait for that independent
+      // effect instead of racing it against the first visible navigation row.
+      await waitForCondition(() => state.workspaceDetailReads > 0, 5_000);
       expect(state.workspaceDetailReads).toBeGreaterThan(0);
       expect(await page.locator("main").count()).toBe(1);
       await expectMainCountNeverExceededOne(page);
@@ -503,7 +507,10 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json(linkedWorkspace());
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) {
-      return json({ channels: [] });
+      // The workspace channels route returns the channel list directly. Keep
+      // this browser API fixture on that wire contract so the typed SDK hook
+      // never hands an envelope to the rail's array-only grouping helper.
+      return json([]);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });

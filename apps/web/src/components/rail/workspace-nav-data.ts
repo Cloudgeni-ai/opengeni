@@ -43,6 +43,22 @@ export type WorkspaceConfigGroup = {
   items: WorkspaceConfigItem[];
 };
 
+/** Product destinations promoted to the primary rail beside New session. */
+export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
+  {
+    to: "/workspaces/$workspaceId/capabilities",
+    icon: "plug",
+    label: "Capabilities",
+    description: "Packs, MCP servers, and tools",
+  },
+  {
+    to: "/workspaces/$workspaceId/schedules",
+    icon: "calendar-clock",
+    label: "Schedules",
+    description: "Run agents on a schedule",
+  },
+];
+
 export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
   {
     id: "overview",
@@ -108,30 +124,6 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
         icon: "map",
         label: "Company Brain",
         description: "Knowledge, rules, guides, review, and learning",
-      },
-    ],
-  },
-  {
-    id: "automation",
-    label: "Automation",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/capabilities",
-        icon: "plug",
-        label: "Capabilities",
-        description: "Packs, MCP servers, and tools",
-      },
-      {
-        to: "/workspaces/$workspaceId/schedules",
-        icon: "calendar-clock",
-        label: "Schedules",
-        description: "Run agents on a schedule",
-      },
-      {
-        to: "/workspaces/$workspaceId/artifacts",
-        icon: "panels-top-left",
-        label: "Artifacts",
-        description: "Live pages and tools built with Geni",
       },
     ],
   },

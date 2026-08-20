@@ -15,6 +15,7 @@ export type UseChannelsResult = {
   refresh: () => Promise<void>;
   create: (request: CreateChannelRequest) => Promise<Channel | null>;
   update: (channelId: string, request: UpdateChannelRequest) => Promise<Channel | null>;
+  reorder: (channelIds: string[]) => Promise<Channel[] | null>;
   remove: (channelId: string) => Promise<boolean>;
   /** Re-file a session into a channel; null moves it back to the inbox. */
   moveSession: (sessionId: string, channelId: string | null) => Promise<Session | null>;
@@ -76,6 +77,15 @@ export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult
     [client, workspaceId, run, refresh],
   );
 
+  const reorder = useCallback(
+    async (channelIds: string[]): Promise<Channel[] | null> => {
+      const result = await run(() => client.reorderChannels(workspaceId, { channelIds }));
+      if (result) await refresh();
+      return result;
+    },
+    [client, workspaceId, run, refresh],
+  );
+
   const moveSession = useCallback(
     async (sessionId: string, channelId: string | null): Promise<Session | null> => {
       return await run(() => client.updateSessionChannel(workspaceId, sessionId, { channelId }));
@@ -90,6 +100,7 @@ export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult
     refresh,
     create,
     update,
+    reorder,
     remove,
     moveSession,
     mutating,

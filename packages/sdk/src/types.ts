@@ -1178,6 +1178,17 @@ export type Session = {
   pinnedAt?: string | null;
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion?: number;
+  /** Personal explicit acknowledgment state. */
+  unread?: boolean;
+  /** Personal actively-working label. */
+  activelyWorking?: boolean;
+  /** Optimistic unread/actively-working revision. */
+  attentionVersion?: number;
+  /** Personal archive state. */
+  archived?: boolean;
+  archivedAt?: string | null;
+  /** Optimistic archive-state revision. */
+  archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
   treeStats?:
     | {
@@ -1188,6 +1199,8 @@ export type Session = {
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
+        unreadDescendants?: number | undefined;
+        activelyWorkingDescendants?: number | undefined;
         /** Counts are lower bounds rather than exact totals when true. */
         truncated: boolean;
       }
@@ -1259,6 +1272,17 @@ export type AgentTopologyPageResponse = {
 
 export type UpdateSessionPinRequest = {
   pinned: boolean;
+  expectedVersion?: number;
+};
+
+export type UpdateSessionAttentionRequest = {
+  unread?: boolean;
+  activelyWorking?: boolean;
+  expectedVersion?: number;
+};
+
+export type UpdateSessionArchiveRequest = {
+  archived: boolean;
   expectedVersion?: number;
 };
 
@@ -3569,6 +3593,8 @@ export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   /** Reversible Memory V1 prompt composition rollout. */
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  /** Model policy inherited by new chats and scheduled tasks. */
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3578,6 +3604,11 @@ export type WorkspaceSettings = {
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
+};
+
+export type WorkspaceSessionDefaults = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -3604,6 +3635,7 @@ export type WorkspaceVoiceInputSettings = {
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4410,6 +4442,8 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  pinned: boolean;
+  sortOrder: number;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4423,6 +4457,12 @@ export type CreateChannelRequest = {
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  pinned?: boolean;
+};
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export type ReorderChannelsRequest = {
+  channelIds: string[];
 };
 
 /** Re-files one session; null moves it back to the unfiled inbox. */
