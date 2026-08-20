@@ -288,6 +288,8 @@ import type {
   SessionListResponse,
   AgentTopologyPageResponse,
   UpdateSessionChannelRequest,
+  UpdateSessionAttentionRequest,
+  UpdateSessionArchiveRequest,
   UpdateSessionPinRequest,
   UninstallPackRequest,
   UninstallPackResult,
@@ -400,6 +402,7 @@ import type {
   VariableSetVariableMetadata,
   Channel,
   CreateChannelRequest,
+  ReorderChannelsRequest,
   UpdateChannelRequest,
   Rig,
   RigVersion,
@@ -945,6 +948,8 @@ export class OpenGeniClient {
       search?: string;
       /** Return only the complete personal pinned projection. */
       pinsOnly?: boolean;
+      /** Return archived root chats instead of the active session list. */
+      archivedOnly?: boolean;
     } = {},
   ): Promise<SessionListResponse> {
     const search = options.search?.trim();
@@ -960,6 +965,7 @@ export class OpenGeniClient {
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(search ? { search } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
+          ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
         },
       );
     } catch (error) {
@@ -990,6 +996,9 @@ export class OpenGeniClient {
       }
       if (options.pinsOnly) {
         throw new Error("The connected OpenGeni API does not support pins-only session lists");
+      }
+      if (options.archivedOnly) {
+        throw new Error("The connected OpenGeni API does not support archived session lists");
       }
       return { pinned: [], sessions: response, nextCursor: null };
     }
@@ -1031,6 +1040,32 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+      request,
+    );
+  }
+
+  /** Set this authenticated member's explicit read/actively-working state. */
+  async updateSessionAttention(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAttentionRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/attention`,
+      request,
+    );
+  }
+
+  /** Archive or restore this authenticated member's root chat. */
+  async updateSessionArchive(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionArchiveRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/archive`,
       request,
     );
   }
@@ -4432,6 +4467,14 @@ export class OpenGeniClient {
     return await this.requestJson<Channel>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/channels/${channelId}`,
+      request,
+    );
+  }
+
+  async reorderChannels(workspaceId: string, request: ReorderChannelsRequest): Promise<Channel[]> {
+    return await this.requestJson<Channel[]>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/channels/order`,
       request,
     );
   }

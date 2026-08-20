@@ -5,10 +5,12 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES,
 } from "@opengeni/contracts";
+import { formatTimestamp } from "@/lib/format";
 import type { ConnectionMetadata } from "@/types";
 import {
   activeOpenGeniSlackBotConnections,
   openGeniSlackBotConnectionLabel,
+  openGeniSlackBotConnectionOptions,
   openGeniSlackBotInstallInput,
   openGeniSlackBotUiMetadata,
   preferredOpenGeniSlackBotConnection,
@@ -126,12 +128,54 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
     expect(preferredOpenGeniSlackBotConnection([revoked])?.id).toBe(revoked.id);
   });
 
+  test("names an install by its Slack workspace, never by its uuid", () => {
+    const existing = connection();
+    expect(openGeniSlackBotConnectionLabel(existing)).toBe("Test workspace · OpenGeni");
+
+    // One install needs no discriminator at all.
+    expect(openGeniSlackBotConnectionOptions([existing])).toEqual([
+      { connection: existing, label: "Test workspace · OpenGeni" },
+    ]);
+
+    // Two same-named Slack workspaces are told apart by the Slack team id,
+    // which is what Slack itself shows, and not by the connection uuid.
+    const otherTeam = connection({
+      id: "55555555-5555-4555-8555-555555555555",
+      metadata: { ...existing.metadata, slackTeamId: "T_OTHER" },
+    });
+    const named = openGeniSlackBotConnectionOptions([existing, otherTeam]);
+    expect(named.map((option) => option.label)).toEqual([
+      "Test workspace · OpenGeni · T_TEST",
+      "Test workspace · OpenGeni · T_OTHER",
+    ]);
+
+    // Reinstalling the same Slack workspace collides on the team id too, so the
+    // install time is the discriminator of last resort.
+    const reinstalled = connection({
+      id: "66666666-6666-4666-8666-666666666666",
+      createdAt: new Date(86_400_000).toISOString(),
+    });
+    const duplicates = openGeniSlackBotConnectionOptions([existing, reinstalled]);
+    expect(duplicates[0]?.label).toBe(
+      `Test workspace · OpenGeni · T_TEST · installed ${formatTimestamp(existing.createdAt)}`,
+    );
+    expect(duplicates[1]?.label).toBe(
+      `Test workspace · OpenGeni · T_TEST · installed ${formatTimestamp(reinstalled.createdAt)}`,
+    );
+
+    // Whatever the ladder produced, no label may leak a uuid and no two rows
+    // may read the same.
+    for (const option of [...named, ...duplicates]) {
+      expect(option.label).not.toContain(option.connection.id);
+    }
+    expect(new Set(duplicates.map((option) => option.label)).size).toBe(2);
+
+    // A row that is not an OpenGeni bot install is dropped, not labeled.
+    expect(openGeniSlackBotConnectionOptions([connection({ kind: "oauth2" })])).toEqual([]);
+  });
+
   test("omits the immutable reinstall target only for an explicit new connection", () => {
     const existing = connection();
-
-    expect(openGeniSlackBotConnectionLabel(existing)).toBe(
-      `Test workspace · OpenGeni · ${connectionId}`,
-    );
 
     expect(openGeniSlackBotInstallInput(existing, false)).toEqual({ connectionId });
     expect(openGeniSlackBotInstallInput(existing, true)).toEqual({});

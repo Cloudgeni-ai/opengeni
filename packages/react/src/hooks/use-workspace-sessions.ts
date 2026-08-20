@@ -10,6 +10,7 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   search?: string | undefined;
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean | undefined;
+  archivedOnly?: boolean | undefined;
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -41,6 +42,7 @@ export function useWorkspaceSessions(
   const cursor = options.cursor;
   const search = options.search;
   const pinsOnly = options.pinsOnly;
+  const archivedOnly = options.archivedOnly;
   const enabled = options.enabled ?? true;
   const queryKey = [
     workspaceId,
@@ -49,6 +51,7 @@ export function useWorkspaceSessions(
     cursor ?? "",
     search ?? "",
     pinsOnly ? "1" : "",
+    archivedOnly ? "archived" : "active",
   ].join("\u0000");
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
@@ -64,9 +67,10 @@ export function useWorkspaceSessions(
         ...(cursor !== undefined ? { cursor } : {}),
         ...(search !== undefined ? { search } : {}),
         ...(pinsOnly ? { pinsOnly: true } : {}),
+        ...(archivedOnly ? { archivedOnly: true } : {}),
       }),
     }),
-    [client, workspaceId, limit, parentSessionId, cursor, search, pinsOnly, queryKey],
+    [client, workspaceId, limit, parentSessionId, cursor, search, pinsOnly, archivedOnly, queryKey],
   );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,

@@ -21,6 +21,10 @@ import {
   SESSION_LIST_SNAPSHOT_MAX_IDS,
   SessionPinAccessError,
   SessionPinVersionConflictError,
+  SessionAttentionVersionConflictError,
+  SessionArchiveVersionConflictError,
+  setSessionArchive,
+  setSessionAttention,
   setSessionPin,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -234,6 +238,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: false,
     });
     expect(roots.sessions.some((row) => row.id === child.id)).toBe(false);
@@ -251,6 +257,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: false,
     });
   });
@@ -334,6 +342,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: true,
     });
     expect(stats.get(deepIds[0]!)).toEqual({
@@ -344,6 +354,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: true,
     });
     expect(stats.get(wideRoot.id)).toEqual({
@@ -354,6 +366,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: true,
     });
   }, 180_000);
@@ -448,6 +462,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadDescendants: 0,
+      activelyWorkingDescendants: 0,
       truncated: true,
     });
   }, 60_000);
@@ -927,6 +943,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,
+        unreadDescendants: 0,
+        activelyWorkingDescendants: 0,
         truncated: false,
       },
     });
@@ -1503,6 +1521,182 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(attempts).toBe(3);
     expect(page.pinned).toEqual([]);
     expect(page.sessions.map((row) => row.id)).toEqual([target.id]);
+  });
+
+  test("keeps acknowledgment and actively-working state durable and subject-specific", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({ ...workspace, message: "attention target" });
+    const subject = "user:attention-one";
+    const otherSubject = "user:attention-two";
+    await grantMember(workspace, subject);
+    await grantMember(workspace, otherSubject);
+
+    const forcedUnread = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: true,
+      expectedVersion: 0,
+    });
+    expect(forcedUnread).toMatchObject({
+      unread: true,
+      activelyWorking: false,
+      attentionVersion: 1,
+    });
+    const cleared = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: false,
+      expectedVersion: 1,
+    });
+    expect(cleared).toMatchObject({ unread: false, attentionVersion: 2 });
+
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set last_sequence = 5 where id = ${target.id}`,
+    );
+
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true, activelyWorking: false, attentionVersion: 2 },
+    );
+
+    const read = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: false,
+      expectedVersion: 2,
+    });
+    expect(read).toMatchObject({ unread: false, activelyWorking: false, attentionVersion: 3 });
+
+    const active = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      activelyWorking: true,
+      expectedVersion: 3,
+    });
+    expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 4 });
+
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set last_sequence = 6 where id = ${target.id}`,
+    );
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true, activelyWorking: true, attentionVersion: 4 },
+    );
+    expect(
+      await getSessionForSubject(db, workspace.workspaceId, target.id, otherSubject),
+    ).toMatchObject({ unread: true, activelyWorking: false, attentionVersion: 0 });
+
+    await expect(
+      setSessionAttention(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId: subject,
+        sessionId: target.id,
+        unread: false,
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionAttentionVersionConflictError);
+  });
+
+  test("archives a root chat personally, hides its tree, and restores it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const root = await session({ ...workspace, message: "archive root" });
+    const child = await session({
+      ...workspace,
+      message: "archive child",
+      parentSessionId: root.id,
+    });
+    const subject = "user:archive-one";
+    const otherSubject = "user:archive-two";
+    await grantMember(workspace, subject);
+    await grantMember(workspace, otherSubject);
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: root.id,
+      pinned: true,
+    });
+    await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: root.id,
+      activelyWorking: true,
+    });
+
+    const archived = await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: root.id,
+      archived: true,
+      expectedVersion: 1,
+    });
+    expect(archived).toMatchObject({
+      archived: true,
+      archiveVersion: 2,
+      pinned: false,
+      activelyWorking: false,
+    });
+
+    const activePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: subject,
+      limit: 20,
+    });
+    expect([...activePage.pinned, ...activePage.sessions].map((row) => row.id)).not.toContain(
+      root.id,
+    );
+    const activeChildren = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: subject,
+      parentSessionId: root.id,
+      limit: 20,
+    });
+    expect(activeChildren.sessions.map((row) => row.id)).not.toContain(child.id);
+
+    const archivedPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: subject,
+      archivedOnly: true,
+      parentSessionId: null,
+      limit: 20,
+    });
+    expect(archivedPage.sessions.map((row) => row.id)).toContain(root.id);
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId: otherSubject,
+          limit: 20,
+        })
+      ).sessions.map((row) => row.id),
+    ).toContain(root.id);
+
+    await expect(
+      setSessionArchive(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId: subject,
+        sessionId: root.id,
+        archived: false,
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionArchiveVersionConflictError);
+    const restored = await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: root.id,
+      archived: false,
+      expectedVersion: 2,
+    });
+    expect(restored).toMatchObject({ archived: false, archiveVersion: 3 });
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId: subject,
+          limit: 20,
+        })
+      ).sessions.map((row) => row.id),
+    ).toContain(root.id);
   });
 
   test("coalesces concurrent first pages to one bounded subject snapshot", async () => {

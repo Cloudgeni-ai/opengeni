@@ -247,9 +247,45 @@ export function SessionRoute({
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
+  const acknowledgedSessionRef = useRef<string | null>(null);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
+  useEffect(() => {
+    if (!session?.unread || acknowledgedSessionRef.current === session.id) return;
+    acknowledgedSessionRef.current = session.id;
+    void context.client
+      .updateSessionAttention(workspaceId, session.id, {
+        unread: false,
+        expectedVersion: session.attentionVersion ?? 0,
+      })
+      .then((updated) => {
+        setContextSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                unread: updated.unread,
+                activelyWorking: updated.activelyWorking,
+                attentionVersion: updated.attentionVersion,
+              }
+            : current,
+        );
+      })
+      .catch(() => {
+        // A later route load or the normal rail refresh can retry. Reading a
+        // chat should never interrupt the user with an acknowledgement error.
+        if (acknowledgedSessionRef.current === session.id) {
+          acknowledgedSessionRef.current = null;
+        }
+      });
+  }, [
+    context.client,
+    session?.attentionVersion,
+    session?.id,
+    session?.unread,
+    setContextSession,
+    workspaceId,
+  ]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);

@@ -212,6 +212,29 @@ describe("ModelPolicyPicker", () => {
     ).toBeTruthy();
   });
 
+  test("can hide latency controls on policy surfaces that do not persist latency", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model="codex/gpt-5.6-sol"
+        effort="low"
+        latencyMode="standard"
+        allowLatencyMode={false}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')
+        ?.click();
+    });
+
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+  });
+
   test("never exposes stale model rows while the catalog is loading", async () => {
     const container = await mount(
       <ModelPolicyPicker

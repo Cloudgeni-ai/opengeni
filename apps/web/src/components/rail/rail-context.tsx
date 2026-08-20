@@ -22,7 +22,7 @@ export const RAIL_DRAWER_BREAKPOINT = 1024;
 /** Resize bounds for the expanded desktop rail (px). */
 export const RAIL_MIN_WIDTH = 220;
 export const RAIL_MAX_WIDTH = 480;
-export const RAIL_DEFAULT_WIDTH = 260;
+export const RAIL_DEFAULT_WIDTH = 244;
 
 function clampRailWidth(width: number): number {
   if (!Number.isFinite(width)) {

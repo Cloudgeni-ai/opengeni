@@ -3,6 +3,7 @@
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
+import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { SessionEvent } from "@opengeni/sdk";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -213,6 +214,8 @@ export type AppContextValue = {
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
+      /** Workspace folder to file the new session under. */
+      channelId?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
       /** Create a session shell without starting an underlying agent turn. */
@@ -420,6 +423,7 @@ export function RootRouteComponent() {
   // submit gets a fresh, independent key. Distinct from the per-call
   // clientEventId (a fresh UUID every send).
   const pendingCreateAttempt = useRef<PendingCreateAttempt | null>(null);
+  const appliedWorkspaceSessionDefaultsKey = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -567,6 +571,26 @@ export function RootRouteComponent() {
       cancelled = true;
     };
   }, [clientConfig, authReady, client]);
+
+  // New-chat policy follows the active workspace. Explicit composer choices
+  // remain local until the route moves to another workspace or its durable
+  // default changes; unrelated workspace updates do not reset the picker.
+  useEffect(() => {
+    if (!clientConfig) return;
+    const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+    if (!workspaceId) return;
+    const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) return;
+    const configured = resolveWorkspaceSessionDefaults(workspace.settings);
+    const nextModel = configured?.model ?? clientConfig.defaultModel;
+    const nextEffort = configured?.reasoningEffort ?? initialReasoningEffort(clientConfig);
+    const key = `${workspaceId}\u0000${nextModel}\u0000${nextEffort}`;
+    if (appliedWorkspaceSessionDefaultsKey.current === key) return;
+    appliedWorkspaceSessionDefaultsKey.current = key;
+    setModel(nextModel);
+    setReasoningEffort(nextEffort);
+    setLatencyMode("standard");
+  }, [clientConfig, pathname, workspaces]);
 
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
   const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
@@ -926,6 +950,7 @@ export function RootRouteComponent() {
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
       workingDir?: string | null;
+      channelId?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
       startMode?: "realtime";
@@ -964,6 +989,7 @@ export function RootRouteComponent() {
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
+          channelId: options?.channelId,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
           startMode: options?.startMode,
         }),

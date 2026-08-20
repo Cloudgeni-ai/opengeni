@@ -2963,6 +2963,9 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    pinned: boolean("pinned").notNull().default(false),
+    // Explicit user order within the pinned and unpinned project groups.
+    sortOrder: integer("sort_order").notNull().default(0),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3804,10 +3807,11 @@ export const sessionSpawnDenials = pgTable(
   }),
 );
 
-// Per-authenticated-subject session organization. This is deliberately a
-// relation instead of a session column: one member's pin must never reorder a
-// shared workspace for another member, and a session's own activity timestamps
-// must remain agent/runtime truth. `subjectId` is the trusted AccessGrant
+// Per-authenticated-subject session organization and follow-up state. This is
+// deliberately a relation instead of session columns: one member's pin,
+// acknowledgment, or actively-working label must never affect another member,
+// and a session's own activity timestamps must remain agent/runtime truth.
+// `subjectId` is the trusted AccessGrant
 // subject, which is text because configured/delegated principals are not always
 // UUIDs. The account/workspace pair carries the standard forced-RLS boundary.
 export const sessionPins = pgTable(
@@ -3831,6 +3835,15 @@ export const sessionPins = pgTable(
     pinned: boolean("pinned").notNull().default(true),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }).defaultNow(),
     version: integer("version").notNull().default(1),
+    // A session is unread for this subject whenever its durable event sequence
+    // has advanced beyond this explicit acknowledgment fence. Merely opening a
+    // route never changes the fence.
+    acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
+    activelyWorking: boolean("actively_working").notNull().default(false),
+    attentionVersion: integer("attention_version").notNull().default(1),
+    archived: boolean("archived").notNull().default(false),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archiveVersion: integer("archive_version").notNull().default(1),
   },
   (table) => ({
     subjectNonempty: check(
@@ -3838,6 +3851,22 @@ export const sessionPins = pgTable(
       sql`length(btrim(${table.subjectId})) > 0`,
     ),
     versionPositive: check("session_pins_version_positive", sql`${table.version} >= 1`),
+    acknowledgedSequenceFloor: check(
+      "session_pins_acknowledged_sequence_floor",
+      sql`${table.acknowledgedSequence} >= -1`,
+    ),
+    attentionVersionPositive: check(
+      "session_pins_attention_version_positive",
+      sql`${table.attentionVersion} >= 1`,
+    ),
+    archiveVersionPositive: check(
+      "session_pins_archive_version_positive",
+      sql`${table.archiveVersion} >= 1`,
+    ),
+    archiveStateConsistent: check(
+      "session_pins_archive_state_consistent",
+      sql`((${table.archived}) and (${table.archivedAt}) is not null) or ((not ${table.archived}) and (${table.archivedAt}) is null)`,
+    ),
     stateConsistent: check(
       "session_pins_state_consistent",
       sql`((${table.pinned}) and (${table.pinnedAt}) is not null) or ((not ${table.pinned}) and (${table.pinnedAt}) is null)`,
@@ -3864,6 +3893,13 @@ export const sessionPins = pgTable(
       table.pinnedAt.desc(),
       table.sessionId.desc(),
     ),
+    subjectArchived: index("session_pins_workspace_subject_archived_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.archived,
+      table.archivedAt.desc(),
+      table.sessionId.desc(),
+    ),
   }),
 );
 
@@ -3882,6 +3918,7 @@ export const sessionListSnapshots = pgTable(
     subjectId: text("subject_id").notNull(),
     parentSessionFilter: text("parent_session_filter").notNull().default("all"),
     search: text("search"),
+    archiveMode: text("archive_mode").$type<"active" | "archived">().notNull().default("active"),
     ordinarySessionIds: uuid("ordinary_session_ids")
       .array()
       .notNull()
@@ -3906,6 +3943,10 @@ export const sessionListSnapshots = pgTable(
     searchLength: check(
       "session_list_snapshots_search_length",
       sql`${table.search} is null or length(${table.search}) <= 200`,
+    ),
+    archiveModeValid: check(
+      "session_list_snapshots_archive_mode_valid",
+      sql`${table.archiveMode} in ('active', 'archived')`,
     ),
     workspaceExpiry: index("session_list_snapshots_workspace_expiry_idx").on(
       table.workspaceId,

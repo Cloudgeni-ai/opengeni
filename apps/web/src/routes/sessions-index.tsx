@@ -17,6 +17,7 @@
 // lightweight local opt-in.
 import {
   FILE_ONLY_MESSAGE_TEXT,
+  useChannels,
   useRigs,
   useVariableSets,
   useWorkspaceSessions,
@@ -33,18 +34,31 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
   CheckIcon,
+  ChevronDownIcon,
   FolderIcon,
   MonitorOffIcon,
+  PlusIcon,
   ServerCogIcon,
   ServerIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
+import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
@@ -96,7 +110,7 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
-import type { Session } from "@/types";
+import type { Channel, Session } from "@/types";
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -128,6 +142,12 @@ function SessionsIndexRouteContent({
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
+  const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
+    launch.channelId ?? null,
+  );
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<SessionDraft>(() =>
@@ -145,6 +165,35 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
+
+  // Folder-launch links preselect their destination, while the ordinary New
+  // session entry starts in Recents. Keep the selection local so choosing a
+  // folder does not turn the composer URL into application state.
+  useEffect(() => {
+    setSelectedChannelId(launch.channelId ?? null);
+  }, [launch.channelId]);
+
+  useEffect(() => {
+    if (
+      selectedChannelId !== null &&
+      !channelsQuery.loading &&
+      !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
+    ) {
+      setSelectedChannelId(null);
+    }
+  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId]);
+  const createProject = useCallback(async () => {
+    const name = projectNameDraft.trim();
+    if (!name) return;
+    const project = await channelsQuery.create({ name });
+    if (!project) {
+      toast.error("Couldn't create the project. The name may already be in use.");
+      return;
+    }
+    setSelectedChannelId(project.id);
+    setProjectDialogOpen(false);
+    setProjectNameDraft("");
+  }, [channelsQuery, projectNameDraft]);
 
   useEffect(() => {
     const onRequest = () => setCreateComposerFocusGen((current) => current + 1);
@@ -329,6 +378,7 @@ function SessionsIndexRouteContent({
                 {
                   targetSandboxId: submission.options.targetSandboxId,
                   workingDir: submission.options.workingDir,
+                  channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
                 },
@@ -358,6 +408,7 @@ function SessionsIndexRouteContent({
               {
                 targetSandboxId: submission.options.targetSandboxId,
                 workingDir: submission.options.workingDir,
+                channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
               },
@@ -423,7 +474,7 @@ function SessionsIndexRouteContent({
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId },
-        search: {},
+        search: launch.channelId ? { channelId: launch.channelId } : {},
         replace: true,
       });
       return;
@@ -455,6 +506,7 @@ function SessionsIndexRouteContent({
     launchModel,
     launchRealtime,
     launchKey,
+    launch.channelId,
     navigate,
     newSessionDraft.conflict,
     newSessionDraft.loading,
@@ -633,6 +685,10 @@ function SessionsIndexRouteContent({
                 policyError={newSessionPolicyError}
                 disabled={busy || newSessionDraft.loading}
                 showRepos={draft.compute.kind === "sandbox"}
+                channels={channelsQuery.channels}
+                selectedChannelId={selectedChannelId}
+                onChannelChange={setSelectedChannelId}
+                onCreateProject={() => setProjectDialogOpen(true)}
                 selection={{
                   mcpServerIds: context.selectedCapabilityToolIds,
                   firstPartyToolIds: draft.firstPartyMcpTools,
@@ -659,6 +715,17 @@ function SessionsIndexRouteContent({
 
         <RecentSessions workspaceId={workspaceId} />
       </div>
+      <ChannelCreateDialog
+        open={projectDialogOpen}
+        name={projectNameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setProjectNameDraft}
+        onOpenChange={(open) => {
+          setProjectDialogOpen(open);
+          if (!open) setProjectNameDraft("");
+        }}
+        onSubmit={() => void createProject()}
+      />
     </div>
   );
 }
@@ -796,6 +863,10 @@ function SessionControlStrip({
   policyError,
   disabled,
   showRepos,
+  channels,
+  selectedChannelId,
+  onChannelChange,
+  onCreateProject,
   selection,
   onToolSelectionChange,
 }: {
@@ -804,6 +875,10 @@ function SessionControlStrip({
   policyError: string | null;
   disabled: boolean;
   showRepos: boolean;
+  channels: Channel[];
+  selectedChannelId: string | null;
+  onChannelChange: (channelId: string | null) => void;
+  onCreateProject: () => void;
   selection: SessionToolSelection;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
@@ -833,6 +908,13 @@ function SessionControlStrip({
         disabled={disabled}
         onChange={onToolSelectionChange}
       />
+      <SessionFolderPicker
+        channels={channels}
+        selectedChannelId={selectedChannelId}
+        disabled={disabled}
+        onChange={onChannelChange}
+        onCreateProject={onCreateProject}
+      />
       {showRepos ? (
         <WorkspaceRepositoryPicker
           workspaceId={workspaceId}
@@ -841,6 +923,61 @@ function SessionControlStrip({
         />
       ) : null}
     </div>
+  );
+}
+
+function SessionFolderPicker({
+  channels,
+  selectedChannelId,
+  disabled,
+  onChange,
+  onCreateProject,
+}: {
+  channels: Channel[];
+  selectedChannelId: string | null;
+  disabled: boolean;
+  onChange: (channelId: string | null) => void;
+  onCreateProject: () => void;
+}) {
+  const selected = channels.find((channel) => channel.id === selectedChannelId) ?? null;
+  const label = selected?.name ?? "Default";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={disabled}
+          aria-label={`Project: ${label}`}
+          className="h-8 max-w-[12rem] gap-1.5 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
+        >
+          <FolderIcon className="size-3.5 shrink-0" />
+          <span className="truncate">{label}</span>
+          <ChevronDownIcon className="size-3 shrink-0" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-56">
+        <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onChange(null)}>
+          <FolderIcon className="size-4" />
+          <span className="min-w-0 flex-1 truncate">Default</span>
+          {selectedChannelId === null ? <CheckIcon className="size-4" /> : null}
+        </DropdownMenuItem>
+        {channels.map((channel) => (
+          <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
+            <FolderIcon className="size-4" />
+            <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+            {channel.id === selectedChannelId ? <CheckIcon className="size-4" /> : null}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onCreateProject}>
+          <PlusIcon className="size-4" />
+          New project
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

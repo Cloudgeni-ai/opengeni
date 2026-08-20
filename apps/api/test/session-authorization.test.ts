@@ -12,6 +12,8 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
   ["PATCH", "", "session.title.write"],
   ["PUT", "/pin", "session.pin.write"],
+  ["PUT", "/attention", "session.attention.write"],
+  ["PUT", "/archive", "session.archive.write"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
   ["GET", "/lineage", "session.lineage.read"],
