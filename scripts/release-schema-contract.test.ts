@@ -213,7 +213,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0306_atomic_personal_resource_attachments.sql",
       ),
     ).toMatchObject({
-      sha256: "de0d9aebc15cdd23656415d601c8bc88d5d4cd5a0b5ae10408e0d3ca75d5a7b3",
+      sha256: "4aa927065e39ecda0cbf118e9f861d728f8b213e4b72238e2cdbccea002e2af4",
       deploymentMode: "maintenance",
     });
     expect(

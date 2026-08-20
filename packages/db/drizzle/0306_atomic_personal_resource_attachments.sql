@@ -86,6 +86,16 @@ BEGIN
 END
 $atomic_personal_resource_writer_drain_after_lock$;
 
+-- The production migrator is a NOSUPERUSER/NOBYPASSRLS table owner, so FORCE
+-- RLS would otherwise make this global drained-work guard see an empty set.
+-- These five tables are read-only inside this exact transaction-local window;
+-- later mutation begins only after FORCE has been restored on every table.
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE rigs NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE rig_versions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_variable_sets NO FORCE ROW LEVEL SECURITY;
+
 DO $atomic_personal_resource_work_drain$
 BEGIN
   IF EXISTS (
@@ -128,6 +138,12 @@ BEGIN
   END IF;
 END
 $atomic_personal_resource_work_drain$;
+
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
+ALTER TABLE rigs FORCE ROW LEVEL SECURITY;
+ALTER TABLE rig_versions FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_variable_sets FORCE ROW LEVEL SECURITY;
 
 -- No active legacy once grant has an accepted logical-turn owner. Settle them
 -- before activating the new protocol so no new turn can adopt ambiguous work.

@@ -48,8 +48,11 @@ const budgets = {
   // macOS/arm64. The public session-tenancy SDK activation brings the merged
   // direct-session graph to 2,063,047 raw bytes on macOS/arm64. PR #1676's
   // Linux/x64 production build measured the direct-session graph at 2,064,626
-  // raw and 573,599 gzip bytes. The next full-KiB envelopes, 2,065,408 raw
-  // (2,017 KiB) and 574,464 gzip (561 KiB), truthfully bound those measurements.
+  // raw and 573,599 gzip bytes. PR #1678's exact Linux/x64 production build
+  // then measured 2,065,995 raw and 573,851 gzip bytes, with raw 587 bytes over
+  // the prior envelope.
+  // The next full-KiB raw envelope is 2,066,432 (2,018 KiB); the unchanged
+  // 574,464 gzip (561 KiB) envelope continues to bound the measured gzip graph.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -57,7 +60,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2017 * kib,
+  directSessionRaw: 2018 * kib,
   directSessionGzip: 561 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

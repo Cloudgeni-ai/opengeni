@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import {
+  acquireBlankTestDatabase,
+  acquireOwnerMigratedTestDatabase,
+  type BlankTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import {
   createDb,
@@ -9,6 +14,11 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  FORCE_RLS_TABLES,
+  PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_TABLE_PRIVILEGES,
+} from "../src/runtime-posture";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -68,6 +78,50 @@ describe("migration 0306 atomic personal-resource attachments", () => {
     expect(source).toContain("once_receipt.turn_id = accepted.turn_id");
     expect(source).toContain("sessions_initial_personal_resource_intent_immutable");
     expect(source).not.toContain("CREATE TEMP");
+    const workDrainWindow = source.slice(
+      source.indexOf("-- The production migrator is a NOSUPERUSER/NOBYPASSRLS table owner"),
+      source.indexOf("-- No active legacy once grant has an accepted logical-turn owner"),
+    );
+    const workDrainTables = [
+      "sessions",
+      "session_turns",
+      "rigs",
+      "rig_versions",
+      "workspace_variable_sets",
+    ];
+    expect(
+      Array.from(workDrainWindow.matchAll(/ALTER TABLE (\w+) NO FORCE ROW LEVEL SECURITY;/g)).map(
+        (match) => match[1],
+      ),
+    ).toEqual(workDrainTables);
+    expect(
+      Array.from(workDrainWindow.matchAll(/ALTER TABLE (\w+) FORCE ROW LEVEL SECURITY;/g)).map(
+        (match) => match[1],
+      ),
+    ).toEqual(workDrainTables);
+    expect(source.indexOf(workDrainWindow)).toBeGreaterThan(
+      source.indexOf("$atomic_personal_resource_writer_drain_after_lock$;"),
+    );
+    expect(
+      source.indexOf(
+        "ALTER TABLE sessions FORCE ROW LEVEL SECURITY;",
+        source.indexOf(workDrainWindow),
+      ),
+    ).toBeLessThan(
+      source.indexOf("ALTER TABLE organization_user_resource_grants NO FORCE ROW LEVEL SECURITY;"),
+    );
+    for (const table of [
+      "turn_personal_resource_attachment_receipts",
+      "turn_personal_resource_once_receipts",
+      "turn_personal_resource_snapshots",
+    ] as const) {
+      expect(source).toContain(`CREATE TABLE ${table}`);
+      expect(source).toContain(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`);
+      expect(source).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
   });
 
   test("consumes once at logical-turn acceptance and admits the same snapshot on recovery", async () => {
@@ -277,5 +331,128 @@ describe("migration 0306 atomic personal-resource attachments", () => {
     } finally {
       await client.close();
     }
+  }, 900_000);
+});
+
+describe("migration 0306 under a NOSUPERUSER NOBYPASSRLS owner", () => {
+  let owned: OwnerMigratedTestDatabase | null = null;
+
+  beforeAll(async () => {
+    owned = await acquireOwnerMigratedTestDatabase("migration-0306-owner-drain");
+    if (!owned) {
+      if (requireRealDatabase) {
+        throw new Error("[migration-0306-owner-drain] PostgreSQL is required but unavailable");
+      }
+      return;
+    }
+    await migrate(owned.ownerUrl);
+  }, 900_000);
+
+  afterAll(async () => {
+    await owned?.release();
+  }, 180_000);
+
+  test("rejects active personal-resource work and rolls every drain table back to FORCE RLS", async () => {
+    if (!owned) return;
+    const { admin, ownerRole, ownerUrl } = owned;
+    const [identity] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
+      select rolsuper as superuser, rolbypassrls as "bypassRls"
+      from pg_roles where rolname = ${ownerRole}`;
+    expect(identity).toEqual({ superuser: false, bypassRls: false });
+
+    const accountId = crypto.randomUUID();
+    const personalWorkspaceId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const sessionId = crypto.randomUUID();
+    await admin`
+      insert into managed_accounts (id, name) values (${accountId}, '0306 owner drain')`;
+    await admin`
+      insert into workspaces (id, account_id, name) values
+        (${personalWorkspaceId}, ${accountId}, '0306 personal'),
+        (${workspaceId}, ${accountId}, '0306 shared')`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${personalWorkspaceId}, ${accountId}), (${workspaceId}, ${accountId})`;
+    const [membership] = await admin<Array<{ id: string }>>`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, ${subjectId}, 'active', ${personalWorkspaceId}, 3)
+      returning id`;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${accountId}, ${workspaceId}, ${subjectId})`;
+    await admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${accountId}, 1, ${"c".repeat(64)}, ${"d".repeat(64)}, 'migration-0306-owner')`;
+    const [variableSet] = await admin<Array<{ id: string }>>`
+      insert into workspace_variable_sets (account_id, workspace_id, name)
+      values (${accountId}, ${personalWorkspaceId}, '0306 owner variables') returning id`;
+    const [authority] = await admin<Array<{ id: string }>>`
+      insert into organization_user_resource_authorities (
+        account_id, organization_membership_id, resource_kind, resource_id,
+        origin_workspace_id, generation, status
+      ) values (
+        ${accountId}, ${membership!.id}, 'variable_set', ${variableSet!.id},
+        ${personalWorkspaceId}, 4, 'active'
+      ) returning id`;
+    await admin`
+      update workspace_variable_sets set authority_scope = 'user',
+        authority_id = ${authority!.id},
+        owner_organization_membership_id = ${membership!.id},
+        origin_workspace_id = ${personalWorkspaceId}
+      where id = ${variableSet!.id}`;
+
+    const client = createDb(owned.adminUrl, { max: 1 });
+    try {
+      await createSession(client.db, {
+        requestedSessionId: sessionId,
+        accountId,
+        workspaceId,
+        initialMessage: "active personal-resource work",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        subjectId,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        variableSetId: variableSet!.id,
+        firstPartyMcpTools: [],
+        createIdempotencyKey: `owner-drain-${sessionId}`,
+      });
+      const started = await initializeSessionStartAtomically(client.db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+      });
+      expect(started.turn?.status).toBe("queued");
+    } finally {
+      await client.close();
+    }
+
+    await admin`delete from schema_migrations
+      where name = '0306_atomic_personal_resource_attachments.sql'`;
+    await expectSqlState(async () => await migrate(ownerUrl), "55000");
+
+    const posture = await admin<Array<{ name: string; forced: boolean }>>`
+      select c.relname as name, c.relforcerowsecurity as forced
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = current_schema()
+        and c.relname in (
+          'sessions', 'session_turns', 'rigs', 'rig_versions', 'workspace_variable_sets'
+        )
+      order by c.relname`;
+    expect(Array.from(posture)).toEqual([
+      { name: "rig_versions", forced: true },
+      { name: "rigs", forced: true },
+      { name: "session_turns", forced: true },
+      { name: "sessions", forced: true },
+      { name: "workspace_variable_sets", forced: true },
+    ]);
   }, 900_000);
 });
