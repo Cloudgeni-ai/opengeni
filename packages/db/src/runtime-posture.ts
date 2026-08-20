@@ -127,6 +127,7 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
   "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
   "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",

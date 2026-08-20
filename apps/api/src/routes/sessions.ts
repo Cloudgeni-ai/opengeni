@@ -468,7 +468,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:create",
+    );
+    const grant = authorization.grant;
     let payload: unknown;
     try {
       payload = await c.req.json();
@@ -483,7 +489,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      session = await createSessionForRequest(deps, grant, workspaceId, payload);
+      session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
@@ -2476,7 +2482,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
@@ -2490,6 +2502,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       latencyMode: payload.latencyMode ?? null,
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
       connectionAuthorities: payload.connectionAuthorities,
+      ...(payload.personalResourceAttachment
+        ? { personalResourceAttachment: payload.personalResourceAttachment }
+        : {}),
+      authorization,
       delivery: "steer",
       origin: "human",
       ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
@@ -2503,7 +2519,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft/submit", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
@@ -2519,6 +2541,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         latencyMode: payload.latencyMode,
         mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
         connectionAuthorities: payload.connectionAuthorities,
+        ...(payload.personalResourceAttachment
+          ? { personalResourceAttachment: payload.personalResourceAttachment }
+          : {}),
+        authorization,
         delivery: payload.delivery,
         origin: "human",
         expectedDraftRevision: payload.expectedDraftRevision,
@@ -2545,7 +2571,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     const event = parseSessionEventAdmission(await c.req.json().catch(() => null));
     const refinedOperation =
@@ -2576,6 +2608,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         latencyMode: event.payload.latencyMode ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
         connectionAuthorities: event.payload.connectionAuthorities,
+        ...(event.payload.personalResourceAttachment
+          ? { personalResourceAttachment: event.payload.personalResourceAttachment }
+          : {}),
+        authorization,
         ...(event.payload.controlEtag !== undefined
           ? { controlEtag: event.payload.controlEtag }
           : {}),
@@ -4316,6 +4352,15 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         message: error.message,
       },
       422,
+    );
+  }
+  if (error instanceof HTTPException && error.status === 409) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_CONFLICT",
+        message: error.message,
+      },
+      409,
     );
   }
   throw error;

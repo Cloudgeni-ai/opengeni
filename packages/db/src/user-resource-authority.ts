@@ -1,10 +1,13 @@
 import {
+  PersonalResourceAttachmentSummary,
+  type PersonalResourceAttachmentIntent,
   USER_RESOURCE_ACTION_BY_KIND,
   type UserResourceDelegation,
   type UserResourceKind,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 
 export type UserResourceAuthorityGrant = {
   grantId: string;
@@ -29,6 +32,98 @@ export type UserResourceAuthoritySummary = {
   status: "active" | "retained" | "revoked";
   grants: UserResourceAuthorityGrant[];
 };
+
+export type AcceptedTurnPersonalResourceAttachment = {
+  summary: PersonalResourceAttachmentSummary;
+  replay: boolean;
+};
+
+export class PersonalResourceAttachmentAcceptanceError extends Error {
+  readonly name = "PersonalResourceAttachmentAcceptanceError";
+  constructor(
+    readonly kind: "invalid" | "forbidden" | "conflict",
+    options?: ErrorOptions,
+  ) {
+    super(
+      kind === "invalid"
+        ? "The personal-resource attachment request is invalid"
+        : kind === "forbidden"
+          ? "The personal-resource attachment is not authorized"
+          : "The personal-resource attachment conflicts with accepted work",
+      options,
+    );
+  }
+}
+
+/**
+ * Issue and freeze the locked session's personal Variable Set/Rig closure on
+ * one already-inserted logical turn. The caller owns the surrounding accepted-
+ * work transaction; this helper must never be called as a standalone grant
+ * mutation.
+ */
+export async function acceptTurnPersonalResourceAttachmentInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    subjectId: string;
+    intent: PersonalResourceAttachmentIntent & { expectedAuthorityEpoch: number };
+  },
+): Promise<AcceptedTurnPersonalResourceAttachment> {
+  await setSubjectRlsContext(db, input.subjectId);
+  let row:
+    | {
+        grantMode: "once" | "session" | "always";
+        grantContext: "user_private" | "workspace_shared";
+        resourceCount: number;
+        resourceKinds: Array<"variable_set" | "rig">;
+        sharedOutputWarningVersion: 1;
+        replay: boolean;
+      }
+    | undefined;
+  try {
+    [row] = await rawRows(
+      db,
+      sql`
+        select grant_mode as "grantMode", grant_context as "grantContext",
+          resource_count::int as "resourceCount", resource_kinds as "resourceKinds",
+          shared_output_warning_version::int as "sharedOutputWarningVersion", replay
+        from accept_turn_personal_resource_attachment(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+          ${input.sessionId}::uuid, ${input.turnId}::uuid, ${input.intent.mode},
+          ${input.intent.expectedAuthorityEpoch},
+          ${input.intent.workspaceSharedAcknowledged},
+          ${input.intent.sharedOutputWarningVersion}
+        )
+      `,
+    );
+  } catch (error) {
+    const sqlState = nestedPostgresSqlState(error);
+    if (sqlState === "22023") {
+      throw new PersonalResourceAttachmentAcceptanceError("invalid", { cause: error });
+    }
+    if (sqlState === "42501") {
+      throw new PersonalResourceAttachmentAcceptanceError("forbidden", { cause: error });
+    }
+    if (sqlState === "23505") {
+      throw new PersonalResourceAttachmentAcceptanceError("conflict", { cause: error });
+    }
+    throw error;
+  }
+  if (!row) throw new Error("atomic personal-resource attachment was not returned");
+  return {
+    summary: PersonalResourceAttachmentSummary.parse({
+      mode: row.grantMode,
+      context: row.grantContext,
+      resourceCount: row.resourceCount,
+      resourceKinds: row.resourceKinds,
+      sharedOutputWarningVersion: row.sharedOutputWarningVersion,
+    }),
+    replay: row.replay,
+  };
+}
 
 type AuthorityRow = Omit<
   UserResourceAuthorityGrant,

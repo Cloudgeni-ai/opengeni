@@ -62,6 +62,7 @@ import type {
   McpPersonalConnectionDelegation,
   ModelContextContributionSummary,
   Permission,
+  PersonalResourceAttachmentIntent,
   PackInstallation,
   PackInstallationStatus,
   ResourceRef,
@@ -175,6 +176,7 @@ import {
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
+  PersonalResourceAttachmentSummary,
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 
@@ -381,6 +383,7 @@ export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
 export * from "./user-resource-authority";
+import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";
 export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
@@ -25639,6 +25642,13 @@ export class SessionIdConflictError extends Error {
   }
 }
 
+export class SessionCreateIdempotencyConflictError extends Error {
+  constructor() {
+    super("Session create idempotency key was reused with a different personal-resource intent");
+    this.name = "SessionCreateIdempotencyConflictError";
+  }
+}
+
 async function frozenSessionCreatorForInsert(
   tx: Database,
   input: {
@@ -25722,6 +25732,7 @@ export type SessionCreateInput = {
   };
   mcpServers?: CreateSessionMcpServerInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   initialXaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
@@ -26116,6 +26127,12 @@ async function createSessionInTransaction(
       if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
         throw new SessionIdConflictError(input.requestedSessionId);
       }
+      if (
+        stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
+        stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
+      ) {
+        throw new SessionCreateIdempotencyConflictError();
+      }
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
@@ -26206,6 +26223,8 @@ async function createSessionInTransaction(
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            initialPersonalResourceAttachmentIntent:
+              input.initialPersonalResourceAttachmentIntent ?? null,
             initialXaiProviderAccountAuthoritySnapshot: initialXaiProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
@@ -26252,6 +26271,12 @@ async function createSessionInTransaction(
       if (existing) {
         if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
           throw new SessionIdConflictError(input.requestedSessionId);
+        }
+        if (
+          stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
+          stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
+        ) {
+          throw new SessionCreateIdempotencyConflictError();
         }
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -51325,6 +51350,76 @@ export async function initializeSessionStartAtomically(
           turnIds: [turn.id],
         });
 
+        const initialPersonalResourceIntent = session.initialPersonalResourceAttachmentIntent;
+        if (initialPersonalResourceIntent) {
+          const attachmentInitiatingHumanSubjectId =
+            turn.initiatingHumanSubjectId ??
+            (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+          if (!attachmentInitiatingHumanSubjectId) {
+            throw new Error("Atomic personal-resource attachment requires an initiating human");
+          }
+          const acceptedPersonalResources =
+            turn.personalResourceProtocolVersion === 1 && turn.personalResourceAttachmentSummary
+              ? {
+                  summary: PersonalResourceAttachmentSummary.parse(
+                    turn.personalResourceAttachmentSummary,
+                  ),
+                  replay: true,
+                }
+              : await acceptTurnPersonalResourceAttachmentInTransaction(tx as unknown as Database, {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  turnId: turn.id,
+                  subjectId: attachmentInitiatingHumanSubjectId,
+                  intent: {
+                    ...initialPersonalResourceIntent,
+                    expectedAuthorityEpoch: session.authorityEpoch,
+                  },
+                });
+          turn = {
+            ...turn,
+            personalResourceAttachmentSummary: acceptedPersonalResources.summary,
+            personalResourceProtocolVersion: 1,
+          };
+          const [existingAttachmentEvent] = await tx
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, session.id),
+                eq(schema.sessionEvents.turnId, turn.id),
+                eq(schema.sessionEvents.type, "session.personal_resources.attached"),
+              ),
+            )
+            .limit(1);
+          if (!existingAttachmentEvent) {
+            const [attachmentEvent] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    turnId: turn.id,
+                    sequence: ++sequence,
+                    type: "session.personal_resources.attached",
+                    payload: { turnId: turn.id, ...acceptedPersonalResources.summary },
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!attachmentEvent) {
+              throw new Error("Failed to append initial personal-resource attachment event");
+            }
+            insertedEvents.push(attachmentEvent);
+          }
+        }
+
         const [queuedEvent] = await tx
           .select({ id: schema.sessionEvents.id })
           .from(schema.sessionEvents)
@@ -52538,6 +52633,7 @@ export async function claimSessionWorkForAttempt(
             authorityEpoch: session.authorityEpoch,
             authorityVisibility: session.visibility as "user_private" | "workspace_shared",
             authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId ?? null,
+            personalResourceProtocolVersion: turn.personalResourceProtocolVersion,
             mcpApprovalPolicies,
             connectorActionPolicies: connectorPolicyRows,
           });
@@ -61575,6 +61671,9 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,
     ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
+    personalResources: row.personalResourceAttachmentSummary
+      ? PersonalResourceAttachmentSummary.parse(row.personalResourceAttachmentSummary)
+      : null,
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,

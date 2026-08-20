@@ -1326,6 +1326,25 @@ export type TimelineAnnotation = DraftTimelineAnnotation & {
   ordinal: number;
 };
 
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+export type PersonalResourceAttachmentIntent = {
+  mode: "once" | "session" | "always";
+  expectedAuthorityEpoch?: number | undefined;
+  workspaceSharedAcknowledged?: boolean | undefined;
+  sharedOutputWarningVersion: 1;
+};
+
+export type PersonalResourceAttachmentSummary = {
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  resourceCount: number;
+  resourceKinds: Array<"variable_set" | "rig">;
+  sharedOutputWarningVersion: 1;
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -1353,6 +1372,7 @@ export type SessionTurn = {
   initiator: TurnInitiator;
   initiatorContext: Record<string, unknown>;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  personalResources?: PersonalResourceAttachmentSummary | null | undefined;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
@@ -1513,6 +1533,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.visibility.changed",
+  "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
@@ -2466,6 +2487,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
   // (from inside a session → "shared" with the creator's box, top-level → "new").
@@ -4099,6 +4122,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
 export type SubmitComposerDraftResponse = {
@@ -6445,6 +6469,7 @@ export type UserMessageEventInput = {
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };
 
