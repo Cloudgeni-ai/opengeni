@@ -122,7 +122,6 @@ export type ClaimTurnOk = {
   modelUsageDispatchId: string;
   claimedModelUsageSourceKeys: Set<string>;
   emittedModelUsageSourceKeys: Set<string>;
-  startupMilestoneBackend: Settings["sandboxBackend"];
 };
 
 export type ClaimTurnOutcome = { exit: RunAgentTurnResult } | { ok: ClaimTurnOk };
@@ -339,7 +338,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
   const claimedModelUsageSourceKeys = new Set<string>();
   const emittedModelUsageSourceKeys = new Set<string>();
-  let startupMilestoneBackend: Settings["sandboxBackend"] = turn.sandboxBackend;
   const recordCanonicalStartupMilestones = (
     receipts: CanonicalTurnStartupMilestoneReceipt[],
   ): void => {
@@ -347,7 +345,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       recordTurnStartupMilestone(observability, {
         milestone: receipt.milestone,
         provider: turnExecutionPolicy.providerId,
-        backend: startupMilestoneBackend,
+        backend: sandboxState.startupMilestoneBackend ?? turn.sandboxBackend,
         outcome: receipt.outcome,
         durationSeconds: receipt.durationMs / 1_000,
       });
@@ -572,7 +570,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       modelUsageDispatchId,
       claimedModelUsageSourceKeys,
       emittedModelUsageSourceKeys,
-      startupMilestoneBackend,
     },
   };
 }

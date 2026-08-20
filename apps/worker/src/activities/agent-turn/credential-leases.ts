@@ -223,7 +223,6 @@ export type TurnCredentialLeases = {
   xai: XaiTurnLease;
   renewServing: (reason: LeaseRenewReason) => Promise<void>;
   servingLost: () => boolean;
-  stopHeartbeats: () => void;
 };
 
 export function createTurnCredentialLeases(deps: TurnCredentialLeaseDeps): TurnCredentialLeases {
@@ -237,9 +236,5 @@ export function createTurnCredentialLeases(deps: TurnCredentialLeaseDeps): TurnC
       await xai.renew();
     },
     servingLost: () => codex.lost || xai.lost,
-    stopHeartbeats: () => {
-      codex.stopHeartbeat();
-      xai.stopHeartbeat();
-    },
   };
 }

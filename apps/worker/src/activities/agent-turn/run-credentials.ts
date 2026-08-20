@@ -21,7 +21,9 @@ import {
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
+  type loadWorkspaceEnvironmentForRunWithCredentials,
 } from "../environment";
+import type { mergeResourceRefs } from "../common";
 import { startGitCredentialRenewalLoop } from "../git-credential-renewal";
 import {
   RUN_CREDENTIAL_EXPIRY_LEAD_MS,
@@ -80,10 +82,8 @@ export type PrepareRunCredentialsDeps = {
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
-  workspaceVariableSet: Awaited<
-    ReturnType<typeof import("../environment").loadWorkspaceEnvironmentForRunWithCredentials>
-  >;
-  turnResources: ReturnType<typeof import("../common").mergeResourceRefs>;
+  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
+  turnResources: ReturnType<typeof mergeResourceRefs>;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
     artifactId: string;

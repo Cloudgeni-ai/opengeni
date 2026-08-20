@@ -17,6 +17,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  type SelfhostedSession,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { mergeResourceRefs } from "../common";
@@ -27,6 +28,7 @@ import {
 } from "../environment";
 import { rigProviderImageSourceImage } from "../packs";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
+import type { currentActivityContext } from "../streaming";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
@@ -42,6 +44,7 @@ import {
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
+import type { createTurnMediaArtifacts } from "./media-artifacts";
 
 import {
   throwIfTurnOperationCancelled,
@@ -68,19 +71,20 @@ export type SandboxRouteDeps = {
   settings: Settings;
   db: ActivityServices["db"];
   eventing: EventingState;
-  media: ReturnType<typeof import("./media-artifacts").createTurnMediaArtifacts>;
+  sandboxState: SandboxRuntimeState;
+  media: ReturnType<typeof createTurnMediaArtifacts>;
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
 };
 
 export type SandboxRouteOk = {
   routingOn: boolean;
-  activeSandboxPointer: Awaited<ReturnType<typeof import("@opengeni/db").readActiveSandbox>>;
+  activeSandboxPointer: Awaited<ReturnType<typeof readActiveSandbox>>;
   activeSandboxRecord: SandboxRecord | null;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
-  groupBoxImage: ReturnType<typeof import("../packs").rigProviderImageSourceImage>;
+  groupBoxImage: ReturnType<typeof rigProviderImageSourceImage>;
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
 };
@@ -95,7 +99,7 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
   cancellationSignal: AbortSignal | undefined;
   runtimeCancellationSignal: AbortSignal | undefined;
   sandboxResumeSignal: AbortSignal;
-  activityContext: ReturnType<typeof import("../streaming").currentActivityContext>;
+  activityContext: ReturnType<typeof currentActivityContext>;
   opJournal: ClaimTurnOk["opJournal"];
   sandboxState: SandboxRuntimeState;
   eventing: EventingState;
@@ -141,15 +145,23 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   throwIfTurnCancelled: () => void;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   sandboxCodemodeToken: string | undefined;
-  media: ReturnType<typeof import("./media-artifacts").createTurnMediaArtifacts>;
+  media: ReturnType<typeof createTurnMediaArtifacts>;
   toolResultSpill: ToolResultSpill;
   connectionScope: { accountId: string; workspaceId: string };
   codemodeAuthority: SandboxCodemodeAuthority;
 };
 
 export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<SandboxRouteOk> {
-  const { input, settings, db, eventing, media, fileAuthoritySubjectId, runSettings } = deps;
-  let startupMilestoneBackend: Settings["sandboxBackend"] | undefined;
+  const {
+    input,
+    settings,
+    db,
+    eventing,
+    media,
+    sandboxState,
+    fileAuthoritySubjectId,
+    runSettings,
+  } = deps;
 
   // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
   // D1-lite) and reused for EVERY downstream decision: the env mint (skip
@@ -237,8 +249,8 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     runSettings.sandboxBackend === "selfhosted" && !machinePrimary
       ? settings.sandboxBackend
       : runSettings.sandboxBackend;
-  startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
-  media.sandboxFileDownloadBackend = startupMilestoneBackend;
+  sandboxState.startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
+  media.sandboxFileDownloadBackend = sandboxState.startupMilestoneBackend;
   const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
   const sandboxCreationBackend: Settings["sandboxBackend"] =
     settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
@@ -436,8 +448,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         );
         // The machine-primary establish narrows `session` to SelfhostedSession
         // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
-        sandboxState.machinePrimarySession =
-          established.session as import("@opengeni/runtime").SelfhostedSession;
+        sandboxState.machinePrimarySession = established.session as SelfhostedSession;
         sandboxState.setupBoxSession = established.session;
         sandboxState.resolvedSandbox = {
           // Wrap in the SAME routing proxy so a mid-turn swap (to another machine

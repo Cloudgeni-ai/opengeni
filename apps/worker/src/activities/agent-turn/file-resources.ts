@@ -41,7 +41,7 @@ export function sandboxFileMaterializationOutcome(
 export async function assertGitHubResourcesRemainAuthorized(
   db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
   workspaceId: string,
-  resources: import("@opengeni/contracts").ResourceRef[],
+  resources: ResourceRef[],
 ): Promise<void> {
   // Must check exactly what sandboxEnvironmentForRun would mint a token for,
   // so the selection is derived from the same extraction as the mint path.

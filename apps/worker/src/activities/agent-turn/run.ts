@@ -232,27 +232,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       finalizeTurnOpStreamOps,
     } = sandboxRuntime;
 
-    // Dual-write of conversation truth (issue #35): completed items are
-    // reconciled into session_history_items after every model response and at
-    // every turn-end path (idempotent on position), and the sandbox recovery
-    // envelope is upserted alongside. Best-effort by design: persistence
-    // problems must never fail the run.
-    //
-    // Orphaned-tool-output guard: `stream.state.history` is NOT a plain
-    // append-only array — it is a computed getter
-    // (`getTurnInput(originalInput, generatedItems)`) that runs the SDK's
-    // `dropOrphanToolCalls` on every access, so a `function_call` with no
-    // settling result yet is transiently ABSENT from history and a later
-    // reconcile sees a DIFFERENT, shorter/reordered list. A blind length
-    // watermark with onConflictDoNothing-on-position then freezes the first
-    // shape of a position and can persist a `function_call_result` at a tail
-    // position while its `function_call` was pruned away in an earlier slice
-    // and never written — the orphan that bricks the session. We defend against
-    // it at the stream boundary with the turn-scoped pending-tool ledger. A
-    // partial parallel batch records raw results but does not call this
-    // reconciler. Once every registered call has a result, the SDK history is
-    // stable and this scalar append watermark is valid again. The sanitizer
-    // remains the final call/result pairing guard for every other reconcile.
     const media = createTurnMediaArtifacts({
       db,
       objectStorage,
@@ -318,23 +297,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getExecutionGeneration: () => attempt.executionGeneration,
     });
 
-    // Rig telemetry (M3): set once the session loads; empty string for a rig-less
-    // turn (mirrors variableSetId). Read by the activity span's finally block.
-    // The Codex account this turn runs on (pin > workspace active), resolved once
-    // a codex-billed turn is confirmed and threaded into the token resolver below.
-    // The session's Codex credential BEFORE this turn resolved its own — captured
-    // before recordSessionActiveCodexCredential overwrites the durable pointer, so
-    // a per-call usage log can report whether the serving account CHANGED since the
-    // session's previous call (the prompt-cache account-switch hypothesis).
-    // The latest usage-header snapshot scraped for free
-    // off this turn's `/codex/responses` responses (a turn issues many model calls;
-    // latest wins). Flushed ONCE into the P2 usage cache for the serving account in
-    // the `finally` — cheaper than a /wham/usage poll AND it self-heals P3 rotation
-    // (the proactive + 429 rankers read these exact columns). null ⇒ nothing scraped.
-    // Hoisted to activity scope so the finally flush (below) sees it. The sink is
-    // wired into codexContext.onUsageHeaders inside the try.
-    // Hoisted for same-turn recovery: an approval-decision rerun must
-    // re-enter through the suffix/history resume path, never through a swapped trigger.
     try {
       const claimed = await claimTurnAttempt({
         input,
@@ -888,6 +850,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings,
         db,
         eventing,
+        sandboxState,
         media,
         fileAuthoritySubjectId,
         runSettings,
@@ -1466,7 +1429,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         generatedImageHistoryProjector,
         modelHistoryProjector,
         compactionModeOptions,
-        companyBrainContextContributions: eventing.companyBrainContextContributions,
         initialRunCredentialMaterial,
         initialGitCredentials,
         sandboxEnvironment,

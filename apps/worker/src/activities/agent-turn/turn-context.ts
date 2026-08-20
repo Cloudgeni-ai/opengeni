@@ -10,6 +10,7 @@ import type {
   EstablishedSandboxSession,
   OpenGeniRuntime,
   RunCredentialCommandSession,
+  SelfhostedSession,
   TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { XaiSubscriptionRequestContext } from "@opengeni/xai-subscription";
@@ -49,6 +50,8 @@ export type AttemptIdentityState = {
   providerRecoveryCount: number;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
+  // Held for same-turn recovery: an approval-decision rerun must re-enter
+  // through the suffix/history resume path, never through a swapped trigger.
   triggerType: string | null;
 };
 
@@ -62,7 +65,7 @@ export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
-  machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null;
+  machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
   firstModelPreparationNestedSandboxMs: number;
   firstModelPreparationNestedSandboxPhases: Array<{
@@ -82,6 +85,10 @@ export type SandboxRuntimeState = {
   snapshotInFlight: Promise<void> | null;
   firstProviderRequestStarted: boolean;
   turnEndCaptureInProgress: boolean;
+  // Backend label for canonical startup milestones. Null until the route
+  // resolves, so milestones recorded before then fall back to the turn's own
+  // recorded backend and later ones report the effective route.
+  startupMilestoneBackend: Settings["sandboxBackend"] | null;
 };
 
 export type RenewalState = {
@@ -120,6 +127,8 @@ export type EventingState = {
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
 };
 
+/** Rig telemetry (M3): set once the session loads; empty string for a rig-less
+ * turn (mirrors variableSetId). Read by the activity span's finally block. */
 export type WorkspaceRefState = {
   variableSetId: string;
   rigId: string;
@@ -127,13 +136,26 @@ export type WorkspaceRefState = {
 };
 
 export type ProviderTurnState = {
+  // The Codex account this turn runs on (pin > workspace active), resolved once
+  // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   xaiRequestContext: XaiSubscriptionRequestContext | null;
   xaiCredentialQuarantined: boolean;
+  // The session's Codex credential BEFORE this turn resolved its own — captured
+  // before recordSessionActiveCodexCredential overwrites the durable pointer, so
+  // a per-call usage log can report whether the serving account CHANGED since the
+  // session's previous call (the prompt-cache account-switch hypothesis).
   priorSessionCodexCredentialId: string | null;
+  // The latest usage-header snapshot scraped for free off this turn's
+  // `/codex/responses` responses (a turn issues many model calls; latest wins).
+  // Flushed ONCE into the P2 usage cache for the serving account in the turn
+  // finalizer — cheaper than a /wham/usage poll AND it self-heals P3 rotation
+  // (the proactive + 429 rankers read these exact columns). null ⇒ nothing
+  // scraped. Lives on the turn context so the finalizer sees it; the sink is
+  // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
@@ -196,6 +218,7 @@ export function createTurnContext(input: {
       snapshotInFlight: null,
       firstProviderRequestStarted: false,
       turnEndCaptureInProgress: false,
+      startupMilestoneBackend: null,
     },
     renewals: {
       gitCredentialRenewals: [],

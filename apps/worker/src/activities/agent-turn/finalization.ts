@@ -12,6 +12,7 @@ import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
 import type { Settings } from "@opengeni/config";
 import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+import type { currentActivityContext } from "../streaming";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type {
@@ -64,7 +65,7 @@ export type TurnFinalizationDeps = {
   signalCodexCapacityWorkflow: ActivityServices["signalCodexCapacityWorkflow"];
   cancellationSignal: AbortSignal | undefined;
   sandboxResumeController: AbortController;
-  activityContext: ReturnType<typeof import("../streaming").currentActivityContext>;
+  activityContext: ReturnType<typeof currentActivityContext>;
   activityStarted: number;
   activitySpan: ReturnType<ActivityServices["observability"]["startSpan"]>;
   dispatchId: string;

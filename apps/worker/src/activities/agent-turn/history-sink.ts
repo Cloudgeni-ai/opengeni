@@ -25,8 +25,27 @@ export type TurnHistorySinkDeps = {
 };
 
 /**
- * Dual-write of conversation truth: completed items are reconciled into
- * session_history_items after every model response and at every turn-end path.
+ * Dual-write of conversation truth (issue #35): completed items are reconciled
+ * into session_history_items after every model response and at every turn-end
+ * path (idempotent on position), and the sandbox recovery envelope is upserted
+ * alongside. Best-effort by design: persistence problems must never fail the
+ * run.
+ *
+ * Orphaned-tool-output guard: `stream.state.history` is NOT a plain
+ * append-only array — it is a computed getter
+ * (`getTurnInput(originalInput, generatedItems)`) that runs the SDK's
+ * `dropOrphanToolCalls` on every access, so a `function_call` with no settling
+ * result yet is transiently ABSENT from history and a later reconcile sees a
+ * DIFFERENT, shorter/reordered list. A blind length watermark with
+ * onConflictDoNothing-on-position then freezes the first shape of a position
+ * and can persist a `function_call_result` at a tail position while its
+ * `function_call` was pruned away in an earlier slice and never written — the
+ * orphan that bricks the session. We defend against it at the stream boundary
+ * with the turn-scoped pending-tool ledger. A partial parallel batch records
+ * raw results but does not call this reconciler. Once every registered call has
+ * a result, the SDK history is stable and this scalar append watermark is valid
+ * again. The sanitizer remains the final call/result pairing guard for every
+ * other reconcile.
  */
 export class TurnHistorySink {
   persistedHistoryCount = 0;

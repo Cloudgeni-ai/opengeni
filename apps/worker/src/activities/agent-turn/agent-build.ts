@@ -11,7 +11,13 @@ import {
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
 } from "@opengeni/db";
-import { type BuildAgentOptions, type ConnectorActionPolicyHooks } from "@opengeni/runtime";
+import {
+  type AttemptConnectorActionBinding,
+  type BuildAgentOptions,
+  type ConnectorActionPolicyHooks,
+  type SandboxFileDownload,
+  type TurnSandboxCommandSession,
+} from "@opengeni/runtime";
 import {
   serviceTierForLatencyMode,
   environmentsEncryptionKeyBytes,
@@ -54,6 +60,13 @@ import {
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
+import type { SandboxTurnRuntime } from "./sandbox-runtime";
+import type { runtimeResourcesForTurn } from "./file-resources";
+import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
+import type {
+  loadWorkspaceEnvironmentForRunWithCredentials,
+  sandboxEnvironmentForRun,
+} from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -74,7 +87,7 @@ export type BuildTurnAgentDeps = {
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
   recordingState: RecordingState;
-  maybeStartOnTurnRecording: import("./sandbox-runtime").SandboxTurnRuntime["maybeStartOnTurnRecording"];
+  maybeStartOnTurnRecording: SandboxTurnRuntime["maybeStartOnTurnRecording"];
   providerTurn: ProviderTurnState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
   leases: ReturnType<typeof createTurnCredentialLeases>;
@@ -103,22 +116,18 @@ export type BuildTurnAgentDeps = {
   installedSkillRuntime: GovernanceModelOk["installedSkillRuntime"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: Awaited<
-    ReturnType<typeof import("../environment").loadWorkspaceEnvironmentForRunWithCredentials>
-  >;
-  runtimeResources: ReturnType<typeof import("./file-resources").runtimeResourcesForTurn>;
+  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
+  runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
   sandboxEnvironment: Record<string, string>;
-  sandboxArtifactRuntime: ReturnType<
-    typeof import("./sandbox-route").sandboxArtifactRuntimeAdmission
-  >;
+  sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   sandboxGitToken: string | undefined;
   sandboxGitTokens: Record<string, string> | undefined;
   sandboxGitCredentialBindings: Awaited<
-    ReturnType<typeof import("../environment").sandboxEnvironmentForRun>
+    ReturnType<typeof sandboxEnvironmentForRun>
   >["gitCredentialBindings"];
   sandboxCodemodeToken: string | undefined;
-  fileResourceDownloads: import("@opengeni/runtime").SandboxFileDownload[];
-  googleDriveConnectorBindings: readonly import("@opengeni/runtime").AttemptConnectorActionBinding[];
+  fileResourceDownloads: SandboxFileDownload[];
+  googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[];
   connectorActionIdentity: {
     accountId: string;
     workspaceId: string;
@@ -510,7 +519,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                 ? {
                     runCommand: async (command) =>
                       await fence.runSandboxCommandStructured(
-                        sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
+                        sessionForReference as TurnSandboxCommandSession,
                         {
                           ...command,
                           ...(runAs ? { runAs } : {}),

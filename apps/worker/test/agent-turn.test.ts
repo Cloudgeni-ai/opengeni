@@ -2980,10 +2980,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(joinAt).toBeGreaterThan(provisionerAt);
     expect(prefetchMintAt).toBeGreaterThan(prefetchAt);
     expect(prefetchMintAt).toBeLessThan(prefetchResumeAt);
-    expect(establishSource.slice(onDemandAt, prefetchAt + 400)).not.toContain(
-      "await sandboxState.resumeManagedGroupBox()",
+    // The whole establish phase runs before tool preparation, so the on-demand
+    // branch must not await the managed box anywhere before the lazy binder.
+    const lazyBinderDefinitionAt = establishSource.indexOf(
+      "export async function bindLazySandboxProvisioner(",
     );
-    expect(establishSource.slice(onDemandAt)).not.toContain("await resumeBoxForTurn(");
+    expect(lazyBinderDefinitionAt).toBeGreaterThan(onDemandAt);
+    const onDemandEstablishBody = establishSource.slice(onDemandAt, lazyBinderDefinitionAt);
+    expect(onDemandEstablishBody).not.toContain("await sandboxState.resumeManagedGroupBox()");
+    expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

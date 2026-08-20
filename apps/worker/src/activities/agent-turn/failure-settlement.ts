@@ -35,6 +35,7 @@ import {
   type CodexRotationStrategy,
 } from "../codex-rotation";
 import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+import type { Settings } from "@opengeni/config";
 import {
   classifyCodexEncryptedArtifactRejection,
   classifyCodexUsageLimitError,
@@ -43,7 +44,11 @@ import {
 } from "@opengeni/codex";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
-import type { TurnActivityServices as ActivityServices, RunAgentTurnResult } from "../types";
+import type {
+  TurnActivityServices as ActivityServices,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
+} from "../types";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnHistorySink } from "./history-sink";
 
@@ -79,8 +84,8 @@ import type {
 
 export type TurnFailureDeps = {
   error: unknown;
-  input: import("../types").RunAgentTurnInput;
-  settings: import("@opengeni/config").Settings;
+  input: RunAgentTurnInput;
+  settings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];

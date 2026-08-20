@@ -76,7 +76,6 @@ import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
   type RetainedArtifactMetadata,
-  type ModelContextContributionSummary,
   type SessionEvent,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -228,7 +227,6 @@ export type TurnStreamAttemptDeps = {
   ) => Promise<Array<Record<string, unknown>>>;
   modelHistoryProjector: ModelHistoryAttachmentProjector;
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
-  companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   initialGitCredentials: MintedRunGitCredentials | undefined;
   sandboxEnvironment: Record<string, string>;
@@ -305,7 +303,6 @@ export async function runTurnStreamAttempt(
     generatedImageHistoryProjector,
     modelHistoryProjector,
     compactionModeOptions,
-    companyBrainContextContributions,
     initialRunCredentialMaterial,
     initialGitCredentials,
     sandboxEnvironment,
@@ -880,7 +877,7 @@ export async function runTurnStreamAttempt(
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
           setLastInputTokens: setLastInputTokensFenced,
-          contextContributions: companyBrainContextContributions,
+          contextContributions: eventing.companyBrainContextContributions,
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -1306,7 +1303,7 @@ export async function runTurnStreamAttempt(
                 providerApi: aggregateProviderApi,
                 model: turn.model,
                 billing,
-                contextContributions: companyBrainContextContributions,
+                contextContributions: eventing.companyBrainContextContributions,
               });
             }
             if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {

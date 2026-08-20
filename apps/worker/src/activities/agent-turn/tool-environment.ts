@@ -48,6 +48,8 @@ import { waitForTurnOperation } from "./sandbox-provision";
 import { shouldDeferNonEagerToolPreparation } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
+import type { SandboxTurnRuntime } from "./sandbox-runtime";
+import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -93,19 +95,17 @@ export type PrepareTurnToolRuntimeDeps = {
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
-  turnTools: ReturnType<typeof import("../goals").withFirstPartyTools>;
+  turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   hostCredentialRootSessionId: string | null;
-  sandboxArtifactRuntime: ReturnType<
-    typeof import("./sandbox-route").sandboxArtifactRuntimeAdmission
-  >;
+  sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   routingOn: boolean;
   runtimeCancellationSignal: AbortSignal | undefined;
   credentialSubjectId: ClaimTurnOk["credentialSubjectId"];
   interactionInterventionResume: ClaimTurnOk["interactionInterventionResume"];
-  runWorkspaceMutationForSandbox: import("./sandbox-runtime").SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
+  runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
 };
