@@ -138,7 +138,7 @@ const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 describe("approval RunState materialization boundary", () => {
   test("ordinary agent turns never read or decode the approval blob", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
 
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
@@ -147,11 +147,11 @@ describe("approval RunState materialization boundary", () => {
 
   test("requires_action pause flushes paired history and attaches the open suffix", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     expect(source).toContain("attachOpenSuffixToPendingToolCalls");
     expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
-    expect(source).toContain("reconcileConversationTruth({ requireDurable: true })");
+    expect(source).toContain("historySink.reconcileConversationTruth({ requireDurable: true })");
     expect(source).toContain("settleOpenSuffixResumeIfNeeded");
   });
 
@@ -706,11 +706,11 @@ describe("turn exact-content boundaries", () => {
 
   test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
     const mandatoryBarrier = source.indexOf(
-      "await reconcileConversationTruth({ requireDurable: true });",
+      "await historySink.reconcileConversationTruth({ requireDurable: true });",
       completionPath,
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
@@ -2665,7 +2665,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("durably starts model preparation before native runStream and binds generic dispatch to fetch", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const runStreamOnceAt = source.indexOf("const runStreamOnce = async");
     const modelPreparationStartedAt = source.indexOf(
@@ -2808,7 +2808,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("activity prepares credential model context before turn input and reuses it lazily", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const resolutionAt = source.indexOf(
       "const initialRunCredentialMaterial = runCredentialResolver",
@@ -2839,7 +2839,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("runtime preparation overlaps independent workspace reads after the personal-resource fence", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
     const overlappedReads = source.indexOf(
@@ -2873,7 +2873,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("lazy git token mint starts before the box establish returns", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const provisionerAt = source.indexOf(
       "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
@@ -2893,7 +2893,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("repository on-demand turns prefetch managed-box create before tools", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const onDemandAt = source.indexOf('} else if (establishPolicy === "on-demand")');
     const prefetchAt = source.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
