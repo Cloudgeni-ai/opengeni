@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { stringify } from "yaml";
 import {
   GRAPH_MANIFEST_PATH,
+  WORKFLOW_GRAPH_LIMITS,
   canonicalJson,
   compareWorkflowExecutionManifest,
   inspectWorkflowExecutionRepository,
@@ -16,6 +18,51 @@ import {
 const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
+
+const minimalWorkflow = [
+  "name: Fixture",
+  "on: push",
+  "jobs:",
+  "  build:",
+  "    timeout-minutes: 5",
+  "    steps:",
+  "      - name: Run",
+  "        run: echo fixture",
+  "",
+].join("\n");
+
+const minimalAction = [
+  "name: Fixture action",
+  "runs:",
+  "  using: composite",
+  "  steps:",
+  "    - name: Run",
+  "      shell: bash",
+  "      run: echo fixture",
+  "",
+].join("\n");
+
+function padAscii(source: string, bytes: number): string {
+  const current = new TextEncoder().encode(source).byteLength;
+  if (current > bytes) throw new Error("fixture exceeds requested byte size");
+  if (current === bytes) return source;
+  return `${source}#${"x".repeat(bytes - current - 1)}`;
+}
+
+function exactNodeLimitYaml(extraLeafScalars = 0): string {
+  const rows = Array.from({ length: 999 }, () => `  - [${"0,".repeat(18)}0]`);
+  rows.push(`  - [${"0,".repeat(14 + extraLeafScalars)}0]`);
+  return `root:\n${rows.join("\n")}\n`;
+}
+
+async function createDiscoveryFixture(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "workflow-graph-discovery-"));
+  await mkdir(join(directory, ".github/workflows"), { recursive: true });
+  await mkdir(join(directory, ".github/actions/probe"), { recursive: true });
+  await writeFile(join(directory, ".github/workflows/fixture.yml"), minimalWorkflow);
+  await writeFile(join(directory, ".github/actions/probe/action.yaml"), minimalAction);
+  return directory;
+}
 
 function fixtureSources(): Record<string, string> {
   return {
@@ -165,6 +212,186 @@ describe("workflow execution graph manifest", () => {
     expect(workflowDigest(reorderedInspection.manifest)).not.toBe(
       workflowDigest(baseline.manifest),
     );
+  });
+
+  test("canonical mappings preserve prototype-shaped own keys without collisions", () => {
+    const parsed = parseRestrictedYaml(
+      [
+        "__proto__: proto-value",
+        "constructor: constructor-value",
+        "prototype: prototype-value",
+        "toString: tostring-value",
+        "ordinary: ordinary-value",
+        "",
+      ].join("\n"),
+      workflowPath,
+    );
+    expect(Object.keys(parsed).sort()).toEqual([
+      "__proto__",
+      "constructor",
+      "ordinary",
+      "prototype",
+      "toString",
+    ]);
+    const canonical = JSON.parse(canonicalJson(parsed)) as Record<string, unknown>;
+    expect(Object.hasOwn(canonical, "__proto__")).toBe(true);
+    expect(canonical.__proto__).toBe("proto-value");
+    expect(canonical.constructor).toBe("constructor-value");
+    expect(canonical.prototype).toBe("prototype-value");
+    expect(canonical.toString).toBe("tostring-value");
+    expect(
+      new Set(
+        ["__proto__", "constructor", "prototype", "toString"].map((key) =>
+          canonicalJson(parseRestrictedYaml(`${key}: value\n`, workflowPath)),
+        ),
+      ).size,
+    ).toBe(4);
+  });
+
+  test("numeric YAML accepts only injective finite safe integers", () => {
+    for (const source of [
+      "value: 9007199254740992\n",
+      "value: 9007199254740993\n",
+      "value: 999999999999999999999999999999999999\n",
+      "value: 1e100\n",
+      "value: 0.1\n",
+      "value: 0.10000000000000001\n",
+      "value: -0\n",
+      "value: .nan\n",
+      "value: .inf\n",
+    ]) {
+      expect(() => parseRestrictedYaml(source, workflowPath), source.trim()).toThrow(
+        "numeric scalar outside the safe-integer domain",
+      );
+    }
+    expect(parseRestrictedYaml("value: 9007199254740991\n", workflowPath)).toEqual({
+      value: 9007199254740991,
+    });
+    expect(parseRestrictedYaml("value: -9007199254740991\n", workflowPath)).toEqual({
+      value: -9007199254740991,
+    });
+    expect(parseRestrictedYaml('value: "0.10000000000000001"\n', workflowPath)).toEqual({
+      value: "0.10000000000000001",
+    });
+    expect(() => canonicalJson({ value: 0.1 })).toThrow("safe-integer domain");
+    expect(() => canonicalJson({ value: -0 })).toThrow("safe-integer domain");
+  });
+
+  test("source-count and UTF-8 byte bounds are exact and pre-parse", () => {
+    const exactSource = padAscii(minimalWorkflow, WORKFLOW_GRAPH_LIMITS.maxSourceBytes);
+    expect(inspectWorkflowExecutionSources({ [workflowPath]: exactSource }).violations).toEqual([]);
+    expect(
+      inspectWorkflowExecutionSources({ [`${workflowPath}`]: `${exactSource}x` }).violations,
+    ).toContain(`${workflowPath} exceeds the per-source UTF-8 byte limit`);
+
+    const exactCount = Object.fromEntries(
+      Array.from({ length: WORKFLOW_GRAPH_LIMITS.maxSources }, (_, index) => [
+        `.github/workflows/count-${index}.yml`,
+        minimalWorkflow,
+      ]),
+    );
+    expect(inspectWorkflowExecutionSources(exactCount).violations).toEqual([]);
+    expect(
+      inspectWorkflowExecutionSources({
+        ...exactCount,
+        ".github/workflows/count-overflow.yml": minimalWorkflow,
+      }).violations,
+    ).toContain("workflow execution graph exceeds the source-count limit");
+
+    const totalParts = 5;
+    const baseSize = Math.floor(WORKFLOW_GRAPH_LIMITS.maxTotalSourceBytes / totalParts);
+    const exactTotal = Object.fromEntries(
+      Array.from({ length: totalParts }, (_, index) => [
+        `.github/workflows/total-${index}.yml`,
+        padAscii(
+          minimalWorkflow,
+          baseSize +
+            (index === totalParts - 1 ? WORKFLOW_GRAPH_LIMITS.maxTotalSourceBytes % totalParts : 0),
+        ),
+      ]),
+    );
+    expect(inspectWorkflowExecutionSources(exactTotal).violations).toEqual([]);
+    const totalOverflow = { ...exactTotal };
+    totalOverflow[".github/workflows/total-0.yml"] =
+      `${totalOverflow[".github/workflows/total-0.yml"]}x`;
+    expect(inspectWorkflowExecutionSources(totalOverflow).violations).toContain(
+      "workflow execution graph exceeds the total UTF-8 byte limit",
+    );
+  });
+
+  test("AST node, collection-width, and nesting-depth bounds are exact", () => {
+    expect(() => parseRestrictedYaml(exactNodeLimitYaml(), workflowPath)).not.toThrow();
+    expect(() => parseRestrictedYaml(exactNodeLimitYaml(1), workflowPath)).toThrow(
+      "AST node limit",
+    );
+
+    const exactMap = `root:\n${Array.from(
+      { length: WORKFLOW_GRAPH_LIMITS.maxCollectionWidth },
+      (_, index) => `  key-${index}: value`,
+    ).join("\n")}\n`;
+    expect(() => parseRestrictedYaml(exactMap, workflowPath)).not.toThrow();
+    expect(() => parseRestrictedYaml(`${exactMap}  key-overflow: value\n`, workflowPath)).toThrow(
+      "collection-width limit",
+    );
+    const exactSequence = `root: [${Array.from(
+      { length: WORKFLOW_GRAPH_LIMITS.maxCollectionWidth },
+      () => "value",
+    ).join(",")}]\n`;
+    expect(() => parseRestrictedYaml(exactSequence, workflowPath)).not.toThrow();
+    expect(() =>
+      parseRestrictedYaml(
+        `root: [${Array.from(
+          { length: WORKFLOW_GRAPH_LIMITS.maxCollectionWidth + 1 },
+          () => "value",
+        ).join(",")}]\n`,
+        workflowPath,
+      ),
+    ).toThrow("collection-width limit");
+
+    const exactFlowDepth = WORKFLOW_GRAPH_LIMITS.maxNestingDepth - 3;
+    expect(() =>
+      parseRestrictedYaml(
+        `root: ${"[".repeat(exactFlowDepth)}value${"]".repeat(exactFlowDepth)}\n`,
+        workflowPath,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseRestrictedYaml(
+        `root: ${"[".repeat(exactFlowDepth + 1)}value${"]".repeat(exactFlowDepth + 1)}\n`,
+        workflowPath,
+      ),
+    ).toThrow("nesting-depth limit");
+    const deepBlock = `${Array.from(
+      { length: WORKFLOW_GRAPH_LIMITS.maxNestingDepth },
+      (_, index) => `${"  ".repeat(index)}key-${index}:`,
+    ).join("\n")}\n${"  ".repeat(WORKFLOW_GRAPH_LIMITS.maxNestingDepth)}value\n`;
+    expect(() => parseRestrictedYaml(deepBlock, workflowPath)).toThrow("nesting-depth limit");
+  });
+
+  test("the aggregate AST node budget fails closed across individually valid sources", () => {
+    const payload = Array.from({ length: 850 }, () => `  - [${"0,".repeat(18)}0]`).join("\n");
+    const source = `${minimalWorkflow}padding:\n${payload}\n`;
+    expect(() => parseRestrictedYaml(source, workflowPath)).not.toThrow();
+    const sources = Object.fromEntries(
+      Array.from({ length: 6 }, (_, index) => [`.github/workflows/nodes-${index}.yml`, source]),
+    );
+    expect(inspectWorkflowExecutionSources(sources).violations.join("\n")).toContain(
+      "total AST node limit",
+    );
+  });
+
+  test("large wide input is rejected by byte bounds before YAML traversal", () => {
+    const sentinel = "SECRET_WIDE_VALUE";
+    const wide = `${minimalWorkflow}${Array.from(
+      { length: 100_000 },
+      (_, index) => `wide-${index}: ${sentinel}-${index}`,
+    ).join("\n")}\n`;
+    expect(new TextEncoder().encode(wide).byteLength).toBeGreaterThan(2_500_000);
+    const startedAt = performance.now();
+    const violations = inspectWorkflowExecutionSources({ [workflowPath]: wide }).violations;
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(violations).toContain(`${workflowPath} exceeds the per-source UTF-8 byte limit`);
+    expect(violations.join("\n")).not.toContain(sentinel);
   });
 
   test("cross-step execution dependencies and order all invalidate the graph digest", () => {
@@ -320,6 +547,107 @@ describe("workflow execution graph manifest", () => {
     );
   });
 
+  test("filesystem discovery rejects action and workflow symlinks before inventory", async () => {
+    const dual = await createDiscoveryFixture();
+    try {
+      await writeFile(join(dual, ".github/actions/probe/payload.txt"), minimalAction);
+      await symlink("payload.txt", join(dual, ".github/actions/probe/action.yml"));
+      await expect(loadWorkflowExecutionSources(dual)).rejects.toThrow(
+        ".github/actions/probe/action.yml is a forbidden symlink in action discovery",
+      );
+    } finally {
+      await rm(dual, { recursive: true, force: true });
+    }
+
+    const symlinkOnly = await createDiscoveryFixture();
+    try {
+      await rm(join(symlinkOnly, ".github/actions/probe/action.yaml"));
+      await writeFile(join(symlinkOnly, ".github/actions/probe/payload.txt"), minimalAction);
+      await symlink("payload.txt", join(symlinkOnly, ".github/actions/probe/action.yml"));
+      await expect(loadWorkflowExecutionSources(symlinkOnly)).rejects.toThrow(
+        "forbidden symlink in action discovery",
+      );
+    } finally {
+      await rm(symlinkOnly, { recursive: true, force: true });
+    }
+
+    const directoryEscape = await createDiscoveryFixture();
+    try {
+      await mkdir(join(directoryEscape, "outside"));
+      await writeFile(join(directoryEscape, "outside/action.yml"), minimalAction);
+      await symlink("../../outside", join(directoryEscape, ".github/actions/escape"));
+      await expect(loadWorkflowExecutionSources(directoryEscape)).rejects.toThrow(
+        ".github/actions/escape is a forbidden symlink in action discovery",
+      );
+    } finally {
+      await rm(directoryEscape, { recursive: true, force: true });
+    }
+
+    const workflowLink = await createDiscoveryFixture();
+    try {
+      await rm(join(workflowLink, ".github/workflows/fixture.yml"));
+      await writeFile(join(workflowLink, "workflow-payload.yml"), minimalWorkflow);
+      await symlink(
+        "../../workflow-payload.yml",
+        join(workflowLink, ".github/workflows/fixture.yml"),
+      );
+      await expect(loadWorkflowExecutionSources(workflowLink)).rejects.toThrow(
+        ".github/workflows/fixture.yml is a forbidden symlink in workflow discovery",
+      );
+    } finally {
+      await rm(workflowLink, { recursive: true, force: true });
+    }
+  });
+
+  test("filesystem discovery entry bounds accept the exact boundary and reject one more", async () => {
+    const directory = await createDiscoveryFixture();
+    try {
+      const actionFillers = WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries - 2;
+      await Promise.all(
+        Array.from({ length: actionFillers }, (_, index) =>
+          writeFile(join(directory, `.github/actions/filler-${index}.txt`), ""),
+        ),
+      );
+      await expect(loadWorkflowExecutionSources(directory)).resolves.toBeDefined();
+      await writeFile(join(directory, ".github/actions/action-overflow.txt"), "");
+      await expect(loadWorkflowExecutionSources(directory)).rejects.toThrow(
+        "action discovery exceeds the directory-entry limit",
+      );
+      await rm(join(directory, ".github/actions/action-overflow.txt"));
+
+      const workflowFillers = WORKFLOW_GRAPH_LIMITS.maxWorkflowDiscoveryEntries - 1;
+      await Promise.all(
+        Array.from({ length: workflowFillers }, (_, index) =>
+          writeFile(join(directory, `.github/workflows/filler-${index}.txt`), ""),
+        ),
+      );
+      await expect(loadWorkflowExecutionSources(directory)).resolves.toBeDefined();
+      await writeFile(join(directory, ".github/workflows/workflow-overflow.txt"), "");
+      await expect(loadWorkflowExecutionSources(directory)).rejects.toThrow(
+        "workflow discovery exceeds the directory-entry limit",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+
+    const depthDirectory = await createDiscoveryFixture();
+    try {
+      let nested = join(depthDirectory, ".github/actions");
+      for (let index = 0; index < WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryDepth; index += 1) {
+        nested = join(nested, `depth-${index}`);
+        await mkdir(nested);
+      }
+      await writeFile(join(nested, "action.yml"), minimalAction);
+      await expect(loadWorkflowExecutionSources(depthDirectory)).resolves.toBeDefined();
+      await mkdir(join(nested, "overflow"));
+      await expect(loadWorkflowExecutionSources(depthDirectory)).rejects.toThrow(
+        "action discovery exceeds the directory-depth limit",
+      );
+    } finally {
+      await rm(depthDirectory, { recursive: true, force: true });
+    }
+  });
+
   test("former shell-assembly probes are ordinary source changes, never interpreted", () => {
     const probes = [
       String.raw`cat <<EOF\n$(timeout 10h job)\nEOF`,
@@ -407,8 +735,8 @@ describe("workflow execution graph manifest", () => {
         "timeout-minutes: 30",
         `timeout-minutes: ${JSON.stringify(cap)}`,
       );
-      expect(inspectWorkflowExecutionSources(sources).violations.join("\n"), String(cap)).toContain(
-        "job timeout-minutes must be a static integer",
+      expect(inspectWorkflowExecutionSources(sources).violations.join("\n"), String(cap)).toMatch(
+        /job timeout-minutes must be a static integer|numeric scalar outside the safe-integer domain/u,
       );
     }
     for (const cap of [0, -1, 1.5, 361, "12", "${{ inputs.timeout }}"]) {
@@ -418,8 +746,8 @@ describe("workflow execution graph manifest", () => {
         'run: "echo producer"',
         `timeout-minutes: ${JSON.stringify(cap)}\n        run: "echo producer"`,
       );
-      expect(inspectWorkflowExecutionSources(sources).violations.join("\n"), String(cap)).toContain(
-        "timeout-minutes must be a static integer",
+      expect(inspectWorkflowExecutionSources(sources).violations.join("\n"), String(cap)).toMatch(
+        /timeout-minutes must be a static integer|numeric scalar outside the safe-integer domain/u,
       );
     }
 

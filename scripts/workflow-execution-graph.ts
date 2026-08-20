@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
 import { posix, relative, resolve, sep } from "node:path";
 import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument } from "yaml";
 
@@ -9,6 +9,24 @@ export const GRAPH_CANONICALIZATION = "restricted-yaml-1.2-sorted-json-v1" as co
 export const GRAPH_MANIFEST_PATH = "scripts/workflow-execution-graph-manifest.json" as const;
 export const MAX_JOB_TIMEOUT_MINUTES = 120;
 export const MAX_STEP_TIMEOUT_MINUTES = 360;
+
+// The current graph is 22 sources / ~297 KiB total; its largest source is
+// ~82 KiB, largest AST is 3,165 nodes, widest collection is 37 entries, and
+// deepest AST path is 14 nodes. These limits leave substantial authored-growth
+// margin while bounding every attacker-controlled dimension before recursive
+// conversion or canonicalization.
+export const WORKFLOW_GRAPH_LIMITS = {
+  maxSources: 64,
+  maxSourceBytes: 256 * 1024,
+  maxTotalSourceBytes: 1024 * 1024,
+  maxAstNodesPerSource: 20_000,
+  maxTotalAstNodes: 100_000,
+  maxCollectionWidth: 1024,
+  maxNestingDepth: 64,
+  maxActionDiscoveryEntries: 1024,
+  maxActionDiscoveryDepth: 16,
+  maxWorkflowDiscoveryEntries: 128,
+} as const;
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type YamlObject = Record<string, unknown>;
@@ -89,7 +107,9 @@ function isObject(value: unknown): value is YamlObject {
 function canonicalValue(value: unknown, location = "root"): JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`${location} contains a non-finite number`);
+    if (!Number.isSafeInteger(value) || Object.is(value, -0)) {
+      throw new Error(`${location} contains a number outside the safe-integer domain`);
+    }
     return value;
   }
   if (Array.isArray(value)) {
@@ -100,7 +120,10 @@ function canonicalValue(value: unknown, location = "root"): JsonValue {
   if (prototype !== Object.prototype && prototype !== null) {
     throw new Error(`${location} contains a non-plain YAML mapping`);
   }
-  const canonical: Record<string, JsonValue> = {};
+  // A normal object treats `__proto__` assignment as prototype mutation. A
+  // null-prototype mapping preserves every own YAML key without changing the
+  // canonical JSON emitted for the ordinary corpus.
+  const canonical = Object.create(null) as Record<string, JsonValue>;
   for (const key of Object.keys(value).sort()) {
     canonical[key] = canonicalValue(value[key], `${location}.${key}`);
   }
@@ -118,33 +141,87 @@ function sha256(kind: string, identity: string, value: unknown): string {
   return hash.digest("hex");
 }
 
-function assertRestrictedNode(value: unknown, sourcePath: string): void {
-  if (value === null || value === undefined) return;
-  if (isAlias(value)) throw new Error(`${sourcePath} uses a YAML alias`);
-
-  const node = value as { anchor?: unknown; tag?: unknown };
-  if (typeof node.anchor === "string" && node.anchor.length > 0) {
-    throw new Error(`${sourcePath} uses a YAML anchor`);
-  }
-  if (typeof node.tag === "string" && node.tag.length > 0) {
-    throw new Error(`${sourcePath} uses an explicit YAML tag`);
-  }
-
-  if (isPair(value)) {
-    if (!isScalar(value.key) || typeof value.key.value !== "string") {
-      throw new Error(`${sourcePath} uses a non-string YAML mapping key`);
-    }
-    if (value.key.value === "<<") throw new Error(`${sourcePath} uses a YAML merge key`);
-    assertRestrictedNode(value.key, sourcePath);
-    assertRestrictedNode(value.value, sourcePath);
-    return;
-  }
-  if (isMap(value) || isSeq(value)) {
-    for (const item of value.items) assertRestrictedNode(item, sourcePath);
-  }
+function utf8Bytes(source: string): number {
+  return new TextEncoder().encode(source).byteLength;
 }
 
-export function parseRestrictedYaml(source: string, sourcePath: string): YamlObject {
+function assertSourceByteBound(source: string, sourcePath: string): number {
+  const bytes = utf8Bytes(source);
+  if (bytes > WORKFLOW_GRAPH_LIMITS.maxSourceBytes) {
+    throw new Error(`${sourcePath} exceeds the per-source UTF-8 byte limit`);
+  }
+  return bytes;
+}
+
+function assertRestrictedStructure(
+  value: unknown,
+  sourcePath: string,
+  nodeLimit = WORKFLOW_GRAPH_LIMITS.maxAstNodesPerSource,
+  nodeLimitCategory = "AST node",
+): number {
+  let nodeCount = 0;
+  const stack: Array<Readonly<{ value: unknown; depth: number }>> = [{ value, depth: 1 }];
+  while (stack.length > 0) {
+    const entry = stack.pop();
+    if (!entry || entry.value === null || entry.value === undefined) continue;
+    nodeCount += 1;
+    if (nodeCount > nodeLimit) {
+      throw new Error(`${sourcePath} exceeds the ${nodeLimitCategory} limit`);
+    }
+    if (entry.depth > WORKFLOW_GRAPH_LIMITS.maxNestingDepth) {
+      throw new Error(`${sourcePath} exceeds the AST nesting-depth limit`);
+    }
+    if (isAlias(entry.value)) throw new Error(`${sourcePath} uses a YAML alias`);
+
+    const node = entry.value as { anchor?: unknown; tag?: unknown };
+    if (typeof node.anchor === "string" && node.anchor.length > 0) {
+      throw new Error(`${sourcePath} uses a YAML anchor`);
+    }
+    if (typeof node.tag === "string" && node.tag.length > 0) {
+      throw new Error(`${sourcePath} uses an explicit YAML tag`);
+    }
+
+    if (isScalar(entry.value)) {
+      if (
+        typeof entry.value.value === "number" &&
+        (!Number.isSafeInteger(entry.value.value) || Object.is(entry.value.value, -0))
+      ) {
+        throw new Error(`${sourcePath} uses a numeric scalar outside the safe-integer domain`);
+      }
+      continue;
+    }
+    if (isPair(entry.value)) {
+      if (!isScalar(entry.value.key) || typeof entry.value.key.value !== "string") {
+        throw new Error(`${sourcePath} uses a non-string YAML mapping key`);
+      }
+      if (entry.value.key.value === "<<") {
+        throw new Error(`${sourcePath} uses a YAML merge key`);
+      }
+      stack.push(
+        { value: entry.value.value, depth: entry.depth + 1 },
+        { value: entry.value.key, depth: entry.depth + 1 },
+      );
+      continue;
+    }
+    if (isMap(entry.value) || isSeq(entry.value)) {
+      if (entry.value.items.length > WORKFLOW_GRAPH_LIMITS.maxCollectionWidth) {
+        throw new Error(`${sourcePath} exceeds the YAML collection-width limit`);
+      }
+      for (let index = entry.value.items.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: entry.value.items[index], depth: entry.depth + 1 });
+      }
+    }
+  }
+  return nodeCount;
+}
+
+function parseRestrictedYamlWithStats(
+  source: string,
+  sourcePath: string,
+  nodeLimit = WORKFLOW_GRAPH_LIMITS.maxAstNodesPerSource,
+  nodeLimitCategory = "AST node",
+): Readonly<{ parsed: YamlObject; nodeCount: number }> {
+  assertSourceByteBound(source, sourcePath);
   let document;
   try {
     document = parseDocument(source, {
@@ -163,11 +240,20 @@ export function parseRestrictedYaml(source: string, sourcePath: string): YamlObj
   if (!document.contents || !isMap(document.contents)) {
     throw new Error(`${sourcePath} must contain one YAML mapping document`);
   }
-  assertRestrictedNode(document.contents, sourcePath);
+  const nodeCount = assertRestrictedStructure(
+    document.contents,
+    sourcePath,
+    nodeLimit,
+    nodeLimitCategory,
+  );
   const parsed = document.toJS({ maxAliasCount: 0 }) as unknown;
   if (!isObject(parsed)) throw new Error(`${sourcePath} must contain one YAML mapping document`);
   canonicalValue(parsed, sourcePath);
-  return parsed;
+  return { parsed, nodeCount };
+}
+
+export function parseRestrictedYaml(source: string, sourcePath: string): YamlObject {
+  return parseRestrictedYamlWithStats(source, sourcePath).parsed;
 }
 
 function normalizedLocalPath(target: string): string | null {
@@ -469,10 +555,46 @@ export function inspectWorkflowExecutionSources(
   const violations: string[] = [];
   const uncappedRuns: UncappedRunRecord[] = [];
   const generatedTargets: GeneratedLocalTargetRecord[] = [];
-  const sourcePaths = new Set(Object.keys(sources));
+  const sourceEntries = Object.entries(sources).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  const sourcePaths = new Set(sourceEntries.map(([path]) => path));
   const parsedSources = new Map<string, ParsedGraphSource>();
 
-  for (const path of [...sourcePaths].sort()) {
+  if (sourceEntries.length > WORKFLOW_GRAPH_LIMITS.maxSources) {
+    violations.push("workflow execution graph exceeds the source-count limit");
+  } else {
+    let totalBytes = 0;
+    for (const [path, source] of sourceEntries) {
+      const bytes = utf8Bytes(source);
+      totalBytes += bytes;
+      if (bytes > WORKFLOW_GRAPH_LIMITS.maxSourceBytes) {
+        violations.push(`${path} exceeds the per-source UTF-8 byte limit`);
+      }
+    }
+    if (totalBytes > WORKFLOW_GRAPH_LIMITS.maxTotalSourceBytes) {
+      violations.push("workflow execution graph exceeds the total UTF-8 byte limit");
+    }
+  }
+
+  if (violations.length > 0) {
+    return {
+      manifest: {
+        schemaVersion: GRAPH_SCHEMA_VERSION,
+        domain: GRAPH_DOMAIN,
+        canonicalization: GRAPH_CANONICALIZATION,
+        hashAlgorithm: "sha256",
+        workflows: [],
+        actions: [],
+        generatedLocalTargets: [],
+        uncappedRuns: [],
+      },
+      violations,
+    };
+  }
+
+  let totalAstNodes = 0;
+  for (const [path, source] of sourceEntries) {
     const kind = path.startsWith(".github/workflows/")
       ? "workflow"
       : /^\.github\/actions\/.+\/action\.ya?ml$/u.test(path)
@@ -484,7 +606,18 @@ export function inspectWorkflowExecutionSources(
     }
     let document: YamlObject;
     try {
-      document = parseRestrictedYaml(sources[path] ?? "", path);
+      const remainingNodes = WORKFLOW_GRAPH_LIMITS.maxTotalAstNodes - totalAstNodes;
+      const sourceNodeLimit = Math.min(WORKFLOW_GRAPH_LIMITS.maxAstNodesPerSource, remainingNodes);
+      const parsed = parseRestrictedYamlWithStats(
+        source,
+        path,
+        sourceNodeLimit,
+        sourceNodeLimit < WORKFLOW_GRAPH_LIMITS.maxAstNodesPerSource
+          ? "total AST node"
+          : "AST node",
+      );
+      document = parsed.parsed;
+      totalAstNodes += parsed.nodeCount;
     } catch (error) {
       violations.push(error instanceof Error ? error.message : `${path} is invalid YAML`);
       continue;
@@ -544,27 +677,61 @@ export function inspectWorkflowExecutionSources(
 
 async function actionDefinitionPaths(root: string): Promise<readonly string[]> {
   const actionRoot = resolve(root, ".github/actions");
+  const actionRootMetadata = await lstat(actionRoot);
+  if (actionRootMetadata.isSymbolicLink() || !actionRootMetadata.isDirectory()) {
+    throw new Error("action discovery root must be a regular directory");
+  }
   const found: string[] = [];
-  async function walk(directory: string): Promise<void> {
+  let discoveredEntries = 0;
+  async function walk(directory: string, depth: number): Promise<void> {
+    if (depth > WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryDepth) {
+      throw new Error("action discovery exceeds the directory-depth limit");
+    }
     for (const entry of await readdir(directory, { withFileTypes: true })) {
+      discoveredEntries += 1;
+      if (discoveredEntries > WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries) {
+        throw new Error("action discovery exceeds the directory-entry limit");
+      }
       const absolute = resolve(directory, entry.name);
-      if (entry.isDirectory()) await walk(absolute);
+      const identity = relative(root, absolute).split(sep).join("/");
+      if (entry.isSymbolicLink()) {
+        throw new Error(`${identity} is a forbidden symlink in action discovery`);
+      }
+      if (entry.isDirectory()) await walk(absolute, depth + 1);
       else if (entry.isFile() && /^action\.ya?ml$/u.test(entry.name)) {
-        found.push(relative(root, absolute).split(sep).join("/"));
+        found.push(identity);
       }
     }
   }
-  await walk(actionRoot);
+  await walk(actionRoot, 0);
   return found.sort();
 }
 
 export async function loadWorkflowExecutionSources(root: string): Promise<Record<string, string>> {
   const workflowRoot = resolve(root, ".github/workflows");
-  const workflowPaths = (await readdir(workflowRoot))
-    .filter((entry) => /\.ya?ml$/u.test(entry))
-    .map((entry) => `.github/workflows/${entry}`)
+  const workflowRootMetadata = await lstat(workflowRoot);
+  if (workflowRootMetadata.isSymbolicLink() || !workflowRootMetadata.isDirectory()) {
+    throw new Error("workflow discovery root must be a regular directory");
+  }
+  const workflowEntries = await readdir(workflowRoot, { withFileTypes: true });
+  if (workflowEntries.length > WORKFLOW_GRAPH_LIMITS.maxWorkflowDiscoveryEntries) {
+    throw new Error("workflow discovery exceeds the directory-entry limit");
+  }
+  for (const entry of workflowEntries) {
+    if (entry.isSymbolicLink()) {
+      throw new Error(
+        `.github/workflows/${entry.name} is a forbidden symlink in workflow discovery`,
+      );
+    }
+  }
+  const workflowPaths = workflowEntries
+    .filter((entry) => entry.isFile() && /\.ya?ml$/u.test(entry.name))
+    .map((entry) => `.github/workflows/${entry.name}`)
     .sort();
   const paths = [...workflowPaths, ...(await actionDefinitionPaths(root))];
+  if (paths.length > WORKFLOW_GRAPH_LIMITS.maxSources) {
+    throw new Error("workflow execution graph exceeds the source-count limit during discovery");
+  }
   return Object.fromEntries(
     await Promise.all(
       paths.map(async (path) => [path, await readFile(resolve(root, path), "utf8")]),
