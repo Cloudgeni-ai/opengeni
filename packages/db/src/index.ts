@@ -28162,6 +28162,8 @@ export async function setSessionPin(
               // version zero instead of manufacturing an OCC revision.
               pinned: true,
               pinnedAt: new Date(),
+              attentionVersion: 0,
+              archiveVersion: 0,
             })
             .returning();
           pin = inserted ?? null;
@@ -28298,8 +28300,11 @@ export async function setSessionAttention(
               sessionId: input.sessionId,
               pinned: false,
               pinnedAt: null,
+              version: 0,
               acknowledgedSequence,
               activelyWorking: desiredActivelyWorking,
+              attentionVersion: 1,
+              archiveVersion: 0,
             })
             .returning();
           state = inserted ?? null;
@@ -28423,9 +28428,12 @@ export async function setSessionArchive(
               sessionId: input.sessionId,
               pinned: false,
               pinnedAt: null,
+              version: 0,
               activelyWorking: false,
               archived: true,
               archivedAt: new Date(),
+              attentionVersion: 0,
+              archiveVersion: 1,
             })
             .returning();
           state = inserted ?? null;

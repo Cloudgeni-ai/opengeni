@@ -7,7 +7,17 @@
 ALTER TABLE "session_pins"
   ADD COLUMN IF NOT EXISTS "acknowledged_sequence" integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS "actively_working" boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS "attention_version" integer NOT NULL DEFAULT 1;
+  ADD COLUMN IF NOT EXISTS "attention_version" integer NOT NULL DEFAULT 0;
+
+-- The row now owns three independent state domains. An attention-only row must
+-- remain pin version zero so acknowledging a session cannot make a concurrent
+-- pin based on the absent-row projection spuriously stale.
+ALTER TABLE "session_pins"
+  DROP CONSTRAINT IF EXISTS "session_pins_version_positive";
+
+ALTER TABLE "session_pins"
+  ADD CONSTRAINT "session_pins_version_nonnegative"
+  CHECK ("version" >= 0);
 
 DO $constraints$
 BEGIN
@@ -23,12 +33,12 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
-    WHERE conname = 'session_pins_attention_version_positive'
+    WHERE conname = 'session_pins_attention_version_nonnegative'
       AND conrelid = 'session_pins'::regclass
   ) THEN
     ALTER TABLE "session_pins"
-      ADD CONSTRAINT "session_pins_attention_version_positive"
-      CHECK ("attention_version" >= 1);
+      ADD CONSTRAINT "session_pins_attention_version_nonnegative"
+      CHECK ("attention_version" >= 0);
   END IF;
 END
 $constraints$;
@@ -38,4 +48,4 @@ COMMENT ON COLUMN "session_pins"."acknowledged_sequence" IS
 COMMENT ON COLUMN "session_pins"."actively_working" IS
   'Personal durable label indicating that this subject intends to continue work on the session.';
 COMMENT ON COLUMN "session_pins"."attention_version" IS
-  'Independent optimistic revision for acknowledged_sequence and actively_working.';
+  'Independent optimistic revision for acknowledged_sequence and actively_working; zero means that domain has never changed.';

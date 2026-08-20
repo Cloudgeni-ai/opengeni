@@ -5,12 +5,12 @@
 ALTER TABLE "session_pins"
   ADD COLUMN IF NOT EXISTS "archived" boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS "archived_at" timestamptz,
-  ADD COLUMN IF NOT EXISTS "archive_version" integer NOT NULL DEFAULT 1;
+  ADD COLUMN IF NOT EXISTS "archive_version" integer NOT NULL DEFAULT 0;
 
 DO $constraints$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'session_pins_archive_version_positive' AND conrelid = 'session_pins'::regclass) THEN
-    ALTER TABLE "session_pins" ADD CONSTRAINT "session_pins_archive_version_positive" CHECK ("archive_version" >= 1);
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'session_pins_archive_version_nonnegative' AND conrelid = 'session_pins'::regclass) THEN
+    ALTER TABLE "session_pins" ADD CONSTRAINT "session_pins_archive_version_nonnegative" CHECK ("archive_version" >= 0);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'session_pins_archive_state_consistent' AND conrelid = 'session_pins'::regclass) THEN
     ALTER TABLE "session_pins" ADD CONSTRAINT "session_pins_archive_state_consistent"

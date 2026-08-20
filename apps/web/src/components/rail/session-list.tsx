@@ -1776,11 +1776,12 @@ function SessionGroup(props: {
           }}
           onDragEnd={props.onProjectDragEnd}
           className={cn(
-            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg-muted hover:bg-surface-2 hover:text-fg pointer-coarse:h-11",
+            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
             props.project && "cursor-grab active:cursor-grabbing",
-            props.draggedProjectId === props.project?.id && "opacity-45",
-            props.dragOverProjectId === props.project?.id &&
-              props.draggedProjectId !== props.project?.id &&
+            props.project && props.draggedProjectId === props.project.id && "opacity-45",
+            props.project &&
+              props.dragOverProjectId === props.project.id &&
+              props.draggedProjectId !== props.project.id &&
               "ring-1 ring-inset ring-accent",
           )}
         >
@@ -1791,7 +1792,7 @@ function SessionGroup(props: {
             aria-controls={`${sectionId}-sessions`}
             onClick={props.onToggleSection}
             title={`${summary.label} · ${summary.total} total`}
-            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal"
+            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
           >
             <span className="flex w-4 shrink-0 items-center">
               {sectionExpanded ? (
@@ -2109,10 +2110,7 @@ function SessionRow(props: {
       {hasChildren ? (
         <button
           type="button"
-          aria-label={`${props.expanded ? "Collapse" : "Expand"} ${childCountAria.replace(
-            "descendant",
-            "spawned",
-          )}`}
+          aria-label={props.expanded ? "Collapse spawned sessions" : "Expand spawned sessions"}
           aria-expanded={props.expanded}
           onClick={(event) => {
             event.stopPropagation();

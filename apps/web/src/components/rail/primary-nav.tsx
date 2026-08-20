@@ -16,10 +16,7 @@ export function PrimaryNav() {
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
 
   return (
-    <nav
-      aria-label="Primary"
-      className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}
-    >
+    <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
       <NewSessionLink
         aria-label={`New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}`}
         className={cn(
@@ -53,6 +50,6 @@ export function PrimaryNav() {
           onNavigate={() => rail.setDrawerOpen(false)}
         />
       ))}
-    </nav>
+    </div>
   );
 }

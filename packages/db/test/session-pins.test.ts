@@ -1540,9 +1540,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       expectedVersion: 0,
     });
     expect(forcedUnread).toMatchObject({
+      pinned: false,
+      pinVersion: 0,
       unread: true,
       activelyWorking: false,
       attentionVersion: 1,
+      archived: false,
+      archiveVersion: 0,
     });
     const cleared = await setSessionAttention(db, {
       workspaceId: workspace.workspaceId,
@@ -1633,11 +1637,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       subjectId: subject,
       sessionId: root.id,
       archived: true,
-      expectedVersion: 1,
+      expectedVersion: 0,
     });
     expect(archived).toMatchObject({
       archived: true,
-      archiveVersion: 2,
+      archiveVersion: 1,
       pinned: false,
       activelyWorking: false,
     });
@@ -1678,7 +1682,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         subjectId: subject,
         sessionId: root.id,
         archived: false,
-        expectedVersion: 1,
+        expectedVersion: 0,
       }),
     ).rejects.toBeInstanceOf(SessionArchiveVersionConflictError);
     const restored = await setSessionArchive(db, {
@@ -1686,9 +1690,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       subjectId: subject,
       sessionId: root.id,
       archived: false,
-      expectedVersion: 2,
+      expectedVersion: 1,
     });
-    expect(restored).toMatchObject({ archived: false, archiveVersion: 3 });
+    expect(restored).toMatchObject({ archived: false, archiveVersion: 2 });
     expect(
       (
         await listSessionsForSubject(db, workspace.workspaceId, {

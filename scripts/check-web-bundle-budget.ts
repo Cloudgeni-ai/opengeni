@@ -50,14 +50,19 @@ const budgets = {
   // Linux/x64 production build measured the direct-session graph at 2,064,626
   // raw and 573,599 gzip bytes. The next full-KiB envelopes, 2,065,408 raw
   // (2,017 KiB) and 574,464 gzip (561 KiB), truthfully bound those measurements.
-  initialRaw: 1448 * kib,
+  // PR #1680's project-aware session rail now has its own route-aware chunk:
+  // the configured graph measures 1,495,639 raw / 406,140 gzip bytes initially
+  // and 2,065,546 raw / 573,796 gzip bytes on a direct session load. Keep the
+  // gzip and file-count guards unchanged; only the next narrow whole-KiB raw
+  // envelopes account for the new project, archive, and schedule navigation.
+  initialRaw: 1462 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2017 * kib,
+  directSessionRaw: 2018 * kib,
   directSessionGzip: 561 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

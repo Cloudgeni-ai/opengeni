@@ -3872,28 +3872,28 @@ export const sessionPins = pgTable(
     // route never changes the fence.
     acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
     activelyWorking: boolean("actively_working").notNull().default(false),
-    attentionVersion: integer("attention_version").notNull().default(1),
+    attentionVersion: integer("attention_version").notNull().default(0),
     archived: boolean("archived").notNull().default(false),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
-    archiveVersion: integer("archive_version").notNull().default(1),
+    archiveVersion: integer("archive_version").notNull().default(0),
   },
   (table) => ({
     subjectNonempty: check(
       "session_pins_subject_nonempty",
       sql`length(btrim(${table.subjectId})) > 0`,
     ),
-    versionPositive: check("session_pins_version_positive", sql`${table.version} >= 1`),
+    versionNonnegative: check("session_pins_version_nonnegative", sql`${table.version} >= 0`),
     acknowledgedSequenceFloor: check(
       "session_pins_acknowledged_sequence_floor",
       sql`${table.acknowledgedSequence} >= -1`,
     ),
-    attentionVersionPositive: check(
-      "session_pins_attention_version_positive",
-      sql`${table.attentionVersion} >= 1`,
+    attentionVersionNonnegative: check(
+      "session_pins_attention_version_nonnegative",
+      sql`${table.attentionVersion} >= 0`,
     ),
-    archiveVersionPositive: check(
-      "session_pins_archive_version_positive",
-      sql`${table.archiveVersion} >= 1`,
+    archiveVersionNonnegative: check(
+      "session_pins_archive_version_nonnegative",
+      sql`${table.archiveVersion} >= 0`,
     ),
     archiveStateConsistent: check(
       "session_pins_archive_state_consistent",
