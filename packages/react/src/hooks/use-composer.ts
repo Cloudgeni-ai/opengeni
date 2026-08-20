@@ -1133,13 +1133,43 @@ export function useComposer(
     const ownedGeneration = targetGeneration.current;
     optimisticProcessorBusyRef.current = true;
     void (async () => {
+      let mutationFailureObserved = false;
+      const markFailed = (problem: Error, outcomeUnknown: boolean): void => {
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return;
+        }
+        replaceOptimisticSends((current) =>
+          current.map((candidate) =>
+            candidate.clientEventId === operation.clientEventId
+              ? {
+                  ...candidate,
+                  state: "failed",
+                  error: problem.message,
+                  outcomeUnknown,
+                }
+              : candidate,
+          ),
+        );
+      };
       try {
         if (operation.outcomeUnknown) {
-          const events = await client.listEvents(workspaceId, sessionId, {
-            includeTypes: ["user.message"],
-            limit: 100,
-            payloadMode: "none",
-          });
+          let events: SessionEvent[];
+          try {
+            events = await client.listEvents(workspaceId, sessionId, {
+              includeTypes: ["user.message"],
+              limit: 100,
+              payloadMode: "none",
+            });
+          } catch (cause) {
+            // This read cannot settle the prior mutation in either direction.
+            // Preserve its exact key and uncertain status until reconciliation
+            // succeeds or that same mutation is actually replayed.
+            markFailed(asError(cause), true);
+            return;
+          }
           if (
             events.some(
               (event) =>
@@ -1177,31 +1207,39 @@ export function useComposer(
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
             throw new Error("The durable composer draft is not ready for delivery.");
           }
-          const result = await client.submitComposerDraft(workspaceId, sessionId, {
-            text: operation.draftPayload.text,
-            annotations: operation.draftPayload.annotations,
-            resources: operation.draftPayload.resources,
-            model: operation.draftPayload.model,
-            reasoningEffort: operation.draftPayload.reasoningEffort,
-            latencyMode: operation.draftPayload.latencyMode,
-            expectedDraftRevision,
-            clientEventId: operation.clientEventId,
-            delivery: "send",
-            ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
-            ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
-            ...(wireInput.mcpCredentialUpdates
-              ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
-              : {}),
-            ...(wireInput.connectionAuthorities
-              ? { connectionAuthorities: wireInput.connectionAuthorities }
-              : {}),
-            ...(wireInput.personalResourceAttachment
-              ? { personalResourceAttachment: wireInput.personalResourceAttachment }
-              : {}),
-          });
+          const result = await client
+            .submitComposerDraft(workspaceId, sessionId, {
+              text: operation.draftPayload.text,
+              annotations: operation.draftPayload.annotations,
+              resources: operation.draftPayload.resources,
+              model: operation.draftPayload.model,
+              reasoningEffort: operation.draftPayload.reasoningEffort,
+              latencyMode: operation.draftPayload.latencyMode,
+              expectedDraftRevision,
+              clientEventId: operation.clientEventId,
+              delivery: "send",
+              ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
+              ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
+              ...(wireInput.mcpCredentialUpdates
+                ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
+                : {}),
+              ...(wireInput.connectionAuthorities
+                ? { connectionAuthorities: wireInput.connectionAuthorities }
+                : {}),
+              ...(wireInput.personalResourceAttachment
+                ? { personalResourceAttachment: wireInput.personalResourceAttachment }
+                : {}),
+            })
+            .catch((cause: unknown) => {
+              mutationFailureObserved = true;
+              throw cause;
+            });
           adoptDraftBase(result.draft);
         } else {
-          await client.sendMessage(workspaceId, sessionId, wireInput);
+          await client.sendMessage(workspaceId, sessionId, wireInput).catch((cause: unknown) => {
+            mutationFailureObserved = true;
+            throw cause;
+          });
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -1227,26 +1265,13 @@ export function useComposer(
       } catch (cause) {
         const problem = asError(cause);
         onDeliveryErrorRef.current?.(problem, operation.input, "send");
-        // A retry's latest server result is authoritative. A prior uncertain
-        // outcome must not keep a now-definitive rejection retryable.
-        const outcomeUnknown = isOutcomeUnknownError(cause);
-        if (
-          targetKeyRef.current === ownedTargetKey &&
-          targetGeneration.current === ownedGeneration
-        ) {
-          replaceOptimisticSends((current) =>
-            current.map((candidate) =>
-              candidate.clientEventId === operation.clientEventId
-                ? {
-                    ...candidate,
-                    state: "failed",
-                    error: problem.message,
-                    outcomeUnknown,
-                  }
-                : candidate,
-            ),
-          );
-        }
+        // Only an actual mutation replay can replace prior uncertainty with a
+        // definitive response. Local preparation failures remain retry-only.
+        const outcomeUnknown =
+          operation.outcomeUnknown && !mutationFailureObserved
+            ? true
+            : isOutcomeUnknownError(cause);
+        markFailed(problem, outcomeUnknown);
       } finally {
         optimisticProcessorBusyRef.current = false;
         if (targetKeyRef.current === ownedTargetKey) {

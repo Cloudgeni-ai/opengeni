@@ -3082,6 +3082,82 @@ describe("useComposer durable draft and control binding", () => {
     });
   }
 
+  test("Send preserves an uncertain mutation when its reconciliation read fails", async () => {
+    const initial: ComposerDraft = {
+      revision: 7,
+      text: "do not duplicate accepted work",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const attempts: SendMessageInput[] = [];
+    const deliveryFailures: Error[] = [];
+    let reconciliationReads = 0;
+    let failReconciliation = true;
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      listEvents: async () => {
+        reconciliationReads += 1;
+        if (failReconciliation) throw new TypeError("event reconciliation unavailable");
+        return [];
+      },
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw gatewayError(503);
+        return makeEvent(2, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          onDeliveryError: (error) => deliveryFailures.push(error),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    await flush();
+    const uncertain = hook.result.current.optimisticMessages?.find(
+      (message) => message.outcomeUnknown,
+    );
+    expect(uncertain).toBeDefined();
+    const originalClientEventId = uncertain!.clientEventId;
+
+    await flushing(() => hook.result.current.retryOptimisticMessage?.(originalClientEventId));
+    await flush();
+    expect({ reconciliationReads, mutationAttempts: attempts.length }).toEqual({
+      reconciliationReads: 1,
+      mutationAttempts: 1,
+    });
+    expect(deliveryFailures).toHaveLength(1);
+    expect(
+      hook.result.current.optimisticMessages?.find(
+        (message) => message.clientEventId === originalClientEventId,
+      ),
+    ).toMatchObject({ state: "failed", outcomeUnknown: true });
+
+    failReconciliation = false;
+    await flushing(() => hook.result.current.retryOptimisticMessage?.(originalClientEventId));
+    await flush();
+    expect(reconciliationReads).toBe(2);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.clientEventId).toBe(originalClientEventId);
+    expect(
+      hook.result.current.optimisticMessages?.find(
+        (message) => message.clientEventId === originalClientEventId,
+      ),
+    ).toBeUndefined();
+    await hook.unmount();
+  });
+
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} turns an uncertain retry's definitive personal denial into a fresh reconfirmed operation`, async () => {
       const initial: ComposerDraft = {
