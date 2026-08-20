@@ -296,6 +296,15 @@ describe("P4.4 Channel-A route discipline", () => {
       status: 503,
       errorCode: "sandbox_channel_a_provider_unavailable",
     });
+    expect(
+      channelAOperationFailureDiagnostic(
+        new BrowserControlTransportError("controller unreachable"),
+      ),
+    ).toEqual({
+      reason: "provider_unavailable",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    });
   });
 
   test("concurrent reads settle before one bounded transient retry", async () => {

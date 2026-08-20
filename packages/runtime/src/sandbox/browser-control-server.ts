@@ -40,15 +40,21 @@ type ExecResultLike = {
 type ExecCapableSession = {
   exec?: (args: {
     cmd: string;
+    workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<ExecResultLike>;
   execCommand?: (args: {
     cmd: string;
+    workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<string>;
 };
+
+// Image-backed controller spawn uses absolute /tmp paths. Do not inherit a
+// session working directory; a missing cwd makes spawn fail with ENOENT.
+const PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 
 export type EnsureBrowserControlServerOptions = {
   port?: number;
@@ -100,8 +106,18 @@ export async function ensureBrowserControlServer(
     ...(options.allowedOrigins ? { allowedOrigins: options.allowedOrigins } : {}),
   });
   const result = target.exec
-    ? await target.exec({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 4_000 })
-    : await target.execCommand!({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 4_000 });
+    ? await target.exec({
+        cmd,
+        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        yieldTimeMs: timeoutMs,
+        maxOutputTokens: 4_000,
+      })
+    : await target.execCommand!({
+        cmd,
+        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        yieldTimeMs: timeoutMs,
+        maxOutputTokens: 4_000,
+      });
   const output = outputOf(result);
   const exitCode = exitCodeOf(result) ?? inferExitCode(output);
   if (exitCode !== 0) throw new BrowserControlServerError(exitCode, output);
@@ -120,12 +136,14 @@ export async function tearDownBrowserControlServer(session: unknown): Promise<vo
   if (target?.exec) {
     await target.exec({
       cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: 15_000,
       maxOutputTokens: 4_000,
     });
   } else if (target?.execCommand) {
     await target.execCommand({
       cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: 15_000,
       maxOutputTokens: 4_000,
     });
