@@ -1054,6 +1054,52 @@ export type IntegrationClientMetadata = {
   response_types: ["code"];
 };
 
+export type SessionVisibility = "private" | "workspace";
+
+export type SessionTenancyPublicProjection = {
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  ownedByCurrentUser: boolean;
+  fork: {
+    sourceVisibility: SessionVisibility;
+    sourceAuthorityEpoch: number;
+    forkedAt: string;
+  } | null;
+};
+
+export type UpdateSessionVisibilityRequest = {
+  visibility: SessionVisibility;
+  expectedAuthorityEpoch: number;
+  idempotencyKey: string;
+};
+
+export type UpdateSessionVisibilityResponse = {
+  operationId: string;
+  eventId: string | null;
+  eventSequence: number | null;
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  changed: boolean;
+  replay: boolean;
+  revokedGrantCount: number;
+};
+
+export type ForkSessionRequest = {
+  idempotencyKey: string;
+};
+
+export type ForkSessionResponse = {
+  operationId: string;
+  eventId: string;
+  eventSequence: number;
+  sessionId: string;
+  workspaceId: string;
+  visibility: "private";
+  authorityEpoch: 1;
+  copiedHistoryItemCount: number;
+  replay: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -1074,6 +1120,8 @@ export type Session = {
   toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
+  /** Present only when session-tenancy product activation is enabled for the organization. */
+  tenancy?: SessionTenancyPublicProjection | undefined;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;

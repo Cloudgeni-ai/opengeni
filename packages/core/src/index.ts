@@ -84,6 +84,7 @@ export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
+export * from "./application/session-tenancy";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
 export * from "./editable-artifact-live";

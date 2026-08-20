@@ -12,18 +12,11 @@ import { join } from "node:path";
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE for organizations carrying the durable activation receipt. Product
-// callers remain deliberately absent: no API route, core domain function,
-// worker activity, MCP tool, SDK call, or UI reaches either adapter yet.
-//
-// That is a decision, not an accident. Personal visibility cannot be exposed to
-// humans until the later product slice in `docs/organization-tenancy.md`
-// ("Session-visibility and fork surfaces: database activated, product callers
-// pending") lands.
-//
-// These tests pin that boundary so a future caller has to arrive through that
-// decision on purpose. If you are adding the first real caller, update the doc
-// section and this file in the same change.
+// ACTIVE for organizations carrying the durable activation receipt. The first
+// public caller is deliberately narrow: one core application service reached
+// by the two HTTP routes and the framework-neutral SDK. Worker, MCP, runtime,
+// React, web UI, cross-workspace, attachment, and personal-grant callers remain
+// forbidden.
 // ---------------------------------------------------------------------------
 
 const repo = join(import.meta.dir, "..");
@@ -31,6 +24,11 @@ const repo = join(import.meta.dir, "..");
 const SQL_ENTRY_POINTS = ["transition_session_visibility", "fork_session_content"] as const;
 const ADAPTER_ENTRY_POINTS = ["transitionSessionVisibility", "forkSessionContent"] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
+const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
+const AUTHORIZATION_CALLER_ALLOWLIST = new Set([
+  "packages/core/src/application/session-tenancy.ts",
+  "apps/api/src/routes/sessions.ts",
+]);
 
 /** Files allowed to name the SQL entry points: origin definition, later body
  * replacements that only copy newly required session columns, grants, posture,
@@ -52,8 +50,8 @@ async function sourceFiles(root: string, pattern = "**/*.{ts,tsx}"): Promise<str
   return files.sort();
 }
 
-describe("session visibility and fork database contract is activated without product callers", () => {
-  test("no product package reaches either lifecycle entry point", async () => {
+describe("session visibility and fork product activation stays on its exact public boundary", () => {
+  test("only the core application boundary reaches the database adapter", async () => {
     const roots = [
       "apps/api/src",
       "apps/worker/src",
@@ -67,11 +65,12 @@ describe("session visibility and fork database contract is activated without pro
     const forbidden = [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS];
     for (const root of roots) {
       for (const file of await sourceFiles(root)) {
+        if (ADAPTER_CALLER_ALLOWLIST.has(file)) continue;
         const content = await readFile(join(repo, file), "utf8");
         for (const marker of forbidden) {
           expect(
             content.includes(marker),
-            `${file} must not reach ${marker}: the session-tenancy database prerequisite is activated, but product callers remain out of scope. See docs/organization-tenancy.md "Session-visibility and fork surfaces: database activated, product callers pending".`,
+            `${file} must not reach ${marker}; the first product activation is API/core/SDK-only and packages/core/src/application/session-tenancy.ts is the sole adapter caller.`,
           ).toBe(false);
         }
       }
@@ -104,7 +103,8 @@ describe("session visibility and fork database contract is activated without pro
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(2);
+    // One probe plus the exact version supplied to both lifecycle functions.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(3);
   });
 
   test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {
@@ -116,7 +116,7 @@ describe("session visibility and fork database contract is activated without pro
     expect(regression).toMatch(/transition_session_visibility\([\s\S]*?'a{64}',\s*1\s*\)/u);
   });
 
-  test("the two authorization operations remain declarations with no enforcement", async () => {
+  test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {
     const contracts = await readFile(join(repo, "packages/contracts/src/index.ts"), "utf8");
     for (const operation of AUTHORIZATION_OPERATIONS) {
       expect(contracts).toContain(operation);
@@ -132,11 +132,12 @@ describe("session visibility and fork database contract is activated without pro
     ];
     for (const root of roots) {
       for (const file of await sourceFiles(root)) {
+        if (AUTHORIZATION_CALLER_ALLOWLIST.has(file)) continue;
         const content = await readFile(join(repo, file), "utf8");
         for (const operation of AUTHORIZATION_OPERATIONS) {
           expect(
             content.includes(operation),
-            `${file} must not authorize ${operation} while the surface is inert.`,
+            `${file} must not authorize ${operation}; worker, MCP, runtime, SDK implementation, React, and web remain out of scope.`,
           ).toBe(false);
         }
       }
@@ -145,9 +146,7 @@ describe("session visibility and fork database contract is activated without pro
 
   test("the decision stays recorded next to the tenancy activation phases", async () => {
     const doc = await readFile(join(repo, "docs/organization-tenancy.md"), "utf8");
-    expect(doc).toContain(
-      "## Session-visibility and fork surfaces: database activated, product callers pending",
-    );
+    expect(doc).toContain("## Session-visibility and private-fork public activation");
     expect(doc).toContain("transition_session_visibility");
     expect(doc).toContain("fork_session_content");
     expect(doc).toContain("session_list_snapshots");

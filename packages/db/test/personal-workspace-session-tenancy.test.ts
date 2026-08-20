@@ -5,6 +5,8 @@ import {
   createSession,
   ensureManagedAccessForUser,
   forkSessionContent,
+  getSessionEventForSubject,
+  getSessionForSubject,
   transitionSessionVisibility,
   type DbClient,
 } from "../src/index";
@@ -113,6 +115,41 @@ async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<s
  * inference is accepted.
  */
 describe("session tenancy SQL seams inside a managed human's own personal workspace", () => {
+  test("subject reads expose tenancy only after the organization's durable activation", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const sessionId = await ownedSession(human, human.personalWorkspaceId);
+    await shared.admin`
+      delete from session_tenancy_activations where account_id = ${human.accountId}`;
+
+    const inert = await getSessionForSubject(
+      client.db,
+      human.personalWorkspaceId,
+      sessionId,
+      human.subjectId,
+    );
+    expect(inert?.tenancy).toBeUndefined();
+
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${human.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
+      )`;
+    const activated = await getSessionForSubject(
+      client.db,
+      human.personalWorkspaceId,
+      sessionId,
+      human.subjectId,
+    );
+    expect(activated?.tenancy).toEqual({
+      visibility: "workspace",
+      authorityEpoch: 1,
+      ownedByCurrentUser: true,
+      fork: null,
+    });
+  }, 180_000);
+
   test("transition_session_visibility accepts the owner in their own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
@@ -129,6 +166,21 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(result.visibility).toBe("user_private");
     expect(result.eventId).toBeString();
     expect(result.eventSequence).toBe(1);
+    const [session, event] = await Promise.all([
+      getSessionForSubject(client.db, human.personalWorkspaceId, sessionId, human.subjectId),
+      getSessionEventForSubject(
+        client.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        result.eventId!,
+      ),
+    ]);
+    expect(session?.tenancy).toMatchObject({
+      visibility: "private",
+      authorityEpoch: 2,
+      ownedByCurrentUser: true,
+    });
+    expect(event).toMatchObject({ id: result.eventId, sequence: result.eventSequence });
   }, 180_000);
 
   test("fork_session_content accepts the owner's own personal workspace as source", async () => {

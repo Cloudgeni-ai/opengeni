@@ -284,11 +284,15 @@ import type {
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
+  ForkSessionRequest,
+  ForkSessionResponse,
   Session,
   SessionListResponse,
   AgentTopologyPageResponse,
   UpdateSessionChannelRequest,
   UpdateSessionPinRequest,
+  UpdateSessionVisibilityRequest,
+  UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
   SessionEvent,
@@ -874,6 +878,32 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /** Change an owned, fully quiescent session between private and workspace visibility. */
+  async updateSessionVisibility(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionVisibilityRequest,
+  ): Promise<UpdateSessionVisibilityResponse> {
+    return await this.requestJson<UpdateSessionVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/visibility`,
+      request,
+    );
+  }
+
+  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  async forkSession(
+    workspaceId: string,
+    sessionId: string,
+    request: ForkSessionRequest,
+  ): Promise<ForkSessionResponse> {
+    return await this.requestJson<ForkSessionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/forks`,
       request,
     );
   }
