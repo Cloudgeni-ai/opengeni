@@ -48,7 +48,7 @@ authority.
    the existing API Integration registration seam. No second transport or tool
    registry is introduced.
 
-## Current providers and corrected OPE-266 scope
+## Current provider scope
 
 - **Gmail** is the static reviewed example. Its catalog identity remains the
   official Gmail MCP resource, while every call executes through
