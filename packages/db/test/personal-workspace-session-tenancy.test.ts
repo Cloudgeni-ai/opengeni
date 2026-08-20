@@ -9,8 +9,10 @@ import {
   forkSessionContent,
   getSessionEventForSubject,
   getSessionForSubject,
+  grantWorkspaceAccess,
   nestedPostgresSqlState,
   openPrivateSessionCreateCapability,
+  removeWorkspaceMember,
   setSubjectRlsContext,
   transitionSessionVisibility,
   withRlsContext,
@@ -112,6 +114,29 @@ async function ownedSession(human: ManagedHuman, workspaceId: string): Promise<s
     select owner_organization_membership_id as "owner" from sessions where id = ${session.id}`;
   expect(owned?.owner).toBe(human.organizationMembershipId);
   return session.id;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function waitUntilBlockedBy(backendPid: number): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await shared.admin<Array<{ blocked: boolean }>>`
+      select exists (
+        select 1 from pg_stat_activity activity
+        where activity.datname = current_database()
+          and ${backendPid} = any(pg_blocking_pids(activity.pid))
+      ) as blocked`;
+    if (row?.blocked) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("workspace membership removal did not block on private create authority");
 }
 
 /**
@@ -251,6 +276,95 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       immutableState = nestedPostgresSqlState(error);
     }
     expect(immutableState).toBe("42501");
+  }, 180_000);
+
+  test("workspace access removal waits for private create and settles the committed session", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const requestedSessionId = crypto.randomUUID();
+    const removerSubjectId = `user:private-create-remover-${crypto.randomUUID()}`;
+    const removerPersonalWorkspaceId = crypto.randomUUID();
+    await shared.admin`
+      insert into workspaces (id, account_id, name)
+      values (${removerPersonalWorkspaceId}, ${human.accountId}, 'Removal actor Personal')`;
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id, authorization_revision
+      ) values (
+        ${human.accountId}, ${removerSubjectId}, 'admin', 'active',
+        ${removerPersonalWorkspaceId}, 1
+      )`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.legacyWorkspaceId,
+      subjectId: removerSubjectId,
+      permissions: ["workspace:admin", "members:manage"],
+    });
+    const adminRoster = await shared.admin<Array<{ subjectId: string; permissions: string[] }>>`
+      select subject_id as "subjectId", permissions from workspace_memberships membership
+      where membership.account_id = ${human.accountId}
+        and membership.workspace_id = ${human.legacyWorkspaceId}
+        and membership.permissions ?| array['workspace:admin', 'members:manage']
+      order by subject_id`;
+    expect(Array.from(adminRoster)).toHaveLength(2);
+
+    const createPrepared = deferred();
+    const releaseCreate = deferred();
+    let creatorBackendPid = 0;
+    const create = createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.legacyWorkspaceId,
+      requestedSessionId,
+      visibility: "user_private",
+      initialMessage: "private create removal race",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-create-removal-${crypto.randomUUID()}`,
+      beforeCreateCommit: async (tx) => {
+        const [backend] = await tx.execute<{ pid: number }>(
+          sql`select pg_backend_pid()::integer as pid`,
+        );
+        creatorBackendPid = backend!.pid;
+        createPrepared.resolve();
+        await releaseCreate.promise;
+      },
+    });
+
+    await createPrepared.promise;
+    let removalSettled = false;
+    const removal = removeWorkspaceMember(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.legacyWorkspaceId,
+      actorSubjectId: removerSubjectId,
+      targetSubjectId: human.subjectId,
+    }).finally(() => {
+      removalSettled = true;
+    });
+    await waitUntilBlockedBy(creatorBackendPid);
+    expect(removalSettled).toBe(false);
+    releaseCreate.resolve();
+    expect((await create).session.id).toBe(requestedSessionId);
+    expect(await removal).toBe(true);
+
+    const [settled] = await shared.admin<
+      Array<{ authorityEpoch: number; accessRows: number; revocationEvents: number }>
+    >`
+      select session.authority_epoch::int as "authorityEpoch",
+        (select count(*)::int from workspace_memberships access
+          where access.account_id = ${human.accountId}
+            and access.workspace_id = ${human.legacyWorkspaceId}
+            and access.subject_id = ${human.subjectId}) as "accessRows",
+        (select count(*)::int from session_events event
+          where event.session_id = session.id
+            and event.type = 'session.authority.revoked') as "revocationEvents"
+      from sessions session where session.id = ${requestedSessionId}`;
+    expect(settled).toEqual({ authorityEpoch: 2, accessRows: 0, revocationEvents: 1 });
   }, 180_000);
 
   test("subject reads expose tenancy only after the organization's durable activation", async () => {

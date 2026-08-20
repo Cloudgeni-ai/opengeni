@@ -39,6 +39,10 @@ describe("migration 0311 company scope and private session create", () => {
     expect(source).toContain("WITH shared_workspaces AS MATERIALIZED");
     expect(source).toContain("CROSS JOIN bounds");
     expect(source).toContain("membership.personal_workspace_id = p_workspace_id");
+    expect(source).toContain(
+      "FROM workspace_memberships access\n    WHERE access.account_id = p_account_id",
+    );
+    expect(source).toContain("AND access.subject_id = p_actor_subject_id\n    FOR KEY SHARE");
     expect(source).not.toContain("GRANT INSERT ON organization_profile_events");
     expect(source).not.toContain("GRANT UPDATE ON managed_accounts");
   });

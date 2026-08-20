@@ -333,6 +333,58 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
+  test("reports a failed account-menu refresh without misreporting a committed rename", async () => {
+    const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
+    const updateOrganizationName = mock(async () => ({
+      ...overview(identityA).organization,
+      name: "Acme Research",
+      updatedAt: "2026-08-20T11:00:00.000Z",
+    }));
+    const client = {
+      getOrganizationAdministrationOverview,
+      updateOrganizationName,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => Promise.reject(new Error("access refresh unavailable"))}
+        />,
+      );
+    });
+    await flush();
+    await act(async () => button(container, "Rename").click());
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing organization name input");
+    await enterText(nameInput, "Acme Research");
+    await act(async () => button(container, "Save").click());
+    await flush();
+
+    expect(container.textContent).toContain("Acme Research");
+    expect(toastSuccess).toHaveBeenCalledWith("Organization name updated");
+    expect(toastError).toHaveBeenCalledWith(
+      "Organization name updated, but the account menu couldn't refresh",
+      { description: "access refresh unavailable" },
+    );
+    expect(toastError).not.toHaveBeenCalledWith(
+      "Couldn't update organization name",
+      expect.anything(),
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("keeps people reads and mutations owned through StrictMode setup cleanup setup", async () => {
     const actor = member(identityA, "strict-actor");
     const secondOwner = { ...member(identityA, "strict-owner-2"), subjectId: "user:owner-2" };

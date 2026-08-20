@@ -217,7 +217,14 @@ export function OrganizationOverviewSection(props: {
       );
       setEditing(false);
       toast.success("Organization name updated");
-      await props.onOrganizationChanged();
+      try {
+        await props.onOrganizationChanged();
+      } catch (error) {
+        if (!owns(operation)) return;
+        toast.error("Organization name updated, but the account menu couldn't refresh", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
     } catch (error) {
       if (!owns(operation)) return;
       const outcomeUnknown =

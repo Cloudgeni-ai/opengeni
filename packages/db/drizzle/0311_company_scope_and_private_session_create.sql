@@ -254,6 +254,8 @@ AS $body$
 DECLARE
   new_capability_id uuid := gen_random_uuid();
   actor_membership_id uuid;
+  actor_personal_workspace boolean;
+  workspace_access_id uuid;
 BEGIN
   IF p_account_id IS NULL OR p_workspace_id IS NULL OR p_session_id IS NULL
     OR p_actor_subject_id IS NULL OR p_actor_subject_id NOT LIKE 'user:%'
@@ -272,23 +274,30 @@ BEGIN
   PERFORM 1 FROM workspaces workspace
   WHERE workspace.account_id = p_account_id AND workspace.id = p_workspace_id
   FOR KEY SHARE;
-  SELECT membership.id INTO actor_membership_id
+  SELECT membership.id, membership.personal_workspace_id = p_workspace_id
+  INTO actor_membership_id, actor_personal_workspace
   FROM organization_memberships membership
   WHERE membership.account_id = p_account_id
     AND membership.subject_id = p_actor_subject_id
     AND membership.status = 'active'
-    AND (
-      membership.personal_workspace_id = p_workspace_id
-      OR EXISTS (
-        SELECT 1 FROM workspace_memberships access
-        WHERE access.account_id = p_account_id
-          AND access.workspace_id = p_workspace_id
-          AND access.subject_id = p_actor_subject_id
-      )
-    )
   FOR KEY SHARE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'private session create authority required' USING ERRCODE = '42501';
+  END IF;
+  -- An ordinary workspace's exact access row is authority, not just evidence.
+  -- Lock it after the canonical workspace + organization-membership prefix so
+  -- workspace-membership removal cannot miss an uncommitted private session,
+  -- delete access, and let this transaction commit from an older snapshot.
+  IF NOT actor_personal_workspace THEN
+    SELECT access.id INTO workspace_access_id
+    FROM workspace_memberships access
+    WHERE access.account_id = p_account_id
+      AND access.workspace_id = p_workspace_id
+      AND access.subject_id = p_actor_subject_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'private session create authority required' USING ERRCODE = '42501';
+    END IF;
   END IF;
   PERFORM pg_catalog.set_config(
     'opengeni.private_session_create_lifecycle', 'private_session_create', true
