@@ -1457,9 +1457,18 @@ contract explicitly selects `sandbox.backend=opensandbox`. The stack wrapper:
   `opensandbox-controller-metrics` ClusterIP Service;
 - keeps the lifecycle service `ClusterIP`-only and loads its API key from the
   `opensandbox-api-key` Secret;
-- uses the lifecycle server's private in-cluster proxy for exec, files, and
-  configured HTTP/WebSocket ports; upstream single-tenant mode exempts these
-  proxy routes from API-key checks, so the service must not receive ingress; and
+- enables the ClusterIP ingress gateway in URI mode with OSEP-0011 signed
+  endpoints for Channel B (browserd, noVNC, ttyd). Exec and files stay on the
+  private lifecycle server-proxy. Put a TLS terminator in front of that ClusterIP
+  in production; do not fork the upstream Service to LoadBalancer;
+- stores signing keys in the `opensandbox-secure-access` Secret (`keys` +
+  `active-key`), never in git or the server ConfigMap. Official server
+  `v0.2.2` ignores `OPENSANDBOX_SECURE_ACCESS_*`; the image post-renderer
+  adds an initContainer that materializes `[ingress.secure_access]` into a
+  writable runtime TOML from that Secret;
+- Helm 3 can `helm upgrade --post-renderer scripts/operator/opensandbox-image-post-renderer.sh`.
+  Helm 4 treats `--post-renderer` as a plugin name, so render with
+  `helm template ... | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -`;
 - mounts a generic BatchSandbox template, or the Azure-specific variant that
   selects/tolerates the dedicated sandbox node pool.
 
@@ -1478,22 +1487,30 @@ while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
 reaping is primary; provider expiry is a leak backstop.
 
 OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
-`/workspace` tar capture/hydration. Native OpenSandbox pause/resume, snapshots,
-and immutable rig-image builds are deliberately not used. A desktop-class box
+`/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
+keeps the SHA-256 descriptor plus an object ref. Native OpenSandbox pause/resume,
+snapshots, and immutable rig-image builds are deliberately not used. A desktop-class box
 image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
-interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. The
+interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
+JSON and streams use signed URI-mode ingress (`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS`)
+rather than the lifecycle `/proxy/` path. The
 Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
 is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
 exact retained provider command. `runAs` remains unavailable.
 
-Prepare/render the pinned upstream chart without cluster mutation:
+Prepare/render the pinned upstream chart without cluster mutation. Helm 3
+accepts `--post-renderer <script>`. Helm 4 treats that flag as a plugin name,
+so pipe the template through the script:
 
 ```bash
 scripts/operator/prepare-opensandbox-chart.sh .agent/generated/opensandbox
+kubectl -n opensandbox-system create configmap opensandbox-secure-access-runtime-config \
+  --from-file=materialize-secure-access-config.py=scripts/operator/opensandbox-materialize-secure-access-config.py \
+  --dry-run=client -o yaml | kubectl apply -f -
 helm template opensandbox .agent/generated/opensandbox/opensandbox-0.2.0.tgz \
   --namespace opensandbox-system \
   --values deploy/stacks/official-opensandbox.values.yaml \
-  --post-renderer scripts/operator/opensandbox-image-post-renderer.sh
+  | scripts/operator/opensandbox-image-post-renderer.sh
 ```
 
 When the optional observability wrapper is used, install it after the

@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildStreamUrl,
+  exposedPortAllowsHostFetch,
   exposedPortEndpointFromUrl,
   exposeStreamPort,
   joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
+  signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
   verifyStreamToken,
   type ExposedPortEndpoint,
@@ -98,6 +101,36 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
     expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe(
       "wss://h:6080/stream",
     );
+  });
+});
+
+describe("exposedPortAllowsHostFetch", () => {
+  test("allows native tunnels and OSEP-0011 signed URIs, not lifecycle proxies", () => {
+    expect(exposedPortAllowsHostFetch({ host: "h", port: 443, tls: true, path: "/" })).toBe(true);
+    expect(
+      exposedPortAllowsHostFetch(
+        "ws://127.0.0.1:28888/sbx-1/7682/s6ph0/sigsigsig/v1/browser-sessions/x",
+      ),
+    ).toBe(true);
+    expect(
+      exposedPortAllowsHostFetch("ws://127.0.0.1:18090/v1/sandboxes/sbx-1/proxy/7682"),
+    ).toBe(false);
+    expect(
+      exposedPortAllowsHostFetch({
+        host: "127.0.0.1",
+        port: 18090,
+        tls: false,
+        path: "/sandboxes/sbx-1/6080/vnc.html",
+      }),
+    ).toBe(false);
+    const signed = parseOpenSandboxSignedUriPath("/sbx-1/7682/s6ph0/sigsigsig/v1/origins");
+    expect(signed).toMatchObject({ sandboxId: "sbx-1", port: 7682, signature: "sigsigsig" });
+    expect(signedEndpointNeedsRefresh("/sbx-1/7682/s6ph0/sigsigsig", signed!.expiresAtSeconds * 1000 - 60_000)).toBe(
+      false,
+    );
+    expect(
+      signedEndpointNeedsRefresh("/sbx-1/7682/s6ph0/sigsigsig", signed!.expiresAtSeconds * 1000 - 1_000),
+    ).toBe(true);
   });
 });
 

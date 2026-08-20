@@ -97,7 +97,17 @@ async function main(): Promise<void> {
     "json",
   ]);
   const pods = kubectlJson(["-n", args.namespace, "get", "pods", "-o", "json"]);
+  const ingress = kubectlJson([
+    "-n",
+    args.systemNamespace,
+    "get",
+    "svc",
+    "opensandbox-ingress-gateway",
+    "-o",
+    "json",
+  ]);
   const serviceType = stringAt(service, ["spec", "type"]);
+  const ingressType = stringAt(ingress, ["spec", "type"]);
   const serverContainers = arrayAt(deployment, ["spec", "template", "spec", "containers"]);
   const serverApiKeySecretBacked = serverContainers.some((container) =>
     arrayAt(container, ["env"]).some(
@@ -115,12 +125,14 @@ async function main(): Promise<void> {
   const forbiddenEnv = forbiddenEnvironmentNames(pods);
   const checks = {
     clusterIpOnly: serviceType === "ClusterIP",
+    ingressGatewayClusterIp: ingressType === "ClusterIP",
     lifecycleApiKeySecretBacked: serverApiKeySecretBacked,
     sandboxCredentialsAbsent: forbiddenEnv.length === 0,
     zeroOwnedResources: counts.batchSandboxes === 0 && counts.pools === 0 && counts.pods === 0,
   };
   const passed =
     checks.clusterIpOnly &&
+    checks.ingressGatewayClusterIp &&
     checks.lifecycleApiKeySecretBacked &&
     checks.sandboxCredentialsAbsent &&
     (!args.expectZero || checks.zeroOwnedResources);
@@ -130,6 +142,7 @@ async function main(): Promise<void> {
     context: kubectlText(["config", "current-context"]).trim(),
     namespaces: { system: args.systemNamespace, sandbox: args.namespace },
     serviceType,
+    ingressType,
     counts,
     forbiddenEnvironmentNames: forbiddenEnv,
     checks,

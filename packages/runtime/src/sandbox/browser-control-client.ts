@@ -72,6 +72,7 @@ import {
 import { parseExecResponseBanner } from "./exec-banner";
 import {
   buildStreamUrl,
+  exposedPortAllowsHostFetch,
   joinExposedPortPath,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
@@ -892,21 +893,31 @@ export class BrowserControlClient {
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
         const endpoint = await this.session.resolveExposedPort(this.port);
-        // Prefixed lifecycle proxies (OpenSandbox `/v1/sandboxes/<id>/proxy/<port>`)
-        // rewrite Authorization, so a host-side Bearer cannot be both the proxy
-        // key and the browserd admin token. Native `/` tunnels host-fetch.
-        // Prefixed JSON uses in-box loopback curl. A cached controller-only
-        // session has no exec, so host-fetching that prefix would 401; throw a
-        // retryable transport error so the caller invalidates and provisions.
-        const prefixed = (endpoint.path ?? "/") !== "/";
+        // Lifecycle proxies rewrite Authorization, so a host-side Bearer cannot
+        // be both the proxy key and the browserd admin token. Native `/` tunnels
+        // and OSEP-0011 signed URIs host-fetch. Prefixed lifecycle JSON uses
+        // in-box loopback curl. A cached controller-only session has no exec, so
+        // host-fetching that prefix would 401; throw a retryable transport error
+        // so the caller invalidates and provisions.
+        const hostFetchAllowed = exposedPortAllowsHostFetch(endpoint);
         const canExec = Boolean(this.session.exec || this.session.execCommand);
-        if (prefixed && !canExec) {
+        if (!hostFetchAllowed && !canExec) {
           throw new BrowserControlTransportError(
             "cached browser controller endpoint cannot host-fetch a prefixed proxy",
           );
         }
-        if (!prefixed) {
-          return await requestExposedController(endpoint, input, this.timeoutMs);
+        if (hostFetchAllowed) {
+          try {
+            return await requestExposedController(endpoint, input, this.timeoutMs);
+          } catch (error) {
+            if (
+              retryNativeEndpoint &&
+              error instanceof BrowserControlTransportError
+            ) {
+              return await this.requestJson(input, false);
+            }
+            throw error;
+          }
         }
       } catch (error) {
         if (
@@ -1529,7 +1540,24 @@ async function requestExposedController(
   if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
     throw new BrowserControlProtocolError("browser controller response is too large");
   }
+  if (
+    (response.status === 401 || response.status === 403) &&
+    !looksLikeBrowserControlEnvelope(responseText)
+  ) {
+    throw new BrowserControlTransportError(
+      `browser controller returned HTTP ${response.status}`,
+    );
+  }
   return parseEnvelope(responseText, response.status);
+}
+
+function looksLikeBrowserControlEnvelope(body: string): boolean {
+  try {
+    const value: unknown = JSON.parse(body);
+    return isRecord(value) && value.protocolVersion === BROWSER_CONTROL_PROTOCOL_VERSION;
+  } catch {
+    return false;
+  }
 }
 
 function parseEnvelope(body: string, status: number): unknown {

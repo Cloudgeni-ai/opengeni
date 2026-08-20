@@ -16,6 +16,8 @@ export interface OpenSandboxConformanceArgs {
   image: string;
   ttlSeconds: number;
   readyTimeoutSeconds: number;
+  signedEndpoints: boolean;
+  channelBPublicBaseUrl: string | null;
   output: string | null;
   runId: string;
 }
@@ -37,6 +39,8 @@ export function parseOpenSandboxConformanceArgs(
     image: env.OPENGENI_OPENSANDBOX_IMAGE ?? DEFAULT_IMAGE,
     ttlSeconds: positiveInteger(env.OPENGENI_OPENSANDBOX_TTL_SECONDS ?? "3600", "ttl"),
     readyTimeoutSeconds: 600,
+    signedEndpoints: env.OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS === "true",
+    channelBPublicBaseUrl: env.OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL ?? null,
     output: null,
     runId: `conformance-${crypto.randomUUID()}`,
   };
@@ -49,9 +53,15 @@ export function parseOpenSandboxConformanceArgs(
       args.ttlSeconds = positiveInteger(requiredNext(argv, ++index, value), value);
     } else if (value === "--ready-timeout-seconds") {
       args.readyTimeoutSeconds = positiveInteger(requiredNext(argv, ++index, value), value);
+    } else if (value === "--signed-endpoints") args.signedEndpoints = true;
+    else if (value === "--channel-b-public-base-url") {
+      args.channelBPublicBaseUrl = requiredNext(argv, ++index, value);
     } else if (value === "--output") args.output = requiredNext(argv, ++index, value);
     else if (value === "--run-id") args.runId = labelValue(requiredNext(argv, ++index, value));
     else throw new Error(`Unknown argument: ${value}`);
+  }
+  if (args.channelBPublicBaseUrl && !URL.canParse(args.channelBPublicBaseUrl)) {
+    throw new Error("--channel-b-public-base-url must be a valid URL");
   }
   if (!URL.canParse(args.baseUrl)) throw new Error("--base-url must be a valid URL");
   if (!args.apiKey) throw new Error("Set --api-key or OPENGENI_OPENSANDBOX_API_KEY");
@@ -72,6 +82,10 @@ async function main(): Promise<void> {
     image: args.image,
     ttlSeconds: args.ttlSeconds,
     useServerProxy: true,
+    signedEndpoints: args.signedEndpoints,
+    ...(args.channelBPublicBaseUrl
+      ? { channelBPublicBaseUrl: args.channelBPublicBaseUrl }
+      : {}),
     readyTimeoutSeconds: args.readyTimeoutSeconds,
     resourceLimits: { cpu: "1", memory: "1Gi" },
     resourceRequests: { cpu: "250m", memory: "512Mi" },
@@ -162,6 +176,42 @@ async function main(): Promise<void> {
           .catch(() => undefined);
       }
     });
+    if (args.signedEndpoints) {
+      await step(steps, "signed-channel-b-http", async () => {
+        const correlation = `opensandbox-signed-${args.runId}`;
+        const retained = await runWithToolCallCorrelation(correlation, () =>
+          session!.exec({
+            cmd: "python3 -m http.server 8080 --directory /workspace",
+            yieldTimeMs: 0,
+          }),
+        );
+        if (retained.sessionId === undefined) throw new Error("HTTP server did not yield");
+        try {
+          const endpoint = await session!.resolveExposedPort(8080);
+          const path = new URL(endpoint.url!).pathname;
+          if (/\/v1\/sandboxes\/[^/]+\/proxy\//u.test(path)) {
+            throw new Error(`signed endpoint used lifecycle proxy path ${path}`);
+          }
+          if (!/^\/[^/]+\/8080\/[0-9a-z]+\/[0-9a-z]{8,64}(?:\/|$)/iu.test(path)) {
+            throw new Error(`signed endpoint path was not OSEP-0011 URI mode: ${path}`);
+          }
+          const response = await retryFetch(endpoint.url!, stringHeaders(endpoint.headers), 30_000);
+          if (!response.ok || !(await response.text()).includes("seed.txt")) {
+            throw new Error(`signed HTTP endpoint returned ${response.status}`);
+          }
+          return `signed endpoint=${path}`;
+        } finally {
+          await session!.cancelExecCommand(`${correlation}:0`).catch(() => false);
+          await session!
+            .writeStdinForProcessControl({
+              sessionId: retained.sessionId,
+              chars: "",
+              yieldTimeMs: 5_000,
+            })
+            .catch(() => undefined);
+        }
+      });
+    }
     await step(steps, "portable-workspace-archive", async () => {
       await session!.writeFile({ path: "durable.txt", content: args.runId });
       const archive = await session!.persistWorkspace();

@@ -99,6 +99,11 @@ export type OpenSandboxClientOptions = {
   image: string;
   ttlSeconds: number;
   useServerProxy: boolean;
+  /** OSEP-0011 signed URI-mode Channel B. Independent of `useServerProxy`. */
+  signedEndpoints?: boolean;
+  signedEndpointTtlSeconds?: number;
+  /** Laptop/port-forward rewrite for Channel B only. Preserves the signed path. */
+  channelBPublicBaseUrl?: string;
   poolRef?: string;
   readyTimeoutSeconds: number;
   resourceLimits: Record<string, string>;
@@ -218,6 +223,7 @@ function createRequest(
     timeout: options.ttlSeconds,
     env: environment,
     metadata: { opengeni: "true", backend: "opensandbox" },
+    ...(options.signedEndpoints ? { secureAccess: true } : {}),
   };
   if (options.poolRef) {
     return {
@@ -1219,8 +1225,11 @@ export class OpenSandboxSession {
     const script = String.raw`set -eu
 mkdir -p ${shellQuote(PRIVATE_ROOT)}
 cd ${shellQuote(WORKSPACE_ROOT)}
-if find . -xdev -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
-  printf 'workspace contains a non-file entry\n' >&2
+# Sockets (gpg-agent) and symlinks are normal in a live /workspace. GNU tar
+# ignores sockets (exit 0) and --hard-dereference stores symlink targets as
+# files. Fifos/devices are not portable archive members and can hang tar.
+if find . -xdev -mindepth 1 \( -type p -o -type b -o -type c \) -print -quit | grep -q .; then
+  printf 'workspace contains a non-portable fifo or device\n' >&2
   exit 65
 fi
 tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf ${shellQuote(archivePath)} .`;
@@ -1310,16 +1319,26 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
     if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
       throw new SandboxExposedPortUnavailableError(`Invalid OpenSandbox port: ${port}`);
     }
-    const endpoint = await withLifecycle(
-      this.options,
-      async (sandboxes) =>
-        await sandboxes.getSandboxEndpoint(this.state.sandboxId, port, this.options.useServerProxy),
-    );
+    const signed = this.options.signedEndpoints === true;
+    const endpoint = await withLifecycle(this.options, async (sandboxes) => {
+      if (signed) {
+        const expires =
+          Math.floor(Date.now() / 1000) + (this.options.signedEndpointTtlSeconds ?? 600);
+        return await sandboxes.getSignedEndpoint(this.state.sandboxId, port, expires);
+      }
+      return await sandboxes.getSandboxEndpoint(
+        this.state.sandboxId,
+        port,
+        this.options.useServerProxy,
+      );
+    });
+    const rewrite = channelBRewriteTarget(this.options);
     return recordExposedPortEndpoint(
       this.state,
       withOpenSandboxDesktopViewerPath(
-        endpointToExposedPort(endpoint, this.options.baseUrl, this.options.useServerProxy),
+        endpointToExposedPort(endpoint, rewrite.baseUrl, rewrite.rewriteToBaseUrl),
         port,
+        signed,
       ),
       port,
     );
@@ -1328,14 +1347,30 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
 
 /** noVNC on the OpenSandbox lifecycle proxy serves HTML at the port root
  * (`…/proxy/6080`). The RFB socket is `…/websockify`. Mint `vnc.html` so the
- * existing SDK `desktopSocketUrl` rewrite dials that socket. Modal/Daytona
- * edges at `/` are a different adapter and stay untouched. */
+ * existing SDK `desktopSocketUrl` rewrite dials that socket. Signed URI-mode
+ * ingress is a reverse proxy to the box port and does not need that HTML
+ * viewer path. Modal/Daytona edges at `/` stay untouched. */
 const OPENSANDBOX_DESKTOP_STREAM_PORT = 6080;
+
+function channelBRewriteTarget(options: OpenSandboxClientOptions): {
+  baseUrl: string;
+  rewriteToBaseUrl: boolean;
+} {
+  if (options.signedEndpoints) {
+    if (options.channelBPublicBaseUrl) {
+      return { baseUrl: options.channelBPublicBaseUrl, rewriteToBaseUrl: true };
+    }
+    return { baseUrl: options.baseUrl, rewriteToBaseUrl: false };
+  }
+  return { baseUrl: options.baseUrl, rewriteToBaseUrl: options.useServerProxy };
+}
 
 function withOpenSandboxDesktopViewerPath(
   endpoint: ExposedPortEndpoint,
   port: number,
+  signedEndpoints: boolean,
 ): ExposedPortEndpoint {
+  if (signedEndpoints) return endpoint;
   if (port !== OPENSANDBOX_DESKTOP_STREAM_PORT) return endpoint;
   const rawPath =
     typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
@@ -1515,7 +1550,11 @@ export class OpenSandboxClient {
       configuredExposedPorts: [...state.configuredExposedPorts],
       workspaceReady: state.workspaceReady,
       expiresAt: state.expiresAt,
-      ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
+      ...(this.options.signedEndpoints
+        ? {}
+        : state.exposedPorts
+          ? { exposedPorts: structuredClone(state.exposedPorts) }
+          : {}),
     };
   }
 

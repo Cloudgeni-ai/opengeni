@@ -1794,7 +1794,15 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   request.targetId,
                   request.stream,
                 );
-                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend)
+                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                    ? {
+                        openSandboxInteractionFrameProxy:
+                          deps.settings.openSandboxInteractionFrameProxy,
+                      }
+                    : {}),
+                })
                   ? createInteractionFrameProxyAttachment({
                       requestUrl: context.req.url,
                       rootSecret,

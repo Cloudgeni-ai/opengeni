@@ -31,13 +31,23 @@ export type InteractionFrameProxyAttachment = Readonly<{
   protocols: readonly string[];
 }>;
 
-/** Docker boxes and OpenSandbox lifecycle proxies cannot carry browserd's
- * WebSocket subprotocol grant to the viewer. The API frame-proxy holds the
- * upstream URL + protocols; Modal/Daytona/Blaxel native tunnels stay direct. */
+/** Docker boxes cannot carry browserd's WebSocket subprotocol grant to the
+ * viewer. OpenSandbox uses the API frame-proxy only while Channel B still
+ * goes through the lifecycle proxy. Signed URI-mode ingress keeps native
+ * subprotocols, matching Modal/Daytona/Blaxel. */
 export function placementUsesInteractionFrameProxy(
   backend: string | null | undefined,
+  options?: {
+    openSandboxSignedEndpoints?: boolean;
+    openSandboxInteractionFrameProxy?: boolean;
+  },
 ): boolean {
-  return backend === "docker" || backend === "opensandbox";
+  if (backend === "docker") return true;
+  if (backend !== "opensandbox") return false;
+  if (typeof options?.openSandboxInteractionFrameProxy === "boolean") {
+    return options.openSandboxInteractionFrameProxy;
+  }
+  return options?.openSandboxSignedEndpoints !== true;
 }
 
 export function createInteractionFrameProxyAttachment(input: {

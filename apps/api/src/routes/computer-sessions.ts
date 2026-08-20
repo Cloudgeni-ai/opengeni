@@ -601,7 +601,15 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                       request.targetId,
                       request.stream,
                     );
-                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend)
+                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                    ? {
+                        openSandboxInteractionFrameProxy:
+                          deps.settings.openSandboxInteractionFrameProxy,
+                      }
+                    : {}),
+                })
                   ? createInteractionFrameProxyAttachment({
                       requestUrl: context.req.url,
                       rootSecret: controllerAuthorityRoot(deps),

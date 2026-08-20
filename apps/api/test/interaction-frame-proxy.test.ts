@@ -19,9 +19,18 @@ afterEach(() => {
 });
 
 describe("interaction frame proxy", () => {
-  test("proxies Docker and OpenSandbox placements, not native tunnels", () => {
+  test("proxies Docker and unsigned OpenSandbox, not native or signed tunnels", () => {
     expect(placementUsesInteractionFrameProxy("docker")).toBe(true);
     expect(placementUsesInteractionFrameProxy("opensandbox")).toBe(true);
+    expect(
+      placementUsesInteractionFrameProxy("opensandbox", { openSandboxSignedEndpoints: true }),
+    ).toBe(false);
+    expect(
+      placementUsesInteractionFrameProxy("opensandbox", {
+        openSandboxSignedEndpoints: true,
+        openSandboxInteractionFrameProxy: true,
+      }),
+    ).toBe(true);
     expect(placementUsesInteractionFrameProxy("modal")).toBe(false);
     expect(placementUsesInteractionFrameProxy("blaxel")).toBe(false);
     expect(placementUsesInteractionFrameProxy(null)).toBe(false);

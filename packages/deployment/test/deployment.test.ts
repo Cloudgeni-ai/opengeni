@@ -446,6 +446,14 @@ describe("deployment contract", () => {
     expect(dependency?.installCommands.join("\n")).toContain(
       "opensandbox-batchsandbox-template.azure.yaml",
     );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "ensure-opensandbox-secure-access-secret.sh",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "opensandbox-secure-access-runtime-config",
+    );
+    expect(dependency?.verifyCommands.join("\n")).toContain("opensandbox-ingress-gateway");
+    expect(dependency?.notes.join("\n")).toContain("signed endpoints");
     expect(dependency?.verifyCommands.join("\n")).toContain("grep -qx ClusterIP");
     expect(dependency?.verifyCommands.join("\n")).toContain(
       "get svc opensandbox-controller-metrics",
@@ -1175,6 +1183,10 @@ describe("deployment contract", () => {
       optional: [
         "OPENGENI_OPENSANDBOX_TTL_SECONDS",
         "OPENGENI_OPENSANDBOX_USE_SERVER_PROXY",
+        "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS",
+        "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS",
+        "OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL",
+        "OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY",
         "OPENGENI_OPENSANDBOX_POOL_REF",
       ],
     });

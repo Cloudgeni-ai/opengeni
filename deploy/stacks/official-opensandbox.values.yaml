@@ -54,7 +54,26 @@ opensandbox-server:
         cpu: "1"
         memory: 2Gi
     gateway:
-      enabled: false
+      enabled: true
+      host: opensandbox-ingress-gateway.opensandbox-system.svc.cluster.local
+      gatewayRouteMode: "uri"
+      image:
+        repository: docker.io/opensandbox/ingress
+        tag: v1.0.10
+        pullPolicy: IfNotPresent
+      replicaCount: 1
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      # Official server v0.2.2 ignores OPENSANDBOX_SECURE_ACCESS_* env.
+      # Keep keys in this Secret; the image post-renderer materializes
+      # [ingress.secure_access] into a writable runtime TOML at pod start.
+      secureAccess:
+        existingSecret: opensandbox-secure-access
     volumeMounts:
       - name: batchsandbox-template
         mountPath: /etc/opensandbox/opengeni.batchsandbox-template.yaml

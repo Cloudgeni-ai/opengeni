@@ -1749,6 +1749,21 @@ describe("backend-gated sandbox required-credential validation", () => {
     };
     expect(() => withEnv(active, () => getSettings())).not.toThrow();
     expect(withEnv(active, () => getSettings()).openSandboxUseServerProxy).toBe(true);
+    expect(withEnv(active, () => getSettings()).openSandboxSignedEndpoints).toBe(false);
+    expect(
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS: "true",
+          OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL: "http://127.0.0.1:28888",
+        },
+        () => getSettings(),
+      ),
+    ).toMatchObject({
+      openSandboxSignedEndpoints: true,
+      openSandboxChannelBPublicBaseUrl: "http://127.0.0.1:28888",
+      openSandboxSignedEndpointTtlSeconds: 600,
+    });
     expect(
       withEnv(
         {

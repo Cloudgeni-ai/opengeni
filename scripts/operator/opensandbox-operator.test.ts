@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parseOpenSandboxConformanceArgs } from "./opensandbox-conformance";
 import {
   executeBounded,
@@ -19,7 +21,13 @@ describe("OpenSandbox operator harnesses", () => {
   test("parses immutable conformance and bounded load inputs", () => {
     expect(
       parseOpenSandboxConformanceArgs(["--api-key", "key", "--image", IMAGE], {}),
-    ).toMatchObject({ ttlSeconds: 3600, image: IMAGE });
+    ).toMatchObject({ ttlSeconds: 3600, image: IMAGE, signedEndpoints: false });
+    expect(
+      parseOpenSandboxConformanceArgs(
+        ["--api-key", "key", "--image", IMAGE, "--signed-endpoints"],
+        {},
+      ),
+    ).toMatchObject({ signedEndpoints: true });
     expect(
       parseOpenSandboxLoadArgs(
         ["--profile", "500", "--tier", "cold-node", "--api-key", "key", "--image", IMAGE],
@@ -113,5 +121,150 @@ describe("OpenSandbox operator harnesses", () => {
     expect(script.match(/sha256sum -c - >&2/g)).toHaveLength(5);
     expect(script).toContain('helm lint "$chart_dir" >&2');
     expect(script.trimEnd()).toEndWith("printf '%s\\n' \"$chart_archive\"");
+  });
+
+  test("post-renderer pins the ingress digest alongside controller and server", async () => {
+    const lock = await readFile(
+      resolve(import.meta.dir, "../../deploy/stacks/opensandbox-source.lock"),
+      "utf8",
+    );
+    expect(lock).toContain(
+      "OPENSANDBOX_INGRESS_IMAGE=docker.io/opensandbox/ingress@sha256:450cdae23c7987e6b4974e56577f9569cc0eb7e48e54eff88c11f023db3b35b4",
+    );
+    const rendered = await new Promise<string>((resolvePromise, reject) => {
+      const child = spawn("bash", [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")], {
+        cwd: resolve(import.meta.dir, "../.."),
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolvePromise(stdout);
+        else reject(new Error(stderr || `post-renderer exited ${String(code)}`));
+      });
+      child.stdin.end(
+        "image: docker.io/opensandbox/ingress:v1.0.10\nother: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress:v1.0.10\n",
+      );
+    });
+    expect(rendered).toContain(
+      "docker.io/opensandbox/ingress@sha256:450cdae23c7987e6b4974e56577f9569cc0eb7e48e54eff88c11f023db3b35b4",
+    );
+    expect(rendered).not.toContain("ingress:v1.0.10");
+  });
+
+  test("materializes secure-access TOML from env without logging secrets", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "osb-secure-"));
+    const source = join(dir, "config.toml");
+    const dest = join(dir, "runtime.toml");
+    await writeFile(
+      source,
+      `[ingress]\nmode = "gateway"\n\ngateway.address = "gw.example"\ngateway.route.mode = "uri"\n`,
+    );
+    const child = spawn("python3", [resolve(import.meta.dir, "opensandbox-materialize-secure-access-config.py")], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        SANDBOX_CONFIG_PATH: source,
+        OPENSANDBOX_RUNTIME_CONFIG_PATH: dest,
+        OPENSANDBOX_SECURE_ACCESS_KEYS: "a=dGVzdC1rZXktYnl0ZXMtZm9yLXVuaXQ=",
+        OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY: "a",
+      },
+    });
+    const stderr = await new Promise<string>((resolvePromise, reject) => {
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (chunk) => {
+        out += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        err += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolvePromise(err + out);
+        else reject(new Error(err || `materializer exited ${String(code)}`));
+      });
+    });
+    expect(stderr).toContain("materialized");
+    expect(stderr).not.toContain("dGVzdC1rZXktYnl0ZXMtZm9yLXVuaXQ=");
+    const rendered = await readFile(dest, "utf8");
+    expect(rendered).toContain("[ingress.secure_access]");
+    expect(rendered).toContain('active_key = "a"');
+    expect(rendered).toContain('key = "dGVzdC1rZXktYnl0ZXMtZm9yLXVuaXQ="');
+    expect(rendered).toContain('mode = "gateway"');
+  });
+
+  test("post-renderer injects a secure-access runtime-config initContainer", async () => {
+    const fixture = `---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: main
+          image: docker.io/opensandbox/server:v0.2.2
+          args: ["--config", "/etc/opensandbox/config.toml"]
+          env:
+            - name: SANDBOX_CONFIG_PATH
+              value: /etc/opensandbox/config.toml
+            - name: OPENSANDBOX_SECURE_ACCESS_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: opensandbox-secure-access
+                  key: keys
+            - name: OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opensandbox-secure-access
+                  key: active-key
+          volumeMounts:
+            - name: config
+              mountPath: /etc/opensandbox/config.toml
+              subPath: config.toml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: opensandbox-server-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-server
+`;
+    const rendered = await new Promise<string>((resolvePromise, reject) => {
+      const child = spawn("bash", [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")], {
+        cwd: resolve(import.meta.dir, "../.."),
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolvePromise(stdout);
+        else reject(new Error(stderr || `post-renderer exited ${String(code)}`));
+      });
+      child.stdin.end(fixture);
+    });
+    expect(rendered).toContain("materialize-secure-access-config");
+    expect(rendered).toContain("/runtime-config/config.toml");
+    expect(rendered).toContain("opensandbox-secure-access-runtime-config");
+    expect(rendered).toContain("kind: Service");
+    expect(rendered).toContain("docker.io/opensandbox/server@sha256:");
+    expect(rendered).not.toContain("value: a=");
   });
 });

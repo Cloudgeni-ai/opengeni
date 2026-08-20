@@ -122,15 +122,20 @@ export {
 export {
   NATIVE_SNAPSHOT_PREFIXES,
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA,
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
   encodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
+  workspaceArchiveObjectKey,
+  workspaceArchivePayloadPresent,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,
   type NativeSnapshotRef,
   type TarWorkspaceArchiveDescriptor,
   type WorkspaceArchiveDescriptor,
+  type WorkspaceArchiveObjectRef,
   type WorkspaceTreeFingerprint,
 } from "./sandbox-snapshots";
 
@@ -600,11 +605,11 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     persistable: false,
     supportsRunAs: false,
   },
-  // Optional Kubernetes-native provisioned sandbox through OpenSandbox. The
-  // provider is headless in v1: ordinary command/files/ports are available,
-  // PTY and desktop claims stay off until live protocol conformance proves
-  // them. OpenGeni owns persistence through its portable tar checkpoint path;
-  // native OpenSandbox pause/resume and snapshots are deliberately not used.
+  // Optional Kubernetes-native provisioned sandbox through OpenSandbox.
+  // Desktop-class when the box image includes ttyd/browserd/Xvfb: PTY over ttyd,
+  // noVNC and browserd over signed URI-mode ingress. OpenGeni owns persistence
+  // through its portable tar checkpoint path in object storage; native
+  // OpenSandbox pause/resume and snapshots are deliberately not used.
   opensandbox: {
     backend: "opensandbox",
     backendId: "opensandbox",

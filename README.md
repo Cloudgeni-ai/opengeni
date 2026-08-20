@@ -237,12 +237,12 @@ For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private
 `OPENGENI_OPENSANDBOX_BASE_URL`, `OPENGENI_OPENSANDBOX_API_KEY`, and an
 immutable `OPENGENI_OPENSANDBOX_IMAGE` digest. Kubernetes deployments can use
 the optional pinned upstream platform wrapper under `deploy/stacks`; it keeps
-the lifecycle service private and its lifecycle routes Secret-backed. Upstream
-single-tenant proxy routes are not API-key checked, so the service remains
-ClusterIP-only with no ingress. OpenSandbox v1 uses exact ID-addressed attach,
-renewable provider TTL, and portable `/workspace` archives. A desktop-class
-image advertises ttyd PTY and desktop/recording; native OpenSandbox snapshots
-and `runAs` stay unavailable.
+the lifecycle service private and its lifecycle routes Secret-backed. Exec and
+files stay on that ClusterIP server-proxy. Channel B uses the ClusterIP ingress
+gateway in URI mode with OSEP-0011 signed endpoints. OpenSandbox v1 uses exact
+ID-addressed attach, renewable provider TTL, and portable `/workspace` tar
+archives in object storage. A desktop-class image advertises ttyd PTY and
+desktop/recording; native OpenSandbox snapshots and `runAs` stay unavailable.
 
 ## Deployment
 

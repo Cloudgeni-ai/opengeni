@@ -1,18 +1,18 @@
 import {
   BrowserControlRequestError,
   BrowserControlTransportError,
+  exposedPortAllowsHostFetch,
   exposedPortEndpointFromUrl,
 } from "@opengeni/runtime/sandbox";
 
 /** Modal/Daytona/Blaxel tunnels serve browserd at `/`, so a cached
  * controller-only session can host-fetch JSON. OpenSandbox's lifecycle proxy
  * prefixes `/v1/sandboxes/<id>/proxy/<port>` and rewrites Authorization; JSON
- * must stay on an exec-capable in-box curl session. */
+ * must stay on an exec-capable in-box curl session. OSEP-0011 signed URIs are
+ * Authorization-preserving and host-fetch like a native tunnel. */
 export function controllerCacheAllowsHostFetch(url: string): boolean {
   try {
-    const endpoint = exposedPortEndpointFromUrl(url);
-    const path = endpoint.path ?? "/";
-    return path === "/" || path === "";
+    return exposedPortAllowsHostFetch(exposedPortEndpointFromUrl(url));
   } catch {
     return false;
   }

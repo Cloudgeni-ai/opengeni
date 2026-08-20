@@ -86,6 +86,14 @@ describe("controllerCacheAllowsHostFetch", () => {
     ).toBe(false);
   });
 
+  test("allows OSEP-0011 signed URI prefixes that preserve Authorization", () => {
+    expect(
+      controllerCacheAllowsHostFetch(
+        "ws://127.0.0.1:28888/sbx-1/7682/s6ph0/sigsigsig/v1/browser-sessions/session/targets/t/frames",
+      ),
+    ).toBe(true);
+  });
+
   test("rejects malformed cached URLs fail-closed", () => {
     expect(controllerCacheAllowsHostFetch("https://controller.example/")).toBe(false);
     expect(controllerCacheAllowsHostFetch("not-a-url")).toBe(false);

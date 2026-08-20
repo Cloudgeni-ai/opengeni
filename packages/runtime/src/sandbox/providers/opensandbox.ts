@@ -22,6 +22,11 @@ function clientOptions(
     image: settings.openSandboxImage!,
     ttlSeconds: settings.openSandboxTtlSeconds,
     useServerProxy: settings.openSandboxUseServerProxy,
+    signedEndpoints: settings.openSandboxSignedEndpoints,
+    signedEndpointTtlSeconds: settings.openSandboxSignedEndpointTtlSeconds,
+    ...(settings.openSandboxChannelBPublicBaseUrl
+      ? { channelBPublicBaseUrl: settings.openSandboxChannelBPublicBaseUrl }
+      : {}),
     readyTimeoutSeconds: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
     resourceLimits: OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
     resourceRequests: OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,

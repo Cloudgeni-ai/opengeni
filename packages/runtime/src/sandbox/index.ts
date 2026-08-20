@@ -25,6 +25,7 @@ import {
   DESKTOP_STREAM_PORT,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
+  parseWorkspaceArchiveObjectRef,
   type SandboxBackend,
   type SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
@@ -131,6 +132,7 @@ export {
   describeLegacyNativeSnapshotArchive,
   describeNativeSnapshotArchive,
   fingerprintSandboxWorkspace,
+  inlineWorkspaceArchiveForRestore,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
@@ -336,12 +338,18 @@ export {
 export {
   exposeStreamPort,
   buildStreamUrl,
+  exposedPortAllowsHostFetch,
   exposedPortEndpointFromUrl,
+  isOpenSandboxLifecycleProxyPath,
   joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
+  signedEndpointExpiresAtMs,
+  signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
   type ExposeStreamPortInput,
   type ExposeStreamPortResult,
+  type OpenSandboxSignedUriPath,
 } from "./stream-port";
 
 // P4.3 recording loop — plain functions over a live session handle (no agent
@@ -2311,8 +2319,10 @@ export function requirePersistableReplacementSandboxEnvelope(
 const DURABLE_WORKSPACE_ARCHIVE_FIELDS = [
   "workspaceArchive",
   "workspaceArchiveMeta",
+  "workspaceArchiveRef",
   "workspaceArchivePrev",
   "workspaceArchivePrevMeta",
+  "workspaceArchivePrevRef",
   "workspaceArchiveAt",
 ] as const;
 
@@ -2323,11 +2333,15 @@ function durableWorkspaceArchiveFields(
     envelope?.sessionState && typeof envelope.sessionState === "object"
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
-  if (
-    !sessionState ||
-    typeof sessionState.workspaceArchive !== "string" ||
-    sessionState.workspaceArchive.length === 0
-  ) {
+  if (!sessionState) return null;
+  const archiveRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef);
+  const hasInline =
+    typeof sessionState.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const hasPreviousInline =
+    typeof sessionState.workspaceArchivePrev === "string" &&
+    sessionState.workspaceArchivePrev.length > 0;
+  if (!hasInline && !archiveRef && !hasPreviousInline && !previousRef) {
     return null;
   }
   const fields: Record<string, unknown> = {};
@@ -2335,6 +2349,14 @@ function durableWorkspaceArchiveFields(
     if (sessionState[key] !== undefined && sessionState[key] !== null) {
       fields[key] = sessionState[key];
     }
+  }
+  // Restore may inline object bytes in memory for hydrateWorkspace. That copy
+  // must never be published onto the replacement lease when a durable ref exists.
+  if (archiveRef) {
+    delete fields.workspaceArchive;
+  }
+  if (previousRef) {
+    delete fields.workspaceArchivePrev;
   }
   return fields;
 }
@@ -2361,15 +2383,24 @@ export async function serializeReplacementSandboxEnvelope(
     serialized?.sessionState && typeof serialized.sessionState === "object"
       ? (serialized.sessionState as Record<string, unknown>)
       : {};
+  const sessionState: Record<string, unknown> = {
+    ...serializedSessionState,
+    ...(archiveFields ?? {}),
+  };
+  // Spread cannot delete keys. Restore inlines that leaked into serialized
+  // replacement state must not survive a durable object-storage ref.
+  if (parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {
+    delete sessionState.workspaceArchive;
+  }
+  if (parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef)) {
+    delete sessionState.workspaceArchivePrev;
+  }
   return {
     ...(serialized ?? {}),
     // Never inherit a historical backend marker when the replacement could not
     // serialize. The separately-persisted resume_backend_id and this envelope
     // must both describe the replacement.
     backendId: established.backendId,
-    sessionState: {
-      ...serializedSessionState,
-      ...(archiveFields ?? {}),
-    },
+    sessionState,
   };
 }

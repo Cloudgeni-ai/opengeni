@@ -2918,6 +2918,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(prefetchResumeAt).toBeLessThan(toolsAt);
     expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeManagedGroupBox()");
     expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeBoxForTurn(");
+    expect(source).toContain("onSandboxLost: publishSandboxLost,\n                    objectStorage,");
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

@@ -56,6 +56,7 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   describeLegacyNativeSnapshotArchive,
+  inlineWorkspaceArchiveForRestore,
   MODAL_EXEC_READINESS_TIMEOUT_MS,
   SandboxExecReadinessError,
   WorkspaceArchiveIntegrityError,
@@ -77,6 +78,13 @@ import {
   type RuntimeMetricsHooks,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
+import type { ObjectStorage } from "@opengeni/storage";
+import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
+import {
+  collectWorkspaceArchiveObjectKeys,
+  deleteWorkspaceArchiveObjectKeys,
+  putTarWorkspaceArchiveObject,
+} from "./sandbox-archive-storage";
 
 // Re-exported for callers that just want the ack-kind union.
 export type ResumeHolderKind = LeaseHolderKind;
@@ -109,6 +117,7 @@ export function isRetryableDegradedRestore(restore: {
 export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
+  objectStorage?: ObjectStorage | null;
   /** Exact settings before a verified rig provider image overlaid the logical
    * pack/deployment image. Fresh-create NotFound fallback must preserve an
    * ID-only logical base instead of selecting the provider default. */
@@ -352,25 +361,39 @@ export function safeSnapshotError(error: unknown): {
   errorCode: "snapshot_operation_failed";
   status?: number;
   origin: "sandbox-resume";
+  causeName?: string;
+  integrityCode?: string;
 } {
   const fields: {
     errorClass: "SnapshotOperationError";
     errorCode: "snapshot_operation_failed";
     status?: number;
     origin: "sandbox-resume";
+    causeName?: string;
+    integrityCode?: string;
   } = {
     errorClass: "SnapshotOperationError",
     errorCode: "snapshot_operation_failed",
     origin: "sandbox-resume",
   };
   try {
-    const rawStatus =
-      error && typeof error === "object"
-        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
-          (error as { statusCode?: unknown }).statusCode)
-        : undefined;
-    const status = Number(rawStatus);
-    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+    if (error && typeof error === "object") {
+      const candidate = error as {
+        name?: unknown;
+        code?: unknown;
+        status?: unknown;
+        statusCode?: unknown;
+      };
+      if (typeof candidate.name === "string" && /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)) {
+        fields.causeName = candidate.name;
+      }
+      if (typeof candidate.code === "string" && /^[a-z0-9_]{1,64}$/u.test(candidate.code)) {
+        fields.integrityCode = candidate.code;
+      }
+      const rawStatus = candidate.status ?? candidate.statusCode;
+      const status = Number(rawStatus);
+      if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+    }
   } catch {
     // Public diagnostics are best-effort and must never replace the exact
     // internal snapshot failure.
@@ -501,23 +524,55 @@ function workspaceArchiveFieldsFromEnvelope(
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   const archive = sessionState?.workspaceArchive;
-  if (typeof archive !== "string" || archive.length === 0) {
+  const archiveRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchiveRef);
+  const hasInline = typeof archive === "string" && archive.length > 0;
+  if (!hasInline && !archiveRef) {
     return null;
   }
   const previous = sessionState?.workspaceArchivePrev;
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef);
   const metadata = sessionState?.workspaceArchiveMeta;
   const previousMetadata = sessionState?.workspaceArchivePrevMeta;
   const capturedAt = sessionState?.workspaceArchiveAt;
   return {
-    workspaceArchive: archive,
+    ...(hasInline && !archiveRef ? { workspaceArchive: archive } : {}),
+    ...(archiveRef ? { workspaceArchiveRef: archiveRef } : {}),
     ...(metadata !== undefined ? { workspaceArchiveMeta: metadata } : {}),
-    ...(typeof previous === "string" && previous.length > 0
+    ...(typeof previous === "string" && previous.length > 0 && !previousRef
       ? { workspaceArchivePrev: previous }
       : {}),
+    ...(previousRef ? { workspaceArchivePrevRef: previousRef } : {}),
     ...(previousMetadata !== undefined ? { workspaceArchivePrevMeta: previousMetadata } : {}),
     ...(typeof capturedAt === "string" && capturedAt.length > 0
       ? { workspaceArchiveAt: capturedAt }
       : {}),
+  };
+}
+
+async function materializeSpawnEnvelopeArchive(
+  envelope: unknown,
+  objectStorage: ObjectStorage | null | undefined,
+): Promise<unknown> {
+  if (!envelope || typeof envelope !== "object") return envelope;
+  const record = envelope as Record<string, unknown>;
+  const sessionState =
+    record.sessionState && typeof record.sessionState === "object" && !Array.isArray(record.sessionState)
+      ? (record.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState || !parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {
+    return envelope;
+  }
+  if (!objectStorage) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_base64_invalid",
+      "workspace archive object storage is not configured",
+    );
+  }
+  return {
+    ...record,
+    sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>
+      objectStorage.getObjectBytes(key),
+    ),
   };
 }
 
@@ -575,12 +630,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
   }
   const persistable = session as {
     persistWorkspace?: () => Promise<Uint8Array | undefined>;
+    persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
+    backendId?: unknown;
     state?: {
       workspacePersistence?: unknown;
       providerState?: { workspacePersistence?: unknown };
     };
   };
-  if (typeof persistable.persistWorkspace !== "function") {
+  if (
+    typeof persistable.persistWorkspace !== "function" &&
+    typeof persistable.persistWorkspaceTar !== "function"
+  ) {
+    console.error("mid-session workspace snapshot skipped (no persist primitive)", {
+      backendId: typeof persistable.backendId === "string" ? persistable.backendId : null,
+    });
     return false;
   }
   // Filesystem and directory snapshots create retained Images without
@@ -599,12 +662,21 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // This work cannot pause or mutate the box, so keeping it outside the claim
     // minimizes the time that command admission must wait.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    if (
-      !lease ||
-      lease.leaseEpoch !== leaseEpoch ||
-      lease.liveness !== "warm" ||
-      lease.instanceId === null
-    ) {
+    const canWarmCapture =
+      lease?.liveness === "warm" && lease.instanceId !== null && lease.leaseEpoch === leaseEpoch;
+    const canForceDrainingCapture =
+      force === true &&
+      lease?.liveness === "draining" &&
+      lease.instanceId !== null &&
+      lease.leaseEpoch === leaseEpoch;
+    if (!lease || (!canWarmCapture && !canForceDrainingCapture)) {
+      console.error("mid-session workspace snapshot skipped (lease not warm)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        expectedEpoch: leaseEpoch,
+        liveness: lease?.liveness ?? null,
+        leaseEpoch: lease?.leaseEpoch ?? null,
+        hasInstance: lease?.instanceId !== null && lease?.instanceId !== undefined,
+      });
       return false;
     }
     // A checkpoint of this exact mutation generation already protects every
@@ -613,9 +685,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (lease.archiveComplete) {
       return false;
     }
+    if (lease.instanceId === null) {
+      return false;
+    }
     const instanceId = lease.instanceId;
+    const captureLiveness: "warm" | "draining" = canWarmCapture ? "warm" : "draining";
     const capturePolicy = providerWorkspaceCapturePolicy(lease.backend, session);
     if (!capturePolicy || capturePolicy.liveInstance !== "preserved") {
+      console.error("mid-session workspace snapshot skipped (capture policy)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        backend: lease.backend,
+        liveInstance: capturePolicy?.liveInstance ?? null,
+      });
       return false;
     }
     const nativeModalPersistence =
@@ -635,19 +716,29 @@ export async function maybePersistWarmWorkspaceSnapshot(
       captureId,
       expectedEpoch: leaseEpoch,
       expectedInstanceId: instanceId,
-      liveness: "warm",
+      liveness: captureLiveness,
       captureTimeoutMs,
       minIntervalMs: force ? 0 : intervalMs,
       providerReplaySafe: capturePolicy.takeover === "same_request",
       takeoverSafe: capturePolicy.takeover !== "exclusive",
-      warmAttempt: {
-        sessionId: ids.sessionId,
-        turnId: ids.turnId,
-        attemptId: ids.attemptId,
-        holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
-      },
+      ...(captureLiveness === "warm"
+        ? {
+            warmAttempt: {
+              sessionId: ids.sessionId,
+              turnId: ids.turnId,
+              attemptId: ids.attemptId,
+              holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
+            },
+          }
+        : {}),
     });
-    if (claimed.status !== "claimed") return false;
+    if (claimed.status !== "claimed") {
+      console.error("mid-session workspace snapshot skipped (capture claim)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        status: claimed.status,
+      });
+      return false;
+    }
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
@@ -703,6 +794,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
           strategy: capturePolicy.strategy,
         });
         candidate = await registerCandidate(archive);
+        const priorLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+        const priorKeys = collectWorkspaceArchiveObjectKeys(
+          (priorLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+        );
+        let workspaceArchiveRef: Awaited<ReturnType<typeof putTarWorkspaceArchiveObject>> | undefined;
+        if (archive.descriptor.version === 1 && services.objectStorage) {
+          workspaceArchiveRef = await putTarWorkspaceArchiveObject({
+            objectStorage: services.objectStorage,
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            archive: { bytes: archive.bytes, descriptor: archive.descriptor },
+          });
+        }
         const { wrote } = await persistWarmSnapshot(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
@@ -714,12 +819,27 @@ export async function maybePersistWarmWorkspaceSnapshot(
           expectedInstanceId: instanceId,
           expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
           captureId,
-          workspaceArchive: archive.base64,
+          workspaceArchive: workspaceArchiveRef ? "" : archive.base64,
           workspaceArchiveMeta: archive.descriptor,
+          ...(workspaceArchiveRef ? { workspaceArchiveRef } : {}),
           checkpointArtifactId: candidate?.id ?? null,
           minIntervalMs: force ? 0 : intervalMs,
           capturedAtMs,
         });
+        if (workspaceArchiveRef && services.objectStorage) {
+          if (!wrote) {
+            await services.objectStorage.deleteObject(workspaceArchiveRef.key).catch(() => undefined);
+          } else {
+            const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+            const afterKeys = collectWorkspaceArchiveObjectKeys(
+              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+            );
+            await deleteWorkspaceArchiveObjectKeys(
+              services.objectStorage,
+              [...priorKeys].filter((key) => !afterKeys.has(key)),
+            ).catch(() => undefined);
+          }
+        }
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
@@ -1151,7 +1271,19 @@ export async function resumeBoxForTurn(
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
       const providerCreateStartedAt = new Date();
-      const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
+      const persistArchiveSource =
+        spawnEnvelope && typeof spawnEnvelope === "object"
+          ? (spawnEnvelope as Record<string, unknown>)
+          : null;
+      const hydrateEnvelopeRaw = await materializeSpawnEnvelopeArchive(
+        persistArchiveSource,
+        services.objectStorage,
+      );
+      const hydrateEnvelope =
+        hydrateEnvelopeRaw && typeof hydrateEnvelopeRaw === "object"
+          ? (hydrateEnvelopeRaw as Record<string, unknown>)
+          : null;
+      const established = await establishSandboxSessionFromEnvelope(settings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
         backendOverride: ids.backend as never,
@@ -1209,7 +1341,7 @@ export async function resumeBoxForTurn(
             }
           }
           const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
-            await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
+            await serializeReplacementSandboxEnvelope(created, persistArchiveSource),
             created.backendId,
           );
           const recorded = await recordWarmingSandboxCreated(db, {
@@ -1325,7 +1457,7 @@ export async function resumeBoxForTurn(
       // attempts terminate the replacement and fail closed; they never publish a
       // clean or mixed workspace.
       const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
-        await serializeReplacementSandboxEnvelope(established, spawnEnvelope),
+        await serializeReplacementSandboxEnvelope(established, persistArchiveSource),
         established.backendId,
       );
       throwIfReleasedOrCancelled();

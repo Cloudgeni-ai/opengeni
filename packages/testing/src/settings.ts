@@ -251,6 +251,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openSandboxImage: undefined,
     openSandboxTtlSeconds: 3_600,
     openSandboxUseServerProxy: true,
+    openSandboxSignedEndpoints: false,
+    openSandboxSignedEndpointTtlSeconds: 600,
     openSandboxPoolRef: undefined,
     sandboxOwnershipEnabled: false,
     rigVerificationLeaseOwnershipEnabled: false,

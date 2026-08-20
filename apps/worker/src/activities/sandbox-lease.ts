@@ -132,7 +132,12 @@ import {
   inspectOpenSandboxKubernetesInventory,
   type OpenSandboxKubernetesInventory,
 } from "../opensandbox-kubernetes-inventory";
-import { providerIdentityFromResumeState } from "../sandbox-routing";
+import type { ObjectStorage } from "@opengeni/storage";
+import {
+  collectWorkspaceArchiveObjectKeys,
+  deleteWorkspaceArchiveObjectKeys,
+  putTarWorkspaceArchiveObject,
+} from "../sandbox-archive-storage";
 
 export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 
@@ -531,7 +536,7 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability } = await services();
+      const { db, settings, observability, objectStorage } = await services();
       if (!settings.sandboxOwnershipEnabled) return { status: "skipped" };
       assertSandboxDrainInputTiming(input);
       const drainSettings =
@@ -555,6 +560,7 @@ export function createSandboxLeaseActivities(
           terminateBox,
           probeDrainableProvider,
           captureAttempt,
+          objectStorage,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -1286,7 +1292,7 @@ export async function probeRetainedProcessAtProvider(
   if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
-  if (providerIdentityFromResumeState(lease.resumeState) !== process.providerInstanceId) {
+  if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== process.providerInstanceId) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
 
@@ -1880,6 +1886,7 @@ async function terminateDrainableBox(
   terminateBox: TerminateBoxFn,
   probeDrainableProvider: DrainableProviderProbeFn,
   attempt: SandboxDrainCaptureAttempt,
+  objectStorage: ObjectStorage | null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -2181,12 +2188,45 @@ async function terminateDrainableBox(
       if (!archiveMetadata) {
         throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
       }
+      const priorKeys = collectWorkspaceArchiveObjectKeys(
+        (lease.resumeState as Record<string, unknown> | null | undefined) ?? null,
+      );
+      let workspaceArchiveRef:
+        | Awaited<ReturnType<typeof putTarWorkspaceArchiveObject>>
+        | undefined;
+      if (archiveMetadata.version === 1 && objectStorage) {
+        workspaceArchiveRef = await putTarWorkspaceArchiveObject({
+          objectStorage,
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          archive: {
+            bytes: Buffer.from(archiveBase64, "base64"),
+            descriptor: archiveMetadata,
+          },
+        });
+      }
       result = await persistDrainSnapshot(db, {
         ...baseInput,
-        workspaceArchive: archiveBase64,
+        workspaceArchive: workspaceArchiveRef ? "" : archiveBase64,
         workspaceArchiveMeta: archiveMetadata,
+        ...(workspaceArchiveRef ? { workspaceArchiveRef } : {}),
         ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
       });
+      if (workspaceArchiveRef && objectStorage) {
+        if (!result.wrote) {
+          await objectStorage.deleteObject(workspaceArchiveRef.key).catch(() => undefined);
+        } else {
+          const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
+          const afterKeys = collectWorkspaceArchiveObjectKeys(
+            (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+          );
+          await deleteWorkspaceArchiveObjectKeys(
+            objectStorage,
+            [...priorKeys].filter((key) => !afterKeys.has(key)),
+          ).catch(() => undefined);
+        }
+      }
     }
     if (!result.wrote && checkpointArtifactId) {
       await markSandboxCheckpointArtifactDeletePending(db, {

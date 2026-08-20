@@ -29,6 +29,7 @@ type FakeFile = { type: "file" | "directory"; data?: Uint8Array };
 
 class FakeOpenSandbox {
   readonly calls: string[] = [];
+  readonly executedCommands: string[] = [];
   readonly files = new Map<string, FakeFile>();
   readonly interrupted: string[] = [];
   createdRequest: CreateSandboxRequest | null = null;
@@ -36,6 +37,7 @@ class FakeOpenSandbox {
   commandGate: Promise<void> | null = null;
   resolveCommand: (() => void) | null = null;
   commandFailureAfterInit: Error | null = null;
+  signedEndpointError: Error | null = null;
   commandStatus = { running: false, exitCode: 0, content: "" };
   lifecycleRequestTimeoutSeconds: number | null = null;
   reportedImage = IMAGE;
@@ -92,17 +94,23 @@ class FakeOpenSandbox {
           headers: { "x-open-sandbox-route": id },
         };
       },
-      async getSignedEndpoint(id: string, port: number) {
-        return await this.getSandboxEndpoint(id, port);
+      async getSignedEndpoint(id: string, port: number, expires: number): Promise<Endpoint> {
+        self.calls.push(`getSignedEndpoint:${id}:${port}:${expires}`);
+        if (self.signedEndpointError) throw self.signedEndpointError;
+        if (!self.sandboxExists) throw self.notFound();
+        return {
+          endpoint: `ingress.example.test/${id}/${port}/${expires.toString(36)}/sigsigsig`,
+        };
       },
       invalidateEndpointCache() {},
     };
     const commands = {
       async run(
-        _command: string,
+        command: string,
         options: { workingDirectory?: string } | undefined,
         handlers: any,
       ) {
+        self.executedCommands.push(command);
         const cwd = options?.workingDirectory;
         if (cwd && !self.files.has(cwd) && ![...self.files.keys()].some((path) => path.startsWith(`${cwd}/`))) {
           throw new SandboxApiException({
@@ -312,7 +320,14 @@ class FakeOpenSandbox {
 
 function createClient(
   fake: FakeOpenSandbox,
-  options: { poolRef?: string; baseUrl?: string; useServerProxy?: boolean } = {},
+  options: {
+    poolRef?: string;
+    baseUrl?: string;
+    useServerProxy?: boolean;
+    signedEndpoints?: boolean;
+    signedEndpointTtlSeconds?: number;
+    channelBPublicBaseUrl?: string;
+  } = {},
 ): OpenSandboxClient {
   return new OpenSandboxClient({
     baseUrl: options.baseUrl ?? "https://opensandbox.example.test",
@@ -320,6 +335,11 @@ function createClient(
     image: IMAGE,
     ttlSeconds: 60,
     useServerProxy: options.useServerProxy ?? true,
+    signedEndpoints: options.signedEndpoints,
+    signedEndpointTtlSeconds: options.signedEndpointTtlSeconds,
+    ...(options.channelBPublicBaseUrl
+      ? { channelBPublicBaseUrl: options.channelBPublicBaseUrl }
+      : {}),
     readyTimeoutSeconds: 2,
     resourceLimits: { cpu: "1", memory: "1Gi" },
     resourceRequests: { cpu: "250m", memory: "512Mi" },
@@ -355,6 +375,7 @@ describe("OpenSandbox adapter", () => {
       resourceRequests: { cpu: "250m", memory: "512Mi" },
       env: { BASE: "base", TURN: "turn" },
     });
+    expect(fake.createdRequest).not.toHaveProperty("secureAccess");
 
     await session.start();
     expect(session.state.workspaceReady).toBe(true);
@@ -371,6 +392,23 @@ describe("OpenSandbox adapter", () => {
 
     expect(session.state.workspaceReady).toBe(true);
     expect(fake.files.get("/workspace")).toEqual({ type: "directory" });
+  });
+
+  test("workspace tar capture allows live sockets and only rejects fifos or devices", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    await session.start();
+    fake.files.set("/.opengeni-private/capture-ignored.tar", {
+      type: "file",
+      data: new Uint8Array([0x1f]),
+    });
+    await session.persistWorkspaceTar().catch(() => undefined);
+    const capture = fake.executedCommands.find((command) => command.includes(" --format=gnu -cf "));
+    expect(capture).toBeDefined();
+    expect(capture).not.toContain("workspace contains a non-file entry");
+    expect(capture).toContain("workspace contains a non-portable fifo or device");
+    expect(capture).toContain("-type p");
+    expect(capture).not.toContain("! -type f ! -type d");
   });
 
   test("exec before start still creates the declared workspace root", async () => {
@@ -609,6 +647,51 @@ describe("OpenSandbox adapter", () => {
       tls: true,
       path: "/sandboxes/sbx-1/8080",
     });
+  });
+
+  test("signed Channel B mints OSEP URIs without vnc.html and rewrites the public base", async () => {
+    const fake = new FakeOpenSandbox();
+    const client = createClient(fake, {
+      signedEndpoints: true,
+      signedEndpointTtlSeconds: 600,
+      channelBPublicBaseUrl: "http://127.0.0.1:28888",
+      useServerProxy: true,
+    });
+    const session = await client.create();
+    expect(fake.createdRequest).toMatchObject({ secureAccess: true });
+    const endpoint = await session.resolveExposedPort(6080);
+    expect(fake.calls.some((call) => call.startsWith("getSignedEndpoint:sbx-1:6080:"))).toBe(true);
+    expect(fake.calls.some((call) => call.startsWith("getSandboxEndpoint:"))).toBe(false);
+    expect(endpoint).toMatchObject({
+      host: "127.0.0.1",
+      port: 28888,
+      tls: false,
+    });
+    expect(endpoint.path).toMatch(/^\/sbx-1\/6080\/[0-9a-z]+\/sigsigsig$/);
+    expect(endpoint.path).not.toContain("vnc.html");
+    const persisted = await client.serializeSessionState(session.state);
+    expect(persisted.exposedPorts).toBeUndefined();
+  });
+
+  test("signed Channel B keeps the advertised ingress host without a public-base rewrite", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake, { signedEndpoints: true }).create();
+    const endpoint = await session.resolveExposedPort(6080);
+    expect(endpoint).toMatchObject({
+      host: "ingress.example.test",
+      port: 443,
+      tls: true,
+    });
+    expect(endpoint.path).toMatch(/^\/sbx-1\/6080\/[0-9a-z]+\/sigsigsig$/);
+    expect(endpoint.path).not.toContain("vnc.html");
+  });
+
+  test("signed Channel B fails closed when GetSignedEndpoint fails", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.signedEndpointError = new Error("signed mint failed");
+    const session = await createClient(fake, { signedEndpoints: true }).create();
+    await expect(session.resolveExposedPort(7682)).rejects.toThrow("signed mint failed");
+    expect(fake.calls.some((call) => call.startsWith("getSandboxEndpoint:"))).toBe(false);
   });
 
   test("archive input bound rejects bytes before upload or command execution", async () => {

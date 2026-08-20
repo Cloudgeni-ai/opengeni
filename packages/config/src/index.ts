@@ -895,6 +895,14 @@ const SettingsSchema = z.object({
   // deployments default to one hour.
   openSandboxTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(3_600),
   openSandboxUseServerProxy: EnvBoolean.default(true),
+  // Channel B (browserd / noVNC / ttyd) uses OSEP-0011 signed URI-mode ingress.
+  // Exec/files stay on the private lifecycle server-proxy regardless of this flag.
+  openSandboxSignedEndpoints: EnvBoolean.default(false),
+  openSandboxSignedEndpointTtlSeconds: z.coerce.number().int().min(60).max(3_600).default(600),
+  openSandboxChannelBPublicBaseUrl: z.string().url().optional(),
+  // Explicit override for JPEG/RFB interaction attachments. Unset means
+  // OpenSandbox uses the API frame-proxy unless signed endpoints are on.
+  openSandboxInteractionFrameProxy: EnvBoolean.optional(),
   openSandboxPoolRef: z
     .string()
     .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/)
@@ -2340,6 +2348,10 @@ export function getSettings(): Settings {
     openSandboxImage: optional("OPENGENI_OPENSANDBOX_IMAGE"),
     openSandboxTtlSeconds: optional("OPENGENI_OPENSANDBOX_TTL_SECONDS"),
     openSandboxUseServerProxy: optional("OPENGENI_OPENSANDBOX_USE_SERVER_PROXY"),
+    openSandboxSignedEndpoints: optional("OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS"),
+    openSandboxSignedEndpointTtlSeconds: optional("OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS"),
+    openSandboxChannelBPublicBaseUrl: optional("OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL"),
+    openSandboxInteractionFrameProxy: optional("OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY"),
     openSandboxPoolRef: optional("OPENGENI_OPENSANDBOX_POOL_REF"),
     openSandboxKubernetesInventoryNamespace: optional(
       "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",

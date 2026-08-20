@@ -4100,7 +4100,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const snapshotTurnId = turnId;
               if (snapshotSession && snapshotTurnId) {
                 await maybePersistWarmWorkspaceSnapshot(
-                  { db, settings },
+                  { db, settings, objectStorage },
                   {
                     accountId: input.accountId,
                     workspaceId: input.workspaceId,
@@ -4173,7 +4173,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           })
         ) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
-            { db, settings },
+            { db, settings, objectStorage },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -7854,6 +7854,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     cancellationSignal: sandboxResumeSignal,
                     sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                     onSandboxLost: publishSandboxLost,
+                    objectStorage,
                   },
                   {
                     accountId: input.accountId,
@@ -7928,6 +7929,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     cancellationSignal: sandboxResumeSignal,
                     sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                     onSandboxLost: publishSandboxLost,
+                    objectStorage,
                   },
                   {
                     accountId: input.accountId,
@@ -12844,6 +12846,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             ...(finalizerSignal ? { signal: finalizerSignal } : {}),
           });
+          // Fold the portable /workspace archive onto the lease while this turn
+          // still holds the warm box. Provisioner dispose below calls
+          // releaseLateSandbox, which drops that holder and flips draining.
+          if (snapshotInFlight) {
+            await waitForWarmSnapshot(
+              snapshotInFlight,
+              settings.sandboxSnapshotTimeoutMs,
+              finalizerSignal,
+            );
+          }
+          const persisted = await maybePersistWarmWorkspaceSnapshot(
+            { db, settings, objectStorage },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              attemptId: input.attemptId,
+              sandboxGroupId,
+            },
+            setupBoxSession,
+            resolvedSandbox.leaseEpoch,
+            finalizerSignal,
+            true,
+          );
+          if (persisted && publish) {
+            await publish([
+              {
+                type: "sandbox.box.snapshot",
+                payload: { trigger: "turn-end" },
+              },
+            ]).catch(() => undefined);
+          }
         }
         toolPreparationClosing = true;
         if (toolPreparationReady) {
@@ -12909,56 +12944,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ),
           finalizerSignal,
         );
-        if (resolvedSandbox) {
-          // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
-          // turn's finished /workspace onto the lease before releasing the holder,
-          // so the work this turn just produced survives any unclean box death in
-          // the idle window ahead. Throttled by the same interval as the heartbeat
-          // tick (a short turn right after a snapshot skips — bounded-loss contract
-          // is the interval, not per-turn). Best-effort and time-capped by the
-          // helper's own failure discipline; never delays release on failure.
-          const settledTurnId = turnId;
-          if (runTurnEndPersistence && setupBoxSession && sandboxGroupId && settledTurnId) {
-            // Single-flight vs the heartbeat capture: the timer is already cleared
-            // above, but a capture it launched may still be in flight — and that
-            // capture predates the turn's final writes. Wait for it, but only up
-            // to the snapshot timeout: release must never depend on an unbounded
-            // provider capture.
-            if (snapshotInFlight) {
-              await waitForWarmSnapshot(
-                snapshotInFlight,
-                settings.sandboxSnapshotTimeoutMs,
-                finalizerSignal,
-              );
-            }
-            const persisted = await maybePersistWarmWorkspaceSnapshot(
-              { db, settings },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: settledTurnId,
-                attemptId: input.attemptId,
-                sandboxGroupId,
-              },
-              setupBoxSession,
-              resolvedSandbox.leaseEpoch,
-              finalizerSignal,
-            );
-            if (persisted && publish) {
-              await publish([
-                {
-                  type: "sandbox.box.snapshot",
-                  payload: { trigger: "turn-end" },
-                },
-              ]).catch(() => undefined);
-            }
-            // NB workspace capture no longer runs here — it moved to
-            // the TOP of this finally (before preparedTools.close) so it completes
-            // while the box is still solidly alive, instead of racing the turn-end
-            // teardown that was killing 100% of captures on real Modal desktop boxes.
-          }
-        }
       } catch (error) {
         finalizationError ??= error;
         console.error(

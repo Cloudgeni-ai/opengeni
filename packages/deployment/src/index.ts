@@ -127,6 +127,10 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
     optional: [
       "OPENGENI_OPENSANDBOX_TTL_SECONDS",
       "OPENGENI_OPENSANDBOX_USE_SERVER_PROXY",
+      "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS",
+      "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS",
+      "OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL",
+      "OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY",
       "OPENGENI_OPENSANDBOX_POOL_REF",
     ],
   },
@@ -1972,6 +1976,8 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         `kubectl create namespace ${opensandboxNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
         `kubectl create namespace ${dataplaneNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
         `kubectl -n ${opensandboxNamespace} create secret generic opensandbox-api-key --from-literal=api-key="$OPENGENI_OPENSANDBOX_API_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
+        `scripts/operator/ensure-opensandbox-secure-access-secret.sh ${opensandboxNamespace} opensandbox-secure-access`,
+        `kubectl -n ${opensandboxNamespace} create configmap opensandbox-secure-access-runtime-config --from-file=materialize-secure-access-config.py=scripts/operator/opensandbox-materialize-secure-access-config.py --dry-run=client -o yaml | kubectl apply -f -`,
         `kubectl apply -f ${batchSandboxTemplate}`,
         "kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml",
         `helm upgrade --install opensandbox ${chartArchive} --namespace ${opensandboxNamespace} --values deploy/stacks/official-opensandbox.values.yaml --post-renderer scripts/operator/opensandbox-image-post-renderer.sh --wait --timeout 15m`,
@@ -1981,6 +1987,10 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-controller-manager --timeout=300s`,
         `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-server --timeout=300s`,
         `kubectl -n ${opensandboxNamespace} get svc opensandbox-server -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
+        `kubectl -n ${opensandboxNamespace} get svc opensandbox-ingress-gateway -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
+        `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-ingress-gateway --timeout=300s`,
+        `kubectl -n ${opensandboxNamespace} get secret opensandbox-secure-access -o jsonpath='{.data.active-key}' | grep -q .`,
+        `kubectl -n ${opensandboxNamespace} get configmap opensandbox-secure-access-runtime-config -o go-template='{{index .data "materialize-secure-access-config.py"}}' | grep -q materialize`,
         `kubectl -n ${opensandboxNamespace} get svc opensandbox-controller-metrics -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
         `kubectl -n ${opensandboxNamespace} get secret opensandbox-api-key -o jsonpath='{.data.api-key}' | grep -q .`,
         `kubectl get crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io`,
@@ -1993,11 +2003,12 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
       ],
       notes: [
         "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the OpenGeni app chart.",
-        "The lifecycle service is ClusterIP-only and its lifecycle routes are API-key authenticated. Upstream single-tenant proxy routes are API-key exempt, so the worker proxy remains private with no ingress.",
+        "The lifecycle service is ClusterIP-only and its lifecycle routes are API-key authenticated. Exec and files stay on that private server-proxy. Channel B (browserd, noVNC, ttyd) uses the ClusterIP ingress gateway in URI mode with OSEP-0011 signed endpoints; put a TLS terminator in front of that ClusterIP in production rather than forking the upstream Service to LoadBalancer.",
+        "Official server v0.2.2 ignores OPENSANDBOX_SECURE_ACCESS_* env. The image post-renderer adds an initContainer that materializes [ingress.secure_access] into a writable runtime TOML from Secret opensandbox-secure-access so keys never enter git or the server ConfigMap. Helm 4 cannot pass a script to --post-renderer; use helm template | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -.",
         contract.runtime.cloud === "azure"
           ? "The Azure BatchSandbox template requires the optional Terraform sandbox node pool label and taint contract."
           : "The generic BatchSandbox template has no cloud-specific node selector and works on ordinary Kubernetes or k3s nodes.",
-        "Native OpenSandbox snapshots, ingress gateway, and node log agent remain disabled; OpenGeni portable workspace archives are authoritative in v1.",
+        "Native OpenSandbox snapshots remain disabled; OpenGeni portable workspace archives in object storage are authoritative in v1.",
       ],
     });
   }

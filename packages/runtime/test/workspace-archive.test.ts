@@ -3,9 +3,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   captureVerifiedWorkspaceArchive,
   describeNativeSnapshotArchive,
+  inlineWorkspaceArchiveForRestore,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
@@ -254,6 +256,40 @@ describe("verified workspace archives", () => {
 
     expect(commands).toHaveLength(2);
     expect(commands.every((command) => command.includes("--hard-dereference"))).toBe(true);
+    expect(
+      commands.every((command) =>
+        command.includes("! \\( -type s -o -type p -o -type b -o -type c \\)"),
+      ),
+    ).toBe(true);
+  });
+
+  linuxTest("unix sockets do not change the in-sandbox fingerprint entry count", async () => {
+    const fake = sessionWithFingerprints([stableTree, stableTree]);
+    await captureVerifiedWorkspaceArchive(fake.session, 1_900_000_000_013);
+    const command = fake.commands()[0]!;
+    const root = mkdtempSync(join(tmpdir(), "opengeni-fingerprint-socket-"));
+    try {
+      mkdirSync(join(root, ".gnupg"), { recursive: true });
+      writeFileSync(join(root, "retained.txt"), "retained");
+      const run = () => {
+        const result = Bun.spawnSync(["/bin/bash", "-c", command.replace("cd /workspace", `cd ${shellQuote(root)}`)], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(0);
+        return Buffer.from(result.stdout).toString("utf8");
+      };
+      const withoutSocket = run();
+      const socketPath = join(root, ".gnupg", "S.gpg-agent");
+      const socket = Bun.spawnSync(["python3", "-c", "import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])", socketPath], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(socket.exitCode).toBe(0);
+      expect(run()).toBe(withoutSocket);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("host-backed workspaces fingerprint the SDK archive projection without sandbox exec", async () => {
@@ -533,5 +569,54 @@ describe("verified workspace archives", () => {
     expect(error).toBeInstanceOf(WorkspaceArchiveIntegrityError);
     expect(error).toMatchObject({ code: "workspace_fingerprint_mismatch", retryable: false });
     expect(fake.counts()).toEqual({ probes: 1, captures: 0 });
+  });
+
+  test("object-storage refs restore into verified inline bytes", async () => {
+    const archive = new TextEncoder().encode("object-storage-tar");
+    const capturedAt = 1_900_000_000_000;
+    const sha256 = createHash("sha256").update(archive).digest("hex");
+    const revision = `wa1:${capturedAt}:${sha256}`;
+    const key = workspaceArchiveObjectKey({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+      revision,
+    });
+    const descriptor = {
+      version: 1 as const,
+      revision,
+      archiveSha256: sha256,
+      archiveBytes: archive.length,
+      capturedAt: new Date(capturedAt).toISOString(),
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256,
+        entryCount: 1,
+        fileCount: 1,
+        totalFileBytes: archive.length,
+      },
+    };
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key,
+      sha256,
+      bytes: archive.length,
+      backend: "s3-compatible",
+    };
+    const restored = await inlineWorkspaceArchiveForRestore(
+      { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
+      async (requested) => (requested === key ? { bytes: archive } : null),
+    );
+    expect(restored.workspaceArchive).toBe(Buffer.from(archive).toString("base64"));
+    expect(readVerifiedWorkspaceArchive(restored.workspaceArchive, descriptor).bytes).toEqual(
+      archive,
+    );
+
+    await expect(
+      inlineWorkspaceArchiveForRestore(
+        { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
+        async () => null,
+      ),
+    ).rejects.toMatchObject({ code: "archive_base64_invalid" });
   });
 });

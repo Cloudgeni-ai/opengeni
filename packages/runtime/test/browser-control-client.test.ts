@@ -145,6 +145,43 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("host-fetches JSON through an OSEP-0011 signed URI with the browserd Bearer", async () => {
+    const prefix = "/sbx-1/7682/s6ph0/sigsigsig";
+    let hostFetches = 0;
+    let authorization: string | null = null;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        hostFetches += 1;
+        authorization = request.headers.get("authorization");
+        expect(new URL(request.url).pathname).toBe(`${prefix}/v1/origins`);
+        return success({ origins: ["https://app.opengeni.test"] });
+      },
+    });
+    const session: BrowserControlPlacementSession = {
+      resolveExposedPort: async () => ({
+        host: "127.0.0.1",
+        port: server.port,
+        tls: false,
+        path: prefix,
+        query: "",
+      }),
+      exec: async () => {
+        throw new Error("must not fall back to in-box curl");
+      },
+    };
+    try {
+      const client = new BrowserControlClient(session, { adminToken });
+      expect(await client.addAllowedOrigins(["https://app.opengeni.test"])).toEqual([
+        "https://app.opengeni.test",
+      ]);
+      expect(hostFetches).toBe(1);
+      expect(authorization).toBe(`Bearer ${adminToken}`);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("serializes bounded remote-provider launch authority without returning it", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "provider-controller-1";
