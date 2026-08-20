@@ -1,0 +1,680 @@
+import {
+  advanceWorkspaceGeneration,
+  verifyWorkspaceMutationSettlement,
+  heartbeatLeaseHolder,
+  readLease,
+  accrueWarmSeconds,
+  abandonRecordingForTurnAttempt,
+} from "@opengeni/db";
+import {
+  RoutingMutationOutcomeUnknownError,
+  type EstablishedSandboxSession,
+  stopRecording as stopRecordingOnBox,
+} from "@opengeni/runtime";
+import {
+  sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
+  type Settings,
+} from "@opengeni/config";
+import { createRuntimeBatcher, currentActivityContext } from "../streaming";
+import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
+import {
+  maybePersistWarmWorkspaceSnapshot,
+  waitForWarmSnapshot,
+  type ResumedTurnSandbox,
+} from "../../sandbox-resume";
+import { recordCreditMicros } from "../../observability-metrics";
+import { beginRecording, discardUnpublishedRecording, type ActiveRecording } from "../recording";
+import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
+import { sandboxRunAs } from "@opengeni/runtime";
+import { randomUUID } from "node:crypto";
+
+import { safeErrorDiagnostic } from "./errors";
+import {
+  shouldStartPeriodicWorkspaceSnapshot,
+  releaseTurnSandboxAfterWriterDrain,
+  finalizeDurableTurnOpStreams,
+} from "./quiescence";
+import { SandboxDeadlineRotationError } from "./sandbox-provision";
+import { shouldStartOnTurnRecording } from "./tool-policy";
+import type {
+  AttemptIdentityState,
+  EventingState,
+  RecordingState,
+  SandboxRuntimeState,
+} from "./turn-context";
+
+export type SandboxTurnRuntimeDeps = {
+  input: RunAgentTurnInput;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  cancellationSignal: AbortSignal | undefined;
+  activityContext: ReturnType<typeof currentActivityContext>;
+  sandboxRotationController: AbortController;
+  sandboxState: SandboxRuntimeState;
+  recordingState: RecordingState;
+  eventing: EventingState;
+  attempt: AttemptIdentityState;
+};
+
+export type SandboxTurnRuntime = ReturnType<typeof createSandboxTurnRuntime>;
+
+export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
+  const {
+    input,
+    settings,
+    db,
+    observability,
+    cancellationSignal,
+    activityContext,
+    sandboxRotationController,
+    sandboxState,
+    recordingState,
+    eventing,
+    attempt,
+  } = deps;
+
+  // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
+  // the one box by id from the group lease and injects it NON-OWNED into the
+  // run. null when the flag is off (byte-for-byte the legacy build-and-discard
+  // path) OR when the backend is "none". Released + dropped in `finally`.
+  const releaseLateSandbox = async (sandbox: ResumedTurnSandbox): Promise<void> => {
+    sandboxState.lateSandboxesAwaitingWriterDrain.add(sandbox);
+    // Drop the holder/timer immediately, but keep its null-outcome admissions
+    // fenced until the shared attempt writer drain completes. The staged
+    // release serializes a later proof-bearing call behind this one.
+    await sandbox.release().catch(() => undefined);
+    if (!sandboxState.attemptWritersDrained) return;
+    try {
+      await releaseTurnSandboxAfterWriterDrain(sandbox);
+      sandboxState.lateSandboxesAwaitingWriterDrain.delete(sandbox);
+    } catch (error) {
+      console.error(
+        "late sandbox quiesced release failed (turn outcome unaffected)",
+        safeErrorDiagnostic(error),
+      );
+    }
+  };
+  const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {
+    if (!sandboxState.resolvedSandbox) throw new Error(message);
+    return sandboxState.resolvedSandbox;
+  };
+  // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
+  // routing proxy). Kept as a fallback finalizer; the routing proxy normally
+  // aggregates it together with every machine reached after a mid-turn swap.
+  // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
+  // Platform setup (beforeAgentStart hooks + file materialization) execs against
+  // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
+  // connected machine (the user's real computer).
+  const finalizeTurnOpStreamOps = async (): Promise<void> => {
+    await finalizeDurableTurnOpStreams(
+      [sandboxState.lazyOwnedSandbox?.session, sandboxState.resolvedSandbox?.established.session],
+      sandboxState.machinePrimarySession,
+    );
+  };
+  // A same-target API repair can replace the home provider while this turn is
+  // alive. Keep setup/snapshot persistence on the rebound raw session while
+  // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
+  // proxy separately, so their worker-side handle may replace its raw session.
+  const onHomeSandboxRebound = (rebound: {
+    established: EstablishedSandboxSession;
+    leaseEpoch: number;
+  }): void => {
+    const current = sandboxState.resolvedSandbox;
+    const previousSession = current?.established.session;
+    const preserveRoutingProxy =
+      current !== null && previousSession !== sandboxState.setupBoxSession;
+    sandboxState.setupBoxSession = rebound.established.session;
+    if (!current) return;
+    current.leaseEpoch = rebound.leaseEpoch;
+    current.established = preserveRoutingProxy
+      ? {
+          ...current.established,
+          client: rebound.established.client,
+          // Keep the stable SDK-facing proxy; only its resolver changes the
+          // underlying backend. The worker's setupBoxSession above is raw.
+          session: previousSession,
+          sessionState: rebound.established.sessionState,
+          instanceId: rebound.established.instanceId,
+          backendId: rebound.established.backendId,
+          ...(rebound.established.origin ? { origin: rebound.established.origin } : {}),
+          ...(rebound.established.restoredArchive
+            ? { restoredArchive: rebound.established.restoredArchive }
+            : {}),
+        }
+      : rebound.established;
+  };
+  // The globally unique durable turn-attempt holder id + the group id,
+  // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
+  // (a superseded owner self-evicts) and finally can release.
+  const runWorkspaceMutationForSandbox = async <T>(
+    sandbox: ResumedTurnSandbox,
+    operation: string,
+    mutation: () => Promise<T>,
+    observePhase?: (measurement: {
+      phase: "admission" | "provider" | "settlement" | "snapshot_wait";
+      outcome: "completed" | "failed";
+      durationSeconds: number;
+    }) => void,
+  ): Promise<T> => {
+    const observeMutationPhase = (
+      phase: "admission" | "provider" | "settlement" | "snapshot_wait",
+      outcome: "completed" | "failed",
+      durationMs: number,
+    ): void => {
+      try {
+        observePhase?.({
+          phase,
+          outcome,
+          durationSeconds: Math.max(0, durationMs) / 1_000,
+        });
+      } catch {
+        // Diagnostics must never alter workspace mutation authority.
+      }
+    };
+    // Connected machines are the user's own persistence and never dirty the
+    // cloud home archive. Every persistable raw-session write batch is fenced
+    // against the exact current lease/provider before the provider sees it.
+    if (sandbox.established.backendId === "selfhosted") {
+      const providerStartedAt = performance.now();
+      let providerOutcome: "completed" | "failed" = "failed";
+      try {
+        const result = await mutation();
+        providerOutcome = "completed";
+        return result;
+      } catch (error) {
+        if (error instanceof ChannelAPartialMutationError) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+            { cause: error },
+          );
+        }
+        throw error;
+      } finally {
+        observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+      }
+    }
+    if (
+      !sandboxState.sandboxGroupId ||
+      !sandboxState.sandboxHolderId ||
+      !attempt.turnId ||
+      attempt.executionGeneration <= 0
+    ) {
+      throw new Error("Workspace mutation attempted before exact turn sandbox admission");
+    }
+    let admissionCaptureWaitMs = 0;
+    const identity = {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: input.attemptId,
+      holderId: sandboxState.sandboxHolderId,
+      sandboxGroupId: sandboxState.sandboxGroupId,
+      expectedEpoch: sandbox.leaseEpoch,
+      expectedInstanceId: sandbox.established.instanceId,
+      operation,
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
+      ...(observePhase
+        ? {
+            onCaptureWait: (observation: {
+              durationMs: number;
+              outcome: "completed" | "failed";
+            }) => {
+              admissionCaptureWaitMs += Math.max(0, observation.durationMs);
+              observeMutationPhase("snapshot_wait", observation.outcome, observation.durationMs);
+            },
+          }
+        : {}),
+    };
+    const admissionStartedAt = performance.now();
+    let admissionOutcome: "completed" | "failed" = "failed";
+    let admission: Awaited<ReturnType<typeof advanceWorkspaceGeneration>>;
+    try {
+      admission = await advanceWorkspaceGeneration(db, identity);
+      admissionOutcome = "completed";
+    } finally {
+      observeMutationPhase(
+        "admission",
+        admissionOutcome,
+        Math.max(0, performance.now() - admissionStartedAt - admissionCaptureWaitMs),
+      );
+    }
+    const settleMutation = async (outcome: "resolved" | "rejected"): Promise<void> => {
+      const settlementStartedAt = performance.now();
+      let settlementOutcome: "completed" | "failed" = "failed";
+      try {
+        await verifyWorkspaceMutationSettlement(db, {
+          ...identity,
+          admission,
+          outcome,
+        });
+        settlementOutcome = "completed";
+      } finally {
+        observeMutationPhase(
+          "settlement",
+          settlementOutcome,
+          performance.now() - settlementStartedAt,
+        );
+      }
+    };
+    let result: T;
+    const providerStartedAt = performance.now();
+    let providerOutcome: "completed" | "failed" = "failed";
+    try {
+      result = await mutation();
+      providerOutcome = "completed";
+    } catch (providerError) {
+      observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+      const partialMutation = providerError instanceof ChannelAPartialMutationError;
+      try {
+        await settleMutation(partialMutation ? "resolved" : "rejected");
+      } catch (settlementError) {
+        throw new RoutingMutationOutcomeUnknownError(
+          operation,
+          partialMutation
+            ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
+            : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+          { cause: settlementError },
+        );
+      }
+      if (partialMutation) {
+        throw new RoutingMutationOutcomeUnknownError(
+          operation,
+          `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
+          { cause: providerError },
+        );
+      }
+      throw providerError;
+    }
+    observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+    try {
+      await settleMutation("resolved");
+    } catch (settlementError) {
+      throw new RoutingMutationOutcomeUnknownError(
+        operation,
+        `Platform workspace mutation "${operation}" returned from the provider but lost its durable settlement fence; its outcome is unknown and it was not replayed`,
+        { cause: settlementError },
+      );
+    }
+    return result;
+  };
+  // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
+  // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
+  // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
+  const stopLeaseHeartbeat = (): void => {
+    if (!sandboxState.leaseHeartbeatTimer) return;
+    clearInterval(sandboxState.leaseHeartbeatTimer);
+    sandboxState.leaseHeartbeatTimer = undefined;
+  };
+  // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
+  // credentials for a multi-day turn. The controller is attached only after
+  // the initial seed reached a real cloud box and is drained before capture.
+  // Generic host-owned run material has its own attempt-scoped renewal and
+  // write handle. It is always drained and wiped before workspace capture.
+  // The delegated Codemode bearer has a one-hour TTL. Renewal is attempt-
+  // owned and attaches only after the initial token file reached a real
+  // sandbox session; finalization drains an in-flight replacement.
+  // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
+  // 10s but a Modal filesystem snapshot can take longer — never overlap two
+  // captures on one box. The in-flight capture's promise is held so the
+  // turn-end persist can await it (its capture predates the turn's final
+  // writes; landing after the fresher turn-end capture started would make
+  // the atomic DB throttle discard the fresher one). Interval throttling
+  // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
+  // The heartbeat snapshot is mid-session durability, not first-request
+  // preparation. Keep it off the startup critical path until a provider
+  // request has actually reached its transport boundary.
+  // Turn-end capture needs the lease heartbeat to keep its holder alive, but
+  // must prevent that same timer from starting another periodic snapshot
+  // while it reads. This gate separates those two responsibilities.
+  // Computer-use-only recording. Ordinary shell/filesystem turns leave this
+  // null; the first actual computer action starts it after :0 is ready.
+  // P4.3 recording gate: flips true in `onComputerUseReady`, the runtime's
+  // execution-time callback for the first real computer action. It must flip
+  // BEFORE awaiting recording startup: the SDK tool-call stream item can arrive
+  // before ffmpeg has finished starting. A plain text turn ("hey"/"continue")
+  // never invokes the callback, so settlement performs no storage PUT.
+  const abandonActiveRecording = async (
+    reason: string,
+    disposition: "failed" | "discard" = "failed",
+  ): Promise<void> => {
+    const recording = recordingState.activeRecording as ActiveRecording | null;
+    if (!recording) return;
+    recordingState.activeRecording = null;
+    if (sandboxState.resolvedSandbox) {
+      await stopRecordingOnBox(
+        sandboxState.resolvedSandbox.established.session,
+        recording.proc,
+      ).catch(() => undefined);
+    }
+    if (!attempt.turnId || attempt.executionGeneration <= 0) return;
+    await abandonRecordingForTurnAttempt(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: input.attemptId,
+      recordingId: recording.recordingId,
+      disposition,
+      reason,
+    }).catch(() => undefined);
+  };
+  const flushRuntimeBatcher = async () => {
+    const current = eventing.batcher as ReturnType<typeof createRuntimeBatcher> | null;
+    await current?.flush().catch(() => undefined);
+  };
+  // Reconciliation is declared before provider routing so every turn-end path
+  // can share one closure. It cannot run until `stream` exists, by which time
+  // this value has been rebound to the turn's resolved model policy.
+  const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
+    const established = sandbox.established;
+    if (eventing.publish && established.origin && established.origin !== "resumed") {
+      const lifecycleEvents: Array<{
+        type: "sandbox.box.lost" | "sandbox.box.created";
+        payload: unknown;
+      }> = [];
+      if (established.lostInstanceId) {
+        lifecycleEvents.push({
+          type: "sandbox.box.lost",
+          payload: { sandboxId: established.lostInstanceId },
+        });
+      }
+      lifecycleEvents.push({
+        type: "sandbox.box.created",
+        payload: {
+          sandboxId: established.instanceId,
+          hydrated: established.origin === "restored" ? "archive" : "none",
+        },
+      });
+      await eventing.publish(lifecycleEvents).catch(() => undefined);
+    }
+  };
+  const publishSandboxLost = async (lostSandbox: { instanceId: string }): Promise<void> => {
+    if (!eventing.publish) return;
+    await eventing
+      .publish([
+        {
+          type: "sandbox.box.lost",
+          payload: { sandboxId: lostSandbox.instanceId },
+        },
+      ])
+      .catch((publishError) => {
+        // The lease transition is already authoritative. A fenced/failed audit
+        // append must not prevent the same logical turn from recovering.
+        console.error("sandbox box lost event publish failed", safeErrorDiagnostic(publishError));
+      });
+  };
+  const startLeaseHeartbeat = (
+    sandbox: ResumedTurnSandbox,
+    warmBackend: Settings["sandboxBackend"] | undefined,
+  ): void => {
+    if (sandboxState.leaseHeartbeatTimer) return;
+    if (!sandboxState.sandboxHolderId || !sandboxState.sandboxGroupId) {
+      return;
+    }
+    // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
+    // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
+    // is rejected (returns false) and we stop refreshing — the box rides the
+    // provider idle-timeout and the next dispatch re-establishes it. Best-
+    // effort: a transient DB error must never fail the turn.
+    const heartbeatEpoch = sandbox.leaseEpoch;
+    const heartbeatHolderId = sandboxState.sandboxHolderId;
+    const heartbeatGroupId = sandboxState.sandboxGroupId;
+    // P2.1 warm-meter (tick A): while a turn runs, the heartbeat is also the
+    // warm-seconds tick. GROUP+epoch+tick keyed (one box = one stream, shared
+    // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
+    // metered when a per-backend rate is configured. Best-effort: a metering
+    // failure must never fail the turn.
+    //
+    // Keyed off the EFFECTIVE backend (Stage D): a machine-primary turn has NO
+    // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
+    // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
+    // cloud seconds for a box that does not exist (a real money bug). Non-machine
+    // turns fall back to groupBoxBackend (the REAL box that ran): for a machine-
+    // home turn that degraded to the cloud group box (swap-away / flag-off), that
+    // is the deployment default (modal), so the fallback box is warm-metered at
+    // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
+    const warmRate = sandboxWarmRateMicrosPerSecond(
+      settings,
+      warmBackend ?? (sandbox.established.backendId as Settings["sandboxBackend"]),
+    );
+    sandboxState.leaseHeartbeatTimer = setInterval(() => {
+      void heartbeatLeaseHolder(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: heartbeatGroupId,
+        kind: "turn",
+        holderId: heartbeatHolderId,
+        leaseTtlMs: settings.sandboxLeaseTtlMs,
+        expectedEpoch: heartbeatEpoch,
+      })
+        .then(async (alive) => {
+          if (alive || sandboxState.rotationInFlight || sandboxRotationController.signal.aborted)
+            return;
+          const rotatingLease = await readLease(db, input.workspaceId, heartbeatGroupId).catch(
+            () => null,
+          );
+          if (
+            !rotatingLease ||
+            rotatingLease.leaseEpoch !== heartbeatEpoch ||
+            rotatingLease.instanceId !== sandbox.established.instanceId ||
+            rotatingLease.rotationRequestedAt === null
+          ) {
+            // The holder was reaped, the exact attempt closed, the epoch was
+            // superseded, or the lease began draining. Do not leave a dead
+            // interval issuing DB writes and snapshot probes forever.
+            stopLeaseHeartbeat();
+            return;
+          }
+          sandboxState.rotationInFlight = (async () => {
+            // Rotation admission already fenced all new workspace mutations.
+            // Wait for an earlier periodic capture, then produce the exact
+            // generation-complete checkpoint that licenses aborting this run.
+            if (sandboxState.snapshotInFlight) {
+              await waitForWarmSnapshot(
+                sandboxState.snapshotInFlight,
+                settings.sandboxSnapshotTimeoutMs,
+                cancellationSignal,
+              );
+            }
+            const snapshotSession = sandboxState.setupBoxSession;
+            const snapshotTurnId = attempt.turnId;
+            if (snapshotSession && snapshotTurnId) {
+              await maybePersistWarmWorkspaceSnapshot(
+                { db, settings },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: snapshotTurnId,
+                  attemptId: input.attemptId,
+                  sandboxGroupId: heartbeatGroupId,
+                },
+                snapshotSession,
+                heartbeatEpoch,
+                cancellationSignal,
+                true,
+              );
+            }
+            const checkpointed = await readLease(db, input.workspaceId, heartbeatGroupId);
+            if (
+              checkpointed?.leaseEpoch === heartbeatEpoch &&
+              checkpointed.rotationRequestedAt !== null &&
+              checkpointed.archiveComplete &&
+              !cancellationSignal?.aborted
+            ) {
+              sandboxRotationController.abort(
+                new SandboxDeadlineRotationError(heartbeatGroupId, heartbeatEpoch),
+              );
+            }
+          })()
+            .catch((error) => {
+              observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sandboxGroupId: heartbeatGroupId,
+                leaseEpoch: heartbeatEpoch,
+                ...safeErrorDiagnostic(error),
+              });
+            })
+            .finally(() => {
+              sandboxState.rotationInFlight = null;
+            });
+          await sandboxState.rotationInFlight;
+        })
+        .catch(() => undefined);
+      void accrueWarmSeconds(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: heartbeatGroupId,
+        expectedEpoch: heartbeatEpoch,
+        warmRateMicrosPerSecond: warmRate,
+        subjectId: input.sessionId,
+      })
+        .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
+        .catch(() => undefined);
+      // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
+      // the box, fold a fresh /workspace snapshot onto the lease every
+      // sandboxSnapshotIntervalMs, so a box death the reaper never sees
+      // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
+      // of work — a legit multi-day turn is otherwise completely unprotected
+      // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
+      // session (setupBoxSession): the routing veneer could swap mid-op and a
+      // selfhosted target has no persistWorkspace anyway. Best-effort +
+      // single-flight; throttling lives in the helper.
+      const snapshotSession = sandboxState.setupBoxSession;
+      const snapshotTurnId = attempt.turnId;
+      if (
+        snapshotSession &&
+        snapshotTurnId &&
+        shouldStartPeriodicWorkspaceSnapshot({
+          firstProviderRequestStarted: sandboxState.firstProviderRequestStarted,
+          snapshotInFlight: Boolean(sandboxState.snapshotInFlight),
+          turnEndCaptureInProgress: sandboxState.turnEndCaptureInProgress,
+        })
+      ) {
+        sandboxState.snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
+          { db, settings },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: snapshotTurnId,
+            attemptId: input.attemptId,
+            sandboxGroupId: heartbeatGroupId,
+          },
+          snapshotSession,
+          heartbeatEpoch,
+          activityContext?.cancellationSignal,
+        )
+          .then(async (persisted) => {
+            if (persisted && eventing.publish) {
+              await eventing.publish([
+                {
+                  type: "sandbox.box.snapshot",
+                  payload: { trigger: "heartbeat" },
+                },
+              ]);
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            sandboxState.snapshotInFlight = null;
+          });
+      }
+    }, 10_000);
+    if (
+      "unref" in sandboxState.leaseHeartbeatTimer &&
+      typeof sandboxState.leaseHeartbeatTimer.unref === "function"
+    ) {
+      sandboxState.leaseHeartbeatTimer.unref();
+    }
+  };
+  const maybeStartOnTurnRecording = async (
+    sandbox: ResumedTurnSandbox,
+    effectiveBackend: Settings["sandboxBackend"] | undefined,
+  ): Promise<void> => {
+    if (recordingState.activeRecording) {
+      return;
+    }
+    if (recordingState.computerUseRecordingStart) {
+      await recordingState.computerUseRecordingStart;
+      return;
+    }
+    // Called only by the runtime's first-computer-action hook. Plain sandbox
+    // operations never start ffmpeg and never boot a display merely to record
+    // an unused desktop. Recording failure never fails the computer action.
+    if (
+      shouldStartOnTurnRecording({
+        recordingEnabled: settings.recordingEnabled,
+        desktopEnabled: settings.sandboxDesktopEnabled,
+        establishedBackendId: sandbox.established.backendId,
+        // EFFECTIVE (active) backend, not the session home: a machine-primary turn
+        // resolves to "selfhosted" and skips; a swap back to the cloud group box
+        // resolves to undefined and records as before.
+        effectiveBackend,
+      })
+    ) {
+      recordingState.computerUseRecordingStart = (async () => {
+        let begun: Awaited<ReturnType<typeof beginRecording>> | null = null;
+        try {
+          begun = await beginRecording({
+            settings,
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            recordingId: randomUUID(),
+            mode: "on-turn",
+            session: sandbox.established.session,
+            runAs: sandboxRunAs(settings),
+            reason: null,
+          });
+          if (!eventing.publish) {
+            throw new Error("recording started before the turn event publisher was ready");
+          }
+          await eventing.publish([{ type: "recording.started", payload: begun.started }]);
+          recordingState.activeRecording = begun.active;
+        } catch (recordingError) {
+          recordingState.activeRecording = null;
+          if (begun) {
+            await discardUnpublishedRecording({
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              active: begun.active,
+              session: sandbox.established.session,
+            });
+          }
+          console.error(
+            "computer-use recording start failed (action outcome unaffected)",
+            safeErrorDiagnostic(recordingError),
+          );
+        }
+      })();
+      await recordingState.computerUseRecordingStart;
+    }
+  };
+
+  return {
+    releaseLateSandbox,
+    requireResolvedSandboxForMutation,
+    finalizeTurnOpStreamOps,
+    onHomeSandboxRebound,
+    runWorkspaceMutationForSandbox,
+    stopLeaseHeartbeat,
+    abandonActiveRecording,
+    flushRuntimeBatcher,
+    publishSandboxLifecycleEvents,
+    publishSandboxLost,
+    startLeaseHeartbeat,
+    maybeStartOnTurnRecording,
+  };
+}

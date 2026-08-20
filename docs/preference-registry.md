@@ -260,4 +260,4 @@ Canonical implementation:
 - `apps/web/src/routes/preference-registry-admin.tsx`;
 - `apps/web/src/routes/workspace-state-loader.ts`;
 - `packages/runtime/src/workspace-governance.ts`;
-- `apps/worker/src/activities/agent-turn.ts`.
+- `apps/worker/src/activities/agent-turn/governance-model.ts`.

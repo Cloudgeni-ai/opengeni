@@ -26,7 +26,8 @@ import {
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
-import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
+import { type ObjectStorage } from "@opengeni/storage";
+import { objectStorageForSandboxDownloads } from "./file-resources";
 import type { ResumedTurnSandbox } from "../../sandbox-resume";
 
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
@@ -261,23 +262,4 @@ function uuidFromDigest(digest: string, startByte: number): string {
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function objectStorageForSandboxDownloads(
-  settings: Settings,
-  objectStorage: ObjectStorage,
-  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
-): ObjectStorage {
-  if (activeSandboxBackend === "selfhosted") {
-    return objectStorage;
-  }
-  if (settings.objectStorageBackend !== "s3-compatible" || !settings.objectStorageSandboxEndpoint) {
-    return objectStorage;
-  }
-  return (
-    createObjectStorage({
-      ...settings,
-      objectStorageEndpoint: settings.objectStorageSandboxEndpoint,
-    }) ?? objectStorage
-  );
 }

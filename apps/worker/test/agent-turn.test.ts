@@ -138,20 +138,25 @@ const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 describe("approval RunState materialization boundary", () => {
   test("ordinary agent turns never read or decode the approval blob", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const streamSource = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
 
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+    expect(streamSource).not.toContain("getLatestRunStateResumeMetadata(");
+    expect(streamSource).not.toMatch(/\bgetLatestRunState\s*\(/);
   });
 
   test("requires_action pause flushes paired history and attaches the open suffix", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     expect(source).toContain("attachOpenSuffixToPendingToolCalls");
     expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
-    expect(source).toContain("reconcileConversationTruth({ requireDurable: true })");
+    expect(source).toContain("historySink.reconcileConversationTruth({ requireDurable: true })");
     expect(source).toContain("settleOpenSuffixResumeIfNeeded");
   });
 
@@ -706,11 +711,13 @@ describe("turn exact-content boundaries", () => {
 
   test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
-    const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
+    const completionPath = source.indexOf(
+      'const finalOutput = String(eventing.stream.finalOutput ?? "");',
+    );
     const mandatoryBarrier = source.indexOf(
-      "await reconcileConversationTruth({ requireDurable: true });",
+      "await historySink.reconcileConversationTruth({ requireDurable: true });",
       completionPath,
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
@@ -718,13 +725,19 @@ describe("turn exact-content boundaries", () => {
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
 
-    const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
-    const terminalFailureStart = source.indexOf('activityStatus = "failed";', failureClassifier);
-    const terminalFailureEnd = source.indexOf(
-      'turnMetricOutcome = "failed";',
+    const failureSource = await Bun.file(
+      new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
+    ).text();
+    const failureClassifier = failureSource.indexOf("const failure = agentRunFailurePayload(error");
+    const terminalFailureStart = failureSource.indexOf(
+      'control.activityStatus = "failed";',
+      failureClassifier,
+    );
+    const terminalFailureEnd = failureSource.indexOf(
+      'control.turnMetricOutcome = "failed";',
       terminalFailureStart,
     );
-    const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
+    const terminalFailureBlock = failureSource.slice(terminalFailureStart, terminalFailureEnd);
     expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
     expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
     expect(terminalFailureBlock).toContain('type: "turn.failed"');
@@ -2665,7 +2678,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("durably starts model preparation before native runStream and binds generic dispatch to fetch", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     const runStreamOnceAt = source.indexOf("const runStreamOnce = async");
     const modelPreparationStartedAt = source.indexOf(
@@ -2808,57 +2821,89 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("activity prepares credential model context before turn input and reuses it lazily", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
-    const resolutionAt = source.indexOf(
+    const credentialSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run-credentials.ts", import.meta.url),
+    ).text();
+    const streamSource = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const establishSource = await Bun.file(
+      new URL("../src/activities/agent-turn/sandbox-establish.ts", import.meta.url),
+    ).text();
+    const resolutionAt = credentialSource.indexOf(
       "const initialRunCredentialMaterial = runCredentialResolver",
     );
-    const modelNoteAt = source.indexOf(
+    const modelNoteAt = credentialSource.indexOf(
       "const runCredentialsNote = initialRunCredentialMaterial",
       resolutionAt,
     );
-    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
-    const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
-      modelNoteAt,
+    const credentialsCallAt = source.indexOf("const runCredentials = await prepareRunCredentials(");
+    const streamCallAt = source.indexOf("return await runTurnStreamAttempt(", credentialsCallAt);
+    const turnInputAt = streamSource.indexOf("const prepared = await turnInput(");
+    const provisionerAt = establishSource.indexOf(
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
-    const lazyCredentialAttachAt = source.indexOf(
+    const lazyCredentialAttachAt = establishSource.indexOf(
       "await attachRunCredentialRenewal(",
       provisionerAt,
     );
-    const lazyProvisionerPrefix = source.slice(provisionerAt, lazyCredentialAttachAt + 500);
+    const lazyProvisionerPrefix = establishSource.slice(
+      provisionerAt,
+      lazyCredentialAttachAt + 500,
+    );
+    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", credentialsCallAt);
 
     expect(resolutionAt).toBeGreaterThan(-1);
     expect(modelNoteAt).toBeGreaterThan(resolutionAt);
-    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
-    expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(credentialsCallAt).toBeGreaterThan(-1);
+    expect(streamCallAt).toBeGreaterThan(credentialsCallAt);
+    expect(turnInputAt).toBeGreaterThan(-1);
+    expect(provisionerAt).toBeGreaterThan(-1);
+    expect(lazyBindAt).toBeGreaterThan(credentialsCallAt);
+    expect(streamCallAt).toBeGreaterThan(lazyBindAt);
     expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
     expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
     expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");
   });
 
   test("runtime preparation overlaps independent workspace reads after the personal-resource fence", async () => {
-    const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    const governanceSource = await Bun.file(
+      new URL("../src/activities/agent-turn/governance-model.ts", import.meta.url),
     ).text();
-    const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
-    const overlappedReads = source.indexOf(
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const credentialsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run-credentials.ts", import.meta.url),
+    ).text();
+    const authorize = governanceSource.indexOf("await resolveSessionAttemptPersonalResources(db");
+    const overlappedReads = governanceSource.indexOf(
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = source.indexOf(
+    const packRead = governanceSource.indexOf(
       "resolveWorkspacePackRuntime(db, input.workspaceId)",
       overlappedReads,
     );
-    const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", overlappedReads);
-    const policyRead = source.indexOf(
+    const rigRead = governanceSource.indexOf(
+      "await materializeRigVersionForAttempt(db",
+      overlappedReads,
+    );
+    const policyRead = governanceSource.indexOf(
       "getWorkspaceModelPolicy(db, input.workspaceId)",
       overlappedReads,
     );
-    const imageEnsure = source.indexOf(
+    const governanceCall = source.indexOf("const governance = await prepareGovernanceAndModel({");
+    const credentialsCall = source.indexOf(
+      "const runCredentials = await prepareRunCredentials(",
+      governanceCall,
+    );
+    const imageEnsure = credentialsSource.indexOf(
       "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
     );
-    const gitAssert = source.indexOf(
+    const gitAssert = credentialsSource.indexOf(
       "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
     );
     expect(authorize).toBeGreaterThan(0);
@@ -2866,20 +2911,22 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(packRead).toBeGreaterThan(overlappedReads);
     expect(rigRead).toBeGreaterThan(packRead);
     expect(policyRead).toBeGreaterThan(rigRead);
-    expect(imageEnsure).toBeGreaterThan(policyRead);
+    expect(governanceCall).toBeGreaterThan(-1);
+    expect(credentialsCall).toBeGreaterThan(governanceCall);
+    expect(imageEnsure).toBeGreaterThan(-1);
     expect(gitAssert).toBeGreaterThan(imageEnsure);
-    expect(source.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
+    expect(credentialsSource.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
   });
 
   test("lazy git token mint starts before the box establish returns", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/sandbox-establish.ts", import.meta.url),
     ).text();
     const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
     const resumeAt = source.indexOf(
-      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      "const provisioned = await (sandboxState.prefetchedManagedBox ??",
       provisionerAt,
     );
     const mintStartAt = source.lastIndexOf("startRunGitCredentialsMint();", resumeAt);
@@ -2893,32 +2940,66 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("repository on-demand turns prefetch managed-box create before tools", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
-    const onDemandAt = source.indexOf('} else if (establishPolicy === "on-demand")');
-    const prefetchAt = source.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
-    const toolsAt = source.indexOf('phase: "tools"', prefetchAt);
-    const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
-      toolsAt,
+    const establishSource = await Bun.file(
+      new URL("../src/activities/agent-turn/sandbox-establish.ts", import.meta.url),
+    ).text();
+    const onDemandAt = establishSource.indexOf('} else if (establishPolicy === "on-demand")');
+    const prefetchAt = establishSource.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
+    const establishCallAt = source.indexOf("await establishTurnSandbox({");
+    const toolsCallAt = source.indexOf(
+      "const toolRuntime = await prepareTurnToolRuntime(",
+      establishCallAt,
     );
-    const joinAt = source.indexOf(
-      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+    const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", toolsCallAt);
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    const toolsAt = toolsSource.indexOf('phase: "tools"');
+    const provisionerAt = establishSource.indexOf(
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+    );
+    const joinAt = establishSource.indexOf(
+      "const provisioned = await (sandboxState.prefetchedManagedBox ??",
       provisionerAt,
     );
-    const prefetchMintAt = source.indexOf("startRunGitCredentialsMint();", prefetchAt);
-    const prefetchResumeAt = source.indexOf("resumeManagedGroupBox()", prefetchMintAt);
+    const prefetchMintAt = establishSource.indexOf("startRunGitCredentialsMint();", prefetchAt);
+    const prefetchResumeAt = establishSource.indexOf(
+      "sandboxState.resumeManagedGroupBox()",
+      prefetchMintAt,
+    );
 
     expect(onDemandAt).toBeGreaterThan(-1);
     expect(prefetchAt).toBeGreaterThan(onDemandAt);
-    expect(toolsAt).toBeGreaterThan(prefetchAt);
-    expect(provisionerAt).toBeGreaterThan(toolsAt);
+    expect(establishCallAt).toBeGreaterThan(-1);
+    expect(toolsCallAt).toBeGreaterThan(establishCallAt);
+    expect(lazyBindAt).toBeGreaterThan(toolsCallAt);
+    expect(toolsAt).toBeGreaterThan(-1);
+    expect(provisionerAt).toBeGreaterThan(-1);
     expect(joinAt).toBeGreaterThan(provisionerAt);
     expect(prefetchMintAt).toBeGreaterThan(prefetchAt);
     expect(prefetchMintAt).toBeLessThan(prefetchResumeAt);
-    expect(prefetchResumeAt).toBeLessThan(toolsAt);
-    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeManagedGroupBox()");
-    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeBoxForTurn(");
+    // The whole establish phase runs before tool preparation, so the on-demand
+    // branch must not await the managed box anywhere before the lazy binder.
+    const lazyBinderDefinitionAt = establishSource.indexOf(
+      "export async function bindLazySandboxProvisioner(",
+    );
+    expect(lazyBinderDefinitionAt).toBeGreaterThan(onDemandAt);
+    const onDemandEstablishBody = establishSource.slice(onDemandAt, lazyBinderDefinitionAt);
+    expect(onDemandEstablishBody).not.toContain("await sandboxState.resumeManagedGroupBox()");
+    expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
+  });
+
+  test("personal-connection membership uses named live-authority, not a bare grant join", async () => {
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
+    expect(toolsSource).not.toContain("getWorkspaceGrant");
+    expect(toolsSource).toMatch(
+      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
+    );
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {

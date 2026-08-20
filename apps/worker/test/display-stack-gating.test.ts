@@ -13,7 +13,7 @@ describe("turn sandbox resume is desktop-free", () => {
     "utf8",
   );
   const agentTurnSource = readFileSync(
-    join(import.meta.dir, "..", "src", "activities", "agent-turn.ts"),
+    join(import.meta.dir, "..", "src", "activities", "agent-turn", "agent-build.ts"),
     "utf8",
   );
 
