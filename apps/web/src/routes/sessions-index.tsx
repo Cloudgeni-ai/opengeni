@@ -932,7 +932,7 @@ function SessionControlStrip({
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
+    <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden">
       <ModelPicker
         rows={modelCatalog.rows}
         model={context.model}
@@ -941,6 +941,7 @@ function SessionControlStrip({
         disabled={disabled}
         loading={modelCatalog.loading}
         error={modelCatalog.error ?? policyError}
+        className="shrink"
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
         onLatencyModeChange={context.setLatencyMode}
@@ -949,7 +950,7 @@ function SessionControlStrip({
         servers={context.toolMcpServers}
         firstPartyTools={firstPartyToolOptions}
         selection={selection}
-        triggerClassName="max-sm:hidden"
+        triggerClassName="min-w-0 shrink overflow-hidden max-sm:hidden"
         disabled={disabled}
         onChange={onToolSelectionChange}
       />
@@ -964,7 +965,7 @@ function SessionControlStrip({
         <WorkspaceRepositoryPicker
           workspaceId={workspaceId}
           disabled={disabled}
-          triggerClassName="max-sm:hidden"
+          triggerClassName="min-w-0 shrink overflow-hidden max-sm:hidden"
         />
       ) : null}
     </div>
@@ -995,10 +996,10 @@ function SessionFolderPicker({
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}
-          className="h-8 max-w-[12rem] gap-1.5 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
+          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <FolderIcon className="size-3.5 shrink-0" />
-          <span className="truncate">{label}</span>
+          <span className="min-w-0 truncate">{label}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>

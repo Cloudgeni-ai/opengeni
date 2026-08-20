@@ -568,6 +568,25 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0301 creates this target-schema capability before
+    -- opengeni_app exists on a fresh migrate-then-provision installation. Its
+    -- policy is evaluated for ordinary session-list snapshot writes, so the
+    -- runtime role must be able to execute the predicate even when no
+    -- visibility-transition capability is active. Re-converge the exact ACL
+    -- here and keep PUBLIC revoked.
+    IF to_regprocedure(
+      format('%I.session_visibility_lifecycle_capability_held()', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_visibility_lifecycle_capability_held() FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_visibility_lifecycle_capability_held() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
     -- yet exist, and these three live in the data schema rather than
