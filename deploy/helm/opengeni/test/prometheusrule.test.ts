@@ -6,28 +6,27 @@ const DEPLOYMENT_SCOPE =
   "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
-  test("alerts on cumulative provider-dispatch and first-byte p95 SLOs", async () => {
+  test("keeps cumulative startup latency out of paging alerts", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
-    for (const [name, milestone] of [
-      ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
-      ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
-    ] as const) {
-      const expression = alertExpression(template, name);
-      expect(expression).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
-      expect(expression).toContain(`milestone="${milestone}"`);
-      expect(expression).toContain("histogram_quantile(");
-      expect(expression).toContain("turnStartupMinSamples");
-      for (const selector of metricSelectors(expression)) {
-        expect(selector).toContain(DEPLOYMENT_SCOPE);
-      }
-      expect(expression).not.toContain("sessionId");
-      expect(expression).not.toContain("turnId");
+    for (const name of [
+      "OpenGeniTurnStartupQueueP95High",
+      "OpenGeniTurnStartupProviderDispatchP95High",
+      "OpenGeniTurnStartupFirstByteP95High",
+    ]) {
+      expect(template).not.toContain(name);
     }
-    expect(template).not.toContain("OpenGeniTurnStartupQueueP95High");
-    expect(template).not.toContain("turnStartupQueueP95Seconds");
+    for (const value of [
+      "turnStartupQueueP95Seconds",
+      "turnStartupProviderDispatchP95Seconds",
+      "turnStartupFirstByteP95Seconds",
+    ]) {
+      expect(template).not.toContain(value);
+    }
+    expect(template).not.toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+    expect(template).toContain("OpenGeniTurnStartupFirstByteAvailabilityLow");
     expect(template).toContain("OpenGeniTurnEligibleBacklogOld");
     expect(template).toContain("OpenGeniTurnSlotsSaturated");
   });
@@ -37,7 +36,7 @@ describe("turn-capacity Prometheus alerts", () => {
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
-    const expression = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
+    const expression = alertExpression(template, "OpenGeniTurnStartupFirstByteAvailabilityLow");
     const production = renderDeploymentScope(expression, {
       namespace: "opengeni-shared",
       release: "release-a",
@@ -65,7 +64,6 @@ describe("turn-capacity Prometheus alerts", () => {
       "utf8",
     );
     const availability = alertExpression(template, "OpenGeniTurnStartupFirstByteAvailabilityLow");
-    const latency = alertExpression(template, "OpenGeniTurnStartupFirstByteP95High");
 
     expect(availability).toContain("opengeni_turn_startup_milestone_duration_seconds_count");
     expect(availability).toContain('milestone="first_byte",outcome="completed"');
@@ -79,9 +77,6 @@ describe("turn-capacity Prometheus alerts", () => {
     for (const selector of metricSelectors(availability)) {
       expect(selector).toContain(DEPLOYMENT_SCOPE);
     }
-    expect(latency).toContain('milestone="first_byte",outcome="completed"');
-    expect(latency).not.toContain('outcome="failed"');
-    expect(latency).not.toContain("opengeni_model_request_phases_total");
   });
 
   test("alerts on actual SuperGrok valid-event idle timeout terminals", async () => {
