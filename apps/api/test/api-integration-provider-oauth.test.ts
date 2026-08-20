@@ -658,7 +658,7 @@ describe("API Integration provider OAuth", () => {
     expect(connections[0]!.subjectId).toBe(workspace.subjectId);
   }, 60_000);
 
-  test("the personal-owner claim cannot be forged, replayed, or moved to another provider", async () => {
+  test("rejects claim forgery, nonce replay, and a mismatched definition fingerprint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
@@ -691,10 +691,11 @@ describe("API Integration provider OAuth", () => {
       "state_invalid",
     );
 
-    // PROVIDER SWAP: even holding the signing secret, the claim cannot be
-    // carried to a different provider. It is one field inside a payload that
-    // also binds the definition and its fingerprint, so re-signing under
-    // another definitionId fails the fingerprint check.
+    // DEFINITION/FINGERPRINT MISMATCH: changing the definitionId while keeping
+    // the original fingerprint is refused, even when the altered payload is
+    // re-signed. The signing secret remains root authority and could mint a
+    // fully consistent state; this proves the callback's mismatch check, not
+    // isolation from a signing-secret holder.
     const verified = await legacyProviderOAuthState(workspace, {
       definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
