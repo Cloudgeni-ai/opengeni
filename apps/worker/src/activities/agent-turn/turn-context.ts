@@ -1,7 +1,11 @@
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
-import type { SessionStatus, XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import type {
+  ModelContextContributionSummary,
+  SessionStatus,
+  XaiProviderAccountAuthoritySnapshotV1,
+} from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
   OpenGeniRuntime,
@@ -113,6 +117,7 @@ export type EventingState = {
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
 };
 
 export type WorkspaceRefState = {
@@ -223,6 +228,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      companyBrainContextContributions: null,
     },
     workspaceRefs: {
       variableSetId: "",

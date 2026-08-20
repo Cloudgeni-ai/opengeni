@@ -2,7 +2,6 @@ import {
   getScheduledVariableSetExpectedGenerationForAttempt,
   advanceWorkspaceGeneration,
   verifyWorkspaceMutationSettlement,
-  materializeRigVersionForAttempt,
   getSandbox,
   readActiveSandbox,
   getSessionRootId,
@@ -12,11 +11,7 @@ import {
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   getXaiSessionAccountPin,
   setXaiSessionAccountPin,
-  getWorkspaceModelPolicy,
   getWorkspaceGrant,
-  getWorkspace,
-  resolveCompanyBrainContextSelection,
-  isSessionCompactionRequested,
   countSessionHistoryItems,
   setSessionLastInputTokensForTurnAttempt,
   heartbeatLeaseHolder,
@@ -24,41 +19,21 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
-  getGeneratedVideoArtifact,
-  listSessionSystemUpdatesForTurn,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
   getLiveEnrollmentConnection,
   assertPersonalMachineForAttempt,
   abandonRecordingForTurnAttempt,
-  getOrCreateCompanyProfileSnapshot,
-  getOrCreatePreferenceRegistrySnapshot,
-  getOrCreateWorkspaceInstructionPolicySnapshot,
-  PreferenceRegistryInitiatorError,
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
   withCodexAppsRequestAuthorization,
-  resolveSessionAttemptPersonalResources,
   type SandboxRecord,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import { sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
-  projectHistoryForProvider,
-  restoreGenericDispatchHistoryItems,
-  projectModelInputForCapabilities,
-  appendSessionInstructions,
-  appendWorkspaceGovernance,
-  appendWorkspaceMemory,
-  composeAgentInstructions,
-  hasActiveWorkspaceInstructionPolicy,
-  renderWorkspaceGovernanceContext,
-  requestRemoteCompactionV2,
-  serializedToolsForRemoteCompaction,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
-  EmptyCompactionSummaryError,
   materializeSandboxFileDownloads,
   materializeRunCredentials,
   clearRunCredentials,
@@ -68,7 +43,6 @@ import {
   refreshCodemodeTokenFile,
   codemodeTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
-  SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
@@ -77,7 +51,6 @@ import {
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
-  type ModelResponseUsage,
   type BuildAgentOptions,
   type AttemptConnectorActionBinding,
   type ConnectorActionPolicyHooks,
@@ -105,13 +78,11 @@ import {
   sandboxWarmRateMicrosPerSecond,
   serviceTierForLatencyMode,
   environmentsEncryptionKeyBytes,
-  settingsWithResolvedModelContext,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   codemodeWorkspaceUrl,
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
-import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
 import {
@@ -131,12 +102,10 @@ import {
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
   rigProviderImageContentHash,
-  resolveRigProviderImageForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
   videoGenerationCapabilitiesForPolicy,
 } from "@opengeni/core";
-import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import {
   admitVideoGenerationRequest,
@@ -171,14 +140,7 @@ import {
   runCredentialModelNote,
 } from "../run-credentials";
 import { withFirstPartyTools } from "../goals";
-import {
-  rigProviderImageSourceImage,
-  resolveWorkspacePackRuntime,
-  resolveWorkspaceInstalledSkillRuntime,
-  settingsWithPackSandboxImage,
-  settingsWithRigImage,
-} from "../packs";
-import { createModelHistoryAttachmentProjector } from "../run-input";
+import { rigProviderImageSourceImage } from "../packs";
 import { createRuntimeBatcher, currentActivityContext } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -201,7 +163,6 @@ import {
 import {
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
-  recordContextCompaction,
   recordCreditMicros,
   recordModelRequestPhase,
   recordSandboxLogicalProvision,
@@ -212,15 +173,10 @@ import {
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import {
-  buildCompanyBrainContributionReceipt,
   modelVisibleCompanyBrainSkillActivations,
   summarizeCompanyBrainContributions,
 } from "../../model-context-contributions";
 import { beginRecording, discardUnpublishedRecording, type ActiveRecording } from "../recording";
-import {
-  collectGeneratedImageReceipts,
-  projectGeneratedImageHistoryForModel,
-} from "../generated-images";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -233,29 +189,14 @@ import {
   SandboxChannelAService,
   type ChannelASession,
 } from "@opengeni/runtime/sandbox";
-import { retryWhileMissing } from "@opengeni/storage";
-import { sandboxRunAs, WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
-import {
-  evaluateWorkspaceModelPolicy,
-  resolveWorkspaceAgentHumanInputEnabled,
-  VideoGenerationRejectedResult,
-  type MediaGenerationResult,
-  type ModelContextContributionSummary,
-  type SessionEvent,
-  type ToolAuthNeededPayload,
-} from "@opengeni/contracts";
+import { sandboxRunAs } from "@opengeni/runtime";
+import { VideoGenerationRejectedResult, type ToolAuthNeededPayload } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { assertWorkspaceHumanInputAllowed, shouldPublishToolAuthNeededForTurn } from "./admission";
-import { codexWorkspaceMetricKey, acceptsPromptCacheKeyForTurn } from "./codex";
-import {
-  unavailableMcpOperationalContext,
-  safeErrorDiagnostic,
-  compactionFailureReasonFromError,
-  isCompactionSummaryFailure,
-  shouldRecoverCompactionProviderFailure,
-} from "./errors";
+import { shouldPublishToolAuthNeededForTurn } from "./admission";
+import { codexWorkspaceMetricKey } from "./codex";
+import { unavailableMcpOperationalContext, safeErrorDiagnostic } from "./errors";
 import {
   filterUnmaterializedSandboxFileDownloads,
   runtimeResourcesForTurn,
@@ -267,11 +208,7 @@ import {
   requiresSignedFileResourceDownloads,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
-import {
-  TurnEventPublisher,
-  createCompactionModelUsageEventState,
-  processCompactionModelUsageEvent,
-} from "./model-usage";
+import { TurnEventPublisher } from "./model-usage";
 import {
   shouldStartPeriodicWorkspaceSnapshot,
   releaseTurnSandboxAfterWriterDrain,
@@ -299,12 +236,9 @@ import {
   shouldStartOnTurnRecording,
   computerToolModeForTurn,
   structuredToolTransportForTurn,
-  lazyToolTransportForTurn,
   shouldDeferNonEagerToolPreparation,
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
-  openAiHostedImageProviderBindingForTurn,
-  modelAttachmentInputPolicyForTurn,
 } from "./tool-policy";
 import { createTurnContext } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
@@ -312,6 +246,8 @@ import { settleTurnFailure } from "./failure-settlement";
 import { runTurnStreamAttempt } from "./stream-attempt";
 import { claimTurnAttempt } from "./claim";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
+import { prepareGovernanceAndModel } from "./governance-model";
+import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { selectXaiTurnCapacity } from "./xai-capacity";
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
@@ -1232,293 +1168,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if ("exit" in xaiCapacity) return xaiCapacity.exit;
       }
 
-      const runtimePreparationStartedAt = performance.now();
-
-      // Personal Rig/Variable Set authority is revalidated immediately before
-      // any direct resource read. The database function is a zero-row no-op for
-      // sessions with no personal resources, preserving the legacy workspace path.
-      await resolveSessionAttemptPersonalResources(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: fileAuthoritySubjectId,
-        attemptId: input.attemptId,
+      const governance = await prepareGovernanceAndModel({
+        input,
+        db,
+        runtime,
+        objectStorage,
+        eventing,
+        workspaceRefs,
+        media,
+        turn,
+        session,
+        capabilitySettings,
+        fileAuthoritySubjectId,
+        humanInputResume,
+        turnExecutionPolicy,
+        requiredGeneratedVideoFiles,
       });
-
-      const governanceClaims = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-      };
-      // Independent workspace reads after the personal-resource fence. Pack,
-      // installed skills, frozen rig, governance snapshots, and model policy do
-      // not depend on each other. Company-brain selection still waits on the
-      // snapshots below so its receipt stays exact.
-      const [
+      if ("exit" in governance) return governance.exit;
+      const {
+        runtimePreparationStartedAt,
         packRuntime,
         installedSkillRuntime,
-        rigMaterialization,
-        [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
-        workspaceModelPolicy,
-      ] = await Promise.all([
-        resolveWorkspacePackRuntime(db, input.workspaceId),
-        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
-        session.rigId && session.rigVersionId
-          ? (async () =>
-              await materializeRigVersionForAttempt(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration: turn.executionGeneration,
-              }))()
-          : Promise.resolve(null),
-        Promise.all([
-          getWorkspace(db, input.workspaceId),
-          getOrCreateCompanyProfileSnapshot(db, governanceClaims),
-          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-            if (error instanceof PreferenceRegistryInitiatorError) return null;
-            throw error;
-          }),
-        ]),
-        getWorkspaceModelPolicy(db, input.workspaceId),
-      ]);
-      const rigVersion = rigMaterialization?.version ?? null;
-      // Rig display name for the doctrine block + setup events/errors (only on a
-      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
-      // gone). Loaded once here alongside the version.
-      const rigName = rigVersion ? (rigMaterialization?.rigName ?? "rig") : null;
-      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
-      workspaceRefs.rigId = session.rigId ?? "";
-      workspaceRefs.rigVersionId = session.rigVersionId ?? "";
-      if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
-      const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
-      const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
-      const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
-      const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
-      assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-      const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
-      const workspaceGovernance = renderWorkspaceGovernanceContext(
-        {
-          companyProfile: companyProfileSnapshot,
-          instructionPolicy: instructionPolicySnapshot,
-          preferences: preferenceSnapshot,
-        },
-        {
-          includeCompanyProfile: companyProfileIncluded,
-        },
-      );
-      const structuredWorkspacePolicyActive =
-        hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
-      const workspaceMemory = contextSelection.workspaceMemory;
-      const buildCompanyBrainContributionReceiptFor = (
-        skillActivations: Parameters<
-          typeof buildCompanyBrainContributionReceipt
-        >[0]["skillActivations"],
-      ) =>
-        buildCompanyBrainContributionReceipt({
-          contextSelectionReceiptId: contextSelection.receipt.id,
-          attemptId: input.attemptId,
-          turnId: turn.id,
-          nestedAgentDepth: session.nestedAgentDepth,
-          memoryPromptMode,
-          instructionPolicy: instructionPolicySnapshot,
-          workspaceAgentInstructions,
-          preferences: preferenceSnapshot,
-          companyProfile: companyProfileSnapshot,
-          companyProfileIncluded,
-          workspaceMemory,
-          skillActivations,
-        });
-      let companyBrainContextContributions: readonly ModelContextContributionSummary[] | null =
-        null;
-      try {
-        // Portable operator compaction runs before tool/skill preparation, so its
-        // exact Company Brain prefix contains governance and standing memory but
-        // no runtime skill catalog. Later compaction paths replace this summary
-        // after the complete skill activation set is resolved.
-        companyBrainContextContributions = summarizeCompanyBrainContributions(
-          buildCompanyBrainContributionReceiptFor([]),
-        );
-      } catch {
-        // Contribution telemetry must never change model execution semantics.
-      }
-      const logicalSandboxSettings = settingsWithRigImage(
-        settingsWithPackSandboxImage(
-          capabilitySettings,
-          packRuntime.sandboxImage,
-          packRuntime.sandboxProviderImages,
-        ),
-        rigVersion?.image ?? null,
-      );
-      const providerImageSelection = await resolveRigProviderImageForRun(
-        logicalSandboxSettings,
         rigVersion,
-        turn.sandboxBackend,
-      );
-      const providerImageSettings = providerImageSelection.settings;
-      const verifiedRigProviderImageId =
-        providerImageSelection.reason === "selected"
-          ? (providerImageSelection.imageId ?? undefined)
-          : undefined;
-      const baseRunSettings = {
-        // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
-        // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
-        // settingsWithRigImage runs outermost over only the intentionally
-        // retained legacy fallback. A matching verified provider-native ID is
-        // then applied only to fresh creation without changing the logical
-        // lease image.
-        ...providerImageSettings,
-        openaiModel: turn.model,
-        openaiReasoningEffort: turn.reasoningEffort,
-        sandboxBackend: turn.sandboxBackend,
-      };
-      const runSettings = await settingsWithSessionMcpServersForRun(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        input.attemptId,
-        baseRunSettings,
-      );
-
-      // Multi-provider per-turn routing → the provider gating (compaction mode,
-      // hosted web search, encrypted reasoning, context window) the agent and
-      // compaction summarizer must use; null falls back to the legacy global
-      // client. Resolve against `capabilitySettings` (whose openaiModel is the
-      // deployment default), NOT `runSettings`: runSettings.openaiModel is the
-      // turn's model, so for a turn ON a registry model the built-in provider
-      // would otherwise claim that id (configuredModels builds the built-in's
-      // models from openaiModel) and shadow the registry entry — resolving the
-      // turn to the built-in (Azure) gating while the global model router routes
-      // the name to its registry provider. That mismatch attaches web_search to
-      // a chat-only Fireworks model. Resolving against the default-model settings
-      // keeps gating consistent with the router. Cost accounting covers registry
-      // models via configuredModelPricing.
-      const resolvedModel = runtime.resolveTurnModel(
-        capabilitySettings,
-        turnExecutionPolicy.productModelId,
-      );
-      const providerApi = resolvedModel?.provider.api ?? "responses";
-      const nativeImageProviderBinding =
-        providerApi === "responses"
-          ? openAiHostedImageProviderBindingForTurn(capabilitySettings, resolvedModel)
-          : null;
-      const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
-      const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-      // Use the proven wire capability, not the catalogue modality alone. Chat
-      // providers may advertise vision, but OpenGeni intentionally has no typed
-      // image transport for that wire yet; exposing view_image there would turn
-      // pixels into a multi-megabyte text/base64 function result.
-      const supportsImageInput = modelInputPolicy.supportsImageInput;
-      media.modelCanReceiveRetainedSessionImages = supportsImageInput;
-      const attachmentProjector = createModelHistoryAttachmentProjector(
+        rigName,
+        agentHumanInputEnabled,
+        workspaceAgentInstructions,
+        workspaceGovernance,
+        structuredWorkspacePolicyActive,
+        workspaceMemory,
+        buildCompanyBrainContributionReceiptFor,
+        logicalSandboxSettings,
+        verifiedRigProviderImageId,
+        runSettings,
+        resolvedModel,
+        providerApi,
+        nativeImageProviderBinding,
+        lazyToolTransport,
         modelInputPolicy,
-        objectStorage
-          ? async (file) => {
-              const object = await retryWhileMissing(async () =>
-                objectStorage.getObjectBytes(file.objectKey),
-              );
-              if (!object) throw new Error("attachment object is missing");
-              return object.bytes;
-            }
-          : undefined,
-      );
-      const modelHistoryProjector = async (
-        items: Array<Record<string, unknown>>,
-        projectionOptions?: Parameters<typeof attachmentProjector>[1],
-      ) =>
-        projectModelInputForCapabilities(
-          await attachmentProjector(items, projectionOptions),
-          modelInputPolicy,
-        );
-      const generatedImageHistoryProjector = async (
-        items: Array<Record<string, unknown>>,
-      ): Promise<Array<Record<string, unknown>>> => {
-        collectGeneratedImageReceipts(items, media.generatedImageReceiptsByProviderItemId);
-        return projectGeneratedImageHistoryForModel(items);
-      };
-      const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
-        await modelHistoryProjector(
-          projectHistoryForProvider(
-            await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
-            providerApi,
-          ),
-        );
-      // Bind the provider/model catalog's context policy to every model-facing
-      // path for this turn. In particular, Codex subscription turns must not
-      // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
-      // raw window, effective ceiling, and auto-compact limit are distinct live
-      // catalog values and must reach pre-turn compaction, history guards, and
-      // every model call together.
-      eventing.modelRunSettings = resolvedModel
-        ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
-        : runSettings;
-      // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
-      // after resolution and BEFORE any model call (the compaction summarizer
-      // and the main run both come later in this scope), so a blocked
-      // provider/model can never be reached through ANY stamp path: explicit
-      // turn model, inherited session default, goal-continuation inheritance,
-      // or the legacy null-resolution fallback. The frozen execution policy is
-      // the attribution source even if an injected test runtime returns no
-      // concrete resolved model. Fail-loud, never a silent remap.
-      {
-        if (workspaceModelPolicy) {
-          const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-            providerId: turnExecutionPolicy.providerId,
-            modelId: turnExecutionPolicy.productModelId,
-          });
-          if (!verdict.allowed) {
-            throw new WorkspaceModelPolicyBlockedError(
-              turnExecutionPolicy.productModelId,
-              turnExecutionPolicy.providerId,
-              verdict.reason,
-            );
-          }
-        }
-      }
-      // A recovered asynchronous video completion is model-visible only after
-      // its durable File is present at the exact sandbox path carried by the
-      // receipt. Resolve and verify the claimed update before sandbox policy is
-      // chosen so this turn cannot remain lazy and expose an absent path.
-      for (const update of await listSessionSystemUpdatesForTurn(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        turn.id,
-      )) {
-        const payload = update.payload as MediaGenerationResult;
-        if (payload.type !== "media_generation_result" || payload.status !== "ready") continue;
-        const retained = await getGeneratedVideoArtifact(
-          db,
-          input.workspaceId,
-          payload.receipt.artifact.artifactId,
-        );
-        if (
-          !retained ||
-          retained.artifact.deletedAt ||
-          retained.file.status !== "ready" ||
-          retained.file.contentType !== "video/mp4" ||
-          retained.file.sizeBytes !== payload.receipt.artifact.originalBytes ||
-          retained.file.sha256 !== payload.receipt.artifact.sha256 ||
-          retained.artifact.sandboxFilename !== `generated-video-${retained.artifact.id}.mp4`
-        ) {
-          throw new Error("Generated video completion does not match its retained File");
-        }
-        requiredGeneratedVideoFiles.push({
-          operationId: payload.operationId,
-          artifactId: retained.artifact.id,
-          fileId: retained.file.id,
-          objectKey: retained.file.objectKey,
-          sizeBytes: retained.file.sizeBytes,
-          sha256: retained.file.sha256,
-          filename: retained.artifact.sandboxFilename,
-        });
-      }
+        supportsImageInput,
+        modelHistoryProjector,
+        generatedImageHistoryProjector,
+        compactionModelHistoryProjector,
+      } = governance.ok;
+
       // A codex-subscription turn resolves the bearer for THIS turn's effective
       // codex account (effectiveCodexCredentialId; pin > workspace-active) at
       // model-call time — multi-account P1 means a workspace can hold N accounts,
@@ -1858,289 +1550,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fn,
           ),
         );
-      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
-        ? input.sessionId
-        : undefined;
-      const compactionUsageState = createCompactionModelUsageEventState(
+      const compactionPrep = await prepareCompaction({
+        input,
+        settings,
+        db,
+        bus,
+        observability,
+        cancellationSignal,
+        control,
+        attempt,
+        billingState,
+        eventing: eventing as typeof eventing & {
+          publish: NonNullable<(typeof eventing)["publish"]>;
+          settle: NonNullable<(typeof eventing)["settle"]>;
+        },
+        providerTurn,
+        leases,
+        media,
+        claimedResult,
         claimedModelUsageSourceKeys,
-      );
-      const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-        await processCompactionModelUsageEvent({
-          usage,
-          state: compactionUsageState,
-          dispatchId: modelUsageDispatchId,
-          settings,
-          db,
-          observability,
-          publish: eventing.publish,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-          providerApi: resolvedModel?.provider.api ?? "responses",
-          model: resolvedModel?.configured.id ?? turn.model,
-          externallyBilled: billingState.isExternallyBilledTurn,
-          turnAttemptId: input.attemptId,
-          servingCredentialId: providerTurn.effectiveCodexCredentialId,
-          priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-          emittedSourceKeys: emittedModelUsageSourceKeys,
-          renewLease: () => leases.renewServing("model_usage"),
-          leaseLost: leases.servingLost,
-          leaseLostMessage: "Provider credential lease expired during context compaction",
-          contextContributions: companyBrainContextContributions,
-        });
-      };
-      const compactionSummarizerFor = (systemInstructions?: string) =>
-        resolvedModel
-          ? (s: Settings, m: Array<Record<string, unknown>>) =>
-              withProviderRequestContext(() =>
-                summarizeContextForCompaction(s, m, {
-                  client: resolvedModel.client,
-                  provider: resolvedModel.provider,
-                  api: resolvedModel.provider.api,
-                  model: turnExecutionPolicy.upstreamModelId,
-                  maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                  onUsage: recordCompactionUsage,
-                  ...(systemInstructions ? { systemInstructions } : {}),
-                  ...(promptCacheKey ? { promptCacheKey } : {}),
-                }),
-              )
-          : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeContextForCompaction(s, m, {
-                model: turnExecutionPolicy.upstreamModelId,
-                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                onUsage: recordCompactionUsage,
-                ...(systemInstructions ? { systemInstructions } : {}),
-                ...(promptCacheKey ? { promptCacheKey } : {}),
-              });
-      // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
-      // tools → instructions → history. Filled after buildAgent for every
-      // compact path (including operator /compact, which now builds the agent
-      // first so it does not send empty tools/instructions).
-      let remoteCompactionTools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>> =
-        [];
-      let remoteCompactionInstructions = "";
-      let remoteCompactionToolsReady = false;
-      let remoteCompactionAgent: Parameters<typeof serializedToolsForRemoteCompaction>[0] | null =
-        null;
-      const remoteCompactionRequester =
-        resolvedModel && billingState.isCodexTurn
-          ? (s: Settings, m: Array<Record<string, unknown>>) =>
-              withCodexRemoteCompaction(async () => {
-                // Lazily serialize tools here so EmptyCompactionSummaryError is
-                // thrown inside the compaction try/settlement handlers, not as a
-                // raw activity failure before maybeCompactContext runs.
-                if (!remoteCompactionInstructions.trim()) {
-                  throw new EmptyCompactionSummaryError({
-                    stage: "remote_v2_instructions",
-                    reason: "agent_missing_system_instructions",
-                  });
-                }
-                if (!remoteCompactionToolsReady) {
-                  if (!remoteCompactionAgent) {
-                    throw new EmptyCompactionSummaryError({
-                      stage: "remote_v2_tools",
-                      reason: "agent_missing_for_tools",
-                    });
-                  }
-                  try {
-                    remoteCompactionTools =
-                      await serializedToolsForRemoteCompaction(remoteCompactionAgent);
-                  } catch (error) {
-                    // Tool schemas sit before instructions in the cache prefix.
-                    // Failing open to [] would reintroduce a massive pre-compact
-                    // cache bust — fail closed so we never send a tools mismatch
-                    // on purpose.
-                    throw new EmptyCompactionSummaryError({
-                      stage: "remote_v2_tools",
-                      reason: "serialize_tools_failed",
-                      error: String(error),
-                    });
-                  }
-                  remoteCompactionToolsReady = true;
-                }
-                return requestRemoteCompactionV2(s, m, {
-                  client: resolvedModel.client,
-                  provider: resolvedModel.provider,
-                  model: turnExecutionPolicy.upstreamModelId,
-                  systemInstructions: remoteCompactionInstructions,
-                  onUsage: recordCompactionUsage,
-                  tools: remoteCompactionTools,
-                  ...(promptCacheKey ? { promptCacheKey } : {}),
-                });
-              })
-          : undefined;
-      const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-      };
-      const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
-        // `compaction.started` was already fanout via publishCompactionLiveEvents.
-        await publishDurableSessionEvents(
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          events.filter((event) => event.type !== "session.context.compaction.started"),
-        );
-      };
-      const compactionModeOptions = {
-        codexCompactionMode: session.codexCompactionMode,
-        isCodexSubscriptionTurn: billingState.isCodexTurn,
-        publishLiveEvents: publishCompactionLiveEvents,
-        ...(remoteCompactionRequester
-          ? { requestRemoteCompactionV2: remoteCompactionRequester }
-          : {}),
-      } as const;
-
-      // Operator /compact:
-      // - portable (incl. Codex portable): early maintenance path — no
-      //   prepareTools/sandbox; summarizer only needs composed instructions.
-      // - remote_v2: fall through to prepareTools/buildAgent so the compact
-      //   request reuses the ordinary tools→instructions cache prefix, then
-      //   settle without inference. (Requester is also wired for Codex portable
-      //   turns but unused there — gate on the frozen session mode.)
-      const compactionOnlyTurn = turn.source === "compaction";
-      const remoteV2CompactionNeedsAgentPrefix =
-        Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
-      if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
-        const compactionInstructions = appendWorkspaceMemory(
-          appendSessionInstructions(
-            appendWorkspaceGovernance(
-              composeAgentInstructions(
-                structuredWorkspacePolicyActive
-                  ? eventing.modelRunSettings.agentInstructionsTemplate
-                  : (workspaceAgentInstructions ??
-                      eventing.modelRunSettings.agentInstructionsTemplate),
-                undefined,
-                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
-              ),
-              workspaceGovernance ?? undefined,
-            ),
-            session.instructions ?? undefined,
-          ),
-          workspaceMemory ?? undefined,
-        );
-        const requested = await isSessionCompactionRequested(
-          db,
-          input.workspaceId,
-          input.sessionId,
-        );
-        let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
-        if (requested) {
-          try {
-            outcome = await waitForTurnOperation(
-              maybeCompactContext(
-                db,
-                eventing.modelRunSettings,
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                  executionGeneration: attempt.executionGeneration,
-                  attemptId: input.attemptId,
-                },
-                session.lastInputTokens,
-                compactionSummarizerFor(compactionInstructions),
-                {
-                  force: true,
-                  clearRequestedCompaction: true,
-                  trigger: "operator",
-                  materializeHistory: media.materializeScreenshotHistory,
-                  projectModelInput: compactionModelHistoryProjector,
-                  ...compactionModeOptions,
-                },
-              ),
-              cancellationSignal,
-              undefined,
-            );
-          } catch (error) {
-            // Codex retries retryable checkpoint-provider failures rather than
-            // treating them as a semantic compaction result. Keep the operator
-            // request pending and let the ordinary same-turn provider/capacity
-            // recovery path re-dispatch this exact maintenance execution.
-            if (shouldRecoverCompactionProviderFailure(error)) throw error;
-            if (error instanceof TurnAttemptFencedError) throw error;
-            // `compaction.started` may already be live — settle skipped before
-            // failing the turn so the timeline cannot stick on Compacting…
-            const landmark = await settleFailedContextCompactionLandmark(
-              db,
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                executionGeneration: attempt.executionGeneration,
-                attemptId: input.attemptId,
-              },
-              {
-                clearRequestedCompaction: true,
-                publishLiveEvents: publishCompactionLiveEvents,
-              },
-            );
-            if (!isCompactionSummaryFailure(error)) throw error;
-            const errorMessage = String(compactionFailureReasonFromError(error));
-            if (
-              !(await eventing.settle!({
-                events: [
-                  {
-                    type: "turn.failed",
-                    payload: {
-                      error: errorMessage,
-                      code: "context_compaction_failed",
-                      retryable: false,
-                      recovery: "user_message",
-                      compacted: false,
-                    },
-                  },
-                  {
-                    type: "session.status.changed",
-                    payload: { status: "idle" },
-                  },
-                ],
-                turnStatus: "failed",
-                sessionStatus: "idle",
-                activeTurnId: null,
-                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
-              }))
-            ) {
-              return claimedResult({ status: "cancelled" });
-            }
-            control.turnMetricOutcome = "failed";
-            control.activityStatus = "idle";
-            control.activityError = error;
-            return claimedResult({ status: "idle" });
-          }
-          if (outcome.events.length > 0) {
-            if (outcome.compacted) {
-              recordContextCompaction(observability, "operator");
-            }
-            await publishCompactionOutcomeEvents(outcome.events);
-          }
-        }
-        if (
-          !(await eventing.settle!({
-            events: [
-              {
-                type: "turn.completed",
-                payload: {
-                  maintenance: "context_compaction",
-                  result: outcome?.compacted ? "compacted" : (outcome?.reason ?? "already_applied"),
-                },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            turnStatus: "completed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-          }))
-        ) {
-          return claimedResult({ status: "cancelled" });
-        }
-        control.turnMetricOutcome = "completed";
-        control.activityStatus = "idle";
-        return claimedResult({ status: "idle" });
-      }
+        emittedModelUsageSourceKeys,
+        modelUsageDispatchId,
+        turn,
+        session,
+        turnExecutionPolicy,
+        resolvedModel,
+        workspaceAgentInstructions,
+        workspaceGovernance,
+        structuredWorkspacePolicyActive,
+        workspaceMemory,
+        rigVersion,
+        rigName,
+        compactionModelHistoryProjector,
+        summarizeContextForCompaction,
+        withProviderRequestContext,
+        withCodexRemoteCompaction,
+      });
+      if ("exit" in compactionPrep) return compactionPrep.exit;
+      const {
+        promptCacheKey,
+        remotePrefix,
+        remoteCompactionRequester,
+        publishCompactionLiveEvents,
+        publishCompactionOutcomeEvents,
+        compactionModeOptions,
+        compactionOnlyTurn,
+        compactionSummarizerFor,
+      } = compactionPrep.ok;
 
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Repositories remain durable workspace inputs. File attachments do not:
@@ -4221,7 +3677,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runtimeSkillActivations,
       );
       try {
-        companyBrainContextContributions = summarizeCompanyBrainContributions(
+        eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
           buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
         );
       } catch {
@@ -4797,7 +4253,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
             modelVisibleRuntimeSkillActivations,
           );
-          companyBrainContextContributions = summarizeCompanyBrainContributions(
+          eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,
           );
           recordCompanyBrainContributions(observability, companyBrainContributionReceipt);
@@ -4817,257 +4273,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Observability must never change model execution semantics.
         }
       };
-      const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
-      const compactSummarizer = compactionSummarizerFor(
-        agentInstructions.trim() ? agentInstructions : undefined,
-      );
-      if (remoteCompactionRequester) {
-        // Exact byte match with the ordinary turn prefix (CLI base_instructions).
-        // Tools serialize lazily inside the requester so setup failures settle as
-        // compaction failures rather than raw activity crashes.
-        remoteCompactionInstructions = agentInstructions;
-        remoteCompactionAgent = agent;
-      }
+      const postAgentCompaction = await runPostAgentCompaction({
+        input,
+        settings,
+        db,
+        bus,
+        observability,
+        cancellationSignal,
+        control,
+        attempt,
+        billingState,
+        eventing: eventing as typeof eventing & {
+          publish: NonNullable<(typeof eventing)["publish"]>;
+          settle: NonNullable<(typeof eventing)["settle"]>;
+        },
+        providerTurn,
+        leases,
+        media,
+        claimedResult,
+        claimedModelUsageSourceKeys,
+        emittedModelUsageSourceKeys,
+        modelUsageDispatchId,
+        turn,
+        session,
+        turnExecutionPolicy,
+        resolvedModel,
+        workspaceAgentInstructions,
+        workspaceGovernance,
+        structuredWorkspacePolicyActive,
+        workspaceMemory,
+        rigVersion,
+        rigName,
+        compactionModelHistoryProjector,
+        summarizeContextForCompaction,
+        withProviderRequestContext,
+        withCodexRemoteCompaction,
+        remotePrefix,
+        remoteCompactionRequester,
+        publishCompactionLiveEvents,
+        publishCompactionOutcomeEvents,
+        compactionModeOptions,
+        compactionOnlyTurn,
+        compactionSummarizerFor,
+        agent,
+      });
+      if ("exit" in postAgentCompaction) return postAgentCompaction.exit;
+      const { compactSummarizer } = postAgentCompaction.ok;
 
-      if (compactionOnlyTurn) {
-        const requested = await isSessionCompactionRequested(
-          db,
-          input.workspaceId,
-          input.sessionId,
-        );
-        let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
-        if (requested) {
-          try {
-            outcome = await waitForTurnOperation(
-              maybeCompactContext(
-                db,
-                eventing.modelRunSettings,
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                  executionGeneration: attempt.executionGeneration,
-                  attemptId: input.attemptId,
-                },
-                session.lastInputTokens,
-                compactSummarizer,
-                {
-                  force: true,
-                  clearRequestedCompaction: true,
-                  trigger: "operator",
-                  projectModelInput: compactionModelHistoryProjector,
-                  ...compactionModeOptions,
-                },
-              ),
-              cancellationSignal,
-              undefined,
-            );
-          } catch (error) {
-            // Codex retries retryable checkpoint-provider failures rather than
-            // treating them as a semantic compaction result. Keep the operator
-            // request pending and let the ordinary same-turn provider/capacity
-            // recovery path re-dispatch this exact maintenance execution.
-            if (shouldRecoverCompactionProviderFailure(error)) throw error;
-            if (error instanceof TurnAttemptFencedError) throw error;
-            const landmark = await settleFailedContextCompactionLandmark(
-              db,
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                executionGeneration: attempt.executionGeneration,
-                attemptId: input.attemptId,
-              },
-              {
-                clearRequestedCompaction: true,
-                publishLiveEvents: publishCompactionLiveEvents,
-              },
-            );
-            if (!isCompactionSummaryFailure(error)) throw error;
-            const errorMessage = String(compactionFailureReasonFromError(error));
-            if (
-              !(await eventing.settle!({
-                events: [
-                  {
-                    type: "turn.failed",
-                    payload: {
-                      error: errorMessage,
-                      code: "context_compaction_failed",
-                      retryable: false,
-                      recovery: "user_message",
-                      compacted: false,
-                    },
-                  },
-                  {
-                    type: "session.status.changed",
-                    payload: { status: "idle" },
-                  },
-                ],
-                turnStatus: "failed",
-                sessionStatus: "idle",
-                activeTurnId: null,
-                ...(landmark.requestConsumed ? {} : { consumeRequestedCompactionFailure: true }),
-              }))
-            ) {
-              return claimedResult({ status: "cancelled" });
-            }
-            control.turnMetricOutcome = "failed";
-            control.activityStatus = "idle";
-            control.activityError = error;
-            return claimedResult({ status: "idle" });
-          }
-          if (outcome.events.length > 0) {
-            if (outcome.compacted) {
-              recordContextCompaction(observability, "operator");
-            }
-            await publishCompactionOutcomeEvents(outcome.events);
-          }
-        }
-        if (
-          !(await eventing.settle!({
-            events: [
-              {
-                type: "turn.completed",
-                payload: {
-                  maintenance: "context_compaction",
-                  result: outcome?.compacted ? "compacted" : (outcome?.reason ?? "already_applied"),
-                },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            turnStatus: "completed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-          }))
-        ) {
-          return claimedResult({ status: "cancelled" });
-        }
-        control.turnMetricOutcome = "completed";
-        control.activityStatus = "idle";
-        return claimedResult({ status: "idle" });
-      }
-
-      // Pre-turn durable context compaction. When the single Codex-parity
-      // threshold is crossed, this summarizes active history and rebuilds active
-      // history as [user messages..., summary] BEFORE the model input is read.
-      // Summarizer context overflows drop one oldest summarizer-input item and
-      // retry, exactly like Codex. Other failures end this turn honestly.
-      // Run before every fresh inference. Approval resumes replay their frozen
-      // RunState verbatim and recovering attempts already compacted, if needed,
-      // before the first attempt's model boundary.
-      if (
-        attempt.triggerType === "user.message" ||
-        attempt.triggerType === "system.update.delivered"
-      ) {
-        let forced = false;
-        try {
-          // Operator /compact (the slash command) sets a durable request flag;
-          // observe it without consuming it so a failed/stale attempt cannot
-          // lose the request. The replacement transaction clears it on success.
-          forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
-          const outcome = await waitForTurnOperation(
-            maybeCompactContext(
-              db,
-              eventing.modelRunSettings,
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: attempt.turnId!,
-                executionGeneration: attempt.executionGeneration,
-                attemptId: input.attemptId,
-              },
-              session.lastInputTokens,
-              // Provider-aware summarizer: when the turn's model resolved to a
-              // registry provider, summarize on THAT provider's client + wire API
-              // (a chat provider can't summarize through OpenAI/Azure). Null
-              // resolution uses the built-in Responses summarizer with the same
-              // session prompt-cache key as the main model calls.
-              compactSummarizer,
-              forced
-                ? {
-                    force: true,
-                    clearRequestedCompaction: true,
-                    trigger: "operator",
-                    materializeHistory: media.materializeScreenshotHistory,
-                    projectModelInput: compactionModelHistoryProjector,
-                    ...compactionModeOptions,
-                  }
-                : {
-                    trigger: "auto",
-                    materializeHistory: media.materializeScreenshotHistory,
-                    projectModelInput: compactionModelHistoryProjector,
-                    ...compactionModeOptions,
-                  },
-            ),
-            cancellationSignal,
-            undefined,
-          );
-          if (outcome.events.length > 0) {
-            if (outcome.compacted) {
-              const compactionTrigger = forced ? "operator" : undefined;
-              recordContextCompaction(observability, compactionTrigger ?? "auto");
-            }
-            await publishCompactionOutcomeEvents(outcome.events);
-          }
-        } catch (compactError) {
-          if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
-          if (compactError instanceof TurnAttemptFencedError) throw compactError;
-          const landmark = await settleFailedContextCompactionLandmark(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: attempt.turnId!,
-              executionGeneration: attempt.executionGeneration,
-              attemptId: input.attemptId,
-            },
-            {
-              clearRequestedCompaction: forced,
-              publishLiveEvents: publishCompactionLiveEvents,
-            },
-          );
-          if (!isCompactionSummaryFailure(compactError)) throw compactError;
-          const errorMessage = String(compactionFailureReasonFromError(compactError));
-          observability.error("context compaction failed", {
-            sessionId: input.sessionId,
-            turnId: attempt.turnId,
-            ...safeErrorDiagnostic(compactError),
-          });
-          if (
-            !(await eventing.settle!({
-              events: [
-                {
-                  type: "turn.failed",
-                  payload: {
-                    error: errorMessage,
-                    code: "context_compaction_failed",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted: false,
-                  },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              turnStatus: "failed",
-              sessionStatus: "idle",
-              activeTurnId: null,
-              ...(forced && !landmark.requestConsumed
-                ? { consumeRequestedCompactionFailure: true }
-                : {}),
-            }))
-          ) {
-            return claimedResult({ status: "cancelled" });
-          }
-          control.turnMetricOutcome = "failed";
-          control.activityStatus = "idle";
-          control.activityError = compactError;
-          return claimedResult({ status: "idle" });
-        }
-      }
       recordTurnStartupPhase(observability, {
         phase: "post_agent_preparation",
         provider: turnExecutionPolicy.providerId,
@@ -5254,7 +4506,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         generatedImageHistoryProjector,
         modelHistoryProjector,
         compactionModeOptions,
-        companyBrainContextContributions,
+        companyBrainContextContributions: eventing.companyBrainContextContributions,
         initialRunCredentialMaterial,
         initialGitCredentials,
         sandboxEnvironment,

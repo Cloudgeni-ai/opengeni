@@ -2858,23 +2858,30 @@ describe("lazy sandbox provisioner single-flight", () => {
   });
 
   test("runtime preparation overlaps independent workspace reads after the personal-resource fence", async () => {
+    const governanceSource = await Bun.file(
+      new URL("../src/activities/agent-turn/governance-model.ts", import.meta.url),
+    ).text();
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
-    const authorize = source.indexOf("await resolveSessionAttemptPersonalResources(db");
-    const overlappedReads = source.indexOf(
+    const authorize = governanceSource.indexOf("await resolveSessionAttemptPersonalResources(db");
+    const overlappedReads = governanceSource.indexOf(
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = source.indexOf(
+    const packRead = governanceSource.indexOf(
       "resolveWorkspacePackRuntime(db, input.workspaceId)",
       overlappedReads,
     );
-    const rigRead = source.indexOf("await materializeRigVersionForAttempt(db", overlappedReads);
-    const policyRead = source.indexOf(
+    const rigRead = governanceSource.indexOf(
+      "await materializeRigVersionForAttempt(db",
+      overlappedReads,
+    );
+    const policyRead = governanceSource.indexOf(
       "getWorkspaceModelPolicy(db, input.workspaceId)",
       overlappedReads,
     );
+    const governanceCall = source.indexOf("const governance = await prepareGovernanceAndModel({");
     const imageEnsure = source.indexOf(
       "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
     );
@@ -2886,7 +2893,8 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(packRead).toBeGreaterThan(overlappedReads);
     expect(rigRead).toBeGreaterThan(packRead);
     expect(policyRead).toBeGreaterThan(rigRead);
-    expect(imageEnsure).toBeGreaterThan(policyRead);
+    expect(governanceCall).toBeGreaterThan(-1);
+    expect(imageEnsure).toBeGreaterThan(governanceCall);
     expect(gitAssert).toBeGreaterThan(imageEnsure);
     expect(source.slice(imageEnsure - 80, gitAssert)).toContain("Promise.all");
   });
