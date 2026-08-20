@@ -53,7 +53,7 @@ describe("migration 0303 session tenancy product activation", () => {
       "active_scheduled_task",
       "workspace_mutation_admission",
       "retained_process",
-      "active_viewer",
+      "active_sandbox_access",
       "shared_sandbox_group",
     ]) {
       expect(migration).toContain(`blocker := '${blocker}'`);
@@ -129,6 +129,19 @@ describe("migration 0303 session tenancy product activation", () => {
         organizationTenancyCanonicalActivationEnabled: true,
       }),
     ).resolves.toBeDefined();
+    await expect(
+      assertRuntimeDatabasePosture(runtime.db, {
+        rlsStrategy: "scoped",
+        targetSchema: "public",
+      }),
+    ).rejects.toThrow(/session-tenancy product activation is durable/);
+    await expect(
+      assertRuntimeDatabasePosture(runtime.db, {
+        rlsStrategy: "scoped",
+        targetSchema: "public",
+        organizationTenancyCanonicalActivationEnabled: true,
+      }),
+    ).resolves.toBeDefined();
     await runtime.close();
     const app = postgres(shared.appUrl, { max: 1 });
     try {
@@ -145,6 +158,13 @@ describe("migration 0303 session tenancy product activation", () => {
       });
       expect(scopedExact?.activated).toBe(true);
       expect(Array.from(await app`select * from session_tenancy_activations`)).toEqual([]);
+      const [helperAcl] = await app<{ executable: boolean }[]>`
+        select has_function_privilege(
+          current_user,
+          'assert_session_tenancy_quiescent(uuid,uuid,uuid,boolean)',
+          'EXECUTE'
+        ) as executable`;
+      expect(helperAcl?.executable).toBe(false);
     } finally {
       await app.end();
     }

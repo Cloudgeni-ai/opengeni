@@ -337,7 +337,6 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   FORK_SESSION_CONTENT_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
-  SESSION_TENANCY_QUIESCENCE_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -362,6 +361,11 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_RESOLVE_POOL_ROUTINE,
   XAI_REVALIDATE_CREDENTIAL_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+
+/** Owner-internal helpers that must exist but must never be callable by the runtime role. */
+export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
@@ -1156,7 +1160,7 @@ function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): stri
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
-/** Inspect only PostgreSQL catalogs and privilege functions; no tenant rows. */
+/** Inspect PostgreSQL catalogs plus one value-free global activation predicate; no tenant content. */
 export async function inspectRuntimeDatabasePosture(
   db: Database,
   options: RuntimeDatabasePostureOptions,
@@ -1207,6 +1211,15 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
+      // The forward-only activation receipt outlives topology. Embedded/scoped
+      // deployments must enforce the same environment interlock as standalone
+      // FORCE-RLS deployments, so inspect the value-free predicate before the
+      // scoped catalog fast-path.
+      const activationRows = resultRows<{ activated: boolean }>(
+        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
+      );
+      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
       // the standalone opengeni_app object/grant contract on the host's role.
@@ -1221,7 +1234,7 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
-          sessionTenancyProductActivationPresent: false,
+          sessionTenancyProductActivationPresent,
         };
       }
 
@@ -1402,7 +1415,10 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => sql`${name}`),
+                  [
+                    ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+                    ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+                  ].map((name) => sql`${name}`),
                   sql`, `,
                 )}
               ]::text[]
@@ -1451,10 +1467,6 @@ export async function inspectRuntimeDatabasePosture(
         securityDefiner: row.security_definer,
       }));
 
-      const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
-      );
-
       return {
         identity: mappedIdentity,
         memberships,
@@ -1465,7 +1477,7 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
-        sessionTenancyProductActivationPresent: activationRows[0]?.activated === true,
+        sessionTenancyProductActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1644,6 +1656,33 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const forbiddenRoutine of RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES) {
+    const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    if (matches.length !== 1) {
+      violations.push(
+        `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
+      );
+      continue;
+    }
+    const routine = matches[0]!;
+    if (!routine.securityDefiner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+    if (authorityOwner && routine.owner !== authorityOwner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
+      );
+    }
+    if (routine.execute) {
+      violations.push(`runtime role has forbidden owner-internal helper ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
+    }
+  }
   for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (matches.length !== 1) {

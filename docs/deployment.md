@@ -448,10 +448,14 @@ neither has a down-migration. For each subsequent activation:
      --activated-by '<bounded-operator-identity>'
    ```
 
-   The command reruns the canonical inventory and parity reports, requires
-   every activation blocker to be zero, hashes and durably records that exact
-   evidence, checks the supplied exact application-role inventory twice around
-   write-blocking locks, and is idempotent only for the same evidence digests.
+   The command reruns the canonical inventory and parity reports, retains and
+   hashes the inventory snapshot, and requires every parity invariant plus each
+   exact drainable/bounded activation lane to be zero. It deliberately does not
+   gate on total ownerless sessions or all-time immutable legacy writer rows;
+   migration 0298 supplies their truthful attributable and observation-window
+   refinements. It durably records the exact evidence, checks the supplied exact
+   application-role inventory twice around write-blocking locks, and is
+   idempotent only for the same evidence digests.
    A live application session rejects activation with SQLSTATE `55000`; changed
    evidence against an existing receipt is a conflict.
 8. start only that same digest's API and workers, and require the startup and

@@ -735,7 +735,8 @@ SQL function writes it.
 Migration 0303 itself is rolling and activates no organization. The drained
 `bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
 command verifies the canonical opt-in, required migrations, zero-valued tenancy
-inventory, and parity gates/lanes before inserting one immutable
+parity gates plus exact drainable/bounded lanes, while retaining the inventory
+as contextual evidence, before inserting one immutable
 `session_tenancy_activations` receipt. A mutation without that exact version-1
 organization receipt fails closed.
 
@@ -747,8 +748,10 @@ The activated database contract is intentionally narrow:
   strings are never authority.
 - A transition rejects with a typed conflict unless turns/attempts,
   interruptions, updates, human/tool/RunState receipts, goals/capacity waits,
-  realtime, schedules, workspace writers/processes, and viewers are all
-  quiescent. The stale 0225 auto-cancellation behavior is not ported.
+  realtime, schedules, workspace writers/processes, and sandbox viewer or
+  interaction holders are all quiescent. The stale 0225 auto-cancellation
+  behavior is not ported. The nested quiescence helper is owner-internal and
+  ungranted; only the fully authorized lifecycle functions may invoke it.
 - Transition-to-private additionally requires a singleton sandbox group. A
   proven transition advances the epoch, revokes old-epoch personal grants,
   clears staged personal delegations, preserves 0301 cache/pin behavior, and
@@ -1474,15 +1477,25 @@ Once an activation migration commits for a subsystem:
 All of the following must hold, per organization, before an activation migration
 is run:
 
-1. **Complete backfill.** `bun run db:inventory-tenancy --organization-id <uuid>`
-   (migration 0285) must report zero for every population the activated subsystem
-   consumes: `organizationMemberships.activeWithoutPersonalWorkspace`,
-   `workspaceMemberSubjectsWithoutMembershipAnchor`, `sessions.ownerless`,
-   `documents.legacyPersonalNullAuthority`,
-   `codexCredentials.unattributedConnector`,
-   `workspaceWriters.admissions.legacyUnattributed`, and
-   `workspaceWriters.retainedProcesses.legacyUnattributed`. A single non-zero
-   counter for a consumed population is a blocker.
+1. **Complete backfill and quiet observation window.** Run both
+   `bun run db:inventory-tenancy --organization-id <uuid>` and the canonical
+   migration-0298 parity report. The inventory is retained and hashed as the
+   content-free population snapshot; it is not a universal drain-to-zero gate.
+   The parity report must have zero violations in every invariant gate and zero
+   in each current activation lane: `connectionsLegacyUser`,
+   `workspaceWriterAdmissionsLegacyUnattributedInWindow`,
+   `workspaceWriterProcessesLegacyUnattributedInWindow`,
+   `documentsLegacyPersonalNullAuthority`,
+   `codexCredentialsUnattributedConnector`,
+   `workspaceMemberSubjectsWithoutMembershipAnchor`,
+   `sessionsAttributableButUnattributed`, and
+   `connectionUseLegacyResolutionsInWindow`. The bounded writer/use lanes prove
+   the legacy path is no longer exercised; the attributable-session lane is the
+   actually repairable subset of ownerless sessions. Total `sessions.ownerless`
+   and the all-time `workspaceWriters.*.legacyUnattributed` inventory counts are
+   deliberately not blockers: service/API-key sessions can remain ownerless,
+   and pre-0277 direct/process writer rows are immutable historical evidence.
+   A single non-zero required parity lane or invariant violation is a blocker.
    Variable Sets, Rigs, and Connected Machines contribute no drain-to-zero
    counter here, and one must not be invented: nothing in their schema separates
    an unmigrated legacy row from a deliberately organization- or

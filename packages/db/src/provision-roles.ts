@@ -1205,7 +1205,7 @@ BEGIN
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) TO %I',
+        'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM %I',
         ${literal(schema)},
         ${literal(role)}
       );

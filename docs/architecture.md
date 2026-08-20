@@ -1123,9 +1123,12 @@ Forward-only migrations under `drizzle/0000..` applied by a bespoke runner (`mig
 Migration 0303 is rolling and inert until an organization is explicitly
 activated. It replaces the 0225 visibility/fork bodies with the product-ready
 database prerequisite: exact personal-workspace-or-ordinary-membership
-authorization, fail-closed quiescence and singleton proof, old-epoch
+authorization, fail-closed quiescence (including sandbox viewer/interaction
+holders) and singleton proof, old-epoch
 grant/delegation revocation, and a same-workspace/private-only canonical-content
 fork that creates a new root and sandbox group without copying live authority.
+The lock-taking quiescence helper is owner-internal and never a runtime
+capability; only the fully scoped lifecycle functions may invoke it.
 The drained operator command writes a forward-only per-organization activation
 receipt only after canonical inventory/parity checks; API/worker startup then
 requires the canonical activation switch. Applying 0303 itself remains safe

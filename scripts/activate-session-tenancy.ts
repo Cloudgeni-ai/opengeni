@@ -42,23 +42,45 @@ function numberAt(value: unknown, path: readonly string[]): number {
   return typeof current === "number" ? current : Number.NaN;
 }
 
+const REQUIRED_PARITY_LANES = [
+  "connectionsLegacyUser",
+  "workspaceWriterAdmissionsLegacyUnattributedInWindow",
+  "workspaceWriterProcessesLegacyUnattributedInWindow",
+  "documentsLegacyPersonalNullAuthority",
+  "codexCredentialsUnattributedConnector",
+  "workspaceMemberSubjectsWithoutMembershipAnchor",
+  "sessionsAttributableButUnattributed",
+  "connectionUseLegacyResolutionsInWindow",
+] as const;
+
+const REQUIRED_PARITY_GATES = [
+  "membership_personal_workspace_pointer",
+  "membership_personal_workspace_exclusive",
+  "membership_personal_workspace_same_organization",
+  "personal_workspace_has_no_membership_row",
+  "authority_resource_single_owner",
+  "grant_delegation_fence_complete",
+  "grant_owner_membership_active",
+  "grant_authority_live",
+  "grant_session_fence_not_ahead",
+  "session_owner_provenance_paired",
+  "session_owner_subject_matches_membership",
+  "session_owner_membership_same_organization",
+  "login_binding_dispute_propagated",
+  "identity_active_binding_owned",
+  "user_scoped_resource_live_anchor",
+] as const;
+
 export function assertSessionTenancyActivationEvidence(inventory: unknown, parity: unknown): void {
-  const inventoryZeroes = [
-    ["organizationMemberships", "activeWithoutPersonalWorkspace"],
-    ["workspaceMemberSubjectsWithoutMembershipAnchor"],
-    ["sessions", "ownerless"],
-    ["documents", "legacyPersonalNullAuthority"],
-    ["codexCredentials", "unattributedConnector"],
-    ["workspaceWriters", "admissions", "legacyUnattributed"],
-    ["workspaceWriters", "retainedProcesses", "legacyUnattributed"],
-  ] as const;
-  const failedInventory = inventoryZeroes.filter((path) => numberAt(inventory, path) !== 0);
-  if (failedInventory.length > 0) {
-    throw new Error(
-      `Session tenancy activation inventory is not drained: ${failedInventory
-        .map((path) => path.join("."))
-        .join(", ")}`,
-    );
+  if (
+    inventory === null ||
+    typeof inventory !== "object" ||
+    numberAt(inventory, ["schemaVersion"]) !== 1
+  ) {
+    throw new Error("Session tenancy activation inventory report is structurally invalid");
+  }
+  if (parity === null || typeof parity !== "object" || numberAt(parity, ["schemaVersion"]) !== 1) {
+    throw new Error("Session tenancy activation parity report is structurally invalid");
   }
   const parityRecord = parity as Record<string, unknown>;
   const gates = parityRecord.gates;
@@ -66,16 +88,27 @@ export function assertSessionTenancyActivationEvidence(inventory: unknown, parit
   if (gates === null || typeof gates !== "object" || lanes === null || typeof lanes !== "object") {
     throw new Error("Session tenancy activation parity report is structurally invalid");
   }
-  const failedGates = Object.entries(gates as Record<string, unknown>).filter(
+  const gateRecord = gates as Record<string, unknown>;
+  const missingGates = REQUIRED_PARITY_GATES.filter((name) => !(name in gateRecord));
+  const failedGates = Object.entries(gateRecord).filter(
     ([, gate]) => numberAt(gate, ["violations"]) !== 0,
   );
-  const undrainedLanes = Object.entries(lanes as Record<string, unknown>).filter(
+  const laneRecord = lanes as Record<string, unknown>;
+  const missingLanes = REQUIRED_PARITY_LANES.filter((name) => !(name in laneRecord));
+  const undrainedLanes = Object.entries(laneRecord).filter(
     ([, count]) => typeof count !== "number" || count !== 0,
   );
-  if (failedGates.length > 0 || undrainedLanes.length > 0) {
+  if (
+    missingGates.length > 0 ||
+    failedGates.length > 0 ||
+    missingLanes.length > 0 ||
+    undrainedLanes.length > 0
+  ) {
     throw new Error(
       `Session tenancy activation parity is not clean: ${[
+        ...missingGates.map((name) => `missing-gate:${name}`),
         ...failedGates.map(([name]) => `gate:${name}`),
+        ...missingLanes.map((name) => `missing-lane:${name}`),
         ...undrainedLanes.map(([name]) => `lane:${name}`),
       ].join(", ")}`,
     );

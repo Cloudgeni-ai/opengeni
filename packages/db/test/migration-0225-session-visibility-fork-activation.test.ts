@@ -274,6 +274,7 @@ describe("migration 0303 session tenancy product activation", () => {
 
   test("forks only an explicit durable-content allowlist with fresh authority", async () => {
     const migration = await readFile(migrationPath, "utf8");
+    const fork = migration.slice(migration.indexOf("CREATE FUNCTION fork_session_content"));
     expect(migration).toContain("CREATE FUNCTION fork_session_content");
     expect(migration).toContain(
       "p_destination_workspace_id IS DISTINCT FROM p_source_workspace_id",
@@ -303,6 +304,12 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(migration).not.toContain("INSERT INTO session_goals");
     expect(migration).not.toContain("INSERT INTO organization_user_resource_grants");
     expect(migration).not.toContain("INSERT INTO session_pins");
+    expect(fork.indexOf("INSERT INTO session_command_receipts")).toBeGreaterThan(
+      fork.indexOf("INTO source_session FROM sessions session"),
+    );
+    expect(fork.indexOf("PERFORM assert_session_tenancy_quiescent")).toBeGreaterThan(
+      fork.indexOf("INSERT INTO session_command_receipts"),
+    );
   });
 
   test("installs both lifecycle capabilities and authority-change constraint", async () => {
@@ -325,6 +332,39 @@ describe("migration 0303 session tenancy product activation", () => {
         and conname = 'session_attempt_interruptions_kind_check'
     `;
     expect(constraint?.definition).toContain("authority_change");
+  });
+
+  test("keeps the unscoped quiescence helper private from the application role", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+    await shared.admin`
+      update session_goals set status = 'active' where session_id = ${value.session.id}`;
+    const app = postgres(shared.appUrl, { max: 1 });
+    try {
+      const [acl] = await app<{ executable: boolean }[]>`
+        select has_function_privilege(
+          current_user,
+          'assert_session_tenancy_quiescent(uuid,uuid,uuid,boolean)',
+          'EXECUTE'
+        ) as executable`;
+      expect(acl?.executable).toBe(false);
+      let failure: unknown;
+      try {
+        await app`
+          select assert_session_tenancy_quiescent(
+            ${value.ownerGrant.accountId}::uuid,
+            ${value.ownerGrant.workspaceId}::uuid,
+            ${value.session.id}::uuid,
+            true
+          )`;
+      } catch (error) {
+        failure = error;
+      }
+      expect(nestedPostgresSqlState(failure)).toBe("42501");
+      expect((failure as { detail?: string } | undefined)?.detail).not.toBe("active_goal");
+    } finally {
+      await app.end();
+    }
   });
 
   test("adds restrictive visibility policies to every direct session reference", async () => {
@@ -376,7 +416,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(manualPolicies.map((row) => row.tableName)).toEqual([...manualTables].sort());
   });
 
-  test("executes a same-workspace private fork with copied history and fresh authority", async () => {
+  test("replays a same-workspace private fork before mutable source quiescence", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
     const operationKey = `fork:${crypto.randomUUID()}`;
@@ -447,6 +487,12 @@ describe("migration 0303 session tenancy product activation", () => {
       latencyMode: "standard",
     });
 
+    // New work may legitimately begin after the committed fork. The exact
+    // operation retry must still return its durable result rather than inspect
+    // the source again.
+    await shared.admin`
+      update session_goals set status = 'active' where session_id = ${value.session.id}`;
+
     const replay = await forkSessionContent(client.db, {
       sourceWorkspaceId: value.ownerGrant.workspaceId,
       sourceSessionId: value.session.id,
@@ -456,6 +502,84 @@ describe("migration 0303 session tenancy product activation", () => {
       operationKey,
     });
     expect(replay).toEqual({ ...forked, replay: true });
+
+    // Reusing the same key with a different canonical request remains a typed
+    // database conflict even while the source is no longer quiescent.
+    const app = postgres(shared.appUrl, { max: 1 });
+    try {
+      await expectSqlState(
+        () =>
+          app.begin(async (sql) => {
+            await sql`select set_config('opengeni.account_id', ${value.ownerGrant.accountId}, true)`;
+            await sql`select set_config('opengeni.workspace_id', ${value.ownerGrant.workspaceId}, true)`;
+            await sql`select set_config('opengeni.subject_id', ${value.ownerSubjectId}, true)`;
+            await sql`
+              select * from fork_session_content(
+                ${value.ownerGrant.accountId}::uuid,
+                ${value.ownerGrant.workspaceId}::uuid,
+                ${value.session.id}::uuid,
+                ${value.ownerSubjectId},
+                ${value.ownerGrant.workspaceId}::uuid,
+                'user_private',
+                ${operationKey},
+                ${"f".repeat(64)},
+                1
+              )`;
+          }),
+        "23505",
+      );
+    } finally {
+      await app.end();
+    }
+  });
+
+  test("blocks transition to private while an interaction holder retains sandbox access", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+    const [sessionRow] = await shared.admin<{ sandboxGroupId: string }[]>`
+      select sandbox_group_id as "sandboxGroupId" from sessions where id = ${value.session.id}`;
+    const [lease] = await shared.admin<{ id: string }[]>`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        viewer_holders, backend, expires_at
+      ) values (
+        ${value.ownerGrant.accountId}, ${value.ownerGrant.workspaceId},
+        ${sessionRow!.sandboxGroupId}, 'warm', 1, 1, 'modal', now() + interval '10 minutes'
+      ) returning id`;
+    const holderId = `browser-session:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into sandbox_lease_holders (
+        account_id, workspace_id, lease_id, kind, holder_id, subject_id
+      ) values (
+        ${value.ownerGrant.accountId}, ${value.ownerGrant.workspaceId}, ${lease!.id},
+        'interaction', ${holderId}, ${value.session.id}
+      )`;
+
+    await expect(
+      transitionSessionVisibility(client.db, {
+        workspaceId: value.ownerGrant.workspaceId,
+        sessionId: value.session.id,
+        actorSubjectId: value.ownerSubjectId,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `interaction-blocked:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
+    const [unchanged] = await shared.admin<{ visibility: string; epoch: number }[]>`
+      select visibility, authority_epoch as epoch from sessions where id = ${value.session.id}`;
+    expect(unchanged).toEqual({ visibility: "workspace_shared", epoch: 1 });
+
+    await shared.admin`delete from sandbox_lease_holders where lease_id = ${lease!.id}`;
+    await expect(
+      transitionSessionVisibility(client.db, {
+        workspaceId: value.ownerGrant.workspaceId,
+        sessionId: value.session.id,
+        actorSubjectId: value.ownerSubjectId,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `interaction-released:${crypto.randomUUID()}`,
+      }),
+    ).resolves.toMatchObject({ visibility: "user_private", authorityEpoch: 2 });
   });
 
   test("denies a same-workspace non-owner across session content and resource tables", async () => {

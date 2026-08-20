@@ -166,10 +166,14 @@ $$;
 REVOKE ALL ON FUNCTION
   activate_session_tenancy_product(uuid, text, text, text, text[]) FROM PUBLIC;
 
--- Called only after the owner and activation checks. All mutation-bearing
--- tables are write-locked for the short transition/fork transaction so the
--- zero observation cannot race a new arrival. The stable blocker code is
--- carried in DETAIL; the adapter maps SQLSTATE 55P03 to a typed 409-ready error.
+-- Nested implementation helper only. The outer lifecycle functions call this
+-- after their complete tenant, membership, owner, activation, and operation
+-- checks. It is deliberately ungranted to the application role: by itself it
+-- has no authority boundary and would otherwise expose a cross-tenant activity
+-- oracle while taking global table locks. All mutation-bearing tables are
+-- write-locked for the short transition/fork transaction so the zero
+-- observation cannot race a new arrival. The stable blocker code is carried in
+-- DETAIL; the adapter maps SQLSTATE 55P03 to a typed 409-ready error.
 CREATE FUNCTION assert_session_tenancy_quiescent(
   p_account_id uuid,
   p_workspace_id uuid,
@@ -248,9 +252,9 @@ BEGIN
       JOIN sandbox_leases lease ON lease.id = holder.lease_id
       WHERE lease.workspace_id = p_workspace_id
         AND lease.sandbox_group_id = session_group_id
-        AND holder.kind = 'viewer'
+        AND holder.kind IN ('viewer', 'interaction')
     )
-  THEN blocker := 'active_viewer';
+  THEN blocker := 'active_sandbox_access';
   END IF;
 
   IF blocker IS NULL AND p_require_singleton_group THEN
@@ -663,6 +667,39 @@ BEGIN
   THEN RAISE EXCEPTION 'session fork is owner-only'
     USING ERRCODE = '42501'; END IF;
 
+  -- Resolve the durable operation receipt after current caller authorization
+  -- but before inspecting mutable source state. An identical retry returns the
+  -- already-committed destination even if new work began on the source after
+  -- the first fork. A reused key with different input remains a conflict.
+  INSERT INTO session_command_receipts (
+    account_id, workspace_id, actor_type, actor_subject_id, action,
+    target_session_id, operation_key, canonical_request_hash
+  ) VALUES (
+    p_account_id, p_source_workspace_id, 'human', p_actor_subject_id,
+    'session.fork', p_source_session_id, p_operation_key, p_canonical_request_hash
+  ) ON CONFLICT DO NOTHING;
+  SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
+  WHERE receipt.workspace_id = p_source_workspace_id
+    AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
+    AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
+    AND receipt.target_session_id = p_source_session_id
+    AND receipt.target_turn_id IS NULL AND receipt.operation_key = p_operation_key
+  FOR UPDATE;
+  IF receipt_row.canonical_request_hash <> p_canonical_request_hash THEN
+    RAISE EXCEPTION 'session fork idempotency conflict' USING ERRCODE = '23505';
+  END IF;
+  IF receipt_row.result ->> 'status' = 'applied' THEN
+    operation_id := receipt_row.id;
+    event_id := nullif(receipt_row.result ->> 'eventId', '')::uuid;
+    event_sequence := (receipt_row.result ->> 'eventSequence')::integer;
+    session_id := (receipt_row.result ->> 'sessionId')::uuid;
+    workspace_id := (receipt_row.result ->> 'workspaceId')::uuid;
+    visibility := receipt_row.result ->> 'visibility'; authority_epoch := 1;
+    copied_history_item_count :=
+      (receipt_row.result ->> 'copiedHistoryItemCount')::integer;
+    replay := true; RETURN NEXT; RETURN;
+  END IF;
+
   PERFORM assert_session_tenancy_quiescent(
     p_account_id, p_source_workspace_id, p_source_session_id, true
   );
@@ -694,35 +731,6 @@ BEGIN
       AND source_item.session_id = p_source_session_id
     ORDER BY source_item.position;
   GET DIAGNOSTICS history_count = ROW_COUNT;
-
-  INSERT INTO session_command_receipts (
-    account_id, workspace_id, actor_type, actor_subject_id, action,
-    target_session_id, operation_key, canonical_request_hash
-  ) VALUES (
-    p_account_id, p_source_workspace_id, 'human', p_actor_subject_id,
-    'session.fork', p_source_session_id, p_operation_key, p_canonical_request_hash
-  ) ON CONFLICT DO NOTHING;
-  SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
-  WHERE receipt.workspace_id = p_source_workspace_id
-    AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
-    AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
-    AND receipt.target_session_id = p_source_session_id
-    AND receipt.target_turn_id IS NULL AND receipt.operation_key = p_operation_key
-  FOR UPDATE;
-  IF receipt_row.canonical_request_hash <> p_canonical_request_hash THEN
-    RAISE EXCEPTION 'session fork idempotency conflict' USING ERRCODE = '23505';
-  END IF;
-  IF receipt_row.result ->> 'status' = 'applied' THEN
-    operation_id := receipt_row.id;
-    event_id := nullif(receipt_row.result ->> 'eventId', '')::uuid;
-    event_sequence := (receipt_row.result ->> 'eventSequence')::integer;
-    session_id := (receipt_row.result ->> 'sessionId')::uuid;
-    workspace_id := (receipt_row.result ->> 'workspaceId')::uuid;
-    visibility := receipt_row.result ->> 'visibility'; authority_epoch := 1;
-    copied_history_item_count :=
-      (receipt_row.result ->> 'copiedHistoryItemCount')::integer;
-    replay := true; RETURN NEXT; RETURN;
-  END IF;
 
   SELECT coalesce(
       CASE WHEN (destination_workspace.settings ->> 'maxNestedAgentDepth') ~ '^\d+$'
@@ -889,8 +897,8 @@ BEGIN
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION session_tenancy_any_product_activation()
       TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)
-      TO opengeni_app;
+    REVOKE ALL ON FUNCTION assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)
+      FROM opengeni_app;
     GRANT EXECUTE ON FUNCTION transition_session_visibility(
       uuid, uuid, uuid, text, text, integer, text, text, integer
     ) TO opengeni_app;
