@@ -61,12 +61,7 @@ import type {
 } from "@opengeni/codemode";
 import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
 import { z } from "zod";
-import {
-  MCP_MAX_TOOL_RESULT_BYTES,
-  McpPayloadTooLargeError,
-  assertMcpPayloadWithinBytes,
-  guardedMcpFetch,
-} from "./mcp-network";
+import { guardedMcpFetch } from "./mcp-network";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -1264,17 +1259,10 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
         AttemptToolResultValue["structuredContent"]
       >,
     };
-    assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "interaction tool result");
     return result;
   } catch (error) {
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
-    }
-    if (error instanceof McpPayloadTooLargeError) {
-      return interactionErrorResult(
-        "result_too_large",
-        "Interaction result exceeded the bounded tool-result size; narrow the request.",
-      );
     }
     if (error instanceof OpenGeniApiError && !error.outcomeUnknown && error.status < 500) {
       return interactionErrorResult(
