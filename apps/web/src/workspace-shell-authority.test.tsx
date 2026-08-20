@@ -138,6 +138,7 @@ describe("workspace shell authority", () => {
       transition: 0,
     });
     expect(shellMounts).toBe(0);
+    expect(rendered.container.querySelector("main")).toBeNull();
     expect(rendered.container.querySelector("aside")).toBeNull();
     await act(async () => rendered.root.unmount());
   });
@@ -157,6 +158,10 @@ describe("workspace shell authority", () => {
     expect(calls.prepareSlack).toBe(1);
     expect(rendered.container.textContent).toContain("Checking Slack access");
     expect(shellMounts).toBe(0);
+    expect(rendered.container.querySelector("main")).toBeNull();
+    expect(
+      rendered.container.querySelector('section[aria-label="Slack workspace access"]'),
+    ).not.toBeNull();
 
     await act(async () => {
       pending.resolve({
@@ -183,6 +188,7 @@ describe("workspace shell authority", () => {
     expect(calls.mcp).toBe(0);
     expect(calls.reset).toBe(0);
     expect(shellMounts).toBe(0);
+    expect(rendered.container.querySelector("main")).toBeNull();
     expect(rendered.container.querySelector("aside")).toBeNull();
     await act(async () => rendered.root.unmount());
   });

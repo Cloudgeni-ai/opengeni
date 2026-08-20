@@ -69,6 +69,7 @@ export function WorkspaceShellRouteContent({
     client,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
+    revalidatePrincipalAccess,
     resetWorkspaceIntegrations,
     refreshWorkspace,
     setSelectedRepoIds,
@@ -161,6 +162,7 @@ export function WorkspaceShellRouteContent({
         await refreshWorkspace(workspaceId);
         if (!ownsSlackOperation(operation)) return null;
         clearSlackLinkContinuation();
+        revalidatePrincipalAccess();
       }
       return next;
     },
@@ -170,6 +172,7 @@ export function WorkspaceShellRouteContent({
       client,
       ownsSlackOperation,
       refreshWorkspace,
+      revalidatePrincipalAccess,
       updateSlackAccess,
       workspaceId,
     ],
@@ -192,6 +195,7 @@ export function WorkspaceShellRouteContent({
           await refreshWorkspace(workspaceId);
           if (disposed || !ownsSlackOperation(operation)) return;
           clearSlackLinkContinuation();
+          revalidatePrincipalAccess();
         }
       })
       .catch((error) => {
@@ -214,6 +218,7 @@ export function WorkspaceShellRouteContent({
     ownsSlackOperation,
     preparePendingSlackLink,
     refreshWorkspace,
+    revalidatePrincipalAccess,
     updateSlackAccess,
     workspaceId,
   ]);
@@ -329,6 +334,7 @@ export function WorkspaceShellRouteContent({
         requestedWorkspaceId={workspaceId}
         workspaces={context.workspaces}
         accessContext={context.accessContext}
+        suppressAuthorizedFallback={context.invalidSlackLinkQueryWorkspaceId === workspaceId}
       />
     );
   }
@@ -357,7 +363,10 @@ export function WorkspaceShellRouteContent({
             ? "This Slack access request was cancelled. Request a fresh link from Slack to try again."
             : "This Slack link is invalid or expired. Request a fresh link from Slack.";
       return (
-        <main className="flex min-h-dvh items-center justify-center bg-canvas p-4">
+        <section
+          aria-label="Slack workspace access"
+          className="flex min-h-full items-center justify-center bg-canvas p-4"
+        >
           {!slackAccessRequest && !slackAccessError ? (
             <LoadingPanel label="Checking Slack access" />
           ) : activePendingState ? (
@@ -403,7 +412,7 @@ export function WorkspaceShellRouteContent({
               }
             />
           )}
-        </main>
+        </section>
       );
     }
     return null;

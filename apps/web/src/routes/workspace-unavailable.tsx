@@ -15,16 +15,19 @@ export function WorkspaceUnavailableRoute(props: {
   workspaces: readonly Workspace[];
   accessContext: AccessContext;
   location?: RouteRecoveryLocation;
+  suppressAuthorizedFallback?: boolean;
 }) {
   const location =
     props.location ??
     (typeof window === "undefined" ? { pathname: "", search: "", hash: "" } : window.location);
-  const fallback = resolveAuthorizedWorkspaceFallback({
-    requestedWorkspaceId: props.requestedWorkspaceId,
-    location,
-    workspaces: props.workspaces,
-    accessContext: props.accessContext,
-  });
+  const fallback = props.suppressAuthorizedFallback
+    ? null
+    : resolveAuthorizedWorkspaceFallback({
+        requestedWorkspaceId: props.requestedWorkspaceId,
+        location,
+        workspaces: props.workspaces,
+        accessContext: props.accessContext,
+      });
   const fallbackTarget = fallback?.target ?? null;
   const sessionId = workspaceSessionIdFromPath(location.pathname);
 
@@ -43,7 +46,7 @@ export function WorkspaceUnavailableRoute(props: {
   return (
     <ProblemPanel
       title="Workspace unavailable"
-      description="This workspace doesn't exist or you don't have access to it. No authorized equivalent destination was found."
+      description="You don't have access to this workspace. It may no longer exist, and no authorized equivalent destination was found."
       action={
         <Button asChild type="button" variant="secondary">
           <a href="/">Open default workspace</a>
