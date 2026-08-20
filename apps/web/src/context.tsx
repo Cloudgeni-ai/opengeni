@@ -42,6 +42,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
+import {
+  loadCurrentManagedSelfContext,
+  managedSelfContextIdentity,
+  type ManagedSelfContext,
+  type ManagedSelfContextIdentity,
+} from "@/lib/managed-self-context";
 import { sameSessionForContext } from "@/lib/session-context";
 import { runSingleFlight } from "@/lib/single-flight";
 import {
@@ -123,6 +129,8 @@ export type AppContextValue = {
   authSession: AuthSession | null;
   accessContext: AccessContext;
   workspaces: Workspace[];
+  /** Exact managed-human membership facts bound to the current credential identity. */
+  managedSelfContext: ManagedSelfContext | null;
   /** Token-free continuation identity retained across Root/provider remounts. */
   slackLinkContinuationWorkspaceId: string | null;
   /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
@@ -399,6 +407,7 @@ export function RootRouteComponent() {
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
     string | null
   >(slackLinkPrepareController.workspaceId);
@@ -444,6 +453,7 @@ export function RootRouteComponent() {
   const activeGitHubDisconnectOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const authPrincipalIdRef = useRef<string | null>(null);
   const accessPrincipalIdRef = useRef<string | null>(null);
+  const managedSelfContextIdentityRef = useRef<ManagedSelfContextIdentity | null>(null);
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
@@ -587,6 +597,8 @@ export function RootRouteComponent() {
   const invalidatePrincipalWorkspaceState = useCallback(() => {
     authPrincipalIdRef.current = null;
     accessPrincipalIdRef.current = null;
+    managedSelfContextIdentityRef.current = null;
+    setManagedSelfContext(null);
     resetWorkspaceState(null, true);
   }, [resetWorkspaceState]);
 
@@ -662,27 +674,59 @@ export function RootRouteComponent() {
     if (!clientConfig || !authReady) {
       setAccessContext(null);
       setWorkspaces([]);
+      managedSelfContextIdentityRef.current = null;
+      setManagedSelfContext(null);
       setAccessLoading(false);
       setAccessError(null);
       return;
     }
     let cancelled = false;
+    const acceptedManagedIdentity =
+      clientConfig.auth.mode === "managedSession" && authSession
+        ? managedSelfContextIdentity({
+            credentialGeneration: accessKeyVersion,
+            managedUserId: authSession.user.id,
+          })
+        : null;
+    managedSelfContextIdentityRef.current = acceptedManagedIdentity;
+    setManagedSelfContext(null);
     setAccessLoading(true);
     setAccessError(null);
-    void Promise.all([client.getAccessContext(), client.listWorkspaces()])
-      .then(([context, nextWorkspaces]) => {
+    const selfContextPromise = acceptedManagedIdentity
+      ? loadCurrentManagedSelfContext({
+          identity: acceptedManagedIdentity,
+          currentIdentity: () => managedSelfContextIdentityRef.current,
+          request: () => client.listOrganizationMemberships(),
+        })
+      : Promise.resolve(null);
+    void Promise.all([client.getAccessContext(), client.listWorkspaces(), selfContextPromise])
+      .then(([context, nextWorkspaces, nextManagedSelfContext]) => {
         if (cancelled) {
           return;
+        }
+        if (acceptedManagedIdentity && nextManagedSelfContext === null) {
+          return;
+        }
+        if (
+          nextManagedSelfContext &&
+          context.subjectId !== nextManagedSelfContext.identity.subjectId
+        ) {
+          throw new Error("managed self context did not match the authenticated subject");
         }
         if (
           accessPrincipalIdRef.current !== null &&
           accessPrincipalIdRef.current !== context.subjectId
         ) {
           invalidatePrincipalWorkspaceState();
+          // The newly returned access + membership tuple is already bound to
+          // the accepted current cookie identity. Restore that identity after
+          // clearing the prior principal's workspace state.
+          managedSelfContextIdentityRef.current = acceptedManagedIdentity;
         }
         accessPrincipalIdRef.current = context.subjectId;
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
+        setManagedSelfContext(nextManagedSelfContext);
       })
       .catch((error) => {
         if (cancelled) {
@@ -702,8 +746,18 @@ export function RootRouteComponent() {
       });
     return () => {
       cancelled = true;
+      if (managedSelfContextIdentityRef.current === acceptedManagedIdentity) {
+        managedSelfContextIdentityRef.current = null;
+      }
     };
-  }, [clientConfig, authReady, client, invalidatePrincipalWorkspaceState]);
+  }, [
+    accessKeyVersion,
+    authSession,
+    clientConfig,
+    authReady,
+    client,
+    invalidatePrincipalWorkspaceState,
+  ]);
 
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
   const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
@@ -1483,6 +1537,7 @@ export function RootRouteComponent() {
           authSession: authSession ?? null,
           accessContext,
           workspaces,
+          managedSelfContext,
           slackLinkContinuationWorkspaceId,
           preparePendingSlackLink,
           clearSlackLinkContinuation,
@@ -1592,6 +1647,7 @@ export function RootRouteComponent() {
     keyAuthRequired,
     manualRepos,
     manualReposOpen,
+    managedSelfContext,
     model,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
