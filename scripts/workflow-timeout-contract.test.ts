@@ -297,6 +297,91 @@ describe("workflow timeout contract", () => {
     }
   });
 
+  test("terminal-review shell indirection probes preserve executable expansion semantics", () => {
+    const exactProbes = [
+      { source: "cat <<EOF\n$(timeout 10h job)\nEOF", minutes: 600 },
+      { source: 'echo "$(timeout 10h job)"', minutes: 600 },
+      { source: 'VALUE="$(timeout 10h job)"', minutes: 600 },
+      { source: 'consume "$(timeout 10h job)"', minutes: 600 },
+      { source: "eval 'timeout 10h job'", minutes: 600 },
+      { source: 'time""out 10h job', minutes: 600 },
+      { source: "ti\\meout 10h job", minutes: 600 },
+      { source: "time\\\nout 10h job", minutes: 600 },
+      { source: 'bun test --time""out 720000', minutes: 12 },
+      { source: 'cmd=timeout; "$cmd" 10h job', minutes: 600 },
+      { source: "gtimeout 10h job", minutes: 600 },
+    ] as const;
+    for (const probe of exactProbes) {
+      const result = analyzeShellTimeoutBudget(probe.source);
+      expect(result.uncertainties, probe.source).toEqual([]);
+      expect(result.minutes, probe.source).toBeCloseTo(probe.minutes, 8);
+    }
+
+    for (const probe of [
+      "cat <<'EOF'\n$(timeout 10h job)\nEOF",
+      'cat <<E"OF"\n`timeout 10h job`\nEOF',
+      "cat <<$'EOF'\n$(timeout 10h job)\nEOF",
+      'cat <<$"EOF"\n$(timeout 10h job)\nEOF',
+      "cat <<\\EOF\n$(timeout 10h job)\nEOF",
+      "cat <<EOF\nliteral timeout 10h prose\n\\$(timeout 10h job)\nEOF",
+      'echo "literal timeout 10h prose"',
+    ]) {
+      expect(analyzeShellTimeoutBudget(probe), probe).toEqual({ minutes: 0, uncertainties: [] });
+    }
+  });
+
+  test("nearby recursive expansions count or fail closed without prose false positives", () => {
+    for (const probe of [
+      'echo "`timeout 10h job`"',
+      "VALUE=<(timeout 10h job)",
+      'export VALUE="$(timeout 10h job)"',
+      'VALUE="$(timeout 10h job)" consume',
+      'consume "${VALUE:-$(timeout 10h job)}"',
+      'echo "$(echo "$(timeout 10h job)")"',
+      "cat <<EOF\n`timeout 10h job`\nEOF",
+      'cat <<EOF\n"$(timeout 10h job)"\nEOF',
+      "eval time''out 10h job",
+      'script="timeout 10h job"; eval "$script"',
+      "bash <<< 'timeout 10h job'",
+      'flag=--timeout; bun test "$flag" 36000000',
+      "cmd=time''out; \"${cmd}\" 10h job",
+      'cmd=echo; if ready; then cmd=timeout; else cmd=timeout; fi; "$cmd" 10h job',
+      'cmd=echo; if cmd=timeout; then true; fi; "$cmd" 10h job',
+      "/opt/homebrew/bin/gtimeout 10h job",
+    ]) {
+      const result = analyzeShellTimeoutBudget(probe);
+      expect(result.uncertainties, probe).toEqual([]);
+      expect(result.minutes, probe).toBeCloseTo(600, 8);
+    }
+    for (const probe of [
+      'eval "$SCRIPT"',
+      'bash -c "$SCRIPT"',
+      'flag=$FLAGS; bash "$flag" "timeout 10h job"',
+      "bash <<'EOF'\ntimeout 10h job\nEOF",
+      'cmd=$COMMAND; "$cmd" ordinary-argument',
+      'cmd=$COMMAND; "$cmd" 10h job',
+      'cmd=timeout; if ready; then cmd=echo; fi; "$cmd" 10h job',
+      'cmd=timeout; for item in $ITEMS; do cmd=echo; done; "$cmd" 10h job',
+      'items="1 2 3"; for item in $items; do timeout 10m job; done',
+      'cmd=echo; for cmd in timeout; do "$cmd" 10h job; done',
+      'cmd=timeout; unset cmd; "$cmd" 10h job',
+      'cmd=timeout; read cmd; "$cmd" 10h job',
+      "source ./dynamic-script.sh; timeout 10h job",
+      'flag=$OPTION; bun test "$flag" 720000',
+      'bun test --timeout="${DURATION}"',
+      'echo "$(timeout "$DURATION" job)"',
+    ]) {
+      expect(analyzeShellTimeoutBudget(probe).uncertainties.length, probe).toBeGreaterThan(0);
+    }
+    expect(analyzeShellTimeoutBudget("for item in $(timeout 10h job); do true; done")).toEqual({
+      minutes: 600,
+      uncertainties: [],
+    });
+    expect(
+      analyzeShellTimeoutBudget('cmd=echo; while cmd=timeout; do break; done; "$cmd" 10h job'),
+    ).toEqual({ minutes: 600, uncertainties: [] });
+  });
+
   test("a numeric step ceiling replaces nested command budgets without double counting", () => {
     expect(
       analyzeStepTimeoutBudget({
