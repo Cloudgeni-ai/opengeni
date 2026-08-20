@@ -1,9 +1,5 @@
 import {
   getScheduledVariableSetExpectedGenerationForAttempt,
-  advanceWorkspaceGeneration,
-  verifyWorkspaceMutationSettlement,
-  getSandbox,
-  readActiveSandbox,
   getSessionRootId,
   persistAttemptToolCatalog,
   selectXaiCredentialForUse,
@@ -14,21 +10,14 @@ import {
   getWorkspaceGrant,
   countSessionHistoryItems,
   setSessionLastInputTokensForTurnAttempt,
-  heartbeatLeaseHolder,
-  readLease,
-  accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
-  getLiveEnrollmentConnection,
-  assertPersonalMachineForAttempt,
-  abandonRecordingForTurnAttempt,
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   prepareConnectorActionApproval,
   withCodexAppsRequestAuthorization,
-  type SandboxRecord,
 } from "@opengeni/db";
 import { sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
@@ -38,30 +27,22 @@ import {
   materializeRunCredentials,
   clearRunCredentials,
   clearRunCredentialsForAttempt,
-  withRunCredentialsSession,
   refreshGitCredentialBindingTokenFiles,
   refreshCodemodeTokenFile,
   codemodeTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
-  runOwnedSandboxSetup,
-  markModelPreparationFirstSandboxOperation,
-  recordModelPreparationMeasurement,
-  RoutingMutationOutcomeUnknownError,
-  sdkBackendIdForSandboxBackend,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type BuildAgentOptions,
   type AttemptConnectorActionBinding,
   type ConnectorActionPolicyHooks,
-  type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   type ConnectorAttachmentMaterializationRequest,
   createFirstPartyInteractionAttemptToolDefinitions,
-  stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
   authorizeGoogleDrivePublicationAttempt,
@@ -74,14 +55,11 @@ import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import {
   allowedFirstPartyMcpToolsForSession,
-  sandboxLifecycleTransitionWaitMs,
-  sandboxWarmRateMicrosPerSecond,
   serviceTierForLatencyMode,
   environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   codemodeWorkspaceUrl,
   resolveModelProvider,
-  type Settings,
 } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
@@ -141,32 +119,18 @@ import {
 } from "../run-credentials";
 import { withFirstPartyTools } from "../goals";
 import { rigProviderImageSourceImage } from "../packs";
-import { createRuntimeBatcher, currentActivityContext } from "../streaming";
+import { currentActivityContext } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "../types";
-import {
-  resumeBoxForTurn,
-  maybePersistWarmWorkspaceSnapshot,
-  waitForWarmSnapshot,
-  type ResumedTurnSandbox,
-} from "../../sandbox-resume";
-import {
-  wrapTurnBoxWithRouting,
-  wrapLazyTurnBoxWithRouting,
-  establishSelfhostedTurnSession,
-  routingEnabled,
-  lazyProvisionEnabled,
-} from "../../sandbox-routing";
+import { type ResumedTurnSandbox } from "../../sandbox-resume";
+import { lazyProvisionEnabled } from "../../sandbox-routing";
 import {
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
-  recordCreditMicros,
   recordModelRequestPhase,
-  recordSandboxLogicalProvision,
-  recordSandboxProvisionAttempt,
   recordCompanyBrainContributions,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
@@ -176,7 +140,6 @@ import {
   modelVisibleCompanyBrainSkillActivations,
   summarizeCompanyBrainContributions,
 } from "../../model-context-contributions";
-import { beginRecording, discardUnpublishedRecording, type ActiveRecording } from "../recording";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -184,11 +147,7 @@ import { createTurnHistorySink } from "./history-sink";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
 import { executeCodexImageGeneration } from "../codex-image-generation";
 import { resolveImageGenerationReferences } from "../image-generation-references";
-import {
-  ChannelAPartialMutationError,
-  SandboxChannelAService,
-  type ChannelASession,
-} from "@opengeni/runtime/sandbox";
+import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { VideoGenerationRejectedResult, type ToolAuthNeededPayload } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
@@ -196,7 +155,7 @@ import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-mem
 
 import { shouldPublishToolAuthNeededForTurn } from "./admission";
 import { codexWorkspaceMetricKey } from "./codex";
-import { unavailableMcpOperationalContext, safeErrorDiagnostic } from "./errors";
+import { unavailableMcpOperationalContext } from "./errors";
 import {
   filterUnmaterializedSandboxFileDownloads,
   runtimeResourcesForTurn,
@@ -209,31 +168,13 @@ import {
   objectStorageForSandboxDownloads,
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
+import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
 import {
-  shouldStartPeriodicWorkspaceSnapshot,
-  releaseTurnSandboxAfterWriterDrain,
-  finalizeDurableTurnOpStreams,
-} from "./quiescence";
-import {
-  SandboxDeadlineRotationError,
-  throwIfTurnOperationCancelled,
-  waitForTurnOperation,
-  classifySandboxLogicalProvisionFailure,
-  isLazySandboxProvisionRetryable,
-  createTurnSandboxProvisioner,
-} from "./sandbox-provision";
-import {
-  resolveActiveSandboxBackend,
-  managedSandboxOwnershipForTurn,
-  shouldEstablishSandboxForTurn,
   sandboxEstablishPolicyDecision,
-  shouldPrefetchManagedSandbox,
-  reconcileActiveSandboxPointer,
   ensureTurnModalRegistryImage,
   sandboxArtifactRuntimeAdmission,
 } from "./sandbox-route";
 import {
-  shouldStartOnTurnRecording,
   computerToolModeForTurn,
   structuredToolTransportForTurn,
   shouldDeferNonEagerToolPreparation,
@@ -248,6 +189,12 @@ import { claimTurnAttempt } from "./claim";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
+import { createSandboxTurnRuntime } from "./sandbox-runtime";
+import {
+  resolveSandboxRoute,
+  establishTurnSandbox,
+  bindLazySandboxProvisioner,
+} from "./sandbox-establish";
 import { selectXaiTurnCapacity } from "./xai-capacity";
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
@@ -382,593 +329,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getTurnId: () => attempt.turnId,
     });
 
-    // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
-    // the one box by id from the group lease and injects it NON-OWNED into the
-    // run. null when the flag is off (byte-for-byte the legacy build-and-discard
-    // path) OR when the backend is "none". Released + dropped in `finally`.
-    const releaseLateSandbox = async (sandbox: ResumedTurnSandbox): Promise<void> => {
-      sandboxState.lateSandboxesAwaitingWriterDrain.add(sandbox);
-      // Drop the holder/timer immediately, but keep its null-outcome admissions
-      // fenced until the shared attempt writer drain completes. The staged
-      // release serializes a later proof-bearing call behind this one.
-      await sandbox.release().catch(() => undefined);
-      if (!sandboxState.attemptWritersDrained) return;
-      try {
-        await releaseTurnSandboxAfterWriterDrain(sandbox);
-        sandboxState.lateSandboxesAwaitingWriterDrain.delete(sandbox);
-      } catch (error) {
-        console.error(
-          "late sandbox quiesced release failed (turn outcome unaffected)",
-          safeErrorDiagnostic(error),
-        );
-      }
-    };
-    const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {
-      if (!sandboxState.resolvedSandbox) throw new Error(message);
-      return sandboxState.resolvedSandbox;
-    };
-    // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
-    // routing proxy). Kept as a fallback finalizer; the routing proxy normally
-    // aggregates it together with every machine reached after a mid-turn swap.
-    // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
-    // Platform setup (beforeAgentStart hooks + file materialization) execs against
-    // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
-    // connected machine (the user's real computer).
-    const finalizeTurnOpStreamOps = async (): Promise<void> => {
-      await finalizeDurableTurnOpStreams(
-        [sandboxState.lazyOwnedSandbox?.session, sandboxState.resolvedSandbox?.established.session],
-        sandboxState.machinePrimarySession,
-      );
-    };
-    // A same-target API repair can replace the home provider while this turn is
-    // alive. Keep setup/snapshot persistence on the rebound raw session while
-    // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
-    // proxy separately, so their worker-side handle may replace its raw session.
-    const onHomeSandboxRebound = (rebound: {
-      established: EstablishedSandboxSession;
-      leaseEpoch: number;
-    }): void => {
-      const current = sandboxState.resolvedSandbox;
-      const previousSession = current?.established.session;
-      const preserveRoutingProxy =
-        current !== null && previousSession !== sandboxState.setupBoxSession;
-      sandboxState.setupBoxSession = rebound.established.session;
-      if (!current) return;
-      current.leaseEpoch = rebound.leaseEpoch;
-      current.established = preserveRoutingProxy
-        ? {
-            ...current.established,
-            client: rebound.established.client,
-            // Keep the stable SDK-facing proxy; only its resolver changes the
-            // underlying backend. The worker's setupBoxSession above is raw.
-            session: previousSession,
-            sessionState: rebound.established.sessionState,
-            instanceId: rebound.established.instanceId,
-            backendId: rebound.established.backendId,
-            ...(rebound.established.origin ? { origin: rebound.established.origin } : {}),
-            ...(rebound.established.restoredArchive
-              ? { restoredArchive: rebound.established.restoredArchive }
-              : {}),
-          }
-        : rebound.established;
-    };
-    // The globally unique durable turn-attempt holder id + the group id,
-    // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
-    // (a superseded owner self-evicts) and finally can release.
-    const runWorkspaceMutationForSandbox = async <T>(
-      sandbox: ResumedTurnSandbox,
-      operation: string,
-      mutation: () => Promise<T>,
-      observePhase?: (measurement: {
-        phase: "admission" | "provider" | "settlement" | "snapshot_wait";
-        outcome: "completed" | "failed";
-        durationSeconds: number;
-      }) => void,
-    ): Promise<T> => {
-      const observeMutationPhase = (
-        phase: "admission" | "provider" | "settlement" | "snapshot_wait",
-        outcome: "completed" | "failed",
-        durationMs: number,
-      ): void => {
-        try {
-          observePhase?.({
-            phase,
-            outcome,
-            durationSeconds: Math.max(0, durationMs) / 1_000,
-          });
-        } catch {
-          // Diagnostics must never alter workspace mutation authority.
-        }
-      };
-      // Connected machines are the user's own persistence and never dirty the
-      // cloud home archive. Every persistable raw-session write batch is fenced
-      // against the exact current lease/provider before the provider sees it.
-      if (sandbox.established.backendId === "selfhosted") {
-        const providerStartedAt = performance.now();
-        let providerOutcome: "completed" | "failed" = "failed";
-        try {
-          const result = await mutation();
-          providerOutcome = "completed";
-          return result;
-        } catch (error) {
-          if (error instanceof ChannelAPartialMutationError) {
-            throw new RoutingMutationOutcomeUnknownError(
-              operation,
-              `Connected Machine workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
-              { cause: error },
-            );
-          }
-          throw error;
-        } finally {
-          observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
-        }
-      }
-      if (
-        !sandboxState.sandboxGroupId ||
-        !sandboxState.sandboxHolderId ||
-        !attempt.turnId ||
-        attempt.executionGeneration <= 0
-      ) {
-        throw new Error("Workspace mutation attempted before exact turn sandbox admission");
-      }
-      let admissionCaptureWaitMs = 0;
-      const identity = {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-        holderId: sandboxState.sandboxHolderId,
-        sandboxGroupId: sandboxState.sandboxGroupId,
-        expectedEpoch: sandbox.leaseEpoch,
-        expectedInstanceId: sandbox.established.instanceId,
-        operation,
-        captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
-        ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
-        ...(observePhase
-          ? {
-              onCaptureWait: (observation: {
-                durationMs: number;
-                outcome: "completed" | "failed";
-              }) => {
-                admissionCaptureWaitMs += Math.max(0, observation.durationMs);
-                observeMutationPhase("snapshot_wait", observation.outcome, observation.durationMs);
-              },
-            }
-          : {}),
-      };
-      const admissionStartedAt = performance.now();
-      let admissionOutcome: "completed" | "failed" = "failed";
-      let admission: Awaited<ReturnType<typeof advanceWorkspaceGeneration>>;
-      try {
-        admission = await advanceWorkspaceGeneration(db, identity);
-        admissionOutcome = "completed";
-      } finally {
-        observeMutationPhase(
-          "admission",
-          admissionOutcome,
-          Math.max(0, performance.now() - admissionStartedAt - admissionCaptureWaitMs),
-        );
-      }
-      const settleMutation = async (outcome: "resolved" | "rejected"): Promise<void> => {
-        const settlementStartedAt = performance.now();
-        let settlementOutcome: "completed" | "failed" = "failed";
-        try {
-          await verifyWorkspaceMutationSettlement(db, {
-            ...identity,
-            admission,
-            outcome,
-          });
-          settlementOutcome = "completed";
-        } finally {
-          observeMutationPhase(
-            "settlement",
-            settlementOutcome,
-            performance.now() - settlementStartedAt,
-          );
-        }
-      };
-      let result: T;
-      const providerStartedAt = performance.now();
-      let providerOutcome: "completed" | "failed" = "failed";
-      try {
-        result = await mutation();
-        providerOutcome = "completed";
-      } catch (providerError) {
-        observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
-        const partialMutation = providerError instanceof ChannelAPartialMutationError;
-        try {
-          await settleMutation(partialMutation ? "resolved" : "rejected");
-        } catch (settlementError) {
-          throw new RoutingMutationOutcomeUnknownError(
-            operation,
-            partialMutation
-              ? `Platform workspace mutation "${operation}" partially applied at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`
-              : `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
-            { cause: settlementError },
-          );
-        }
-        if (partialMutation) {
-          throw new RoutingMutationOutcomeUnknownError(
-            operation,
-            `Platform workspace mutation "${operation}" partially applied before a later batch item failed; the complete operation was not replayed`,
-            { cause: providerError },
-          );
-        }
-        throw providerError;
-      }
-      observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
-      try {
-        await settleMutation("resolved");
-      } catch (settlementError) {
-        throw new RoutingMutationOutcomeUnknownError(
-          operation,
-          `Platform workspace mutation "${operation}" returned from the provider but lost its durable settlement fence; its outcome is unknown and it was not replayed`,
-          { cause: settlementError },
-        );
-      }
-      return result;
-    };
-    // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
-    // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
-    // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
-    const stopLeaseHeartbeat = (): void => {
-      if (!sandboxState.leaseHeartbeatTimer) return;
-      clearInterval(sandboxState.leaseHeartbeatTimer);
-      sandboxState.leaseHeartbeatTimer = undefined;
-    };
-    // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
-    // credentials for a multi-day turn. The controller is attached only after
-    // the initial seed reached a real cloud box and is drained before capture.
-    // Generic host-owned run material has its own attempt-scoped renewal and
-    // write handle. It is always drained and wiped before workspace capture.
-    // The delegated Codemode bearer has a one-hour TTL. Renewal is attempt-
-    // owned and attaches only after the initial token file reached a real
-    // sandbox session; finalization drains an in-flight replacement.
-    // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
-    // 10s but a Modal filesystem snapshot can take longer — never overlap two
-    // captures on one box. The in-flight capture's promise is held so the
-    // turn-end persist can await it (its capture predates the turn's final
-    // writes; landing after the fresher turn-end capture started would make
-    // the atomic DB throttle discard the fresher one). Interval throttling
-    // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
-    // The heartbeat snapshot is mid-session durability, not first-request
-    // preparation. Keep it off the startup critical path until a provider
-    // request has actually reached its transport boundary.
-    // Turn-end capture needs the lease heartbeat to keep its holder alive, but
-    // must prevent that same timer from starting another periodic snapshot
-    // while it reads. This gate separates those two responsibilities.
-    // Computer-use-only recording. Ordinary shell/filesystem turns leave this
-    // null; the first actual computer action starts it after :0 is ready.
-    // P4.3 recording gate: flips true in `onComputerUseReady`, the runtime's
-    // execution-time callback for the first real computer action. It must flip
-    // BEFORE awaiting recording startup: the SDK tool-call stream item can arrive
-    // before ffmpeg has finished starting. A plain text turn ("hey"/"continue")
-    // never invokes the callback, so settlement performs no storage PUT.
-    const abandonActiveRecording = async (
-      reason: string,
-      disposition: "failed" | "discard" = "failed",
-    ): Promise<void> => {
-      const recording = recordingState.activeRecording as ActiveRecording | null;
-      if (!recording) return;
-      recordingState.activeRecording = null;
-      if (sandboxState.resolvedSandbox) {
-        await stopRecordingOnBox(
-          sandboxState.resolvedSandbox.established.session,
-          recording.proc,
-        ).catch(() => undefined);
-      }
-      if (!attempt.turnId || attempt.executionGeneration <= 0) return;
-      await abandonRecordingForTurnAttempt(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-        recordingId: recording.recordingId,
-        disposition,
-        reason,
-      }).catch(() => undefined);
-    };
-    const flushRuntimeBatcher = async () => {
-      const current = eventing.batcher as ReturnType<typeof createRuntimeBatcher> | null;
-      await current?.flush().catch(() => undefined);
-    };
-    // Reconciliation is declared before provider routing so every turn-end path
-    // can share one closure. It cannot run until `stream` exists, by which time
-    // this value has been rebound to the turn's resolved model policy.
-    const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
-      const established = sandbox.established;
-      if (eventing.publish && established.origin && established.origin !== "resumed") {
-        const lifecycleEvents: Array<{
-          type: "sandbox.box.lost" | "sandbox.box.created";
-          payload: unknown;
-        }> = [];
-        if (established.lostInstanceId) {
-          lifecycleEvents.push({
-            type: "sandbox.box.lost",
-            payload: { sandboxId: established.lostInstanceId },
-          });
-        }
-        lifecycleEvents.push({
-          type: "sandbox.box.created",
-          payload: {
-            sandboxId: established.instanceId,
-            hydrated: established.origin === "restored" ? "archive" : "none",
-          },
-        });
-        await eventing.publish(lifecycleEvents).catch(() => undefined);
-      }
-    };
-    const publishSandboxLost = async (lostSandbox: { instanceId: string }): Promise<void> => {
-      if (!eventing.publish) return;
-      await eventing
-        .publish([
-          {
-            type: "sandbox.box.lost",
-            payload: { sandboxId: lostSandbox.instanceId },
-          },
-        ])
-        .catch((publishError) => {
-          // The lease transition is already authoritative. A fenced/failed audit
-          // append must not prevent the same logical turn from recovering.
-          console.error("sandbox box lost event publish failed", safeErrorDiagnostic(publishError));
-        });
-    };
-    const startLeaseHeartbeat = (
-      sandbox: ResumedTurnSandbox,
-      warmBackend: Settings["sandboxBackend"] | undefined,
-    ): void => {
-      if (sandboxState.leaseHeartbeatTimer) return;
-      if (!sandboxState.sandboxHolderId || !sandboxState.sandboxGroupId) {
-        return;
-      }
-      // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
-      // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
-      // is rejected (returns false) and we stop refreshing — the box rides the
-      // provider idle-timeout and the next dispatch re-establishes it. Best-
-      // effort: a transient DB error must never fail the turn.
-      const heartbeatEpoch = sandbox.leaseEpoch;
-      const heartbeatHolderId = sandboxState.sandboxHolderId;
-      const heartbeatGroupId = sandboxState.sandboxGroupId;
-      // P2.1 warm-meter (tick A): while a turn runs, the heartbeat is also the
-      // warm-seconds tick. GROUP+epoch+tick keyed (one box = one stream, shared
-      // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
-      // metered when a per-backend rate is configured. Best-effort: a metering
-      // failure must never fail the turn.
-      //
-      // Keyed off the EFFECTIVE backend (Stage D): a machine-primary turn has NO
-      // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
-      // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
-      // cloud seconds for a box that does not exist (a real money bug). Non-machine
-      // turns fall back to groupBoxBackend (the REAL box that ran): for a machine-
-      // home turn that degraded to the cloud group box (swap-away / flag-off), that
-      // is the deployment default (modal), so the fallback box is warm-metered at
-      // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
-      const warmRate = sandboxWarmRateMicrosPerSecond(
-        settings,
-        warmBackend ?? (sandbox.established.backendId as Settings["sandboxBackend"]),
-      );
-      sandboxState.leaseHeartbeatTimer = setInterval(() => {
-        void heartbeatLeaseHolder(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sandboxGroupId: heartbeatGroupId,
-          kind: "turn",
-          holderId: heartbeatHolderId,
-          leaseTtlMs: settings.sandboxLeaseTtlMs,
-          expectedEpoch: heartbeatEpoch,
-        })
-          .then(async (alive) => {
-            if (alive || sandboxState.rotationInFlight || sandboxRotationController.signal.aborted)
-              return;
-            const rotatingLease = await readLease(db, input.workspaceId, heartbeatGroupId).catch(
-              () => null,
-            );
-            if (
-              !rotatingLease ||
-              rotatingLease.leaseEpoch !== heartbeatEpoch ||
-              rotatingLease.instanceId !== sandbox.established.instanceId ||
-              rotatingLease.rotationRequestedAt === null
-            ) {
-              // The holder was reaped, the exact attempt closed, the epoch was
-              // superseded, or the lease began draining. Do not leave a dead
-              // interval issuing DB writes and snapshot probes forever.
-              stopLeaseHeartbeat();
-              return;
-            }
-            sandboxState.rotationInFlight = (async () => {
-              // Rotation admission already fenced all new workspace mutations.
-              // Wait for an earlier periodic capture, then produce the exact
-              // generation-complete checkpoint that licenses aborting this run.
-              if (sandboxState.snapshotInFlight) {
-                await waitForWarmSnapshot(
-                  sandboxState.snapshotInFlight,
-                  settings.sandboxSnapshotTimeoutMs,
-                  cancellationSignal,
-                );
-              }
-              const snapshotSession = sandboxState.setupBoxSession;
-              const snapshotTurnId = attempt.turnId;
-              if (snapshotSession && snapshotTurnId) {
-                await maybePersistWarmWorkspaceSnapshot(
-                  { db, settings },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: snapshotTurnId,
-                    attemptId: input.attemptId,
-                    sandboxGroupId: heartbeatGroupId,
-                  },
-                  snapshotSession,
-                  heartbeatEpoch,
-                  cancellationSignal,
-                  true,
-                );
-              }
-              const checkpointed = await readLease(db, input.workspaceId, heartbeatGroupId);
-              if (
-                checkpointed?.leaseEpoch === heartbeatEpoch &&
-                checkpointed.rotationRequestedAt !== null &&
-                checkpointed.archiveComplete &&
-                !cancellationSignal?.aborted
-              ) {
-                sandboxRotationController.abort(
-                  new SandboxDeadlineRotationError(heartbeatGroupId, heartbeatEpoch),
-                );
-              }
-            })()
-              .catch((error) => {
-                observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sandboxGroupId: heartbeatGroupId,
-                  leaseEpoch: heartbeatEpoch,
-                  ...safeErrorDiagnostic(error),
-                });
-              })
-              .finally(() => {
-                sandboxState.rotationInFlight = null;
-              });
-            await sandboxState.rotationInFlight;
-          })
-          .catch(() => undefined);
-        void accrueWarmSeconds(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sandboxGroupId: heartbeatGroupId,
-          expectedEpoch: heartbeatEpoch,
-          warmRateMicrosPerSecond: warmRate,
-          subjectId: input.sessionId,
-        })
-          .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
-          .catch(() => undefined);
-        // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
-        // the box, fold a fresh /workspace snapshot onto the lease every
-        // sandboxSnapshotIntervalMs, so a box death the reaper never sees
-        // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
-        // of work — a legit multi-day turn is otherwise completely unprotected
-        // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
-        // session (setupBoxSession): the routing veneer could swap mid-op and a
-        // selfhosted target has no persistWorkspace anyway. Best-effort +
-        // single-flight; throttling lives in the helper.
-        const snapshotSession = sandboxState.setupBoxSession;
-        const snapshotTurnId = attempt.turnId;
-        if (
-          snapshotSession &&
-          snapshotTurnId &&
-          shouldStartPeriodicWorkspaceSnapshot({
-            firstProviderRequestStarted: sandboxState.firstProviderRequestStarted,
-            snapshotInFlight: Boolean(sandboxState.snapshotInFlight),
-            turnEndCaptureInProgress: sandboxState.turnEndCaptureInProgress,
-          })
-        ) {
-          sandboxState.snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
-            { db, settings },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: snapshotTurnId,
-              attemptId: input.attemptId,
-              sandboxGroupId: heartbeatGroupId,
-            },
-            snapshotSession,
-            heartbeatEpoch,
-            activityContext?.cancellationSignal,
-          )
-            .then(async (persisted) => {
-              if (persisted && eventing.publish) {
-                await eventing.publish([
-                  {
-                    type: "sandbox.box.snapshot",
-                    payload: { trigger: "heartbeat" },
-                  },
-                ]);
-              }
-            })
-            .catch(() => undefined)
-            .finally(() => {
-              sandboxState.snapshotInFlight = null;
-            });
-        }
-      }, 10_000);
-      if (
-        "unref" in sandboxState.leaseHeartbeatTimer &&
-        typeof sandboxState.leaseHeartbeatTimer.unref === "function"
-      ) {
-        sandboxState.leaseHeartbeatTimer.unref();
-      }
-    };
-    const maybeStartOnTurnRecording = async (
-      sandbox: ResumedTurnSandbox,
-      effectiveBackend: Settings["sandboxBackend"] | undefined,
-    ): Promise<void> => {
-      if (recordingState.activeRecording) {
-        return;
-      }
-      if (recordingState.computerUseRecordingStart) {
-        await recordingState.computerUseRecordingStart;
-        return;
-      }
-      // Called only by the runtime's first-computer-action hook. Plain sandbox
-      // operations never start ffmpeg and never boot a display merely to record
-      // an unused desktop. Recording failure never fails the computer action.
-      if (
-        shouldStartOnTurnRecording({
-          recordingEnabled: settings.recordingEnabled,
-          desktopEnabled: settings.sandboxDesktopEnabled,
-          establishedBackendId: sandbox.established.backendId,
-          // EFFECTIVE (active) backend, not the session home: a machine-primary turn
-          // resolves to "selfhosted" and skips; a swap back to the cloud group box
-          // resolves to undefined and records as before.
-          effectiveBackend,
-        })
-      ) {
-        recordingState.computerUseRecordingStart = (async () => {
-          let begun: Awaited<ReturnType<typeof beginRecording>> | null = null;
-          try {
-            begun = await beginRecording({
-              settings,
-              db,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: attempt.turnId!,
-              recordingId: randomUUID(),
-              mode: "on-turn",
-              session: sandbox.established.session,
-              runAs: sandboxRunAs(settings),
-              reason: null,
-            });
-            if (!eventing.publish) {
-              throw new Error("recording started before the turn event publisher was ready");
-            }
-            await eventing.publish([{ type: "recording.started", payload: begun.started }]);
-            recordingState.activeRecording = begun.active;
-          } catch (recordingError) {
-            recordingState.activeRecording = null;
-            if (begun) {
-              await discardUnpublishedRecording({
-                db,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                active: begun.active,
-                session: sandbox.established.session,
-              });
-            }
-            console.error(
-              "computer-use recording start failed (action outcome unaffected)",
-              safeErrorDiagnostic(recordingError),
-            );
-          }
-        })();
-        await recordingState.computerUseRecordingStart;
-      }
-    };
+    const sandboxRuntime = createSandboxTurnRuntime({
+      input,
+      settings,
+      db,
+      observability,
+      cancellationSignal,
+      activityContext,
+      sandboxRotationController,
+      sandboxState,
+      recordingState,
+      eventing,
+      attempt,
+    });
+    const {
+      requireResolvedSandboxForMutation,
+      runWorkspaceMutationForSandbox,
+      stopLeaseHeartbeat,
+      abandonActiveRecording,
+      flushRuntimeBatcher,
+      maybeStartOnTurnRecording,
+      finalizeTurnOpStreamOps,
+    } = sandboxRuntime;
+
     // Dual-write of conversation truth (issue #35): completed items are
     // reconciled into session_history_items after every model response and at
     // every turn-end path (idempotent on position), and the sandbox recovery
@@ -1121,7 +504,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
-      let startupMilestoneBackend = claimed.ok.startupMilestoneBackend;
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
@@ -1737,100 +1119,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         rigDefaultEnvironmentValues,
         workspaceVariableSet?.values ?? {},
       );
-      // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
-      // D1-lite) and reused for EVERY downstream decision: the env mint (skip
-      // inert platform git tokens for a machine turn), the establish path (no phantom Modal
-      // home box for a machine-primary turn), buildAgent (skip the repository clone
-      // hook so a private repo is never `git clone`d onto the user's real disk), and
-      // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
-      // + its sandbox row are loaded ONCE here (best-effort, never throwing) and the
-      // SAME values feed resolveActiveSandboxBackend (the tested gate) AND the
-      // machine-primary establish branch (enrollmentId/epoch/workingDir) below — no
-      // double read, no read-skew between the gate decision and the establish. With
-      // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
-      const routingOn = routingEnabled(settings);
-      let activeSandboxPointer = routingOn
-        ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
-        : null;
-      // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
-      // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
-      // EVERY op of this turn — reset it to the session HOME under the epoch fence +
-      // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
-      // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
-      // then means the row is genuinely absent, never a suppressed transient DB error
-      // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
-      // reconcile fails open — pointer untouched, record null (machinePrimary:false),
-      // no event — and the establish branch below reads the returned values.
-      let activeSandboxRecord: SandboxRecord | null = null;
-      if (routingOn) {
-        const reconciled = await reconcileActiveSandboxPointer(
-          db,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-          },
-          activeSandboxPointer,
-          (sandboxId) =>
-            getSandbox(
-              db,
-              fileAuthoritySubjectId
-                ? {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    subjectId: fileAuthoritySubjectId,
-                  }
-                : input.workspaceId,
-              sandboxId,
-            ),
-          eventing.publish
-            ? async (events) => {
-                await eventing.publish!(events);
-              }
-            : undefined,
-        );
-        activeSandboxPointer = reconciled.pointer;
-        activeSandboxRecord = reconciled.record;
-      }
-      const activeSandboxBackend = await resolveActiveSandboxBackend(
+      const sandboxRoute = await resolveSandboxRoute({
+        input,
+        settings,
+        db,
+        eventing,
+        media,
+        fileAuthoritySubjectId,
+        runSettings,
+      });
+      const {
         routingOn,
-        async () => activeSandboxPointer,
-        async () => activeSandboxRecord?.kind ?? null,
-      );
-      // A machine-primary turn = the effective backend is selfhosted AND we have the
-      // machine's enrollment (agent id) + a non-null pointer to bind it. Anything
-      // missing (should not happen — the DB enforces selfhosted⇒enrollmentId) falls
-      // back to the cloud establish path (a correct, if phantom, box) rather than
-      // crashing the turn.
-      const machinePrimary =
-        activeSandboxBackend === "selfhosted" &&
-        Boolean(activeSandboxPointer?.activeSandboxId) &&
-        Boolean(activeSandboxRecord?.enrollmentId);
-      // `none` describes the durable home, not an explicit per-turn route. Give
-      // the runtime the effective backend so it builds a SandboxAgent for the
-      // attached Connected Machine without mutating the session or turn record.
-      if (machinePrimary && eventing.modelRunSettings.sandboxBackend === "none") {
-        eventing.modelRunSettings = {
-          ...eventing.modelRunSettings,
-          sandboxBackend: "selfhosted",
-        };
-      }
-      // The backend that can actually create a sandbox for this turn. In the
-      // common path this is runSettings.sandboxBackend. A selfhosted home turn
-      // that is NOT machine-primary falls back to the deployment cloud backend
-      // so swap-away / flag-off degrade to a real group box.
-      const groupBoxBackend: Settings["sandboxBackend"] =
-        runSettings.sandboxBackend === "selfhosted" && !machinePrimary
-          ? settings.sandboxBackend
-          : runSettings.sandboxBackend;
-      startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
-      media.sandboxFileDownloadBackend = startupMilestoneBackend;
-      const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
-      const sandboxCreationBackend: Settings["sandboxBackend"] =
-        settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
-          ? groupBoxBackend
-          : runSettings.sandboxBackend;
-      const effectiveRunCredentialBackend = activeSandboxBackend ?? groupBoxBackend;
+        activeSandboxBackend,
+        machinePrimary,
+        groupBoxBackend,
+        sandboxCreationBackend,
+        effectiveRunCredentialBackend,
+      } = sandboxRoute;
+
       const runCredentialResolver =
         effectiveRunCredentialBackend === "none"
           ? null
@@ -2394,458 +1700,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         renewals.runCredentialRenewal = controller;
       };
 
-      // P1.2 ownership inversion (gated, default OFF). With the flag off this
-      // block is skipped entirely: resolvedSandbox stays null and runStream
-      // takes the legacy per-run build-and-discard path — byte-for-byte today.
-      // With it on, acquire the group lease (holder = the durable attempt id),
-      // resume the one box by id, and inject it NON-OWNED into the run. The box
-      // backend is "none" -> never resolve (no box to touch).
-      //
-      // Established AFTER sandboxEnvironment is computed (not before) so the box's
-      // manifest is created with the SAME variableSet the agent declares — the SDK
-      // applies the agent's manifest to this provided session and throws on ANY
-      // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
-      // here makes current==target so the delta is empty.
-      recordTurnStartupPhase(observability, {
-        phase: "runtime_preparation",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: "completed",
-        durationSeconds: (performance.now() - runtimePreparationStartedAt) / 1_000,
+      await establishTurnSandbox({
+        ...sandboxRoute,
+        input,
+        settings,
+        db,
+        bus,
+        objectStorage,
+        observability,
+        cancellationSignal,
+        runtimeCancellationSignal,
+        sandboxResumeSignal,
+        activityContext,
+        opJournal,
+        sandboxState,
+        eventing,
+        attempt,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        capabilitySettings,
+        turnExecutionPolicy,
+        runSettings,
+        logicalSandboxSettings,
+        verifiedRigProviderImageId,
+        runtimePreparationStartedAt,
+        establishPolicy,
+        sandboxEnvironment,
+        startRunGitCredentialsMint,
+        machineOpObserver,
+        sandboxOperationObserver,
+        sandboxRuntime,
+        transientCodemodeEnvironment,
+        rigVersion,
+        turnResources,
       });
-      if (
-        shouldEstablishSandboxForTurn(
-          settings.sandboxOwnershipEnabled,
-          turn.sandboxBackend,
-          machinePrimary,
-        )
-      ) {
-        const sandboxEstablishStartedAt = performance.now();
-        let sandboxEstablishOutcome: "completed" | "failed" = "completed";
-        try {
-          const managedOwnership = managedSandboxOwnershipForTurn(
-            machinePrimary,
-            input.attemptId,
-            session.sandboxGroupId,
-          );
-          sandboxState.sandboxHolderId = managedOwnership?.holderId ?? null;
-          sandboxState.sandboxGroupId = managedOwnership?.sandboxGroupId ?? null;
-          // STAGE D honest-label guard: a machine-home session carries
-          // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY
-          // when a live machine pointer resolves (activeSandboxBackend==='selfhosted'
-          // + enrollmentId). When it is NOT primary — the agent swapped back to the
-          // group box (sandbox_swap 'session'/'default'/groupId clears the pointer) or
-          // selfhosted routing is flag-OFF (the pointer is ignored) — the else-branch
-          // must resume a REAL cloud group box, not a "selfhosted" one: the registry
-          // SelfhostedSandboxClient has no bound agentId and throws. Fall the group-box
-          // backend back to the deployment default cloud backend so swap-away / flag-off
-          // degrade to a genuine cloud box exactly like today (home=modal did).
-          if (machinePrimary) {
-            if (activeSandboxRecord!.scope === "user") {
-              if (!fileAuthoritySubjectId) {
-                throw new Error("personal machine use requires an initiating human subject");
-              }
-              const authorized = await assertPersonalMachineForAttempt(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration: turn.executionGeneration,
-                enrollmentId: activeSandboxRecord!.enrollmentId!,
-              });
-              if (!authorized) {
-                throw new Error("personal Connected Machine use was not admitted for this turn");
-              }
-            }
-            // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
-            // establish OR lease the managed home box. The active-sandbox pointer is
-            // the machine route's own epoch fence; the managed-home lease separately
-            // owns cloud recovery, snapshots, billing, and reaping. Mixing those two
-            // ownership domains lets an unrelated degraded cloud archive block a
-            // healthy explicitly selected machine.
-            // Whether the machine's latest Hello advertised the op-stream engine
-            // (refreshed on every connect). Read only when the server flag is on —
-            // one indexed lookup, and the flag off keeps this path byte-identical.
-            const machineEnrollment = await getLiveEnrollmentConnection(
-              db,
-              activeSandboxRecord!.workspaceId,
-              activeSandboxRecord!.enrollmentId!,
-            );
-            const machineOpStream =
-              settings.agentOpStreamEnabled === true && machineEnrollment?.opStream === true;
-            const established = await establishSelfhostedTurnSession(
-              {
-                db,
-                settings,
-                bus,
-                onOp: machineOpObserver.observer,
-                onSandboxOperation: sandboxOperationObserver,
-                opJournal,
-              },
-              {
-                workspaceId: input.workspaceId,
-                controlWorkspaceId: activeSandboxRecord!.workspaceId,
-                agentId: activeSandboxRecord!.enrollmentId!,
-                // An offline machine must not fail turn admission. Bind an
-                // intentionally unserved token so the model receives the normal
-                // typed agent_offline tool result; a later turn resolves a fresh
-                // claimed process instance.
-                connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
-                opStream: machineOpStream,
-                operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
-                  memoryMaxBytes: null,
-                  memoryHighBytes: null,
-                  cpuMaxMillicores: null,
-                  revision: 0,
-                  updatedAt: null,
-                },
-                operationResourcePolicySupported:
-                  machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
-                operationCpuQuotaSupported:
-                  machineEnrollment?.agentCapabilities.operationCpuQuota === true,
-                ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
-                  ? {
-                      personalMachineAttempt: {
-                        accountId: input.accountId,
-                        subjectId: fileAuthoritySubjectId,
-                        sessionId: input.sessionId,
-                        turnId: turn.id,
-                        attemptId: input.attemptId,
-                        executionGeneration: attempt.executionGeneration,
-                      },
-                    }
-                  : {}),
-                epoch: activeSandboxPointer!.activeEpoch,
-                environment: sandboxEnvironment,
-                ...(transientCodemodeEnvironment
-                  ? { transientExecEnvironment: transientCodemodeEnvironment }
-                  : {}),
-                workingDir: activeSandboxPointer!.workingDir,
-              },
-            );
-            // The machine-primary establish narrows `session` to SelfhostedSession
-            // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
-            sandboxState.machinePrimarySession =
-              established.session as import("@opengeni/runtime").SelfhostedSession;
-            sandboxState.setupBoxSession = established.session;
-            sandboxState.resolvedSandbox = {
-              // Wrap in the SAME routing proxy so a mid-turn swap (to another machine
-              // or back to the group box) still re-routes per op. PIN this established
-              // SelfhostedSession for the machine pointer so the turn-start manifest
-              // write (via the proxy's `state` getter) and the per-op reads hit ONE
-              // instance — no two-instance manifest divergence.
-              established: wrapTurnBoxWithRouting(
-                {
-                  db,
-                  settings,
-                  bus,
-                  opJournal,
-                  onOp: machineOpObserver.observer,
-                  onSandboxOperation: sandboxOperationObserver,
-                  onHomeSandboxRebound,
-                  ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
-                },
-                {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  resourceAccountId: input.accountId,
-                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-                  ...(fileAuthoritySubjectId
-                    ? {
-                        personalMachineAttempt: {
-                          accountId: input.accountId,
-                          subjectId: fileAuthoritySubjectId,
-                          turnId: turn.id,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration,
-                        },
-                      }
-                    : {}),
-                  environment: sandboxEnvironment,
-                  ...(transientCodemodeEnvironment
-                    ? { transientExecEnvironment: transientCodemodeEnvironment }
-                    : {}),
-                  workspaceMutationFence: {
-                    accountId: input.accountId,
-                    turnId: turn.id,
-                    executionGeneration: attempt.executionGeneration,
-                    attemptId: input.attemptId,
-                  },
-                  pinnedSelfhosted: {
-                    sandboxId: activeSandboxPointer!.activeSandboxId!,
-                    epoch: activeSandboxPointer!.activeEpoch,
-                  },
-                  // HOME semantics for a mid-turn clear-to-null: only a genuine
-                  // machine-HOME session (its home IS this machine, session.sandboxBackend
-                  // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
-                  // session merely PINNED to a machine this turn never established its group
-                  // box, so defaultIsHome:false makes a clear-to-null fail typed
-                  // (`home_unavailable_this_turn`) rather than silently serving the machine;
-                  // the detach takes effect next turn. (Lazy home-box establishment on such a
-                  // clear is a deferred follow-up; issue #341.)
-                  defaultIsHome: session.sandboxBackend === "selfhosted",
-                },
-                established,
-              ),
-              // For a machine route this is the active-pointer epoch, not a cloud
-              // lease epoch. Cloud-only heartbeat/snapshot/capture paths require
-              // sandboxGroupId and remain disabled for this branch.
-              leaseEpoch: activeSandboxPointer!.activeEpoch,
-              release: async () => undefined,
-            };
-          } else if (establishPolicy === "on-demand") {
-            // Lazy sandbox provisioning: holder/group ids are fixed at turn start,
-            // but the lease acquire + box establish + setup move behind the routing
-            // proxy's first default-pointer op. A chat-only turn never calls it, so
-            // no lease row, no provider box, no warm-meter interval.
-            //
-            // A repository still forces that first default-pointer op before HTTP
-            // (workspace-skill catalog in Agent.instructions). Start create now and
-            // join it at get(); do not await here or we serialize Modal before tools.
-            if (sandboxState.sandboxHolderId && sandboxState.sandboxGroupId) {
-              const lazyHolderId = sandboxState.sandboxHolderId;
-              const lazyGroupId = sandboxState.sandboxGroupId;
-              sandboxState.resumeManagedGroupBox = () =>
-                resumeBoxForTurn(
-                  {
-                    db,
-                    settings: runSettings,
-                    logicalFallbackSettings: logicalSandboxSettings,
-                    cancellationSignal: sandboxResumeSignal,
-                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                    onSandboxLost: publishSandboxLost,
-                  },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sandboxGroupId: lazyGroupId,
-                    sessionId: input.sessionId,
-                    backend: groupBoxBackend,
-                    os: session.sandboxOs,
-                    environment: sandboxEnvironment,
-                    ...(groupBoxImage
-                      ? {
-                          image: groupBoxImage,
-                        }
-                      : {}),
-                    // The lazy acquire must enforce the same frozen rig authority
-                    // as the eager acquire; otherwise a warm box for another rig
-                    // can bypass the shared-state conflict/rotation fence.
-                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-                  },
-                  "turn",
-                  lazyHolderId,
-                );
-              if (
-                shouldPrefetchManagedSandbox({
-                  establishPolicy,
-                  machinePrimary,
-                  groupBoxBackend,
-                  hasRepositoryResources: turnResources.some(
-                    (resource) => resource.kind === "repository",
-                  ),
-                })
-              ) {
-                startRunGitCredentialsMint();
-                const started = waitForTurnOperation(
-                  sandboxState.resumeManagedGroupBox(),
-                  sandboxResumeSignal,
-                  releaseLateSandbox,
-                );
-                const joined = started.catch((error) => {
-                  if (isLazySandboxProvisionRetryable(error)) {
-                    sandboxState.prefetchedManagedBox = null;
-                  }
-                  throw error;
-                });
-                sandboxState.prefetchedManagedBox = joined;
-                void joined.then(
-                  (box) => {
-                    if (sandboxResumeSignal.aborted) return;
-                    startLeaseHeartbeat(box, activeSandboxBackend ?? groupBoxBackend);
-                  },
-                  () => undefined,
-                );
-              }
-            }
-          } else {
-            await eventing.publish!(
-              [
-                {
-                  type: "sandbox.operation.started",
-                  payload: { name: "sandbox.provision" },
-                },
-              ],
-              true,
-            );
-            try {
-              sandboxState.resolvedSandbox = await waitForTurnOperation(
-                resumeBoxForTurn(
-                  {
-                    db,
-                    settings: runSettings,
-                    logicalFallbackSettings: logicalSandboxSettings,
-                    cancellationSignal: sandboxResumeSignal,
-                    sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                    onSandboxLost: publishSandboxLost,
-                  },
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sandboxGroupId: session.sandboxGroupId,
-                    sessionId: input.sessionId,
-                    // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-                    // is not machine-primary resumes a real cloud group box (the
-                    // deployment default), never a "selfhosted" box (which would throw
-                    // for lack of a bound agentId).
-                    backend: groupBoxBackend,
-                    os: session.sandboxOs,
-                    environment: sandboxEnvironment,
-                    // IMAGE IS SHARED STATE (B3): the container image
-                    // this run resolves. The lease stamps it + conflicts on a live shared box
-                    // running a DIFFERENT image (solo → durable rotation; N-holders →
-                    // SandboxImageConflictError surfaced as an actionable turn error). Select
-                    // the image for the actual group-box backend; a configured Modal image must
-                    // never override a Docker run. The selfhosted branch
-                    // (establishSelfhostedTurnSession) NEVER passes
-                    // an image — B3 lives only on this managed-box branch.
-                    ...(groupBoxImage
-                      ? {
-                          image: groupBoxImage,
-                        }
-                      : {}),
-                    // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-                    // conflicts on a live shared box set up under a different rig (solo
-                    // durable rotation / N-holders SandboxRigConflictError). Omitted for a
-                    // rig-less turn -> never stamped or enforced (shares exactly as today).
-                    ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-                  },
-                  "turn",
-                  managedOwnership!.holderId,
-                ),
-                sandboxResumeSignal,
-                releaseLateSandbox,
-              );
-            } catch (error) {
-              await eventing.publish!(
-                [
-                  {
-                    type: "sandbox.operation.failed",
-                    payload: {
-                      name: "sandbox.provision",
-                      error: error instanceof Error ? error.message : String(error),
-                    },
-                  },
-                ],
-                true,
-              );
-              throw error;
-            }
-            sandboxState.setupBoxSession = sandboxState.resolvedSandbox.established.session;
-            // Durable box-lifecycle events (sandbox-file-persistence observability):
-            // record every box transition in session_events so the NEXT box loss is
-            // attributable from the DB alone — worker logs rotate within hours, which
-            // left both 2026-07-06 incidents without a durable trace. Best-effort.
-            await publishSandboxLifecycleEvents(sandboxState.resolvedSandbox);
-            await eventing.publish!(
-              [
-                {
-                  type: "sandbox.operation.completed",
-                  payload: {
-                    name: "sandbox.provision",
-                    ...(sandboxState.resolvedSandbox.established.origin
-                      ? { origin: sandboxState.resolvedSandbox.established.origin }
-                      : {}),
-                  },
-                },
-              ],
-              true,
-            );
-            // M7 hot-swap: when the selfhosted feature is on, wrap the established
-            // group box in the STABLE routing proxy before it is injected NON-OWNED
-            // into the run. The SDK binds to this ONE object once and calls its
-            // methods per tool call; the proxy re-reads (active_sandbox_id,
-            // active_epoch) per op and dispatches to the currently-active backend, so
-            // a sandbox_swap mid-turn lands the NEXT tool call on the new box. With
-            // the flag off the established group box is injected unchanged (today's
-            // path). The lease still owns the group box lifecycle — the proxy is a
-            // routing veneer, not an owner.
-            sandboxState.resolvedSandbox = {
-              ...sandboxState.resolvedSandbox,
-              established: wrapTurnBoxWithRouting(
-                {
-                  db,
-                  settings,
-                  bus,
-                  opJournal,
-                  onSandboxOperation: sandboxOperationObserver,
-                  onHomeSandboxLost: publishSandboxLost,
-                  onHomeSandboxRebound,
-                  ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
-                },
-                // Thread the SAME declared environment the group box was created with
-                // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
-                // carries it too — the SDK's per-turn manifest-env delta stays empty
-                // (no "cannot change manifest environment variables" throw).
-                {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  resourceAccountId: input.accountId,
-                  ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-                  ...(fileAuthoritySubjectId
-                    ? {
-                        personalMachineAttempt: {
-                          accountId: input.accountId,
-                          subjectId: fileAuthoritySubjectId,
-                          turnId: turn.id,
-                          attemptId: input.attemptId,
-                          executionGeneration: attempt.executionGeneration,
-                        },
-                      }
-                    : {}),
-                  environment: sandboxEnvironment,
-                  ...(transientCodemodeEnvironment
-                    ? { transientExecEnvironment: transientCodemodeEnvironment }
-                    : {}),
-                  workspaceMutationFence: {
-                    accountId: input.accountId,
-                    turnId: turn.id,
-                    executionGeneration: attempt.executionGeneration,
-                    attemptId: input.attemptId,
-                  },
-                  homeLease: {
-                    accountId: input.accountId,
-                    sandboxGroupId: session.sandboxGroupId,
-                    leaseEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-                    instanceId: sandboxState.resolvedSandbox.established.instanceId,
-                    backend: groupBoxBackend,
-                  },
-                },
-                sandboxState.resolvedSandbox.established,
-              ),
-            };
-          }
-          if (sandboxState.resolvedSandbox) {
-            startLeaseHeartbeat(
-              sandboxState.resolvedSandbox,
-              activeSandboxBackend ?? groupBoxBackend,
-            );
-          }
-        } catch (error) {
-          sandboxEstablishOutcome = "failed";
-          throw error;
-        } finally {
-          recordTurnStartupPhase(observability, {
-            phase: "sandbox_establish",
-            provider: turnExecutionPolicy.providerId,
-            backend: machinePrimary ? "selfhosted" : groupBoxBackend,
-            outcome: sandboxEstablishOutcome,
-            durationSeconds: (performance.now() - sandboxEstablishStartedAt) / 1_000,
-          });
-        }
-      }
 
       const ordinaryFileResourceDownloads = await (async () => {
         const fileResolutionStartedAt = performance.now();
@@ -3877,374 +2766,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
         );
       }
-      if (
-        establishPolicy === "on-demand" &&
-        sandboxState.sandboxHolderId &&
-        sandboxState.sandboxGroupId
-      ) {
-        const agentDefaultManifest = (agent as { defaultManifest?: unknown }).defaultManifest;
-        if (!agentDefaultManifest) {
-          throw new Error("Lazy sandbox provisioning requires a SandboxAgent defaultManifest");
-        }
-        const lazyClient = {
-          backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
-        } as EstablishedSandboxSession["client"];
-        let lazySandboxEstablishmentSettled = false;
-        sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
-          async () => {
-            throwIfWorkerShuttingDown();
-            throwIfTurnCancelled();
-            if (!sandboxState.resumeManagedGroupBox) {
-              throw new Error("Lazy sandbox provisioning requires a managed group-box resume");
-            }
-            startRunGitCredentialsMint();
-            const provisioned = await (sandboxState.prefetchedManagedBox ??
-              sandboxState.resumeManagedGroupBox());
-            await publishSandboxLifecycleEvents(provisioned);
-            // Return the REAL established box (NOT a copy whose session is the routing
-            // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
-            // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
-            // provisioner.get() -> proxy.exec -> ... loops forever (an async infinite
-            // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
-            // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
-            // gets per-op routing; the worker-side handle (resolvedSandbox: release,
-            // heartbeat, computer-use recording) wants the real box, unproxied.
-            return provisioned;
-          },
-          {
-            signal: sandboxResumeSignal,
-            onStarted: async ({ provisionId }) => {
-              await eventing.publish?.(
-                [
-                  {
-                    type: "sandbox.operation.started",
-                    payload: { name: "sandbox.provision", provisionId },
-                  },
-                ],
-                true,
-              );
-            },
-            onAttemptSettled: ({ result, error, outcome, durationMs }) => {
-              const successStage =
-                result?.established.origin === "created"
-                  ? "create"
-                  : result?.established.origin === "resumed"
-                    ? "resume"
-                    : result?.established.origin === "restored"
-                      ? "archive_recovery"
-                      : "unknown";
-              const failure = error
-                ? classifySandboxLogicalProvisionFailure(groupBoxBackend, error)
-                : null;
-              recordSandboxProvisionAttempt(observability, {
-                backend: groupBoxBackend,
-                stage: failure?.stage ?? successStage,
-                category: failure?.category ?? successStage,
-                outcome,
-                durationSeconds: durationMs / 1_000,
-              });
-            },
-            beforeCompleted: async (provisioned, settlement) => {
-              throwIfTurnOperationCancelled(sandboxResumeSignal);
-              startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
-              sandboxState.setupBoxSession = provisioned.established.session;
-              sandboxState.resolvedSandbox = provisioned;
-              // This durable completion and its logical metric close at actual box
-              // establishment. Credential, rig, repository, and file preparation below
-              // must never be attributed to "Starting sandbox" or provision latency.
-              await eventing.publish?.(
-                [
-                  {
-                    type: "sandbox.operation.completed",
-                    payload: {
-                      name: "sandbox.provision",
-                      ...(provisioned.established.origin
-                        ? { origin: provisioned.established.origin }
-                        : {}),
-                      provisionId: settlement.provisionId,
-                      internalAttempts: settlement.internalAttempts,
-                    },
-                  },
-                ],
-                true,
-              );
-              const successStage =
-                provisioned.established.origin === "created"
-                  ? "create"
-                  : provisioned.established.origin === "resumed"
-                    ? "resume"
-                    : provisioned.established.origin === "restored"
-                      ? "archive_recovery"
-                      : "unknown";
-              recordSandboxLogicalProvision(observability, {
-                backend: groupBoxBackend,
-                stage: successStage,
-                category: "none",
-                outcome: "completed",
-                expected: false,
-                internalAttempts: settlement.internalAttempts,
-                durationSeconds: settlement.durationMs / 1_000,
-              });
-              lazySandboxEstablishmentSettled = true;
+      await bindLazySandboxProvisioner({
+        ...sandboxRoute,
+        input,
+        settings,
+        db,
+        bus,
+        objectStorage,
+        observability,
+        cancellationSignal,
+        runtimeCancellationSignal,
+        sandboxResumeSignal,
+        activityContext,
+        opJournal,
+        sandboxState,
+        eventing,
+        attempt,
+        turn,
+        session,
+        fileAuthoritySubjectId,
+        capabilitySettings,
+        turnExecutionPolicy,
+        runSettings,
+        logicalSandboxSettings,
+        verifiedRigProviderImageId,
+        runtimePreparationStartedAt,
+        establishPolicy,
+        sandboxEnvironment,
+        startRunGitCredentialsMint,
+        machineOpObserver,
+        sandboxOperationObserver,
+        sandboxRuntime,
+        transientCodemodeEnvironment,
+        agent,
+        attachRunCredentialRenewal,
+        attachGitCredentialRenewal,
+        attachCodemodeTokenRenewal,
+        throwIfWorkerShuttingDown,
+        throwIfTurnCancelled,
+        initialRunCredentialMaterial,
+        sandboxCodemodeToken,
+        media,
+        toolResultSpill,
+        connectionScope,
+        codemodeAuthority,
+        rigVersion,
+        turnResources,
+      });
 
-              const lazyGitCredentials =
-                activeSandboxBackend === "selfhosted"
-                  ? undefined
-                  : await startRunGitCredentialsMint();
-              const lazyGitTokens = lazyGitCredentials?.gitTokens;
-              const lazyCodemodeToken = sandboxCodemodeToken
-                ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
-                : undefined;
-              await attachRunCredentialRenewal(
-                provisioned.established.session as RunCredentialCommandSession,
-                initialRunCredentialMaterial,
-                provisioned,
-              );
-              const provisionedSetupSession = initialRunCredentialMaterial
-                ? withRunCredentialsSession(
-                    provisioned.established.session as object,
-                    input.sessionId,
-                  )
-                : provisioned.established.session;
-              await runWorkspaceMutationForSandbox(
-                provisioned,
-                "lazyOwnedSandboxSetup",
-                async () =>
-                  await runOwnedSandboxSetup(
-                    agent,
-                    provisioned.established.session as never,
-                    provisionedSetupSession as never,
-                    {
-                      settings: runSettings,
-                      environment: sandboxEnvironment,
-                      onRuntimeEvent: async (event) => {
-                        await eventing.publish?.(
-                          [{ type: event.type, payload: event.payload }],
-                          true,
-                        );
-                      },
-                      ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                      ...(lazyGitCredentials?.bindings
-                        ? {
-                            gitCredentialBindingsOverride: lazyGitCredentials.bindings,
-                          }
-                        : {}),
-                      ...(lazyCodemodeToken
-                        ? {
-                            codemodeTokenSeedOverride: lazyCodemodeToken.token,
-                          }
-                        : {}),
-                      ...(eventing.toolCancellationFenceRef.current
-                        ? {
-                            commandRunner:
-                              eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                                eventing.toolCancellationFenceRef.current,
-                              ),
-                          }
-                        : {}),
-                    },
-                  ),
-                (measurement) => {
-                  if (eventing.firstModelRequestPreparationRecorded) return;
-                  sandboxState.firstModelPreparationNestedSandboxMs +=
-                    measurement.durationSeconds * 1_000;
-                  sandboxState.firstModelPreparationNestedSandboxPhases.push(measurement);
-                },
-              );
-              await attachCodemodeTokenRenewal(
-                provisioned.established.session as CodemodeTokenWriterSession,
-                lazyCodemodeToken?.expiresAt,
-                provisioned,
-              );
-              await attachGitCredentialRenewal(
-                provisioned.established.session as GitCredentialTokenWriterSession,
-                lazyGitCredentials,
-                provisioned,
-              );
-              // `get()` does not release the first routed sandbox operation
-              // until this hook returns. Only images created during this exact
-              // turn can require deferred delivery here; historical images stay
-              // as durable receipts and are restored explicitly when requested.
-              for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
-                await media.materializeGeneratedImageInSandbox(
-                  receipt,
-                  provisioned,
-                  provisioned.established.session,
-                );
-              }
-              await toolResultSpill.materializeDeferred();
-              throwIfTurnOperationCancelled(sandboxResumeSignal);
-            },
-            onFailed: async (error, settlement) => {
-              if (lazySandboxEstablishmentSettled) return;
-              const failure = classifySandboxLogicalProvisionFailure(groupBoxBackend, error);
-              await eventing.publish?.(
-                [
-                  {
-                    type: "sandbox.operation.failed",
-                    payload: {
-                      name: "sandbox.provision",
-                      error: error instanceof Error ? error.message : String(error),
-                      provisionId: settlement.provisionId,
-                      internalAttempts: settlement.internalAttempts,
-                      failureCategory: failure.category,
-                      failureStage: failure.stage,
-                      failureCode: failure.code,
-                      expectedTransition: failure.expected,
-                      retryable: failure.retryable,
-                    },
-                  },
-                ],
-                true,
-              );
-              recordSandboxLogicalProvision(observability, {
-                backend: groupBoxBackend,
-                stage: failure.stage,
-                category: failure.category,
-                outcome: failure.expected ? "expected_transition" : "failed",
-                expected: failure.expected,
-                internalAttempts: settlement.internalAttempts,
-                durationSeconds: settlement.durationMs / 1_000,
-              });
-            },
-            disposeResult: async (provisioned) => {
-              await releaseLateSandbox(provisioned);
-            },
-          },
-        );
-        sandboxState.lazyOwnedSandbox = wrapLazyTurnBoxWithRouting(
-          {
-            db,
-            settings,
-            bus,
-            opJournal,
-            onOp: machineOpObserver.observer,
-            onSandboxOperation: sandboxOperationObserver,
-            onHomeSandboxLost: publishSandboxLost,
-            onHomeSandboxRebound,
-            ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
-          },
-          {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            resourceAccountId: input.accountId,
-            ...(fileAuthoritySubjectId ? { resourceSubjectId: fileAuthoritySubjectId } : {}),
-            ...(fileAuthoritySubjectId
-              ? {
-                  personalMachineAttempt: {
-                    accountId: input.accountId,
-                    subjectId: fileAuthoritySubjectId,
-                    turnId: turn.id,
-                    attemptId: input.attemptId,
-                    executionGeneration: attempt.executionGeneration,
-                  },
-                }
-              : {}),
-            environment: sandboxEnvironment,
-            ...(transientCodemodeEnvironment
-              ? { transientExecEnvironment: transientCodemodeEnvironment }
-              : {}),
-            workspaceMutationFence: {
-              accountId: input.accountId,
-              turnId: turn.id,
-              executionGeneration: attempt.executionGeneration,
-              attemptId: input.attemptId,
-            },
-          },
-          {
-            client: lazyClient,
-            backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
-            agentDefaultManifest,
-            provisioner: sandboxState.turnSandboxProvisioner,
-            homeLeaseIdentity: {
-              accountId: input.accountId,
-              sandboxGroupId: session.sandboxGroupId,
-              backend: groupBoxBackend,
-            },
-            onFirstOperation: (measurement) => {
-              if (eventing.firstModelRequestPreparationRecorded) return;
-              markModelPreparationFirstSandboxOperation(measurement.durationMs / 1_000);
-
-              for (const nested of sandboxState.firstModelPreparationNestedSandboxPhases) {
-                if (nested.phase === "snapshot_wait") continue;
-                recordModelPreparationMeasurement({
-                  phase:
-                    nested.phase === "admission"
-                      ? "sandbox_workspace_mutation_admission"
-                      : nested.phase === "provider"
-                        ? "sandbox_workspace_mutation_provider"
-                        : "sandbox_workspace_mutation_settlement",
-                  outcome: nested.outcome,
-                  durationSeconds: nested.durationSeconds,
-                });
-              }
-
-              const resolution = measurement.phases.resolution;
-              if (resolution) {
-                recordModelPreparationMeasurement({
-                  phase: "sandbox_first_routed_resolution_other",
-                  outcome: resolution.outcome,
-                  durationSeconds:
-                    Math.max(
-                      0,
-                      resolution.durationMs - sandboxState.firstModelPreparationNestedSandboxMs,
-                    ) / 1_000,
-                });
-              }
-
-              const routedPhaseNames = [
-                ["mutationAdmission", "sandbox_first_routed_mutation_admission"],
-                ["providerOperation", "sandbox_first_routed_provider_operation"],
-                ["mutationSettlement", "sandbox_first_routed_mutation_settlement"],
-              ] as const;
-              for (const [phaseName, metricPhase] of routedPhaseNames) {
-                const phase = measurement.phases[phaseName];
-                if (!phase) continue;
-                recordModelPreparationMeasurement({
-                  phase: metricPhase,
-                  outcome: phase.outcome,
-                  durationSeconds: phase.durationMs / 1_000,
-                });
-              }
-
-              const nestedSnapshotPhases =
-                sandboxState.firstModelPreparationNestedSandboxPhases.filter(
-                  (phase) => phase.phase === "snapshot_wait",
-                );
-              const routedSnapshot = measurement.phases.snapshotWait;
-              const snapshotWaitMs =
-                nestedSnapshotPhases.reduce(
-                  (total, phase) => total + phase.durationSeconds * 1_000,
-                  0,
-                ) + (routedSnapshot?.durationMs ?? 0);
-              if (snapshotWaitMs > 0) {
-                recordModelPreparationMeasurement({
-                  phase: "sandbox_snapshot_wait",
-                  outcome:
-                    routedSnapshot?.outcome === "failed" ||
-                    nestedSnapshotPhases.some((phase) => phase.outcome === "failed")
-                      ? "failed"
-                      : "completed",
-                  durationSeconds: snapshotWaitMs / 1_000,
-                });
-              }
-
-              const routedMeasuredMs = Object.values(measurement.phases).reduce(
-                (total, phase) => total + (phase?.durationMs ?? 0),
-                0,
-              );
-              const routedOtherMs = Math.max(0, measurement.durationMs - routedMeasuredMs);
-              if (routedOtherMs > 0) {
-                recordModelPreparationMeasurement({
-                  phase: "sandbox_first_routed_other",
-                  outcome: measurement.outcome,
-                  durationSeconds: routedOtherMs / 1_000,
-                });
-              }
-            },
-          },
-        );
-      }
       let companyBrainContributionReceiptRecorded = false;
       const recordCompanyBrainContributionReceiptOnce = (): void => {
         if (companyBrainContributionReceiptRecorded) return;
