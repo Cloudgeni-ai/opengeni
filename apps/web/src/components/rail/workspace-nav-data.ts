@@ -57,6 +57,12 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     label: "Schedules",
     description: "Run agents on a schedule",
   },
+  {
+    to: "/workspaces/$workspaceId/artifacts",
+    icon: "panels-top-left",
+    label: "Artifacts",
+    description: "Live pages and tools built by agents",
+  },
 ];
 
 export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [

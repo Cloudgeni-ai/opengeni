@@ -954,6 +954,16 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("requires the session-list visibility capability on the runtime role", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== "session_visibility_lifecycle_capability_held()",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability session_visibility_lifecycle_capability_held() is missing or ambiguous",
+    );
+  });
+
   test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {
     const posture = safePosture();
     posture.tables.push({
