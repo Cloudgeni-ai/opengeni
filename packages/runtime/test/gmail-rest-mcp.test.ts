@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  GMAIL_REST_MCP_BRIDGE_DESCRIPTOR,
   GMAIL_REST_MCP_TOOLS,
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
@@ -34,6 +36,25 @@ function server(input: {
 }
 
 describe("Gmail REST MCP adapter", () => {
+  test("registers through the reusable local bridge contract", () => {
+    expect(
+      GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({
+        url: OFFICIAL_GMAIL_MCP_URL,
+        connectionRef,
+      }),
+    ).toBe(true);
+    expect(server({ fetchImpl: async () => Response.json({}) }).bridge).toBe(
+      GMAIL_REST_MCP_BRIDGE_DESCRIPTOR,
+    );
+    expect(GMAIL_REST_MCP_BRIDGE_DESCRIPTOR).toMatchObject({
+      adapterId: "gmail-rest",
+      authority: "connection",
+      toolSurface: "static_reviewed",
+      mutationReplay: "safe_reads_only",
+      destinations: [{ origin: "https://gmail.googleapis.com", pathPrefix: "/gmail/v1/users/me/" }],
+    });
+  });
+
   test("exposes exactly the reviewed tool set, including the send tools the hosted preview MCP lacks", () => {
     expect(GMAIL_REST_MCP_TOOLS.map((tool) => tool.name).sort()).toEqual(
       [

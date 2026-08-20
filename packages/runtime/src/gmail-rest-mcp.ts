@@ -1,4 +1,10 @@
 import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
+import {
+  defineLocalMcpBridgeDescriptor,
+  type LocalMcpBridgeAdapter,
+  type LocalMcpBridgeDescriptor,
+  type LocalMcpBridgeServer,
+} from "@opengeni/capabilities";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { MCPServer } from "@openai/agents";
 import { Buffer } from "node:buffer";
@@ -60,6 +66,28 @@ export type GmailRestMcpServerOptions = {
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
 };
+
+export type GmailRestMcpBridgeConfig = {
+  readonly url: string;
+  readonly connectionRef?: McpServerConnectionRef;
+};
+
+export type GmailRestMcpBridgeContext = Omit<
+  GmailRestMcpServerOptions,
+  "serverId" | "connectionRef"
+> & {
+  readonly serverId: string;
+};
+
+export const GMAIL_REST_MCP_BRIDGE_DESCRIPTOR = defineLocalMcpBridgeDescriptor({
+  adapterId: "gmail-rest",
+  providerId: "google-gmail",
+  catalogIdentity: `mcp:${OFFICIAL_GMAIL_MCP_URL}`,
+  authority: "connection",
+  toolSurface: "static_reviewed",
+  mutationReplay: "safe_reads_only",
+  destinations: [{ origin: "https://gmail.googleapis.com", pathPrefix: "/gmail/v1/users/me/" }],
+});
 
 type GmailHeader = { name?: string; value?: string };
 type GmailPart = {
@@ -304,9 +332,10 @@ export function isOfficialGmailMcpConfig(
   );
 }
 
-export class GmailRestMcpServer implements MCPServer {
+export class GmailRestMcpServer implements LocalMcpBridgeServer {
   readonly name: string;
   readonly cacheToolsList = false;
+  readonly bridge: LocalMcpBridgeDescriptor = GMAIL_REST_MCP_BRIDGE_DESCRIPTOR;
   private readonly fetchImpl: FetchLike;
 
   constructor(private readonly options: GmailRestMcpServerOptions) {
@@ -743,6 +772,24 @@ export class GmailRestMcpServer implements MCPServer {
     return payload as T;
   }
 }
+
+export const GMAIL_REST_MCP_BRIDGE_ADAPTER: LocalMcpBridgeAdapter<
+  GmailRestMcpBridgeConfig,
+  GmailRestMcpBridgeContext
+> = Object.freeze({
+  adapterId: GMAIL_REST_MCP_BRIDGE_DESCRIPTOR.adapterId,
+  matches: (config: GmailRestMcpBridgeConfig) =>
+    isOfficialGmailMcpConfig(config.url, config.connectionRef),
+  create: (config: GmailRestMcpBridgeConfig, context: GmailRestMcpBridgeContext) => {
+    if (!config.connectionRef) {
+      throw new Error("Gmail REST bridge requires a connection reference");
+    }
+    return new GmailRestMcpServer({
+      ...context,
+      connectionRef: config.connectionRef,
+    });
+  },
+});
 
 const MESSAGE_HEADERS = ["Subject", "From", "To", "Cc", "Bcc", "Date", "Message-ID"];
 

@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stringify } from "yaml";
@@ -18,6 +28,7 @@ import {
 const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
 const actionPath = ".github/actions/probe/action.yml";
+const discoveryActionPath = ".github/actions/probe/action.yaml";
 
 const minimalWorkflow = [
   "name: Fixture",
@@ -145,7 +156,7 @@ describe("workflow execution graph manifest", () => {
 
     expect(inspection.violations).toEqual([]);
     expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
-    expect(inspection.manifest.workflows).toHaveLength(20);
+    expect(inspection.manifest.workflows).toHaveLength(21);
     expect(inspection.manifest.actions).toHaveLength(2);
     expect(inspection.manifest.uncappedRuns).toHaveLength(197);
     expect(inspection.manifest.generatedLocalTargets).toHaveLength(3);
@@ -645,6 +656,164 @@ describe("workflow execution graph manifest", () => {
       );
     } finally {
       await rm(depthDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("streaming discovery stops at the first over-limit action entry", async () => {
+    const directory = await createDiscoveryFixture();
+    try {
+      await Promise.all(
+        Array.from({ length: WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries + 100 }, (_, index) =>
+          writeFile(join(directory, `.github/actions/stream-${index}.txt`), ""),
+        ),
+      );
+      let observedActionEntries = 0;
+      const closedDirectories: string[] = [];
+      await expect(
+        loadWorkflowExecutionSources(directory, {
+          onDiscoveryEntry(kind) {
+            if (kind === "action") observedActionEntries += 1;
+          },
+          onDirectoryHandleClosed(kind, path) {
+            closedDirectories.push(`${kind}:${path}`);
+          },
+        }),
+      ).rejects.toThrow("action discovery exceeds the directory-entry limit");
+      expect(observedActionEntries).toBe(WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries + 1);
+      expect(closedDirectories).toContain("workflow:.github/workflows");
+      expect(closedDirectories).toContain("action:.github/actions");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("filesystem byte preflight rejects per-file and total overflow before reads", async () => {
+    const oversized = await createDiscoveryFixture();
+    try {
+      await writeFile(
+        join(oversized, ".github/workflows/fixture.yml"),
+        new Uint8Array(WORKFLOW_GRAPH_LIMITS.maxSourceBytes + 1),
+      );
+      let reads = 0;
+      const closed: string[] = [];
+      await expect(
+        loadWorkflowExecutionSources(oversized, {
+          beforeRead() {
+            reads += 1;
+          },
+          onFileHandleClosed(path) {
+            closed.push(path);
+          },
+        }),
+      ).rejects.toThrow("exceeds the per-source UTF-8 byte limit");
+      expect(reads).toBe(0);
+      expect(closed).toEqual([discoveryActionPath]);
+    } finally {
+      await rm(oversized, { recursive: true, force: true });
+    }
+
+    const totalOverflow = await createDiscoveryFixture();
+    try {
+      const sourceBytes = 220 * 1024;
+      for (let index = 0; index < 5; index += 1) {
+        await writeFile(
+          join(totalOverflow, `.github/workflows/large-${index}.yml`),
+          new Uint8Array(sourceBytes),
+        );
+      }
+      let reads = 0;
+      const closed: string[] = [];
+      await expect(
+        loadWorkflowExecutionSources(totalOverflow, {
+          beforeRead() {
+            reads += 1;
+          },
+          onFileHandleClosed(path) {
+            closed.push(path);
+          },
+        }),
+      ).rejects.toThrow("exceeds the total UTF-8 byte limit");
+      expect(reads).toBe(0);
+      expect(closed.sort()).toEqual(
+        [
+          discoveryActionPath,
+          workflowPath,
+          ...Array.from({ length: 5 }, (_, index) => `.github/workflows/large-${index}.yml`),
+        ].sort(),
+      );
+    } finally {
+      await rm(totalOverflow, { recursive: true, force: true });
+    }
+  });
+
+  test("filesystem loader rejects malformed UTF-8 without disclosing bytes", async () => {
+    const errors: string[] = [];
+    for (const malformedByte of [0x80, 0x81]) {
+      const directory = await createDiscoveryFixture();
+      try {
+        await writeFile(
+          join(directory, ".github/workflows/fixture.yml"),
+          Uint8Array.of(malformedByte),
+        );
+        let error: unknown;
+        try {
+          await loadWorkflowExecutionSources(directory);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(Error);
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message).toBe(`${workflowPath} contains invalid UTF-8`);
+        expect(message).not.toContain(String(malformedByte));
+        errors.push(message);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+    expect(new Set(errors)).toEqual(new Set([`${workflowPath} contains invalid UTF-8`]));
+  });
+
+  test("filesystem loader bounds shrink, growth, and replacement races and closes handles", async () => {
+    const mutations = [
+      {
+        name: "shrink",
+        mutate: (path: string) => truncate(path, 1),
+        expected: "changed size while reading graph source",
+      },
+      {
+        name: "growth",
+        mutate: (path: string) => appendFile(path, "x"),
+        expected: "changed size while reading graph source",
+      },
+      {
+        name: "replacement",
+        mutate: async (path: string) => {
+          await rename(path, `${path}.replaced`);
+          await writeFile(path, minimalWorkflow);
+        },
+        expected: "changed while reading graph source",
+      },
+    ] as const;
+
+    for (const mutation of mutations) {
+      const directory = await createDiscoveryFixture();
+      const closed: string[] = [];
+      try {
+        await expect(
+          loadWorkflowExecutionSources(directory, {
+            async afterPreflight() {
+              await mutation.mutate(join(directory, ".github/workflows/fixture.yml"));
+            },
+            onFileHandleClosed(path) {
+              closed.push(path);
+            },
+          }),
+          mutation.name,
+        ).rejects.toThrow(mutation.expected);
+        expect(closed.sort(), mutation.name).toEqual([discoveryActionPath, workflowPath].sort());
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
   });
 

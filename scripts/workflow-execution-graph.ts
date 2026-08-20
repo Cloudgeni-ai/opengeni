@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, open, opendir, readFile, writeFile } from "node:fs/promises";
 import { posix, relative, resolve, sep } from "node:path";
 import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument } from "yaml";
 
@@ -10,7 +10,7 @@ export const GRAPH_MANIFEST_PATH = "scripts/workflow-execution-graph-manifest.js
 export const MAX_JOB_TIMEOUT_MINUTES = 120;
 export const MAX_STEP_TIMEOUT_MINUTES = 360;
 
-// The current graph is 22 sources / ~297 KiB total; its largest source is
+// The current graph is 23 sources / ~293 KiB total; its largest source is
 // ~82 KiB, largest AST is 3,165 nodes, widest collection is 37 entries, and
 // deepest AST path is 14 nodes. These limits leave substantial authored-growth
 // margin while bounding every attacker-controlled dimension before recursive
@@ -30,6 +30,25 @@ export const WORKFLOW_GRAPH_LIMITS = {
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type YamlObject = Record<string, unknown>;
+
+type WorkflowSourceLoaderHooks = Readonly<{
+  afterPreflight?: (
+    sources: readonly Readonly<{ path: string; bytes: number }>[],
+  ) => void | Promise<void>;
+  beforeRead?: (path: string) => void | Promise<void>;
+  onDiscoveryEntry?: (kind: "workflow" | "action", path: string) => void;
+  onDirectoryHandleClosed?: (kind: "workflow" | "action", path: string) => void;
+  onFileHandleClosed?: (path: string) => void;
+}>;
+
+type OpenGraphSource = Readonly<{
+  path: string;
+  absolutePath: string;
+  bytes: number;
+  device: number | bigint;
+  inode: number | bigint;
+  handle: Awaited<ReturnType<typeof open>>;
+}>;
 
 export type GraphDigestRecord = Readonly<{ path: string; sha256: string }>;
 export type UncappedRunRecord = Readonly<{
@@ -675,7 +694,38 @@ export function inspectWorkflowExecutionSources(
   };
 }
 
-async function actionDefinitionPaths(root: string): Promise<readonly string[]> {
+function repositoryIdentity(root: string, absolute: string): string {
+  const identity = relative(root, absolute).split(sep).join("/");
+  if (identity === ".." || identity.startsWith("../") || posix.isAbsolute(identity)) {
+    throw new Error("workflow execution graph discovery escaped the repository root");
+  }
+  return identity;
+}
+
+async function closeDirectory(
+  directory: Awaited<ReturnType<typeof opendir>>,
+  hooks: WorkflowSourceLoaderHooks,
+  kind: "workflow" | "action",
+  path: string,
+): Promise<void> {
+  try {
+    await directory.close();
+  } catch (error) {
+    if (
+      !isObject(error) ||
+      !("code" in error) ||
+      (error as { code?: unknown }).code !== "ERR_DIR_CLOSED"
+    ) {
+      throw error;
+    }
+  }
+  hooks.onDirectoryHandleClosed?.(kind, path);
+}
+
+async function actionDefinitionPaths(
+  root: string,
+  hooks: WorkflowSourceLoaderHooks,
+): Promise<readonly string[]> {
   const actionRoot = resolve(root, ".github/actions");
   const actionRootMetadata = await lstat(actionRoot);
   if (actionRootMetadata.isSymbolicLink() || !actionRootMetadata.isDirectory()) {
@@ -687,56 +737,218 @@ async function actionDefinitionPaths(root: string): Promise<readonly string[]> {
     if (depth > WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryDepth) {
       throw new Error("action discovery exceeds the directory-depth limit");
     }
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      discoveredEntries += 1;
-      if (discoveredEntries > WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries) {
-        throw new Error("action discovery exceeds the directory-entry limit");
+    const handle = await opendir(directory);
+    try {
+      while (true) {
+        const entry = await handle.read();
+        if (!entry) break;
+        const absolute = resolve(directory, entry.name);
+        const identity = repositoryIdentity(root, absolute);
+        discoveredEntries += 1;
+        hooks.onDiscoveryEntry?.("action", identity);
+        if (discoveredEntries > WORKFLOW_GRAPH_LIMITS.maxActionDiscoveryEntries) {
+          throw new Error("action discovery exceeds the directory-entry limit");
+        }
+        if (entry.isSymbolicLink()) {
+          throw new Error(`${identity} is a forbidden symlink in action discovery`);
+        }
+        if (entry.isDirectory()) await walk(absolute, depth + 1);
+        else if (/^action\.ya?ml$/u.test(entry.name)) {
+          if (!entry.isFile()) {
+            throw new Error(`${identity} must be a regular action definition file`);
+          }
+          found.push(identity);
+        }
       }
-      const absolute = resolve(directory, entry.name);
-      const identity = relative(root, absolute).split(sep).join("/");
-      if (entry.isSymbolicLink()) {
-        throw new Error(`${identity} is a forbidden symlink in action discovery`);
-      }
-      if (entry.isDirectory()) await walk(absolute, depth + 1);
-      else if (entry.isFile() && /^action\.ya?ml$/u.test(entry.name)) {
-        found.push(identity);
-      }
+    } finally {
+      await closeDirectory(handle, hooks, "action", repositoryIdentity(root, directory));
     }
   }
   await walk(actionRoot, 0);
   return found.sort();
 }
 
-export async function loadWorkflowExecutionSources(root: string): Promise<Record<string, string>> {
+async function workflowDefinitionPaths(
+  root: string,
+  hooks: WorkflowSourceLoaderHooks,
+): Promise<readonly string[]> {
   const workflowRoot = resolve(root, ".github/workflows");
   const workflowRootMetadata = await lstat(workflowRoot);
   if (workflowRootMetadata.isSymbolicLink() || !workflowRootMetadata.isDirectory()) {
     throw new Error("workflow discovery root must be a regular directory");
   }
-  const workflowEntries = await readdir(workflowRoot, { withFileTypes: true });
-  if (workflowEntries.length > WORKFLOW_GRAPH_LIMITS.maxWorkflowDiscoveryEntries) {
-    throw new Error("workflow discovery exceeds the directory-entry limit");
+  const found: string[] = [];
+  let discoveredEntries = 0;
+  const handle = await opendir(workflowRoot);
+  try {
+    while (true) {
+      const entry = await handle.read();
+      if (!entry) break;
+      const absolute = resolve(workflowRoot, entry.name);
+      const identity = repositoryIdentity(root, absolute);
+      discoveredEntries += 1;
+      hooks.onDiscoveryEntry?.("workflow", identity);
+      if (discoveredEntries > WORKFLOW_GRAPH_LIMITS.maxWorkflowDiscoveryEntries) {
+        throw new Error("workflow discovery exceeds the directory-entry limit");
+      }
+      if (entry.isSymbolicLink()) {
+        throw new Error(`${identity} is a forbidden symlink in workflow discovery`);
+      }
+      if (/\.ya?ml$/u.test(entry.name)) {
+        if (!entry.isFile()) {
+          throw new Error(`${identity} must be a regular workflow definition file`);
+        }
+        found.push(identity);
+      }
+    }
+  } finally {
+    await closeDirectory(handle, hooks, "workflow", repositoryIdentity(root, workflowRoot));
   }
-  for (const entry of workflowEntries) {
-    if (entry.isSymbolicLink()) {
-      throw new Error(
-        `.github/workflows/${entry.name} is a forbidden symlink in workflow discovery`,
-      );
+  return found.sort();
+}
+
+async function closeGraphSourceHandles(
+  sources: readonly OpenGraphSource[],
+  hooks: WorkflowSourceLoaderHooks,
+): Promise<unknown> {
+  let firstError: unknown;
+  for (const source of sources) {
+    try {
+      await source.handle.close();
+      hooks.onFileHandleClosed?.(source.path);
+    } catch (error) {
+      firstError ??= error;
     }
   }
-  const workflowPaths = workflowEntries
-    .filter((entry) => entry.isFile() && /\.ya?ml$/u.test(entry.name))
-    .map((entry) => `.github/workflows/${entry.name}`)
-    .sort();
-  const paths = [...workflowPaths, ...(await actionDefinitionPaths(root))];
+  return firstError;
+}
+
+async function openGraphSources(
+  root: string,
+  paths: readonly string[],
+  hooks: WorkflowSourceLoaderHooks,
+): Promise<readonly OpenGraphSource[]> {
+  const sources: OpenGraphSource[] = [];
+  let totalBytes = 0;
+  try {
+    for (const path of paths) {
+      const absolutePath = resolve(root, path);
+      repositoryIdentity(root, absolutePath);
+      const pathMetadata = await lstat(absolutePath);
+      if (pathMetadata.isSymbolicLink() || !pathMetadata.isFile()) {
+        throw new Error(`${path} must be a regular non-symlink graph source`);
+      }
+      if (pathMetadata.size > WORKFLOW_GRAPH_LIMITS.maxSourceBytes) {
+        throw new Error(`${path} exceeds the per-source UTF-8 byte limit`);
+      }
+
+      const handle = await open(absolutePath, "r");
+      let handleMetadata: Awaited<ReturnType<typeof handle.stat>>;
+      try {
+        handleMetadata = await handle.stat();
+        if (
+          !handleMetadata.isFile() ||
+          handleMetadata.dev !== pathMetadata.dev ||
+          handleMetadata.ino !== pathMetadata.ino ||
+          handleMetadata.size !== pathMetadata.size
+        ) {
+          throw new Error(`${path} changed during graph source preflight`);
+        }
+        if (handleMetadata.size > WORKFLOW_GRAPH_LIMITS.maxSourceBytes) {
+          throw new Error(`${path} exceeds the per-source UTF-8 byte limit`);
+        }
+        totalBytes += handleMetadata.size;
+        if (totalBytes > WORKFLOW_GRAPH_LIMITS.maxTotalSourceBytes) {
+          throw new Error("workflow execution graph exceeds the total UTF-8 byte limit");
+        }
+      } catch (error) {
+        await handle.close();
+        hooks.onFileHandleClosed?.(path);
+        throw error;
+      }
+      sources.push({
+        path,
+        absolutePath,
+        bytes: handleMetadata.size,
+        device: handleMetadata.dev,
+        inode: handleMetadata.ino,
+        handle,
+      });
+    }
+    return sources;
+  } catch (error) {
+    await closeGraphSourceHandles(sources, hooks);
+    throw error;
+  }
+}
+
+async function readGraphSource(
+  root: string,
+  source: OpenGraphSource,
+  hooks: WorkflowSourceLoaderHooks,
+): Promise<string> {
+  await hooks.beforeRead?.(source.path);
+  const bytes = new Uint8Array(source.bytes + 1);
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const result = await source.handle.read(bytes, offset, bytes.byteLength - offset, offset);
+    if (result.bytesRead === 0) break;
+    offset += result.bytesRead;
+  }
+  if (offset !== source.bytes) {
+    throw new Error(`${source.path} changed size while reading graph source`);
+  }
+  const finalHandleMetadata = await source.handle.stat();
+  const finalPathMetadata = await lstat(source.absolutePath);
+  if (
+    !finalHandleMetadata.isFile() ||
+    finalHandleMetadata.size !== source.bytes ||
+    finalHandleMetadata.dev !== source.device ||
+    finalHandleMetadata.ino !== source.inode ||
+    finalPathMetadata.isSymbolicLink() ||
+    !finalPathMetadata.isFile() ||
+    finalPathMetadata.size !== source.bytes ||
+    finalPathMetadata.dev !== source.device ||
+    finalPathMetadata.ino !== source.inode ||
+    repositoryIdentity(root, source.absolutePath) !== source.path
+  ) {
+    throw new Error(`${source.path} changed while reading graph source`);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, source.bytes));
+  } catch {
+    throw new Error(`${source.path} contains invalid UTF-8`);
+  }
+}
+
+export async function loadWorkflowExecutionSources(
+  root: string,
+  hooks: WorkflowSourceLoaderHooks = {},
+): Promise<Record<string, string>> {
+  const paths = [
+    ...(await workflowDefinitionPaths(root, hooks)),
+    ...(await actionDefinitionPaths(root, hooks)),
+  ].sort();
   if (paths.length > WORKFLOW_GRAPH_LIMITS.maxSources) {
     throw new Error("workflow execution graph exceeds the source-count limit during discovery");
   }
-  return Object.fromEntries(
-    await Promise.all(
-      paths.map(async (path) => [path, await readFile(resolve(root, path), "utf8")]),
-    ),
-  );
+  const openSources = await openGraphSources(root, paths, hooks);
+  let result: Record<string, string> | undefined;
+  let operationError: unknown;
+  try {
+    await hooks.afterPreflight?.(openSources.map(({ path, bytes }) => ({ path, bytes })));
+    const entries: Array<readonly [string, string]> = [];
+    for (const source of openSources) {
+      entries.push([source.path, await readGraphSource(root, source, hooks)]);
+    }
+    result = Object.fromEntries(entries);
+  } catch (error) {
+    operationError = error;
+  }
+  const closeError = await closeGraphSourceHandles(openSources, hooks);
+  if (operationError !== undefined) throw operationError;
+  if (closeError !== undefined) throw closeError;
+  return result ?? {};
 }
 
 function compareRows(
