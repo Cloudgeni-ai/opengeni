@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import packageJson from "../packages/artifact-tool/package.json" with { type: "json" };
 import {
@@ -18,8 +18,50 @@ import {
 } from "./prepare-development-artifact-runtime";
 
 const roots: string[] = [];
+const originalPath = process.env.PATH;
+const originalDirectRustLog = process.env.FAKE_DIRECT_RUST_LOG;
+let directRustLog = "";
+
+beforeEach(async () => {
+  if (process.platform === "win32") return;
+  const root = await mkdtemp(join(tmpdir(), "opengeni-development-rust-"));
+  roots.push(root);
+  const binRoot = join(root, "bin");
+  directRustLog = join(root, "direct-rust.log");
+  await mkdir(binRoot, { recursive: true });
+  const rustup = join(binRoot, "rustup");
+  await writeFile(
+    rustup,
+    `#!/bin/sh
+set -eu
+if [ "$1" = run ] && [ "$3" = rustc ]; then
+  printf '%s\\n' 'rustc 1.97.0 (pinned fixture)'
+elif [ "$1" = run ] && [ "$3" = cargo ]; then
+  printf '%s\\n' 'cargo 1.97.0 (pinned fixture)'
+elif [ "$1" = target ] && [ "$2" = list ]; then
+  printf '%s\\n' 'wasm32-unknown-unknown'
+else
+  exit 2
+fi
+`,
+  );
+  await chmod(rustup, 0o755);
+  for (const tool of ["cargo", "rustc"] as const) {
+    const path = join(binRoot, tool);
+    await writeFile(
+      path,
+      `#!/bin/sh\nprintf '%s\\n' '${tool}' >> "$FAKE_DIRECT_RUST_LOG"\nexit 97\n`,
+    );
+    await chmod(path, 0o755);
+  }
+  process.env.PATH = `${binRoot}${delimiter}${originalPath ?? ""}`;
+  process.env.FAKE_DIRECT_RUST_LOG = directRustLog;
+});
 
 afterEach(async () => {
+  process.env.PATH = originalPath;
+  if (originalDirectRustLog === undefined) delete process.env.FAKE_DIRECT_RUST_LOG;
+  else process.env.FAKE_DIRECT_RUST_LOG = originalDirectRustLog;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -29,7 +71,7 @@ describe("development artifact runtime preparation", () => {
       assertArtifactKernelRustcVersion("rustc 1.97.0 (2d8144b78 2026-07-07)\n", "1.97.0"),
     ).not.toThrow();
     expect(() => assertArtifactKernelRustcVersion("rustc 1.96.0 (host default)", "1.97.0")).toThrow(
-      "Artifact kernel requires Rust 1.97.0; active compiler is rustc 1.96.0",
+      "Artifact kernel requires Rust 1.97.0; pinned compiler reported rustc 1.96.0",
     );
   });
 
@@ -56,6 +98,7 @@ describe("development artifact runtime preparation", () => {
     });
     expect(second).toMatchObject({ rebuiltKernel: false, reusedInstallation: true });
     expect(second.sourceFingerprint).toBe(first.sourceFingerprint);
+    expect(await Bun.file(directRustLog).exists()).toBe(false);
   });
 
   test("detects changed source and refuses to reuse or fabricate a stale receipt", async () => {
@@ -152,6 +195,7 @@ async function createRepositoryFixture() {
     "packages/artifact-tool/kernel/bindings/napi/scripts/smoke.mjs": "// fixture\n",
     "packages/artifact-tool/kernel/bindings/package-receipt.ts": "// fixture\n",
     "scripts/materialize-artifact-kernel-packages.ts": "// fixture\n",
+    "scripts/artifact-kernel-rust.ts": "// fixture\n",
     "scripts/prepare-development-artifact-runtime.ts": "// fixture\n",
   };
   for (const [path, contents] of Object.entries(files)) {

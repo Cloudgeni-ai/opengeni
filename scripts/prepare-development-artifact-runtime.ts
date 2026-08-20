@@ -42,6 +42,15 @@ import {
   materializeArtifactKernelPackages,
   renderArtifactSkillFacadeBootstrap,
 } from "./materialize-artifact-kernel-packages";
+import {
+  assertArtifactKernelRustcVersion,
+  captureArtifactKernelRustTool,
+  ensureArtifactKernelRustToolchain,
+  resolveArtifactKernelRustToolchain,
+  runArtifactKernelRustTool,
+} from "./artifact-kernel-rust";
+
+export { assertArtifactKernelRustcVersion } from "./artifact-kernel-rust";
 
 const SKILL_FACADE = "skill-facade-entry.mjs";
 const INSTALLATION_MANIFEST = "installation.development.json";
@@ -247,6 +256,7 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     "packages/artifact-tool/kernel/bindings/napi/scripts/smoke.mjs",
     "packages/artifact-tool/kernel/bindings/package-receipt.ts",
     "scripts/materialize-artifact-kernel-packages.ts",
+    "scripts/artifact-kernel-rust.ts",
     "scripts/prepare-development-artifact-runtime.ts",
   ];
   const files: string[] = [];
@@ -264,16 +274,16 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     hash.update(await readFile(join(repositoryRoot, path)));
     hash.update(new Uint8Array([0xff]));
   }
-  const rustc = await capture(
-    ["rustc", "-Vv"],
-    join(repositoryRoot, "packages/artifact-tool/kernel"),
-  );
+  const rustToolchain = await resolveArtifactKernelRustToolchain(repositoryRoot);
+  await ensureArtifactKernelRustToolchain(rustToolchain);
+  const rustc = await captureArtifactKernelRustTool(rustToolchain, "rustc", ["-Vv"], {
+    ensure: false,
+  });
   hash.update("rustc\0");
   hash.update(rustc);
-  const cargo = await capture(
-    ["cargo", "-V"],
-    join(repositoryRoot, "packages/artifact-tool/kernel"),
-  );
+  const cargo = await captureArtifactKernelRustTool(rustToolchain, "cargo", ["-V"], {
+    ensure: false,
+  });
   hash.update("cargo\0");
   hash.update(cargo);
   const bun = await capture(["bun", "--version"], repositoryRoot);
@@ -384,30 +394,22 @@ async function buildCurrentHostKernel(
   target: NativeArtifactRuntimeTarget,
   sourceFingerprint: `sha256:${string}`,
 ): Promise<void> {
-  for (const tool of ["cargo", "rustc"] as const) {
-    if (!Bun.which(tool))
-      throw new Error(`${tool} is required to build the local artifact runtime`);
-  }
   const kernelRoot = join(repositoryRoot, "packages", "artifact-tool", "kernel");
   const napiRoot = join(kernelRoot, "bindings", "napi");
-  const toolchain = Bun.TOML.parse(
-    await readFile(join(kernelRoot, "rust-toolchain.toml"), "utf8"),
-  ) as { toolchain?: { channel?: unknown } };
-  const pinnedChannel = toolchain.toolchain?.channel;
-  if (
-    typeof pinnedChannel !== "string" ||
-    pinnedChannel.length === 0 ||
-    pinnedChannel.trim() !== pinnedChannel
-  ) {
-    throw new Error("Artifact kernel Rust toolchain pin is missing or malformed");
-  }
-  assertArtifactKernelRustcVersion(await capture(["rustc", "--version"], napiRoot), pinnedChannel);
-  // rustup resolves the checked-in kernel/rust-toolchain.toml from this directory's ancestors.
-  // Running from the repository root can silently select a different host default and produce a
-  // native build identity that the pinned browser WASM packages correctly reject.
-  await run(
-    ["cargo", "build", "--locked", "--manifest-path", join(napiRoot, "Cargo.toml"), "--release"],
-    napiRoot,
+  const rustToolchain = await resolveArtifactKernelRustToolchain(repositoryRoot);
+  await ensureArtifactKernelRustToolchain(rustToolchain);
+  assertArtifactKernelRustcVersion(
+    await captureArtifactKernelRustTool(rustToolchain, "rustc", ["--version"], {
+      cwd: napiRoot,
+      ensure: false,
+    }),
+    rustToolchain.channel,
+  );
+  await runArtifactKernelRustTool(
+    rustToolchain,
+    "cargo",
+    ["build", "--locked", "--manifest-path", join(napiRoot, "Cargo.toml"), "--release"],
+    { cwd: napiRoot, ensure: false },
   );
   const temporaryAssetRoot = await mkdtemp(join(dirname(assetRoot), ".artifact-native-build-"));
   try {
@@ -429,18 +431,6 @@ async function buildCurrentHostKernel(
     await rename(targetDirectory, destination);
   } finally {
     await rm(temporaryAssetRoot, { recursive: true, force: true });
-  }
-}
-
-export function assertArtifactKernelRustcVersion(
-  rustcVersion: string,
-  pinnedChannel: string,
-): void {
-  const [executable, version] = rustcVersion.trim().split(/\s+/u);
-  if (executable !== "rustc" || version !== pinnedChannel) {
-    throw new Error(
-      `Artifact kernel requires Rust ${pinnedChannel}; active compiler is ${rustcVersion.trim() || "<unknown>"}`,
-    );
   }
 }
 

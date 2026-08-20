@@ -80,7 +80,11 @@ OPENGENI_ARTIFACT_KERNEL_WASM_WEB_DIR=/absolute/path/wasm-web \
 
 The scripts fail with a concrete installation command when Rust, the
 `wasm32-unknown-unknown` target, `wasm-bindgen`, or Bun is unavailable. They do
-not silently omit a runtime.
+not silently omit a runtime. Rust compiler and Cargo commands always go through
+the exact repository pin; direct `cargo` or `rustc` binaries earlier on `PATH`
+cannot select a different compiler. Missing pinned toolchains, targets, and
+required components are installed unless `RUSTUP_AUTO_INSTALL=0` explicitly
+forbids setup.
 
 Production native publishing must build one `.node` artifact per supported
 target in CI (at minimum macOS arm64/x64, Linux arm64/x64 glibc, and Windows
