@@ -25,7 +25,7 @@ describe("user-resource authority routes", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           scope: "user",
-          action: "rig.use",
+          resourceKind: "rig",
           mode: "always",
           context: "workspace_shared",
           workspaceSharedAcknowledged: false,

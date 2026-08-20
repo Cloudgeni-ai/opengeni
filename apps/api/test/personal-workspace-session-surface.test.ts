@@ -1176,3 +1176,92 @@ describe("the in-scope resolver refuses to be an arbitrary-subject oracle", () =
     ).rejects.toThrow(/does not match the applied RLS scope/);
   }, 180_000);
 });
+
+describe("managed personal-resource grant HTTP lifecycle", () => {
+  test("returns RFC3339 expiry/revoke times, reissues expiry, and revokes without connections:read", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const [membership] = await shared.admin<Array<{ id: string }>>`
+      select id from organization_memberships
+      where account_id = ${human.accountId} and subject_id = ${human.subjectId}`;
+    if (!membership) throw new Error("managed human membership missing");
+    const authorityId = crypto.randomUUID();
+    await shared.admin`
+      insert into organization_user_resource_authorities (
+        id, account_id, organization_membership_id, resource_kind, resource_id,
+        origin_workspace_id, generation, status
+      ) values (
+        ${authorityId}, ${human.accountId}, ${membership.id}, 'connection',
+        ${crypto.randomUUID()}, ${human.personalWorkspaceId}, 1, 'active'
+      )`;
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const issue = async (workspaceId: string, connectionWrapper = false): Promise<Response> =>
+      await app.request(
+        `http://x/v1/workspaces/${workspaceId}/${
+          connectionWrapper ? "connection-authorities" : "user-resource-authorities"
+        }/${authorityId}/grants`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            scope: "user",
+            ...(connectionWrapper ? {} : { resourceKind: "connection" }),
+            mode: "always",
+            context: "user_private",
+          }),
+        },
+      );
+
+    const firstResponse = await issue(human.personalWorkspaceId);
+    expect(firstResponse.status).toBe(200);
+    const first = (await firstResponse.json()) as { grant: { grantId: string } };
+    await shared.admin`
+      update organization_user_resource_grants
+      set expires_at = clock_timestamp() - interval '1 second'
+      where id = ${first.grant.grantId}`;
+
+    const listResponse = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=connection`,
+      { headers },
+    );
+    expect(listResponse.status).toBe(200);
+    const listed = (await listResponse.json()) as {
+      authorities: Array<{
+        grants: Array<{ grantId: string; status: string; expiresAt: string | null }>;
+      }>;
+    };
+    const expired = listed.authorities
+      .flatMap((authority) => authority.grants)
+      .find((grant) => grant.grantId === first.grant.grantId);
+    expect(expired).toMatchObject({ status: "expired" });
+    expect(expired?.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
+
+    const reissueResponse = await issue(human.personalWorkspaceId);
+    expect(reissueResponse.status).toBe(200);
+    const reissued = (await reissueResponse.json()) as { grant: { grantId: string } };
+    expect(reissued.grant.grantId).not.toBe(first.grant.grantId);
+
+    const routeGrantResponse = await issue(human.legacyWorkspaceId, true);
+    expect(routeGrantResponse.status).toBe(200);
+    const routeGrant = (await routeGrantResponse.json()) as { grant: { grantId: string } };
+    await shared.admin`
+      update workspace_memberships
+      set permissions = permissions - 'connections:read'
+      where account_id = ${human.accountId}
+        and workspace_id = ${human.legacyWorkspaceId}
+        and subject_id = ${human.subjectId}`;
+
+    const revokeResponse = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/connection-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
+      { method: "DELETE", headers },
+    );
+    expect(revokeResponse.status).toBe(200);
+    const revoked = (await revokeResponse.json()) as {
+      grant: { status: string; revokedAt: string };
+    };
+    expect(revoked.grant.status).toBe("revoked");
+    expect(revoked.grant.revokedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
+  }, 180_000);
+});

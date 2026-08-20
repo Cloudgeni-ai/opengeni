@@ -57,9 +57,12 @@ describe("connection authority contracts", () => {
     ).toBe(false);
     const clean = {
       scope: "user" as const,
+      nextCursor: null,
       authorities: [
         {
           authorityId: id("1"),
+          resourceId: id("8"),
+          originWorkspaceId: id("4"),
           generation: 1,
           status: "active" as const,
           grants: [
@@ -70,9 +73,17 @@ describe("connection authority contracts", () => {
               action: "connection.use" as const,
               mode: "always" as const,
               context: "user_private" as const,
+              authorityEpoch: null,
               generation: 1,
               status: "active" as const,
               expiresAt: null,
+              delegation: {
+                ...delegation,
+                sessionId: null,
+                mode: "always" as const,
+                context: "user_private" as const,
+                authorityEpoch: null,
+              },
             },
           ],
         },
@@ -87,7 +98,7 @@ describe("connection authority contracts", () => {
             ...clean.authorities[0],
             authorityId: id("1"),
             ownerSubjectId: "must-not-survive",
-            connectionId: id("8"),
+            connectionId: id("9"),
           },
         ],
       }).success,

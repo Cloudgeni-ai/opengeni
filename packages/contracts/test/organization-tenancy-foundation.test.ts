@@ -28,11 +28,15 @@ const ids = {
 describe("organization tenancy foundation contracts", () => {
   test("requires explicit user scope and durable shared-output acknowledgement", () => {
     expect(ListUserResourceAuthoritiesQuery.safeParse({}).success).toBe(false);
-    expect(ListUserResourceAuthoritiesQuery.parse({ scope: "user" })).toEqual({ scope: "user" });
+    expect(ListUserResourceAuthoritiesQuery.parse({ scope: "user", resourceKind: "rig" })).toEqual({
+      scope: "user",
+      resourceKind: "rig",
+      limit: 50,
+    });
     expect(
       IssueUserResourceGrantRequest.parse({
         scope: "user",
-        action: "rig.use",
+        resourceKind: "rig",
         mode: "always",
         context: "workspace_shared",
         workspaceSharedAcknowledged: true,
@@ -43,10 +47,13 @@ describe("organization tenancy foundation contracts", () => {
   test("keeps lifecycle lists opaque", () => {
     const result = ListUserResourceAuthoritiesResponse.parse({
       scope: "user",
+      nextCursor: null,
       authorities: [
         {
           authorityId: ids.authority,
           resourceKind: "rig",
+          resourceId: ids.resourceVersion,
+          originWorkspaceId: ids.workspace,
           generation: 1,
           status: "active",
           ownerSubjectId: "must-not-survive",
@@ -58,9 +65,23 @@ describe("organization tenancy foundation contracts", () => {
               action: "rig.use",
               mode: "always",
               context: "user_private",
+              authorityEpoch: null,
               generation: 1,
               status: "active",
               expiresAt: null,
+              delegation: {
+                authorityId: ids.authority,
+                grantId: ids.grant,
+                organizationId: ids.organization,
+                workspaceId: ids.workspace,
+                sessionId: null,
+                action: "rig.use",
+                mode: "always",
+                context: "user_private",
+                authorityEpoch: null,
+                authorityGeneration: 1,
+                grantGeneration: 1,
+              },
               membershipId: ids.membership,
               secret: "must-not-survive",
             },

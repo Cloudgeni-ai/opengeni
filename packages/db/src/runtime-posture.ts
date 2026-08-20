@@ -127,15 +127,12 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
-  "list_self_user_resource_authorities(uuid)",
-  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean)",
-  "revoke_self_user_resource_grant(uuid, uuid)",
+  "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
+  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
+  "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
 const CONNECTION_AUTHORITY_ROUTINES = [
-  "list_self_connection_authorities(uuid)",
-  "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
-  "revoke_self_connection_use_grant(uuid, uuid)",
   "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
@@ -346,6 +343,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,

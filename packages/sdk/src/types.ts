@@ -3377,6 +3377,83 @@ export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
 };
 
+export type UserResourceKind =
+  | "connection"
+  | "document"
+  | "variable_set"
+  | "rig"
+  | "connected_machine";
+export type UserResourceGrantAction =
+  | "connection.use"
+  | "document.read"
+  | "variable_set.use"
+  | "rig.use"
+  | "connected_machine.use";
+export type UserResourceAuthorityGrant = {
+  grantId: string;
+  targetWorkspaceId: string;
+  targetSessionId: string | null;
+  action: UserResourceGrantAction;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  generation: number;
+  status: "active" | "consumed" | "revoked" | "expired";
+  expiresAt: string | null;
+  delegation: UserResourceDelegation;
+};
+export type UserResourceAuthoritySummary = {
+  authorityId: string;
+  resourceKind: UserResourceKind;
+  resourceId: string;
+  originWorkspaceId: string | null;
+  generation: number;
+  status: "active" | "retained" | "revoked";
+  grants: UserResourceAuthorityGrant[];
+};
+export type ListUserResourceAuthoritiesOptions = {
+  resourceKind: UserResourceKind;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+};
+export type ListUserResourceAuthoritiesResponse = {
+  scope: "user";
+  authorities: UserResourceAuthoritySummary[];
+  nextCursor: string | null;
+};
+export type IssueUserResourceGrantRequest =
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "session";
+      context: "user_private" | "workspace_shared";
+      sessionId: string;
+      expectedAuthorityEpoch: number;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    }
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "always";
+      context: "user_private" | "workspace_shared";
+      sessionId?: null | undefined;
+      expectedAuthorityEpoch?: null | undefined;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    };
+export type UserResourceGrantMutationResponse = {
+  scope: "user";
+  grant: UserResourceAuthorityGrant;
+};
+export type RevokeUserResourceGrantResponse = {
+  scope: "user";
+  grant: {
+    grantId: string;
+    generation: number;
+    status: "revoked";
+    revokedAt: string;
+  };
+};
+
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type OrganizationInvitation = {
   id: string;

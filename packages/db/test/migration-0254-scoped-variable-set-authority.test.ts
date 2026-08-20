@@ -204,6 +204,11 @@ describe("migration 0254 scoped variable-set authority", () => {
           (${account.id}, ${workspaceA.id}, ${otherSubject}),
           (${account.id}, ${workspaceB.id}, ${otherSubject})
       `;
+      await admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (${account.id}, 1, ${"5".repeat(64)}, ${"6".repeat(64)}, '0254-test')
+      `;
 
       const ownerWorkspaceA: ActorScope = {
         accountId: account.id,
@@ -346,7 +351,9 @@ describe("migration 0254 scoped variable-set authority", () => {
           select authority_id as "authorityId",
             authority_generation::int as "authorityGeneration",
             authority_status as "authorityStatus", grant_id as "grantId"
-          from list_self_user_resource_authorities(${account.id}::uuid)
+          from list_self_user_resource_authorities(
+            ${account.id}::uuid, ${workspaceB.id}::uuid, 'variable_set', null, 100
+          )
         `,
       );
       expect(
@@ -402,8 +409,8 @@ describe("migration 0254 scoped variable-set authority", () => {
               grant_status as "grantStatus"
             from issue_self_user_resource_grant(
               ${account.id}::uuid, ${ownerAuthority!.authorityId}::uuid,
-              ${workspaceB.id}::uuid, 'variable_set.use', 'session',
-              'workspace_shared', ${session.id}::uuid, true
+              ${workspaceB.id}::uuid, 'variable_set', 'session',
+              'workspace_shared', ${session.id}::uuid, 1, true
             )
           `,
         );
@@ -501,7 +508,8 @@ describe("migration 0254 scoped variable-set authority", () => {
         const [revoked] = await tx<Array<{ grantStatus: string; grantGeneration: number }>>`
           select grant_status as "grantStatus", grant_generation::int as "grantGeneration"
           from revoke_self_user_resource_grant(
-            ${account.id}::uuid, ${revokedAttempt.grant.grantId}::uuid
+            ${account.id}::uuid, ${workspaceB.id}::uuid,
+            ${revokedAttempt.grant.grantId}::uuid
           )
         `;
         expect(revoked).toEqual({ grantStatus: "revoked", grantGeneration: 2 });
@@ -526,8 +534,8 @@ describe("migration 0254 scoped variable-set authority", () => {
           select grant_id as "grantId"
           from issue_self_user_resource_grant(
             ${account.id}::uuid, ${deleteAuthority!.authorityId}::uuid,
-            ${workspaceB.id}::uuid, 'variable_set.use', 'always',
-            'workspace_shared', null, true
+            ${workspaceB.id}::uuid, 'variable_set', 'always',
+            'workspace_shared', null, null, true
           )
         `,
       );
@@ -577,7 +585,9 @@ describe("migration 0254 scoped variable-set authority", () => {
             authority_generation::int as "authorityGeneration",
             authority_status as "authorityStatus", grant_id as "grantId",
             grant_generation::int as "grantGeneration", grant_status as "grantStatus"
-          from list_self_user_resource_authorities(${account.id}::uuid)
+          from list_self_user_resource_authorities(
+            ${account.id}::uuid, ${workspaceB.id}::uuid, 'variable_set', null, 100
+          )
         `,
       );
       expect(

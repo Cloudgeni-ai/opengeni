@@ -37,7 +37,7 @@ export class SessionTenancyPersistenceOutcomeUnknownError extends Error {
   }
 }
 
-function requireCanonicalManagedHuman(
+export function requireCanonicalManagedHuman(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): void {

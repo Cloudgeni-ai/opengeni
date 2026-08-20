@@ -65,6 +65,51 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("manages bounded session/always personal grants without exposing once", async () => {
+    const authorityId = "66666666-6666-4666-8666-666666666666";
+    const grantId = "77777777-7777-4777-8777-777777777777";
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    await client.listUserResourceAuthorities(WORKSPACE_ID, {
+      resourceKind: "connection",
+      cursor: authorityId,
+      limit: 25,
+    });
+    await client.issueUserResourceGrant(WORKSPACE_ID, authorityId, {
+      scope: "user",
+      resourceKind: "connection",
+      mode: "session",
+      context: "workspace_shared",
+      sessionId: SESSION_ID,
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+    });
+    await client.revokeUserResourceGrant(WORKSPACE_ID, grantId);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities/${authorityId}/grants`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities/grants/${grantId}`,
+      ],
+    );
+    const listUrl = new URL(requests[0]!.url);
+    expect(Object.fromEntries(listUrl.searchParams)).toEqual({
+      scope: "user",
+      resourceKind: "connection",
+      cursor: authorityId,
+      limit: "25",
+    });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      scope: "user",
+      resourceKind: "connection",
+      mode: "session",
+      context: "workspace_shared",
+      sessionId: SESSION_ID,
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+    });
+    expect(new URL(requests[2]!.url).searchParams.get("scope")).toBe("user");
+  });
+
   test("sends explicit visibility and fork idempotency contracts without inventing defaults", async () => {
     const visibilityResponse = {
       operationId: "11111111-1111-4111-8111-111111111111",

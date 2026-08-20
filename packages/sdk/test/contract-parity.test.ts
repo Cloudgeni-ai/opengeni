@@ -84,6 +84,8 @@ import {
   ForkSessionResponse as ContractForkSessionResponse,
   UpdateSessionVisibilityRequest as ContractUpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse as ContractUpdateSessionVisibilityResponse,
+  IssueUserResourceGrantRequest as ContractIssueUserResourceGrantRequest,
+  ListUserResourceAuthoritiesResponse as ContractListUserResourceAuthoritiesResponse,
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
   SessionMcpServerInput as ContractSessionMcpServerInput,
@@ -220,6 +222,8 @@ import type {
   ForkSessionResponse,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
+  IssueUserResourceGrantRequest,
+  ListUserResourceAuthoritiesResponse,
   SessionCapabilities,
   SessionEvent,
   SessionHumanInputRequest,
@@ -253,6 +257,21 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("personal-resource management request and page shapes stay in parity", () => {
+    const request = (
+      value: IssueUserResourceGrantRequest,
+    ): z.input<typeof ContractIssueUserResourceGrantRequest> => value;
+    const pageFromSdk = (
+      value: ListUserResourceAuthoritiesResponse,
+    ): z.input<typeof ContractListUserResourceAuthoritiesResponse> => value;
+    const pageFromContract = (
+      value: z.infer<typeof ContractListUserResourceAuthoritiesResponse>,
+    ): ListUserResourceAuthoritiesResponse => value;
+    expect([request, pageFromSdk, pageFromContract].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
+  });
+
   test("session visibility and private-fork request/response shapes stay in parity", () => {
     const visibilityRequest = (
       value: UpdateSessionVisibilityRequest,

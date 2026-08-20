@@ -15,11 +15,17 @@ import {
 } from "@opengeni/testing";
 import type { AccessGrantAuthorization } from "../src/access";
 import { HTTPException } from "hono/http-exception";
+import { SessionAuthorizationDeniedError } from "../src/session-authorization";
 import {
   forkManagedHumanSessionPrivate,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
 } from "../src/application/session-tenancy";
+import {
+  issueManagedHumanUserResourceGrant,
+  listManagedHumanUserResourceAuthorities,
+  revokeManagedHumanUserResourceGrant,
+} from "../src/application/user-resource-grants";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -41,6 +47,197 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
+  test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-grants-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Core personal grants",
+    });
+    const personalGrant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!personalGrant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${personalGrant.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'grant-test'
+      )`;
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${personalGrant.accountId} and subject_id = ${subjectId}`;
+    if (!membership) throw new Error("managed human membership missing");
+    const authorityIds = [crypto.randomUUID(), crypto.randomUUID()];
+    const resourceIds = [crypto.randomUUID(), crypto.randomUUID()];
+    for (let index = 0; index < authorityIds.length; index += 1) {
+      await shared.admin`
+        insert into organization_user_resource_authorities (
+          id, account_id, organization_membership_id, resource_kind, resource_id,
+          origin_workspace_id, generation, status, created_at
+        ) values (
+          ${authorityIds[index]}, ${personalGrant.accountId}, ${membership.id}, 'rig',
+          ${resourceIds[index]}, ${personalGrant.workspaceId}, 1, 'active',
+          clock_timestamp() + (${index}::text || ' milliseconds')::interval
+        )`;
+    }
+    const authorization = {
+      grant: {
+        ...personalGrant,
+        permissions: [...new Set([...personalGrant.permissions, "rigs:use", "sessions:control"])],
+      },
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const session = await createSession(client.db, {
+      accountId: personalGrant.accountId,
+      workspaceId: personalGrant.workspaceId,
+      initialMessage: "grant target",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const grantOperations: SessionAuthorizationOperation[] = [];
+    const deps = {
+      db: client.db,
+      sessionAuthorization: {
+        authorizeSession: async (input) => {
+          grantOperations.push(input.operation);
+          return { allowed: true as const, relatedSessionAccess: "root" as const };
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+
+    const firstPage = await listManagedHumanUserResourceAuthorities(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      { resourceKind: "rig", limit: 1 },
+    );
+    expect(firstPage.authorities).toHaveLength(1);
+    expect(firstPage.nextCursor).toBe(firstPage.authorities[0]?.authorityId ?? null);
+    const secondPage = await listManagedHumanUserResourceAuthorities(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      { resourceKind: "rig", cursor: firstPage.nextCursor ?? undefined, limit: 1 },
+    );
+    expect(secondPage.authorities).toHaveLength(1);
+    expect(secondPage.nextCursor).toBeNull();
+
+    const issued = await issueManagedHumanUserResourceGrant(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      authorityIds[0]!,
+      {
+        scope: "user",
+        resourceKind: "rig",
+        mode: "session",
+        context: "workspace_shared",
+        sessionId: session.id,
+        expectedAuthorityEpoch: 1,
+        workspaceSharedAcknowledged: true,
+      },
+    );
+    expect(issued).toMatchObject({
+      action: "rig.use",
+      authorityEpoch: 1,
+      mode: "session",
+      status: "active",
+      delegation: {
+        authorityId: authorityIds[0],
+        organizationId: personalGrant.accountId,
+        workspaceId: personalGrant.workspaceId,
+        sessionId: session.id,
+        authorityEpoch: 1,
+        authorityGeneration: 1,
+        grantGeneration: 1,
+      },
+    });
+    expect(grantOperations).toEqual(["session.personal_resource.grant"]);
+    await shared.admin`
+      update organization_user_resource_grants
+      set expires_at = clock_timestamp() - interval '1 second'
+      where id = ${issued.grantId}`;
+    const reissued = await issueManagedHumanUserResourceGrant(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      authorityIds[0]!,
+      {
+        scope: "user",
+        resourceKind: "rig",
+        mode: "session",
+        context: "workspace_shared",
+        sessionId: session.id,
+        expectedAuthorityEpoch: 1,
+        workspaceSharedAcknowledged: true,
+      },
+    );
+    expect(reissued).toMatchObject({ status: "active", action: "rig.use" });
+    expect(reissued.grantId).not.toBe(issued.grantId);
+    await expect(
+      issueManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        personalGrant.workspaceId,
+        authorityIds[1]!,
+        {
+          scope: "user",
+          resourceKind: "rig",
+          mode: "session",
+          context: "workspace_shared",
+          sessionId: crypto.randomUUID(),
+          expectedAuthorityEpoch: 1,
+          workspaceSharedAcknowledged: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
+    expect(grantOperations).toEqual([
+      "session.personal_resource.grant",
+      "session.personal_resource.grant",
+    ]);
+
+    const revoked = await revokeManagedHumanUserResourceGrant(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      reissued.grantId,
+    );
+    expect(revoked).toMatchObject({ grantId: reissued.grantId, status: "revoked", generation: 2 });
+    const replay = await revokeManagedHumanUserResourceGrant(
+      deps,
+      authorization,
+      personalGrant.workspaceId,
+      reissued.grantId,
+    );
+    expect(replay).toEqual(revoked);
+
+    const otherWorkspaceGrant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!otherWorkspaceGrant) throw new Error("managed human has no shared workspace grant");
+    const otherAuthorization = { ...authorization, grant: otherWorkspaceGrant };
+    await expect(
+      revokeManagedHumanUserResourceGrant(
+        deps,
+        otherAuthorization,
+        otherWorkspaceGrant.workspaceId,
+        reissued.grantId,
+      ),
+    ).rejects.toBeDefined();
+  }, 180_000);
+
   test("authorizes, mutates, publishes the exact durable events, and replays without a wake", async () => {
     if (!shared || !client) return;
     const userId = `core-session-tenancy-${crypto.randomUUID()}`;

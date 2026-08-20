@@ -184,6 +184,22 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         target: "personal",
         workspaceMembership: false,
       });
+      const legacySignatures = [
+        "list_self_user_resource_authorities(uuid)",
+        "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,boolean)",
+        "revoke_self_user_resource_grant(uuid,uuid)",
+        "list_self_connection_authorities(uuid)",
+        "issue_self_connection_use_grant(uuid,uuid,uuid,text,text,uuid,boolean)",
+        "revoke_self_connection_use_grant(uuid,uuid)",
+      ];
+      const legacyFunctions = await sql<Array<{ signature: string; procedure: string | null }>>`
+        select signature,
+          to_regprocedure(format('%I.%s', current_schema(), signature))::text as procedure
+        from unnest(${sql.array(legacySignatures)}::text[]) as signature
+        order by signature`;
+      expect(Array.from(legacyFunctions)).toEqual(
+        [...legacySignatures].sort().map((signature) => ({ signature, procedure: null })),
+      );
       await expect(insertAttempt(sql, ids, ids.attemptId)).rejects.toThrow(
         "initiating human lacks target-workspace membership",
       );

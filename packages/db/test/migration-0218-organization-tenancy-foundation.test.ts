@@ -33,14 +33,10 @@ const historicalTenancySystemOnlyPolicy = "organization_tenancy_system_only";
 const currentLedgerTenancyLifecyclePolicy = "organization_tenancy_lifecycle";
 const currentManagedHumanTenancyLifecycleExpression =
   "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'organization_membership_lifecycle'::text]))";
+const currentPersonalResourceTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'organization_membership_lifecycle'::text, 'personal_resource_grant_management'::text]))";
 const currentSessionVisibilityTenancyLifecycleExpression =
-  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text]))";
-// Migration 0290 adds the read-only `organization_membership_backfill` marker
-// to `organization_memberships`' USING clause ONLY. Its WITH CHECK keeps
-// exactly the three pre-existing write markers, so the backfill enumeration is
-// structurally incapable of writing that table.
-const currentMembershipBackfillTenancyLifecycleReadExpression =
-  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text, 'organization_membership_backfill'::text]))";
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text, 'organization_membership_lifecycle'::text, 'personal_resource_grant_management'::text]))";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -528,20 +524,18 @@ describe("migration 0218 organization tenancy foundation", () => {
     // assert the current lifecycle policy while the static checks above preserve
     // 0218's historical deny-all contract. Migration 0263 retains managed-human
     // provisioning and session-visibility activation while adding only its exact
-    // organization-membership capability; direct app privileges remain deny-all.
+    // organization-membership capability. Migration 0305 replaces those exact
+    // policies with the same prior write markers plus only its constrained
+    // personal-resource lifecycle marker; direct app privileges remain deny-all.
     expect([...policyRows]).toEqual(
       [...tenancyTables].sort().map((tableName) => {
         const lifecycleExpression =
           tableName === "organization_memberships" ||
           tableName === "organization_user_resource_grants"
             ? currentSessionVisibilityTenancyLifecycleExpression
-            : currentManagedHumanTenancyLifecycleExpression;
-        // 0290's read-only marker widens exactly one USING clause; every
-        // WITH CHECK on every tenancy table stays on the write markers.
-        const readExpression =
-          tableName === "organization_memberships"
-            ? currentMembershipBackfillTenancyLifecycleReadExpression
-            : lifecycleExpression;
+            : tableName === "organization_user_resource_authorities"
+              ? currentPersonalResourceTenancyLifecycleExpression
+              : currentManagedHumanTenancyLifecycleExpression;
         return {
           tableName,
           rlsEnabled: true,
@@ -549,7 +543,7 @@ describe("migration 0218 organization tenancy foundation", () => {
           policyCount: 1,
           policyNames: [currentLedgerTenancyLifecyclePolicy],
           policyCommands: ["*"],
-          usingExpressions: [readExpression],
+          usingExpressions: [lifecycleExpression],
           checkExpressions: [lifecycleExpression],
           appSelect: false,
           appInsert: false,

@@ -581,6 +581,55 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     }
   });
 
+  test("0305 grant routines keep exact dedicated-schema proconfig and lifecycle-only RLS", async () => {
+    if (!available) return;
+    const routines = await admin<Array<{ name: string; settings: string[] | null }>>`
+      select procedure.proname as name, procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname in (
+          'list_self_user_resource_authorities',
+          'issue_self_user_resource_grant',
+          'revoke_self_user_resource_grant'
+        )
+        and pg_catalog.oidvectortypes(procedure.proargtypes) in (
+          'uuid, uuid, text, uuid, integer',
+          'uuid, uuid, uuid, text, text, text, uuid, integer, boolean',
+          'uuid, uuid, uuid'
+        )
+      order by procedure.proname`;
+    expect(Array.from(routines)).toEqual([
+      {
+        name: "issue_self_user_resource_grant",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "list_self_user_resource_authorities",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "revoke_self_user_resource_grant",
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+    const policies = await admin<Array<{ tableName: string; usingExpression: string }>>`
+      select tablename as "tableName", qual as "usingExpression"
+      from pg_policies
+      where schemaname = ${SCHEMA}
+        and policyname = 'organization_tenancy_lifecycle'
+        and tablename in (
+          'organization_memberships',
+          'organization_user_resource_authorities',
+          'organization_user_resource_grants'
+        )
+      order by tablename`;
+    expect(policies).toHaveLength(3);
+    for (const policy of policies) {
+      expect(policy.usingExpression).toContain("personal_resource_grant_management");
+    }
+  });
+
   test("migrate-then-provision grants the exact target-schema knowledge authority lock", async () => {
     if (!available) return;
     expect(appRoleExistedBeforeMigration).toBe(false);
