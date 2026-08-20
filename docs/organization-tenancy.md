@@ -81,9 +81,15 @@ functions with `pg_catalog`, the target schema, and `pg_temp` as their exact
 search path; the app role retains zero direct table DML. The Connection-specific
 REST wrappers converge on this lifecycle, including permission-independent
 revocation after baseline route-workspace access is proved.
-Standalone `once`, custom expiry, new-session atomic attachment, cross-workspace
-grant/fork UX, schedules, MCP/agent administration, and web UI remain outside
-this backend prerequisite.
+Standalone `once` and custom expiry remain outside this management surface.
+Migration 0306 adds the only direct-session `once` path: create/Send/Steer
+acceptance derives the fixed personal Variable Set/Rig closure and issues it in
+the same transaction as the logical turn. New-session create binds the new
+session epoch; established-session requests provide the expected epoch. The
+receipt and snapshots are immutable, credential-free, and turn-bound, so
+same-turn recovery reuses once while goal/machine successors do not inherit it.
+Cross-workspace grant/fork UX, MCP/agent administration, and web UI remain
+outside this backend slice.
 
 For direct and scheduled personal Variable Set/Rig use, personal-workspace and
 origin-workspace columns are provenance/lifecycle facts only. Authorization is

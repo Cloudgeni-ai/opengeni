@@ -1296,6 +1296,22 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(
+      format(
+        '%I.accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)', ${literal(schema)}))
       IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM PUBLIC', ${literal(schema)});

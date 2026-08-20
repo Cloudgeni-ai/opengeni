@@ -155,6 +155,7 @@ import type {
   UpsertIntegrationFacetRequest,
   PreviewPluginRequest,
   PluginPreview,
+  PersonalResourceAttachmentIntent,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -558,6 +559,7 @@ export type SendMessageInput = {
   expectedDraftRevision?: number;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
 export type SteerMessageResult = {

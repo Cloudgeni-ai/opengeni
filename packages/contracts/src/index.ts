@@ -1106,6 +1106,55 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
 } as const satisfies Record<UserResourceKind, string>;
 
 export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+/**
+ * Owner-authored issuance intent for the fixed personal Variable Set/Rig
+ * closure selected by one session. The server derives every resource,
+ * authority and action from the locked session; callers never nominate grants.
+ */
+export const PersonalResourceAttachmentIntent = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    expectedAuthorityEpoch: z.number().int().positive().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
+
+function requireEstablishedPersonalResourceEpoch(
+  value: { personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.personalResourceAttachment !== undefined &&
+    value.personalResourceAttachment.expectedAuthorityEpoch === undefined
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "established-session attachment requires expectedAuthorityEpoch",
+    });
+  }
+}
+
+/** Credential-free accepted-work projection. Resource ids remain private. */
+export const PersonalResourceAttachmentSummary = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    resourceCount: z.number().int().positive(),
+    resourceKinds: z
+      .array(z.enum(["variable_set", "rig"]))
+      .min(1)
+      .max(2),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentSummary = z.infer<typeof PersonalResourceAttachmentSummary>;
 /** Public owner-management deliberately excludes race-prone standalone `once`. */
 export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
 export const UserResourceAuthorityGrant = z.object({
@@ -6263,6 +6312,8 @@ export const SessionTurn = z
     initiatorContext: TurnInitiatorContext,
     /** Secret-safe projection of the exact personal authority frozen on this turn. */
     personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+    /** Safe summary only; opaque resource/grant identity remains private. */
+    personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
     cancelledBy: z.string().nullable(),
     cancelReason: z.string().nullable(),
     startedAt: z.string().nullable(),
@@ -6408,15 +6459,18 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
-}).extend({
-  expectedDraftRevision: z.number().int().positive(),
-  clientEventId: SessionOperationKey,
-  delivery: z.enum(["send", "steer"]),
-  controlEtag: z.string().min(1).optional(),
-  modelContext: z.string().trim().min(1).max(32768).optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-});
+})
+  .extend({
+    expectedDraftRevision: z.number().int().positive(),
+    clientEventId: SessionOperationKey,
+    delivery: z.enum(["send", "steer"]),
+    controlEtag: z.string().min(1).optional(),
+    modelContext: z.string().trim().min(1).max(32768).optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+  })
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
 
 /**
@@ -10262,6 +10316,7 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.personal_resources.attached",
   "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
   // oversized retained event envelope. The original row stays durable; this
@@ -12548,6 +12603,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
     /** Explicit personal-connection grants for the initial accepted turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
     // inside a session → "shared" with the creator's box, top-level → "new"),
@@ -12601,6 +12658,21 @@ export const CreateSessionRequest = withVariableSetIdAlias(
       path: ["connectionAuthorities"],
       message:
         "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
+    });
+  }
+  if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment"],
+      message:
+        "personalResourceAttachment requires an accepted initial turn and is not supported by realtime session staging",
+    });
+  }
+  if (value.personalResourceAttachment?.expectedAuthorityEpoch !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "new-session attachment authority epoch is derived by the server",
     });
   }
 });
@@ -12803,9 +12875,11 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
 
 export const ClientSessionEvent = z.discriminatedUnion("type", [
@@ -12850,9 +12924,11 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({

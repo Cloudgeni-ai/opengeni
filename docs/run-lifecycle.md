@@ -53,6 +53,18 @@ NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
+An owner-authored `personalResourceAttachment` is part of that same accepted
+work transaction for create, Send, and Steer. The server derives the fixed
+personal Variable Set/Rig closure from the locked session; callers never issue
+a grant and then send work in a second operation. `once` is consumed against
+the logical turn id, so every recovery attempt for that turn copies the same
+immutable snapshot. It is never copied to a queue edit, goal continuation, or
+machine-input successor; editing a queued once-bearing turn is rejected.
+`session` and `always` remain live grant generations for later causal turns.
+Revocation cannot erase bytes already injected into a running sandbox, but it
+rejects every later resolution and recovery admission. Realtime session staging
+does not accept this intent because it has no initial logical-turn boundary.
+
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
 Only the authenticated browser owner/connection is exclusive. Human

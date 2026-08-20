@@ -356,6 +356,9 @@ describe("runtime database posture evaluator", () => {
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
+        "turn_personal_resource_attachment_receipts",
+        "turn_personal_resource_once_receipts",
+        "turn_personal_resource_snapshots",
       ].filter(
         (table) =>
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
@@ -667,6 +670,18 @@ describe("runtime database posture evaluator", () => {
       "canonical_human_identity_operations",
       "canonical_human_identity_subjects",
       "canonical_human_login_bindings",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+  });
+
+  test("classifies logical-turn personal-resource ledgers as FORCE-RLS with no direct DML", () => {
+    for (const table of [
+      "turn_personal_resource_attachment_receipts",
+      "turn_personal_resource_once_receipts",
+      "turn_personal_resource_snapshots",
     ] as const) {
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);

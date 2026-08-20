@@ -4,6 +4,8 @@ import type {
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
+  PersonalResourceAttachmentIntent,
+  PersonalResourceAttachmentSummary,
   McpServerConnectionRef,
   ModelContextContributionSummary,
   RigProviderImages,
@@ -13,6 +15,7 @@ import type {
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
@@ -3139,6 +3142,12 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    // Initial accepted-work staging only. The initializer consumes this inside
+    // the same transaction that inserts the first logical turn and grant
+    // snapshots; runtime never authorizes from the session field.
+    initialPersonalResourceAttachmentIntent: jsonb(
+      "initial_personal_resource_attachment_intent",
+    ).$type<PersonalResourceAttachmentIntent>(),
     initialXaiProviderAccountAuthoritySnapshot: jsonb(
       "initial_xai_provider_account_authority_snapshot",
     )
@@ -5214,6 +5223,17 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    // Credential-free public summary of a turn-bound personal Variable
+    // Set/Rig attachment. Exact resource and grant identity lives only in the
+    // immutable accepted-work snapshot tables.
+    personalResourceAttachmentSummary: jsonb(
+      "personal_resource_attachment_summary",
+    ).$type<PersonalResourceAttachmentSummary>(),
+    // 0 = legacy attempt-selected authority; 1 = immutable logical-turn
+    // snapshots. Drained migration 0306 makes every new atomic attachment v1.
+    personalResourceProtocolVersion: integer("personal_resource_protocol_version")
+      .notNull()
+      .default(0),
     // Immutable scheduled occurrence that accepted this logical turn. Null for
     // ordinary human, goal, child, and unrelated internal work.
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
@@ -5253,6 +5273,145 @@ export const sessionTurns = pgTable(
       "session_turns_model_context_check",
       sql`${table.modelContext} is null
         or opengeni_private.model_context_value_valid(${table.modelContext})`,
+    ),
+  }),
+);
+
+/** Immutable logical-turn receipt for atomic personal Variable Set/Rig issuance. */
+export const turnPersonalResourceAttachmentReceipts = pgTable(
+  "turn_personal_resource_attachment_receipts",
+  {
+    turnId: uuid("turn_id")
+      .primaryKey()
+      .references(() => sessionTurns.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    membershipAuthorizationRevision: bigint("membership_authorization_revision", {
+      mode: "number",
+    }).notNull(),
+    sessionVisibility: text("session_visibility").notNull(),
+    sessionAuthorityEpoch: integer("session_authority_epoch").notNull(),
+    grantMode: text("grant_mode").notNull(),
+    sharedOutputWarningVersion: integer("shared_output_warning_version").notNull(),
+    sharedOutputAcknowledged: boolean("shared_output_acknowledged").notNull(),
+    requestDigest: bytea("request_digest").notNull(),
+    resourceCount: integer("resource_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceTurn: foreignKey({
+      name: "turn_personal_resource_attachment_receipts_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    identity: check(
+      "turn_personal_resource_attachment_receipts_identity_chk",
+      sql`${table.sessionAuthorityEpoch} > 0
+        and octet_length(${table.initiatingHumanSubjectId}) between 1 and 512
+        and ${table.membershipAuthorizationRevision} > 0
+        and ${table.resourceCount} between 1 and 27
+        and ${table.grantMode} in ('once', 'session', 'always')
+        and ${table.sessionVisibility} in ('user_private', 'workspace_shared')
+        and ${table.sharedOutputWarningVersion} = 1
+        and (${table.sessionVisibility} <> 'workspace_shared'
+          or ${table.sharedOutputAcknowledged})`,
+    ),
+  }),
+);
+
+/** Exact resource/grant authority frozen on one accepted logical turn. */
+export const turnPersonalResourceSnapshots = pgTable(
+  "turn_personal_resource_snapshots",
+  {
+    turnId: uuid("turn_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    resourceKind: text("resource_kind").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    resourceVersionId: uuid("resource_version_id"),
+    selectionSources: text("selection_sources").array().notNull(),
+    action: text("action").notNull(),
+    originWorkspaceId: uuid("origin_workspace_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    membershipAuthorizationRevision: bigint("membership_authorization_revision", {
+      mode: "number",
+    }).notNull(),
+    authorityId: uuid("authority_id").notNull(),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    grantId: uuid("grant_id").notNull(),
+    grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
+    grantMode: text("grant_mode").notNull(),
+    grantContext: text("grant_context").notNull(),
+    grantSessionId: uuid("grant_session_id"),
+    grantAuthorityEpoch: integer("grant_authority_epoch"),
+    canonicalDelegation: jsonb("canonical_delegation").$type<UserResourceDelegation>().notNull(),
+    snapshotDigest: bytea("snapshot_digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.turnId, table.resourceKind, table.resourceId] }),
+    receipt: foreignKey({
+      name: "turn_personal_resource_snapshots_receipt_fk",
+      columns: [table.turnId],
+      foreignColumns: [turnPersonalResourceAttachmentReceipts.turnId],
+    }).onDelete("cascade"),
+    authority: index("turn_personal_resource_snapshots_authority_idx").on(table.authorityId),
+    grant: index("turn_personal_resource_snapshots_grant_idx").on(table.grantId),
+    kind: check(
+      "turn_personal_resource_snapshots_kind_chk",
+      sql`(${table.resourceKind} = 'variable_set'
+          and ${table.action} = 'variable_set.use'
+          and ${table.resourceVersionId} is null)
+        or (${table.resourceKind} = 'rig'
+          and ${table.action} = 'rig.use'
+          and ${table.resourceVersionId} is not null)`,
+    ),
+    generations: check(
+      "turn_personal_resource_snapshots_generation_chk",
+      sql`${table.membershipAuthorizationRevision} > 0
+        and ${table.authorityGeneration} > 0
+        and ${table.grantGeneration} > 0
+        and cardinality(${table.selectionSources}) between 1 and 26`,
+    ),
+    grantShape: check(
+      "turn_personal_resource_snapshots_grant_chk",
+      sql`${table.grantMode} in ('once', 'session', 'always')
+        and ${table.grantContext} in ('user_private', 'workspace_shared')
+        and ((${table.grantMode} = 'always'
+            and ${table.grantSessionId} is null
+            and ${table.grantAuthorityEpoch} is null)
+          or (${table.grantMode} in ('once', 'session')
+            and ${table.grantSessionId} = ${table.sessionId}
+            and ${table.grantAuthorityEpoch} > 0))`,
+    ),
+  }),
+);
+
+/** One once grant may belong to one accepted logical turn only. */
+export const turnPersonalResourceOnceReceipts = pgTable(
+  "turn_personal_resource_once_receipts",
+  {
+    grantId: uuid("grant_id").primaryKey(),
+    turnId: uuid("turn_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    authorityId: uuid("authority_id").notNull(),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    receipt: foreignKey({
+      name: "turn_personal_resource_once_receipts_turn_fk",
+      columns: [table.turnId],
+      foreignColumns: [turnPersonalResourceAttachmentReceipts.turnId],
+    }).onDelete("cascade"),
+    generations: check(
+      "turn_personal_resource_once_receipts_generation_chk",
+      sql`${table.authorityGeneration} > 0 and ${table.grantGeneration} > 0`,
     ),
   }),
 );
@@ -5345,6 +5504,9 @@ export const sessionTurnAttempts = pgTable(
     authorityEpoch: integer("authority_epoch").notNull(),
     authorityVisibility: text("authority_visibility").notNull(),
     authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
+    personalResourceProtocolVersion: integer("personal_resource_protocol_version")
+      .notNull()
+      .default(0),
     // Immutable policy snapshot captured under the session lock at claim.
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()

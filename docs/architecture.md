@@ -763,6 +763,14 @@ child/fork session or after-commit admission worker.
 - **Turn initiator**: the immutable subject or service principal whose authority accepted that exact turn. The session creator is separate and is reused only for idempotent repair of the create command's first turn. Send/Steer capture their authenticated actor; queue edits preserve the original; service work is explicit; agent-spawned work inherits through the signed calling-turn reference. Recovery and approval never replace it. Canonical: `packages/contracts/src/index.ts` (`TurnInitiator`), `packages/db/src/turn-initiator.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 - **Agent session authority is capability-first.** A live agent attempt may read, message, and control peer workspace sessions; parent/child lineage is not an access deny. Slack-private stays same-root for agents, and `user_private` still requires the initiating human as owner. An agent cannot Steer itself; goal tools stay self-only. `sessions_list` remains compact discovery and validates that the caller attempt is live. An optional embedding-host policy may narrow access and cannot grant a private session OpenGeni denied. Canonical: `packages/core/src/session-authorization.ts` and [`agent-session-authority.md`](agent-session-authority.md).
 - **Personal MCP delegation**: the immutable set of exact subject-owned connection rows that this turn may execute. It is distinct from the initiator: a service-initiated child, goal continuation, or schedule occurrence may carry delegated personal authority only when an earlier causal boundary explicitly froze it. Public surfaces reduce each entry to `{serverId, providerDomain}`; connection UUIDs and owner subject ids remain internal. Canonical: `packages/core/src/domain/personal-connection-delegations.ts`, `packages/db/src/session-queue-commands.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
+- **Atomic personal-resource attachment**: an owning managed human may attach
+  the locked session's fixed personal Variable Set/Rig closure with
+  `once | session | always` only as part of accepted create/Send/Steer work.
+  Once is owned by the logical turn across recovery attempts; standalone
+  issue-then-send is not an authority path. Canonical:
+  `packages/db/drizzle/0306_atomic_personal_resource_attachments.sql`,
+  `packages/db/src/session-queue-commands.ts`, and
+  [`variable-sets.md`](variable-sets.md).
 - **Run**: the SDK execution inside a turn — the streamed agent loop in a sandbox.
 
 ### 5.2 Session/turn lifecycle

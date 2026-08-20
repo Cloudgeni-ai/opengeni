@@ -145,6 +145,7 @@ describe("release schema contract", () => {
       "0273_scheduled_variable_set_materialization.sql",
       "0304_personal_workspace_private_session_reads.sql",
       "0305_personal_resource_grant_management.sql",
+      "0306_atomic_personal_resource_attachments.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -206,6 +207,14 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "b6c20178b35b279314872c7cc79048f028d2b1ed070a49f5ad9e0490cb8e5b0c",
       deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0306_atomic_personal_resource_attachments.sql",
+      ),
+    ).toMatchObject({
+      sha256: "4aa927065e39ecda0cbf118e9f861d728f8b213e4b72238e2cdbccea002e2af4",
+      deploymentMode: "maintenance",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -539,10 +548,10 @@ describe("release schema contract", () => {
         : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
-      if (migrations.has("0309_channel_project_order.sql")) {
+      if (migrations.has("0310_channel_project_order.sql")) {
         return includesActivation
-          ? "19bd42d1f702764744606f0d537d70a9c30331bda4bf542c2a1206f755219a65"
-          : "9937643c8238a4f31d394f76851a4c7e7485c6a372cfecb4c64e6c2a53fa9374";
+          ? "0f1aa9ad9747be5968dfa9374a0c623fcb10a0e4095350f13df81b0bc40679ca"
+          : "5ae226fe9a702d73866c041e7aba8b640d84186a5cb87ccd7e0e8c37fbb7444c";
       }
       if (migrations.has("0303_session_tenancy_product_activation.sql")) {
         return includesActivation
@@ -1181,10 +1190,10 @@ describe("release schema contract", () => {
         (migrations.has("0290_organization_membership_backfill.sql") ? 1 : 0) +
         (migrations.has("0302_personal_workspace_session_ownership.sql") ? 1 : 0) +
         (migrations.has("0303_session_tenancy_product_activation.sql") ? 1 : 0) +
-        (migrations.has("0306_session_attention_state.sql") ? 1 : 0) +
-        (migrations.has("0307_session_archives.sql") ? 1 : 0) +
-        (migrations.has("0308_channel_project_pins.sql") ? 1 : 0) +
-        (migrations.has("0309_channel_project_order.sql") ? 1 : 0),
+        (migrations.has("0307_session_attention_state.sql") ? 1 : 0) +
+        (migrations.has("0308_session_archives.sql") ? 1 : 0) +
+        (migrations.has("0309_channel_project_pins.sql") ? 1 : 0) +
+        (migrations.has("0310_channel_project_order.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1219,14 +1228,14 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0309_channel_project_order.sql")
-        ? "0309_channel_project_order.sql"
-        : migrations.has("0308_channel_project_pins.sql")
-          ? "0308_channel_project_pins.sql"
-          : migrations.has("0307_session_archives.sql")
-            ? "0307_session_archives.sql"
-            : migrations.has("0306_session_attention_state.sql")
-              ? "0306_session_attention_state.sql"
+      migrations.has("0310_channel_project_order.sql")
+        ? "0310_channel_project_order.sql"
+        : migrations.has("0309_channel_project_pins.sql")
+          ? "0309_channel_project_pins.sql"
+          : migrations.has("0308_session_archives.sql")
+            ? "0308_session_archives.sql"
+            : migrations.has("0307_session_attention_state.sql")
+              ? "0307_session_attention_state.sql"
               : migrations.has("0303_session_tenancy_product_activation.sql")
                 ? "0303_session_tenancy_product_activation.sql"
                 : migrations.has("0302_personal_workspace_session_ownership.sql")

@@ -1503,6 +1503,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         pendingToolCalls: number;
         humanInputStatus: string;
         interruptedHistoryItems: number;
+        interruptedHistoryItemsWithOutputStatus: number;
         toolOutputEvents: number;
         humanInputEvents: number;
         systemUpdateEvents: number;
@@ -1523,8 +1524,17 @@ describe("migration 0263 organization membership lifecycle", () => {
             and history.session_id = ${recoveringSession.id}
             and history.turn_id = ${requiresActionTurnId}
             and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}) as "interruptedHistoryItems",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
             and history.item ->> 'callId' = ${pendingToolCallId}
-            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+            and (
+              history.item ? 'status'
+              or (history.item -> 'providerData') ? 'status'
+            )) as "interruptedHistoryItemsWithOutputStatus",
         (select count(*)::int from session_events event_row
           where event_row.workspace_id = ${sharedWorkspaceId}
             and event_row.session_id = ${recoveringSession.id}
@@ -1554,6 +1564,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       pendingToolCalls: 0,
       humanInputStatus: "cancelled",
       interruptedHistoryItems: 1,
+      interruptedHistoryItemsWithOutputStatus: 0,
       toolOutputEvents: 1,
       humanInputEvents: 1,
       systemUpdateEvents: 1,
@@ -1616,6 +1627,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       Array<{
         pendingToolCalls: number;
         interruptedHistoryItems: number;
+        interruptedHistoryItemsWithOutputStatus: number;
         lifecycleProtocolEvents: number;
         lastSequence: number;
       }>
@@ -1629,8 +1641,17 @@ describe("migration 0263 organization membership lifecycle", () => {
             and history.session_id = ${recoveringSession.id}
             and history.turn_id = ${requiresActionTurnId}
             and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}) as "interruptedHistoryItems",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
             and history.item ->> 'callId' = ${pendingToolCallId}
-            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+            and (
+              history.item ? 'status'
+              or (history.item -> 'providerData') ? 'status'
+            )) as "interruptedHistoryItemsWithOutputStatus",
         (select count(*)::int from session_events event_row
           where event_row.workspace_id = ${sharedWorkspaceId}
             and event_row.session_id = ${recoveringSession.id}
@@ -1644,6 +1665,7 @@ describe("migration 0263 organization membership lifecycle", () => {
     expect(replayEvidence).toEqual({
       pendingToolCalls: 0,
       interruptedHistoryItems: 1,
+      interruptedHistoryItemsWithOutputStatus: 0,
       lifecycleProtocolEvents: 4,
       lastSequence: protocolSettlement!.lastSequence,
     });
