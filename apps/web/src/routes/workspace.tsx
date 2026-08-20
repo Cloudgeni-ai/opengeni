@@ -20,7 +20,7 @@ import {
   type WorkspaceOwnedState,
 } from "@/lib/workspace-owned-state";
 import {
-  beginWorkspaceOperation,
+  beginWorkspaceOperationUnlessBlocked,
   type WorkspaceOperationIdentity,
 } from "@/lib/workspace-transition";
 import type { SlackUserLinkAccessRequest } from "@/types";
@@ -68,6 +68,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   );
   const slackOperationSequence = useRef(0);
   const activeSlackOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const slackMutationBusy = useRef(false);
   if (activeSlackOperation.current?.transition.workspaceId !== workspaceId) {
     activeSlackOperation.current = null;
   }
@@ -83,14 +84,22 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     },
     [],
   );
-  const beginSlackOperation = useCallback((): WorkspaceOperationIdentity | null => {
-    const accepted = captureWorkspaceInvocation(workspaceId);
-    if (!accepted) return null;
-    const started = beginWorkspaceOperation(slackOperationSequence.current, accepted);
-    slackOperationSequence.current = started.sequence;
-    activeSlackOperation.current = started.operation;
-    return started.operation;
-  }, [captureWorkspaceInvocation, workspaceId]);
+  const beginSlackOperation = useCallback(
+    (options?: { polling?: boolean }): WorkspaceOperationIdentity | null => {
+      const accepted = captureWorkspaceInvocation(workspaceId);
+      if (!accepted) return null;
+      const started = beginWorkspaceOperationUnlessBlocked(
+        slackOperationSequence.current,
+        accepted,
+        options?.polling === true && slackMutationBusy.current,
+      );
+      if (!started) return null;
+      slackOperationSequence.current = started.sequence;
+      activeSlackOperation.current = started.operation;
+      return started.operation;
+    },
+    [captureWorkspaceInvocation, workspaceId],
+  );
   const ownsSlackOperation = useCallback(
     (operation: WorkspaceOperationIdentity): boolean =>
       activeSlackOperation.current?.id === operation.id &&
@@ -108,12 +117,13 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     activeSlackOperation.current = null;
+    slackMutationBusy.current = false;
     setOwnedSlackAccess({ workspaceId, value: emptySlackAccessState() });
   }, [context.accessKeyVersion, workspaceId]);
 
   const refreshSlackAccess = useCallback(
-    async (request: SlackUserLinkAccessRequest) => {
-      const operation = beginSlackOperation();
+    async (request: SlackUserLinkAccessRequest, options?: { polling?: boolean }) => {
+      const operation = beginSlackOperation(options);
       if (!operation) return null;
       let next: SlackUserLinkAccessRequest;
       try {
@@ -194,17 +204,18 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   ]);
 
   useEffect(() => {
-    if (slackAccessRequest?.status !== "pending") return;
+    if (slackAccessBusy || slackAccessRequest?.status !== "pending") return;
     const interval = window.setInterval(() => {
-      void refreshSlackAccess(slackAccessRequest);
+      void refreshSlackAccess(slackAccessRequest, { polling: true });
     }, 3_000);
     return () => window.clearInterval(interval);
-  }, [refreshSlackAccess, slackAccessRequest]);
+  }, [refreshSlackAccess, slackAccessBusy, slackAccessRequest]);
 
   async function requestAccess() {
     if (!slackAccessRequest || slackAccessRequest.status !== "prepared") return;
     const operation = beginSlackOperation();
     if (!operation) return;
+    slackMutationBusy.current = true;
     updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
     try {
       const request = await client.requestSlackUserLinkWorkspaceAccess(
@@ -228,6 +239,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       if (ownsSlackOperation(operation)) {
         activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
         updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
       }
     }
@@ -242,6 +254,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     }
     const operation = beginSlackOperation();
     if (!operation) return;
+    slackMutationBusy.current = true;
     updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
     try {
       await client.cancelSlackUserLinkAccess(workspaceId, slackAccessRequest.id, {
@@ -262,6 +275,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       if (ownsSlackOperation(operation)) {
         activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
         updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
       }
     }

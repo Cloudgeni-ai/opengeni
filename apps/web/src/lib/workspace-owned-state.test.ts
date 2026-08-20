@@ -95,5 +95,11 @@ describe("workspace-owned local state", () => {
     expect(workspaceRouteSource).toContain("updateWorkspaceOwnedState(current, ownedWorkspaceId");
     expect(workspaceRouteSource).toContain("captureWorkspaceInvocation(workspaceId)");
     expect(workspaceRouteSource).toContain("ownsWorkspaceInvocation(workspaceId");
+    expect(workspaceRouteSource).toContain(
+      "options?.polling === true && slackMutationBusy.current",
+    );
+    expect(workspaceRouteSource).toContain(
+      'if (slackAccessBusy || slackAccessRequest?.status !== "pending") return;',
+    );
   });
 });
