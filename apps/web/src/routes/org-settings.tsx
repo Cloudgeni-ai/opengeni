@@ -134,13 +134,14 @@ export function OrgSettingsRoute({
       }),
     [],
   );
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    const activeOperations = billingOperationRef.current;
+    identityRef.current = adminIdentity;
+    return () => {
       identityRef.current = null;
-      billingOperationRef.current.clear();
-    },
-    [],
-  );
+      activeOperations.clear();
+    };
+  }, [adminIdentity]);
 
   const refreshBilling = useCallback(async () => {
     if (!accountId || !canReadBilling) {

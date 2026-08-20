@@ -125,13 +125,14 @@ export function OrganizationPeopleSection(props: {
     [props.identity],
   );
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    const activeOperations = activeRef.current;
+    identityRef.current = props.identity;
+    return () => {
       identityRef.current = null;
-      activeRef.current.clear();
-    },
-    [],
-  );
+      activeOperations.clear();
+    };
+  }, [props.identity]);
 
   const loadMembers = useCallback(async () => {
     if (!props.managedSession || !canAdminister) {
@@ -326,7 +327,12 @@ export function OrganizationPeopleSection(props: {
 
   async function createInvitation() {
     const email = inviteEmail.trim().toLowerCase();
-    if (!email || !canInviteOrganizationRole(props.actorRole, inviteRole) || visibleBusyResource)
+    if (
+      !email ||
+      !canInviteOrganizationRole(props.actorRole, inviteRole) ||
+      visibleBusyResource ||
+      adminInvites.loading
+    )
       return;
     const operation = claim("admin-invitations", "mutation");
     setBusyOwnerKey(identityKey);
@@ -380,7 +386,11 @@ export function OrganizationPeopleSection(props: {
   }
 
   async function revokeInvitation(invitation: OrganizationInvitation): Promise<boolean> {
-    if (visibleBusyResource || !canRevokeOrganizationInvitation(props.actorRole, invitation.role))
+    if (
+      visibleBusyResource ||
+      adminInvites.loading ||
+      !canRevokeOrganizationInvitation(props.actorRole, invitation.role)
+    )
       return false;
     const operation = claim("admin-invitations", "mutation");
     setBusyOwnerKey(identityKey);
@@ -425,7 +435,7 @@ export function OrganizationPeopleSection(props: {
   }
 
   async function acceptInvitation(invitation: OrganizationInvitation) {
-    if (visibleBusyResource) return;
+    if (visibleBusyResource || incoming.loading) return;
     const operation = claim("incoming-invitations", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("incoming-invitations");
@@ -768,7 +778,7 @@ export function OrganizationPeopleSection(props: {
             </p>
           </div>
           <fieldset
-            disabled={visibleBusyResource === "admin-invitations"}
+            disabled={visibleBusyResource === "admin-invitations" || adminInvites.loading}
             className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
           >
             <legend className="sr-only">Invite a registered user</legend>
@@ -806,6 +816,7 @@ export function OrganizationPeopleSection(props: {
               disabled={
                 !inviteEmail.trim() ||
                 visibleBusyResource !== null ||
+                adminInvites.loading ||
                 !canInviteOrganizationRole(props.actorRole, inviteRole)
               }
               onClick={() => void createInvitation()}
@@ -845,7 +856,7 @@ export function OrganizationPeopleSection(props: {
                       type="button"
                       variant="ghost"
                       size="sm"
-                      disabled={visibleBusyResource !== null}
+                      disabled={visibleBusyResource !== null || adminInvites.loading}
                       onClick={(event) => {
                         actionTriggerRef.current = event.currentTarget;
                         setRevokeConfirmation(invite);
@@ -922,7 +933,7 @@ export function OrganizationPeopleSection(props: {
                 <Button
                   type="button"
                   size="sm"
-                  disabled={visibleBusyResource !== null}
+                  disabled={visibleBusyResource !== null || incoming.loading}
                   onClick={() => void acceptInvitation(invite)}
                 >
                   <CheckIcon className="size-3.5" />
@@ -1070,13 +1081,14 @@ export function OrganizationRetentionSection(props: {
     () => sameOrganizationAdminIdentity(identityRef.current, props.identity),
     [props.identity],
   );
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    const activeOperations = operationRef.current;
+    identityRef.current = props.identity;
+    return () => {
       identityRef.current = null;
-      operationRef.current.clear();
-    },
-    [],
-  );
+      activeOperations.clear();
+    };
+  }, [props.identity]);
   const load = useCallback(async () => {
     if (!canRead) {
       setState({ ownerKey: identityKey, value: null, loading: false, error: null });

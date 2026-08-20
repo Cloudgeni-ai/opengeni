@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import { act, type ReactNode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import * as SonnerPackage from "sonner";
 
 import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
 import {
@@ -19,6 +20,7 @@ const toastSuccess = mock((_message: string) => undefined);
 const toastError = mock((_message: string) => undefined);
 
 mock.module("sonner", () => ({
+  ...SonnerPackage,
   toast: Object.assign(
     mock((_message: string) => undefined),
     {
@@ -137,6 +139,24 @@ async function flush() {
   });
 }
 
+async function enterText(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(input, value);
+    const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+    const onChange = reactPropsKey
+      ? (
+          input as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey]?.onChange
+      : undefined;
+    if (onChange) onChange({ target: input });
+    else input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -155,6 +175,261 @@ beforeEach(() => {
 });
 
 describe("organization administration component fences", () => {
+  test("keeps people reads and mutations owned through StrictMode setup cleanup setup", async () => {
+    const actor = member(identityA, "strict-actor");
+    const secondOwner = { ...member(identityA, "strict-owner-2"), subjectId: "user:owner-2" };
+    const listOrganizationMembers = mock(async () => ({ members: [actor, secondOwner] }));
+    const updateOrganizationMember = mock(async () => ({
+      ...actor,
+      status: "suspended" as const,
+      authorizationRevision: 2,
+    }));
+    const onAuthorityChanged = mock(() => undefined);
+    const client = {
+      listOrganizationMembers,
+      listOrganizationInvitationsForOrganization: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
+      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      updateOrganizationMember,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrganizationPeopleSection
+            client={client}
+            identity={identityA}
+            actorRole="owner"
+            managedSession
+            onAuthorityChanged={onAuthorityChanged}
+          />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(listOrganizationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain(maskedOrganizationSubject(secondOwner.subjectId));
+    await act(async () => button(container, "Suspend You").click());
+    await act(async () => button(container, "Suspend member").click());
+    await flush();
+
+    expect(updateOrganizationMember).toHaveBeenCalledTimes(1);
+    expect(onAuthorityChanged).toHaveBeenCalledTimes(1);
+    expect(toastSuccess).toHaveBeenCalledWith("Member suspended");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("keeps retention reads and mutations owned through StrictMode setup cleanup setup", async () => {
+    const getOrganizationRetentionPolicy = mock(async () => policy(identityA));
+    const updateOrganizationRetentionPolicy = mock(async () => ({
+      ...policy(identityA, 30),
+      version: 2,
+    }));
+    const client = {
+      getOrganizationRetentionPolicy,
+      updateOrganizationRetentionPolicy,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrganizationRetentionSection
+            client={client}
+            identity={identityA}
+            actorRole="owner"
+            managedSession
+          />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(getOrganizationRetentionPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain(
+      "Retain offboarded members' personal data indefinitely",
+    );
+    const deleteAfter = Array.from(container.querySelectorAll("input")).find(
+      (input) =>
+        input.getAttribute("type") === "radio" &&
+        input.nextSibling?.textContent?.includes("eligible"),
+    );
+    if (!(deleteAfter instanceof HTMLInputElement)) throw new Error("Missing delete-after radio");
+    await act(async () => deleteAfter.click());
+    await act(async () => button(container, "Review retention change").click());
+    await act(async () => button(container, "Change retention policy").click());
+    await flush();
+
+    expect(updateOrganizationRetentionPolicy).toHaveBeenCalledTimes(1);
+    expect(toastSuccess).toHaveBeenCalledWith("Retention policy updated");
+    expect(container.textContent).toContain("operator cleanup after 30 days");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("serializes organization invitation reads with create and revoke in both orders", async () => {
+    const listedInvite = invitation("member");
+    const pageRead = deferred<{
+      invitations: OrganizationInvitation[];
+      nextCursor: string | null;
+    }>();
+    const createResult = deferred<OrganizationInvitation>();
+    const revokeResult = deferred<OrganizationInvitation>();
+    let listCall = 0;
+    const listOrganizationInvitationsForOrganization = mock(async () => {
+      listCall += 1;
+      return listCall === 1
+        ? { invitations: [listedInvite], nextCursor: "page-1" }
+        : pageRead.promise;
+    });
+    const createOrganizationInvitation = mock(() => createResult.promise);
+    const revokeOrganizationInvitation = mock(() => revokeResult.promise);
+    const client = {
+      listOrganizationMembers: async () => ({
+        members: [
+          member(identityA, "actor"),
+          { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
+        ],
+      }),
+      listOrganizationInvitationsForOrganization,
+      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      createOrganizationInvitation,
+      revokeOrganizationInvitation,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationPeopleSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          onAuthorityChanged={() => undefined}
+        />,
+      );
+    });
+    await flush();
+    const email = container.querySelector<HTMLInputElement>("#organization-invite-email");
+    if (!email) throw new Error("Missing invitation email field");
+    await enterText(email, "new-member@example.test");
+
+    await act(async () => button(container, "Load more invitations").click());
+    expect(button(container, "Invite registered user").disabled).toBe(true);
+    expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(true);
+    expect(createOrganizationInvitation).not.toHaveBeenCalled();
+    expect(revokeOrganizationInvitation).not.toHaveBeenCalled();
+
+    pageRead.resolve({ invitations: [], nextCursor: "page-2" });
+    await flush();
+    expect(button(container, "Invite registered user").disabled).toBe(false);
+    expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(false);
+
+    await act(async () => button(container, "Invite registered user").click());
+    expect(createOrganizationInvitation).toHaveBeenCalledTimes(1);
+    expect(button(container, "Load more invitations").disabled).toBe(true);
+    createResult.resolve({
+      ...listedInvite,
+      id: "invite-created",
+      targetEmail: "new-member@example.test",
+    });
+    await flush();
+    expect(container.textContent).toContain("new-member@example.test");
+    expect(button(container, "Load more invitations").disabled).toBe(false);
+
+    await act(async () => button(container, "Revoke invitation for member@example.test").click());
+    await act(async () => button(container, "Revoke invitation").click());
+    expect(revokeOrganizationInvitation).toHaveBeenCalledTimes(1);
+    expect(button(container, "Load more invitations").disabled).toBe(true);
+    revokeResult.resolve({ ...listedInvite, status: "revoked", revision: 2 });
+    await flush();
+    expect(container.textContent).toContain("member · revoked");
+    expect(button(container, "Load more invitations").disabled).toBe(false);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("serializes incoming invitation reads with acceptance in both orders", async () => {
+    const incomingInvite = invitation("member");
+    const pageRead = deferred<{
+      invitations: OrganizationInvitation[];
+      nextCursor: string | null;
+    }>();
+    const acceptResult = deferred<unknown>();
+    let listCall = 0;
+    const listOrganizationInvitations = mock(async () => {
+      listCall += 1;
+      return listCall === 1
+        ? { invitations: [incomingInvite], nextCursor: "page-1" }
+        : pageRead.promise;
+    });
+    const acceptOrganizationInvitation = mock(() => acceptResult.promise);
+    const onAuthorityChanged = mock(() => undefined);
+    const client = {
+      listOrganizationMembers: async () => ({
+        members: [
+          member(identityA, "actor"),
+          { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
+        ],
+      }),
+      listOrganizationInvitationsForOrganization: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
+      listOrganizationInvitations,
+      acceptOrganizationInvitation,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const acceptLabel = `Accept invitation to organization ${identityA.organizationId.slice(0, 8)}`;
+
+    await act(async () => {
+      root.render(
+        <OrganizationPeopleSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          onAuthorityChanged={onAuthorityChanged}
+        />,
+      );
+    });
+    await flush();
+
+    await act(async () => button(container, "Load more incoming invitations").click());
+    expect(button(container, acceptLabel).disabled).toBe(true);
+    expect(acceptOrganizationInvitation).not.toHaveBeenCalled();
+    pageRead.resolve({ invitations: [], nextCursor: "page-2" });
+    await flush();
+    expect(button(container, acceptLabel).disabled).toBe(false);
+
+    await act(async () => button(container, acceptLabel).click());
+    expect(acceptOrganizationInvitation).toHaveBeenCalledTimes(1);
+    expect(button(container, "Load more incoming invitations").disabled).toBe(true);
+    acceptResult.resolve(undefined);
+    await flush();
+    expect(onAuthorityChanged).toHaveBeenCalledTimes(1);
+    expect(button(container, "Load more incoming invitations").disabled).toBe(false);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("makes a delayed people mutation inert after keyed A to B remount", async () => {
     const pendingUpdate = deferred<OrganizationMember>();
     const actorA = member(identityA, "actor-a");

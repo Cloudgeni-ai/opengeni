@@ -44,7 +44,7 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("restoreFocusRef={actionTriggerRef}");
     expect(adminSource).toContain("restoreFocusFallbackRef={peopleHeadingRef}");
     expect(adminSource).toContain('aria-live="polite"');
-    expect(adminSource).toContain("disabled={visibleBusyResource !== null}");
+    expect(adminSource).toContain("disabled={visibleBusyResource !== null || incoming.loading}");
   });
 
   test("handles CAS conflicts by refreshing without replaying the mutation", () => {
@@ -61,8 +61,12 @@ describe("organization administration surface", () => {
       expect(adminSource).toContain(`claim("${resource}", "mutation")`);
     }
     expect(adminSource.match(/identityRef\.current = null/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(adminSource).toContain("activeRef.current.clear()");
-    expect(adminSource).toContain("operationRef.current.clear()");
+    expect(
+      adminSource.match(/identityRef\.current = props\.identity/g)?.length,
+    ).toBeGreaterThanOrEqual(4);
+    expect(adminSource.match(/activeOperations\.clear\(\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(adminSource).toContain("adminInvites.loading ||");
+    expect(adminSource).toContain("visibleBusyResource || incoming.loading");
   });
 
   test("documents the bounded UI without claiming provider email or unregistered invites", () => {
