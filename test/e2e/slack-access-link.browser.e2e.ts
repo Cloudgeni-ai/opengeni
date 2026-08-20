@@ -15,6 +15,7 @@ const signedLink = "signed.slack.browser.bearer";
 
 type AccessUiState = {
   signedIn: boolean;
+  signInFailuresRemaining: number;
   hasDefaultWorkspace: boolean;
   requestStatus: "prepared" | "pending" | "completed" | "cancelled" | "expired";
   requestVersion: number;
@@ -130,6 +131,43 @@ describe("Slack access-link browser acceptance", () => {
     }
   }, 90_000);
 
+  test("keeps the scrubbed one-shot bearer across a failed managed sign-in retry", async () => {
+    const state = freshState();
+    state.signInFailuresRemaining = 1;
+    const context = await browser.newContext({ viewport: { width: 1180, height: 850 } });
+    const page = await context.newPage();
+    try {
+      await installAccessApi(page, state);
+      await page.goto(
+        `${webBaseUrl}/workspaces/${workspaceId}/capabilities#slack_link=${encodeURIComponent(signedLink)}`,
+        { waitUntil: "networkidle" },
+      );
+
+      await expectVisible(page.getByRole("heading", { name: "Sign in" }));
+      expect(new URL(page.url()).hash).toBe("");
+      expect(
+        await page.evaluate(() => ({
+          local: Object.values(localStorage),
+          session: Object.values(sessionStorage),
+        })),
+      ).toEqual({ local: [], session: [] });
+
+      await page.getByLabel("Email").fill("slack-link@example.test");
+      await page.getByLabel("Password").fill("correct-horse-battery-staple");
+      await page.locator('form button[type="submit"]').click();
+      await expectText(page.locator("body"), "Sign in failed");
+      expect(state.prepareBodies).toEqual([]);
+
+      await page.locator('form button[type="submit"]').click();
+      await expectText(page.locator("main"), "Workspace access required");
+      expect(state.signInBodies).toHaveLength(2);
+      expect(state.prepareBodies).toEqual([{ linkToken: signedLink }]);
+      expect(new URL(page.url()).hash).toBe("");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   test("cancel is an explicit token-free terminal choice and does not submit an access request", async () => {
     const state = freshState();
     state.signedIn = true;
@@ -221,6 +259,7 @@ describe("Slack access-link browser acceptance", () => {
 function freshState(): AccessUiState {
   return {
     signedIn: false,
+    signInFailuresRemaining: 0,
     hasDefaultWorkspace: false,
     requestStatus: "prepared",
     requestVersion: 1,
@@ -277,6 +316,10 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     }
     if (url.pathname === "/v1/auth/sign-in/email" && request.method() === "POST") {
       state.signInBodies.push((request.postDataJSON() ?? {}) as Record<string, unknown>);
+      if (state.signInFailuresRemaining > 0) {
+        state.signInFailuresRemaining -= 1;
+        return json({ message: "Invalid credentials" }, 401);
+      }
       state.signedIn = true;
       return json({ user: { id: "browser-user" } });
     }

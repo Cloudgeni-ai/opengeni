@@ -262,6 +262,18 @@ export type PendingSlackLink = {
 
 export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
 
+/**
+ * A signed-out Slack deep link has already been scrubbed from browser history,
+ * so its raw in-memory bearer may cross exactly the sign-in that authenticates
+ * its exchange. Every other principal transition clears it.
+ */
+export function preserveSlackLinkForManagedAuth(
+  mode: "signin" | "signup",
+  phase: SlackLinkPreparePhase,
+): boolean {
+  return mode === "signin" && phase === "raw";
+}
+
 export function createSlackLinkPrepareController<Request>(value: PendingSlackLink | null) {
   let workspaceId = value?.workspaceId ?? null;
   let bearer = value?.token ?? null;
@@ -593,16 +605,21 @@ export function RootRouteComponent() {
     [],
   );
 
-  const invalidatePrincipalWorkspaceState = useCallback(() => {
-    principalTransitionIdentity.current = invalidatePrincipalTransition(
-      principalTransitionIdentity.current,
-    );
-    authPrincipalIdRef.current = null;
-    accessPrincipalIdRef.current = null;
-    slackLinkPrepareController.clear();
-    setSlackLinkContinuationWorkspaceId(null);
-    resetWorkspaceState(null, true);
-  }, [resetWorkspaceState]);
+  const invalidatePrincipalWorkspaceState = useCallback(
+    (options?: { preservePendingSlackLink?: boolean }) => {
+      principalTransitionIdentity.current = invalidatePrincipalTransition(
+        principalTransitionIdentity.current,
+      );
+      authPrincipalIdRef.current = null;
+      accessPrincipalIdRef.current = null;
+      if (options?.preservePendingSlackLink !== true) {
+        slackLinkPrepareController.clear();
+        setSlackLinkContinuationWorkspaceId(null);
+      }
+      resetWorkspaceState(null, true);
+    },
+    [resetWorkspaceState],
+  );
 
   useEffect(() => {
     if (isPublicDevHarness) return;
@@ -1502,7 +1519,12 @@ export function RootRouteComponent() {
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) {
-    invalidatePrincipalWorkspaceState();
+    invalidatePrincipalWorkspaceState({
+      preservePendingSlackLink: preserveSlackLinkForManagedAuth(
+        mode,
+        slackLinkPrepareController.phase(),
+      ),
+    });
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);

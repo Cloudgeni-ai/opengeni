@@ -44,7 +44,7 @@ describe("principal transition contract", () => {
     ).toContain("invalidatePrincipalWorkspaceState();");
     expect(
       sourceBetween("async function handleManagedAuth(", "async function handleManagedSignOut()"),
-    ).toContain("invalidatePrincipalWorkspaceState();");
+    ).toContain("invalidatePrincipalWorkspaceState({");
     expect(
       sourceBetween("async function handleManagedSignOut()", "const contextAddManualRepository"),
     ).toContain("invalidatePrincipalWorkspaceState();");
@@ -55,6 +55,7 @@ describe("principal transition contract", () => {
     );
     expect(invalidation).toContain("invalidatePrincipalTransition(");
     expect(invalidation).toContain("slackLinkPrepareController.clear()");
+    expect(invalidation).toContain("options?.preservePendingSlackLink !== true");
     expect(invalidation).toContain("resetWorkspaceState(null, true)");
 
     const reset = sourceBetween("const resetWorkspaceState", "const prepareWorkspaceTransition");
@@ -69,6 +70,23 @@ describe("principal transition contract", () => {
       "setWorkspaceStateOwnerId(workspaceId)",
     ]) {
       expect(reset).toContain(requiredFence);
+    }
+  });
+
+  test("only managed sign-in may preserve the raw scrubbed Slack continuation", () => {
+    const managedAuth = sourceBetween(
+      "async function handleManagedAuth(",
+      "async function handleManagedSignOut()",
+    );
+    expect(managedAuth).toContain("preservePendingSlackLink: preserveSlackLinkForManagedAuth(");
+    expect(managedAuth).toContain("slackLinkPrepareController.phase()");
+
+    for (const unrelatedTransition of [
+      sourceBetween("function saveAccessKey()", "function forgetAccessKey()"),
+      sourceBetween("function forgetAccessKey()", "async function handleManagedAuth("),
+      sourceBetween("async function handleManagedSignOut()", "const contextAddManualRepository"),
+    ]) {
+      expect(unrelatedTransition).not.toContain("preservePendingSlackLink");
     }
   });
 
