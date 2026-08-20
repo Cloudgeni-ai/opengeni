@@ -348,9 +348,11 @@ function codexToolSearchExecutor(
 }
 
 /**
- * Search and byte-bound the currently authorized non-mandatory MCP function tools.
- * Shared by native client tool search and OpenGeni's provider-neutral dispatcher;
- * authorization still comes exclusively from the live `availableTools` snapshot.
+ * Search and byte-bound currently authorized MCP function tools.
+ * Production native/generic search uses {@link searchToolPool} on the
+ * origin-classified lazy set instead. This MCP-only helper remains for
+ * {@link installCodexToolSearch}. Authorization still comes exclusively
+ * from the live `availableTools` snapshot.
  */
 export function searchMcpTools(
   availableTools: Tool[],
@@ -365,10 +367,10 @@ export function searchMcpTools(
 
 /**
  * Rank and byte-bound an already-authorized tool pool.
- *
- * Provider-neutral dispatch uses this for every ordinary function tool because
- * those providers have no native deferred-tool registry. The Codex/OpenAI
- * paths keep their narrower MCP selection before entering this shared bound.
+ * Callers classify the pool first: production native and generic search pass
+ * the origin-classified lazy set (deferred MCP plus every non-MCP function
+ * tool outside the always-visible base names). {@link searchMcpTools} still
+ * passes MCP-only tools.
  */
 export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
   // The Agents SDK can present the same configured tool reference more than once
