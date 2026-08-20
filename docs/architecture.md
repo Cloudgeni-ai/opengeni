@@ -415,6 +415,25 @@ opt-out is `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`
 preconditions, [`deployment.md`](deployment.md) for the operator procedure, and
 the accepted [ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
+The separately activated session-tenancy product surface exposes a secret-safe
+`Session.tenancy` projection plus owner-only managed-cookie visibility and
+same-workspace private-fork SDK mutations. The web console renders access state
+only when that projection is present. One activation-gated app-lifetime, principal +
+workspace-transition + session-fenced controller retains the exact
+outcome-unknown idempotency attempt across route component reloads and clears it
+only after authoritative settlement or an identity/target transition. Replay
+receipts are reconciled against a fresh current `Session.tenancy`; a superseding
+epoch or missing projection retires the historical attempt without presenting
+its old result as current. Private-fork navigation additionally requires a
+fresh owned-private destination in the same workspace. Late results remain
+inert after a principal, workspace, or session transition. The canonical caller
+is only `apps/web`; there is no cross-workspace fork, attachment,
+personal-resource-grant, worker, runtime, MCP, or `packages/react` caller.
+Canonical: `apps/web/src/lib/session-tenancy-operation-controller.ts`,
+`apps/web/src/lib/session-tenancy.ts`,
+`apps/web/src/components/session/session-tenancy-control.tsx`, and
+[`organization-tenancy.md`](organization-tenancy.md).
+
 Migration 0223 adds organization-independent canonical human identity and
 verified login-binding authority. Each Better Auth user converges on one
 canonical identity, while multiple provider/account bindings can authenticate
@@ -1136,14 +1155,21 @@ The drained operator command writes a forward-only per-organization activation
 receipt only after canonical inventory/parity checks; API/worker startup then
 requires the canonical activation switch. Applying 0303 itself remains safe
 with the switch off. `packages/core/src/application/session-tenancy.ts` is the
-sole product adapter caller. Its two canonical managed-human HTTP routes and
-the framework-neutral SDK expose an explicit authority-epoch/idempotency
+sole server product-adapter caller. Its two canonical managed-human HTTP routes
+and the framework-neutral SDK expose an explicit authority-epoch/idempotency
 contract only for activated organizations. Subject-authorized session reads
 carry the public tenancy projection only after activation. Core publishes the
 exact durable event returned by the adapter without another append or workflow
-wake. Worker, MCP, runtime, React, web UI, cross-workspace/public fork,
-attachment APIs, and personal-grant UI remain non-callers;
-`test/session-visibility-contract-surface.test.ts` pins that boundary.
+wake. The bounded managed web UI is the active owning-human caller through that
+SDK boundary: it mounts controls only when the public `Session.tenancy`
+projection is present, requires the managed-cookie owner for mutation, and
+reconciles authoritative state while retaining exact caller idempotency across
+ambiguous outcomes. Worker, MCP, runtime, `packages/react`, cross-workspace or
+public fork, attachment APIs, and personal-grant UI remain non-callers.
+`test/session-visibility-contract-surface.test.ts` pins those inert server
+surfaces; `apps/web/src/components/session/session-tenancy-control.test.tsx`
+and `test/e2e/personal-workspace-accessibility.browser.e2e.ts` pin the separate
+browser caller boundary.
 
 Migration 0304 is rolling. It replaces only the stable private-session read
 predicate so the exact active owner membership may prove access through either

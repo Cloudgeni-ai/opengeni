@@ -8,11 +8,14 @@ import {
   WorkspaceScopeNavigationContent,
   type ScopeNavigationLink,
 } from "../src/components/rail/workspace-scope-nav";
+import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
 import {
   managedSelfContextIdentity,
   type ManagedSelfContext,
 } from "../src/lib/managed-self-context";
-import type { Workspace } from "../src/types";
+import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
+import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { Session, Workspace } from "../src/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";
@@ -95,6 +98,41 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           workspace: personalWorkspace,
           activeWorkspaceId: "another-workspace",
           managedSelfContext: selfContext,
+        }),
+      ),
+      createElement(
+        "div",
+        { id: "personal-session-tenancy" },
+        createElement(SessionTenancyControl, {
+          session: {
+            id: "44444444-4444-4444-8444-444444444444",
+            workspaceId: personalWorkspaceId,
+            accountId: organizationId,
+            status: "idle",
+            initialMessage: "Review the private workspace boundary",
+            title: "Private workspace review",
+            titleSource: "user",
+            tenancy: {
+              visibility: "private",
+              authorityEpoch: 3,
+              ownedByCurrentUser: true,
+              fork: null,
+            },
+          } as Session,
+          client: {} as OpenGeniCoreClient,
+          managedSession: true,
+          scopeLabel: "Roadmap Personal workspace",
+          captureWorkspaceInvocation: () => null,
+          ownsWorkspaceInvocation: () => false,
+          operationController: new SessionTenancyOperationController(),
+          operationScope: {
+            principalId: "33333333-3333-4333-8333-333333333333",
+            workspaceId: personalWorkspaceId,
+            sessionId: "44444444-4444-4444-8444-444444444444",
+            workspaceTransitionRevision: 1,
+          },
+          onRefreshSession: async () => undefined,
+          onOpenSession: () => undefined,
         }),
       ),
       createElement(

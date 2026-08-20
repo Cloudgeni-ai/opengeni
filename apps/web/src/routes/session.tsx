@@ -20,7 +20,7 @@ import {
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
   CheckIcon,
   Loader2Icon,
@@ -35,7 +35,7 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { LoadingPanel } from "@/components/common";
 import {
   FollowUpRepositoryMenuBody,
   FollowUpRepositoryPicker,
@@ -127,10 +127,8 @@ const LazyCodexRealtimeControl = lazy(() =>
   })),
 );
 
-const LazySessionUnavailableRoute = lazy(() =>
-  import("@/routes/session-unavailable").then(({ SessionUnavailableRoute }) => ({
-    default: SessionUnavailableRoute,
-  })),
+const LazySessionRouteAuxiliary = lazy(
+  () => import("@/components/session/session-tenancy-control"),
 );
 
 export function SessionRoute({
@@ -284,7 +282,6 @@ export function SessionRoute({
       toast.error("Failed to load session", { description: String(loadError) });
     }
   }, [loadError]);
-
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -368,7 +365,9 @@ export function SessionRoute({
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {
-          const status = await context.client.getGitHubApp(workspaceId, { returnPath });
+          const status = await context.client.getGitHubApp(workspaceId, {
+            returnPath,
+          });
           if (status.status === "bound") {
             toast.success("GitHub is already connected");
             return;
@@ -484,22 +483,14 @@ export function SessionRoute({
 
   if (!session) {
     if (loadError) {
-      return isApiErrorStatus(loadError, 404) ? (
+      return (
         <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
-          <LazySessionUnavailableRoute workspaceId={workspaceId} sessionId={sessionId} />
+          <LazySessionRouteAuxiliary
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            loadError={loadError}
+          />
         </Suspense>
-      ) : (
-        <ProblemPanel
-          title="Unable to open session"
-          description={loadError instanceof Error ? loadError.message : String(loadError)}
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
       );
     }
     return (
@@ -781,7 +772,11 @@ function useSessionEditableArtifactSummaries(input: {
           },
         );
         if (current) {
-          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+          setLoaded({
+            key: authorityKey,
+            status: "ready",
+            artifacts: result.artifacts,
+          });
         }
       })
       .catch(() => {
@@ -843,7 +838,10 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const fleet = useMachines({
+    sessionId: props.session.id,
+    pollIntervalMs: 5000,
+  });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const loadRetainedScreenshot = useMemo(
@@ -1153,7 +1151,10 @@ function SessionChatPane(props: {
     if (launchLatency) setComposerLatencyMode(launchLatency);
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
-      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      params: {
+        workspaceId: props.session.workspaceId,
+        sessionId: props.session.id,
+      },
       search: composerLaunchSearchAfterPolicyApply({
         model: launchModel,
         effort: launchEffort,
@@ -1285,6 +1286,11 @@ function SessionChatPane(props: {
               creditExhausted={props.creditExhausted}
               workspaceId={props.session.workspaceId}
             />
+          ) : null}
+          {props.session.tenancy ? (
+            <Suspense fallback={null}>
+              <LazySessionRouteAuxiliary session={props.session} events={props.events} />
+            </Suspense>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
