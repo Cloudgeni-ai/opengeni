@@ -1394,6 +1394,12 @@ strips provider item ids from every model-call input by default
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
 self-contained and reasoning continuity does not hinge on provider storage.
+New history rows omit Responses output-only item `status` at persist
+(`canonicalizePersistedHistoryItem`); pairing is `call_id`. The Codex
+subscription fetch still strips leftover item `status` on the wire for
+already-stored SuperGrok rows and mid-turn SDK items because the
+ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
+strip is request-local and does not rewrite stored history.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
 the exact active reasoning/compaction row IDs and the current turn's latest

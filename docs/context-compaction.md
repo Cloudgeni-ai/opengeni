@@ -118,7 +118,11 @@ may remove active history.
 
 The compaction model receives:
 
-1. a bounded, protocol-valid temporary copy of the current active model history;
+1. a bounded, protocol-valid temporary copy of the current active model history.
+   Portable compaction omits opaque `encrypted_content` from that copy
+   (plaintext reasoning stays; `{ type: "compaction" }` blobs are dropped)
+   so a SuperGrok-origin session can compact on Codex. Durable rows stay.
+   Remote v2 still sends Codex blobs.
 2. one final user message containing Codex's checkpoint prompt;
 3. the same system instructions as the running agent;
 4. no tools and no provider-side context-management policy.

@@ -223,7 +223,8 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
-  boundModelToolOutputItem,
+  canonicalizePersistedHistoryItem,
+  omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
   refreshCodexToken,
   type CodexFetch,
@@ -30586,8 +30587,12 @@ export async function appendSessionHistoryItems(
                 position: entry.position,
                 // This is the canonical model-memory boundary. The pending-call
                 // ledger and audit event may retain their separate raw/preview
-                // forms, but conversation truth is always the bounded Codex form.
-                item: boundModelToolOutputItem(entry.item, input.modelToolOutputTruncationTokens),
+                // forms, but conversation truth is always the bounded Codex form
+                // without Responses output-only fields such as `status`.
+                item: canonicalizePersistedHistoryItem(
+                  entry.item,
+                  input.modelToolOutputTruncationTokens,
+                ),
               })),
               "item",
               "itemCodecVersion",
@@ -31671,7 +31676,7 @@ export async function applyContextCompaction(
                 sessionId: input.sessionId,
                 turnId: null,
                 position: supersededFrom + index,
-                item: item,
+                item: omitOutputOnlyHistoryItemFields(item),
                 active: true,
               })),
               "item",
@@ -31688,7 +31693,7 @@ export async function applyContextCompaction(
               sessionId: input.sessionId,
               turnId: input.turnId,
               position: summaryPosition,
-              item: input.summaryItem,
+              item: omitOutputOnlyHistoryItemFields(input.summaryItem),
               active: true,
             },
             "item",
@@ -52469,14 +52474,15 @@ export async function claimSessionWorkForAttempt(
                 sessionId,
                 turnId,
                 position: Number(position),
-                item:
+                item: omitOutputOnlyHistoryItemFields(
                   historyItemOverride ??
-                  (goalSnapshot
-                    ? sessionSystemUpdateBatchHistoryItem(
-                        delivered.updates.map((update) => mapSessionSystemUpdate(update)),
-                        goalSnapshot,
-                      )
-                    : delivered.historyItem),
+                    (goalSnapshot
+                      ? sessionSystemUpdateBatchHistoryItem(
+                          delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                          goalSnapshot,
+                        )
+                      : delivered.historyItem),
+                ),
               },
               "item",
               "itemCodecVersion",
@@ -53826,12 +53832,14 @@ export async function claimSessionWorkForAttempt(
               sessionId,
               turnId: row.id,
               position: Number(historyPosition),
-              item: durableUserHistoryItem(
-                fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
-                Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
-                TimelineAnnotations.parse(row.annotations),
-                row.modelContext,
-                SessionGoalSnapshot.parse(row.goalSnapshot),
+              item: omitOutputOnlyHistoryItemFields(
+                durableUserHistoryItem(
+                  fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
+                  Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+                  TimelineAnnotations.parse(row.annotations),
+                  row.modelContext,
+                  SessionGoalSnapshot.parse(row.goalSnapshot),
+                ),
               ),
             },
             "item",
