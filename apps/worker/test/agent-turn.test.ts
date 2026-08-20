@@ -140,14 +140,19 @@ describe("approval RunState materialization boundary", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
+    const streamSource = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
 
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+    expect(streamSource).not.toContain("getLatestRunStateResumeMetadata(");
+    expect(streamSource).not.toMatch(/\bgetLatestRunState\s*\(/);
   });
 
   test("requires_action pause flushes paired history and attaches the open suffix", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     expect(source).toContain("attachOpenSuffixToPendingToolCalls");
     expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
@@ -706,7 +711,7 @@ describe("turn exact-content boundaries", () => {
 
   test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     const completionPath = source.indexOf(
       'const finalOutput = String(eventing.stream.finalOutput ?? "");',
@@ -2673,7 +2678,7 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("durably starts model preparation before native runStream and binds generic dispatch to fetch", async () => {
     const source = await Bun.file(
-      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
     const runStreamOnceAt = source.indexOf("const runStreamOnce = async");
     const modelPreparationStartedAt = source.indexOf(
@@ -2818,6 +2823,9 @@ describe("lazy sandbox provisioner single-flight", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
+    const streamSource = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
     const resolutionAt = source.indexOf(
       "const initialRunCredentialMaterial = runCredentialResolver",
     );
@@ -2825,7 +2833,8 @@ describe("lazy sandbox provisioner single-flight", () => {
       "const runCredentialsNote = initialRunCredentialMaterial",
       resolutionAt,
     );
-    const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
+    const streamCallAt = source.indexOf("return await runTurnStreamAttempt(", modelNoteAt);
+    const turnInputAt = streamSource.indexOf("const prepared = await turnInput(");
     const provisionerAt = source.indexOf(
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
       modelNoteAt,
@@ -2838,8 +2847,11 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(resolutionAt).toBeGreaterThan(-1);
     expect(modelNoteAt).toBeGreaterThan(resolutionAt);
-    expect(turnInputAt).toBeGreaterThan(modelNoteAt);
+    expect(streamCallAt).toBeGreaterThan(modelNoteAt);
+    expect(turnInputAt).toBeGreaterThan(-1);
     expect(provisionerAt).toBeGreaterThan(modelNoteAt);
+    expect(provisionerAt).toBeGreaterThan(-1);
+    expect(streamCallAt).toBeGreaterThan(provisionerAt);
     expect(lazyCredentialAttachAt).toBeGreaterThan(provisionerAt);
     expect(lazyProvisionerPrefix).not.toContain("runCredentialResolver.resolve(");
     expect(lazyProvisionerPrefix).toContain("initialRunCredentialMaterial");

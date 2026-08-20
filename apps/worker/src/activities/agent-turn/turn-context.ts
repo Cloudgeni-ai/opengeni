@@ -110,6 +110,9 @@ export type EventingState = {
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   modelRunSettings: Settings;
+  firstModelRequestPreparationStartedAt: number | null;
+  firstModelRequestPreparationRecorded: boolean;
+  firstModelRequestCheckpointAt: number | null;
 };
 
 export type WorkspaceRefState = {
@@ -217,6 +220,9 @@ export function createTurnContext(input: {
       turnStartedPublished: false,
       stream: undefined,
       modelRunSettings: input.settings,
+      firstModelRequestPreparationStartedAt: null,
+      firstModelRequestPreparationRecorded: false,
+      firstModelRequestCheckpointAt: null,
     },
     workspaceRefs: {
       variableSetId: "",
