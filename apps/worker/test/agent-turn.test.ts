@@ -708,7 +708,9 @@ describe("turn exact-content boundaries", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
-    const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
+    const completionPath = source.indexOf(
+      'const finalOutput = String(eventing.stream.finalOutput ?? "");',
+    );
     const mandatoryBarrier = source.indexOf(
       "await historySink.reconcileConversationTruth({ requireDurable: true });",
       completionPath,
@@ -719,9 +721,12 @@ describe("turn exact-content boundaries", () => {
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
 
     const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
-    const terminalFailureStart = source.indexOf('activityStatus = "failed";', failureClassifier);
+    const terminalFailureStart = source.indexOf(
+      'control.activityStatus = "failed";',
+      failureClassifier,
+    );
     const terminalFailureEnd = source.indexOf(
-      'turnMetricOutcome = "failed";',
+      'control.turnMetricOutcome = "failed";',
       terminalFailureStart,
     );
     const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
@@ -2819,7 +2824,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     );
     const turnInputAt = source.indexOf("const prepared = await turnInput(", modelNoteAt);
     const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
       modelNoteAt,
     );
     const lazyCredentialAttachAt = source.indexOf(
@@ -2876,10 +2881,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       new URL("../src/activities/agent-turn/run.ts", import.meta.url),
     ).text();
     const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
     const resumeAt = source.indexOf(
-      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      "const provisioned = await (sandboxState.prefetchedManagedBox ??",
       provisionerAt,
     );
     const mintStartAt = source.lastIndexOf("startRunGitCredentialsMint();", resumeAt);
@@ -2899,15 +2904,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     const prefetchAt = source.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
     const toolsAt = source.indexOf('phase: "tools"', prefetchAt);
     const provisionerAt = source.indexOf(
-      "turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
+      "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
       toolsAt,
     );
     const joinAt = source.indexOf(
-      "const provisioned = await (prefetchedManagedBox ?? resumeManagedGroupBox())",
+      "const provisioned = await (sandboxState.prefetchedManagedBox ??",
       provisionerAt,
     );
     const prefetchMintAt = source.indexOf("startRunGitCredentialsMint();", prefetchAt);
-    const prefetchResumeAt = source.indexOf("resumeManagedGroupBox()", prefetchMintAt);
+    const prefetchResumeAt = source.indexOf("sandboxState.resumeManagedGroupBox()", prefetchMintAt);
 
     expect(onDemandAt).toBeGreaterThan(-1);
     expect(prefetchAt).toBeGreaterThan(onDemandAt);
@@ -2917,7 +2922,9 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(prefetchMintAt).toBeGreaterThan(prefetchAt);
     expect(prefetchMintAt).toBeLessThan(prefetchResumeAt);
     expect(prefetchResumeAt).toBeLessThan(toolsAt);
-    expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeManagedGroupBox()");
+    expect(source.slice(onDemandAt, toolsAt)).not.toContain(
+      "await sandboxState.resumeManagedGroupBox()",
+    );
     expect(source.slice(onDemandAt, toolsAt)).not.toContain("await resumeBoxForTurn(");
   });
 
