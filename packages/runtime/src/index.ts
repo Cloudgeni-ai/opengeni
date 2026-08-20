@@ -90,6 +90,19 @@ import {
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
 } from "./connector-attachments";
+import {
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
+export {
+  modelToolResultOverflowError,
+  projectAttemptToolResultForCaller,
+  spilledModelToolResult,
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
 export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
@@ -3160,6 +3173,11 @@ export type PrepareToolsOptions = {
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
   /**
+   * Persist an oversized *model-visible* tool result as a workspace File and
+   * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
+   */
+  spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
    */
@@ -3407,6 +3425,10 @@ export async function prepareAgentTools(
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
+  const attemptToolDefinitions = wrapAttemptToolDefinitions(
+    options.attemptToolDefinitions ?? [],
+    options.spillOversizedModelToolResult,
+  );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
@@ -3676,9 +3698,9 @@ export async function prepareAgentTools(
   warnBestEffortFailures(connectedEagerBestEffort);
   let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
   let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
-  let localToolServer: AttemptDefinitionMcpServer | null = options.attemptToolDefinitions?.length
+  let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
-        options.attemptToolDefinitions,
+        attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
       )
@@ -3689,7 +3711,7 @@ export async function prepareAgentTools(
       createAttemptToolEnvironment({
         scope: localScope,
         generation: options.attemptToolCatalogGeneration ?? 1,
-        definitions: [...(options.attemptToolDefinitions ?? [])],
+        definitions: [...attemptToolDefinitions],
         ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
       }),
     );
@@ -3898,18 +3920,21 @@ async function prepareAttemptToolEnvironment(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
-          execute: async (args, context) =>
-            await server.executeCatalogTool(
-              toolName,
-              args,
-              {
-                ...(context.transportMeta ?? {}),
-                opengeniOperationId: context.operationId,
-              },
-              {
-                ...(context.signal ? { signal: context.signal } : {}),
-              },
-            ),
+          execute: wrapAttemptToolExecute(
+            async (args, context) =>
+              await server.executeCatalogTool(
+                toolName,
+                args,
+                {
+                  ...(context.transportMeta ?? {}),
+                  opengeniOperationId: context.operationId,
+                },
+                {
+                  ...(context.signal ? { signal: context.signal } : {}),
+                },
+              ),
+            options.spillOversizedModelToolResult,
+          ),
         };
       });
     },
@@ -3917,7 +3942,13 @@ async function prepareAttemptToolEnvironment(
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions: [...perServerDefinitions.flat(), ...(options.attemptToolDefinitions ?? [])],
+    definitions: [
+      ...perServerDefinitions.flat(),
+      ...wrapAttemptToolDefinitions(
+        options.attemptToolDefinitions ?? [],
+        options.spillOversizedModelToolResult,
+      ),
+    ],
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
   });
   const subjectId = options.subjectId ?? "worker:mcp-model";
@@ -5710,17 +5741,20 @@ export class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
-    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
-      this.attemptToolEnvironment
-        ? this.attemptToolEnvironment.callModel({
-            modelName: toolName,
-            arguments: cleanArgs ?? {},
-            subjectId: this.attemptToolSubjectId,
-            ...(meta === undefined ? {} : { transportMeta: meta }),
-            ...(options?.signal ? { signal: options.signal } : {}),
-          })
-        : this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options),
-    );
+    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) => {
+      if (this.attemptToolEnvironment) {
+        return await this.attemptToolEnvironment.callModel({
+          modelName: toolName,
+          arguments: cleanArgs ?? {},
+          subjectId: this.attemptToolSubjectId,
+          ...(meta === undefined ? {} : { transportMeta: meta }),
+          ...(options?.signal ? { signal: options.signal } : {}),
+        });
+      }
+      const result = await this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options);
+      assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+      return result;
+    });
   }
 
   async executeCatalogTool(
@@ -5773,7 +5807,6 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       const result = AttemptToolResult.parse(output);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       return result;
