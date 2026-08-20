@@ -1524,7 +1524,7 @@ describe("migration 0263 organization membership lifecycle", () => {
             and history.turn_id = ${requiresActionTurnId}
             and history.item ->> 'type' = 'function_call_result'
             and history.item ->> 'callId' = ${pendingToolCallId}
-            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+            and not (history.item ? 'status')) as "interruptedHistoryItems",
         (select count(*)::int from session_events event_row
           where event_row.workspace_id = ${sharedWorkspaceId}
             and event_row.session_id = ${recoveringSession.id}
