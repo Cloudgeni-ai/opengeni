@@ -100,6 +100,10 @@ import {
   integrationBaseUrl,
   startMcpOAuth,
 } from "../integrations/oauth-client";
+import {
+  assertPersonalConnectionOwnerPrincipal,
+  isPersonalConnectionOwnerPrincipal,
+} from "../connection-ownership";
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 import {
   exchangeOpenGeniSlackAuthorizationCode,
@@ -165,13 +169,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    const grant = access.grant;
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     assertNotReservedFikenMetadata(payload.metadata);
     assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
     const subjectId = createConnectionSubjectId(payload, grant.subjectId);
+    if (subjectId !== null) {
+      assertPersonalConnectionOwnerPrincipal(access);
+    }
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
@@ -440,7 +448,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    // The Drive connector writes only a personal Connection, so only a managed
+    // human may start it.
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    assertPersonalConnectionOwnerPrincipal(access, "Google Drive");
+    const grant = access.grant;
     const parsed = GoogleDriveOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid Google Drive install request" });
@@ -461,7 +473,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connections/atlassian/install", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    // The Atlassian connector writes only a personal Connection, so only a
+    // managed human may start it.
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    assertPersonalConnectionOwnerPrincipal(access, "Atlassian");
+    const grant = access.grant;
     const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid Atlassian install request" });
@@ -888,7 +904,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connections/oauth/start", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    const grant = access.grant;
     const parsed = OAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -902,6 +919,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
+        personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
         requestUrl: c.req.url,
         payload,
       },
@@ -912,7 +930,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/integrations/oauth/start", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    const grant = access.grant;
     const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -925,6 +944,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
+          personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
           payload: parsed.data,
         }),

@@ -38,10 +38,22 @@ import {
 import { HTTPException } from "hono/http-exception";
 
 import {
+  assertConnectionOwnershipAllowedForPrincipal,
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+} from "../connection-ownership";
+import {
   integrationBaseUrl,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
+import {
+  assertOwnershipAllowed,
+  builtInOAuthProfileFor,
+  DEFAULT_OAUTH_PROFILE,
+  type OAuthProviderProfile,
+} from "./oauth-profiles";
 
 const PROVIDER_OAUTH_CALLBACK_PATH = "/v1/integrations/provider-oauth/callback";
 const PROVIDER_OAUTH_TIMEOUT_MS = 15_000;
@@ -60,6 +72,7 @@ type ProviderOAuthState = {
   workspaceId: string;
   subjectId: string;
   ownership: ConnectionOwnership;
+  personalOwnerVerified: boolean;
   definitionId: string;
   definitionFingerprint: string;
   providerDomain: string;
@@ -117,6 +130,12 @@ export async function startApiIntegrationProviderOAuth(
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    /**
+     * False for every principal that cannot own a personal Connection (API
+     * keys, the configured key, services, agent attempts). Resolved by the
+     * route from the live authenticated principal, never inferred here.
+     */
+    personalOwnershipAllowed: boolean;
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
   },
@@ -155,7 +174,33 @@ export async function startApiIntegrationProviderOAuth(
       message: "The selected Connection ownership does not match this OAuth request",
     });
   }
-  const ownership = existingOwnership ?? input.payload.ownership ?? "personal";
+  // This flow used to resolve an omitted ownership to `personal`, inverting the
+  // documented workspace-owned default. Resolving it to `workspace` instead
+  // would have been the opposite defect: an executed probe on
+  // `microsoft-outlook-mail` confirmed it flips a newly connected mailbox from
+  // subject-scoped to workspace-shared for API/SDK callers, which is a real
+  // narrow -> broad widening. So an ambiguous omission is refused outright and
+  // the caller must choose. A profile that allows exactly one ownership is not
+  // ambiguous (Gmail and hosted Slack MCP are personal-only), and a reconnect
+  // takes the existing row's ownership.
+  const profile = providerOAuthProfile(definition, providerDomain);
+  const ownership =
+    existingOwnership ?? input.payload.ownership ?? soleAllowedOwnership(profile) ?? null;
+  if (ownership === null) {
+    throw new HTTPException(422, {
+      message:
+        'ownership is required: choose "workspace" to share this Connection with the workspace, ' +
+        'or "personal" to connect only for yourself',
+    });
+  }
+  // Inert by construction today, and deliberately kept: no curated Definition
+  // resolves to a personal-only profile (all five are Google Workspace and
+  // Microsoft Graph APIs, so `providerOAuthProfile` returns the default), which
+  // is why disabling this line reddens nothing. It is the fence that keeps a
+  // future Definition targeting slack.com or Gmail from minting an ownership
+  // its profile forbids - read it as pre-wiring, not as an untested gap.
+  assertOwnershipAllowed(profile, ownership);
+  assertConnectionOwnershipAllowedForPrincipal(ownership, input.personalOwnershipAllowed);
   const authorizeScopes = uniqueStrings([
     ...(existing?.grantedScopes ?? []),
     ...definition.authentication.scopes,
@@ -173,6 +218,9 @@ export async function startApiIntegrationProviderOAuth(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     ownership,
+    // Signed record that a live principal was checked; the callback has no
+    // principal of its own and enforces exactly this decision.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: input.personalOwnershipAllowed,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
@@ -227,6 +275,7 @@ export async function completeApiIntegrationProviderOAuth(
   let state: ProviderOAuthState | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
+    requireProviderOAuthOwner(state);
     await requireProviderOAuthGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -387,6 +436,28 @@ export async function completeApiIntegrationProviderOAuth(
   }
 }
 
+/**
+ * The ownership fences that apply to a curated Definition, read from the same
+ * profile table the MCP OAuth start uses. No curated Definition targets a
+ * personal-only provider today (they are Google Workspace and Microsoft Graph
+ * APIs), so this resolves to the default profile and its workspace default;
+ * matching by provider domain keeps the Slack/Gmail fences in force if one ever
+ * does, instead of letting this flow mint an ownership their profile forbids.
+ */
+/** The profile's ownership when it allows exactly one, else null (ambiguous). */
+function soleAllowedOwnership(profile: OAuthProviderProfile): ConnectionOwnership | null {
+  return profile.allowedOwnership.length === 1 ? profile.allowedOwnership[0]! : null;
+}
+
+function providerOAuthProfile(
+  definition: IntegrationDefinition,
+  providerDomain: string,
+): OAuthProviderProfile {
+  return (
+    builtInOAuthProfileFor({ mcpUrl: definition.baseUrl, providerDomain }) ?? DEFAULT_OAUTH_PROFILE
+  );
+}
+
 function requiredDefinition(id: string): IntegrationDefinition {
   const definition = integrationDefinitionById(id);
   if (!definition) throw new HTTPException(404, { message: "Unknown Integration definition" });
@@ -525,6 +596,7 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     workspaceId: requiredStateString(payload.workspaceId),
     subjectId: requiredStateString(payload.subjectId),
     ownership,
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     definitionId: requiredStateString(payload.definitionId),
     definitionFingerprint: requiredStateString(payload.definitionFingerprint),
     providerDomain: requiredStateString(payload.providerDomain),
@@ -675,6 +747,18 @@ async function requireProviderOAuthGrant(
     grant.accountId !== state.accountId ||
     !hasPermission(grant.permissions, "connections:write")
   ) {
+    throw new ProviderOAuthCallbackError("connection_conflict");
+  }
+}
+
+/**
+ * A state minted before the start-side principal fence existed can still be in
+ * flight for one `oauthStateTtlMs` window, and it carries no
+ * `personalOwnerVerified` claim. Such a state must not land a personal
+ * Connection.
+ */
+function requireProviderOAuthOwner(state: ProviderOAuthState): void {
+  if (!personalOwnerStateAccepted(state)) {
     throw new ProviderOAuthCallbackError("connection_conflict");
   }
 }
