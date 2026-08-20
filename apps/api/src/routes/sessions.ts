@@ -430,6 +430,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!operation) {
       throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
     }
+    if (operation === "session.visibility.write" || operation === "session.fork.create") {
+      // These two owner-only product mutations perform their target-free
+      // managed-cookie, permission, and activation gates inside core before
+      // resolving the target exactly once. Running the generic middleware here
+      // would both create a pre-gate existence oracle and double-call the host.
+      await next();
+      return;
+    }
     const grant = await requireAccessGrant(c, deps, workspaceId);
     try {
       const authorization = await requireSessionAuthorization(deps, grant, {
@@ -3991,7 +3999,10 @@ export function sessionTenancyHttpError(error: unknown): Error {
       },
     });
   }
-  if (error instanceof SessionTenancyAccessError) {
+  if (
+    error instanceof SessionTenancyAccessError ||
+    error instanceof SessionAuthorizationDeniedError
+  ) {
     return new ApiHttpError(404, {
       code: "not_found",
       message: "Session not found.",
@@ -4014,10 +4025,7 @@ export function sessionTenancyHttpError(error: unknown): Error {
       outcomeUnknown: true,
     });
   }
-  if (
-    error instanceof SessionAuthorizationDeniedError ||
-    error instanceof SessionAuthorizationUnavailableError
-  ) {
+  if (error instanceof SessionAuthorizationUnavailableError) {
     return sessionAuthorizationHttpError(error);
   }
   return error instanceof Error ? error : new Error("Unknown session tenancy error");

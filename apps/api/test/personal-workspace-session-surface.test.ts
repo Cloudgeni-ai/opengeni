@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessContext } from "@opengeni/contracts";
+import type {
+  AccessContext,
+  SessionAuthorizationOperation,
+  SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -18,6 +22,7 @@ import {
   SessionPinAccessError,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
+  transitionSessionVisibility,
   withRlsContext,
   withWorkspaceSubjectRls,
   type DbClient,
@@ -30,6 +35,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { createApp } from "../src/app";
 import { registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -55,7 +61,7 @@ const authSessionBySessionCookie = new Map<
   { authSessionId: string; userId: string; email: string }
 >();
 
-function buildApp(): Hono {
+function buildApp(sessionAuthorization?: SessionAuthorizationPort, full = false): Hono {
   if (!client) throw new Error("test database unavailable");
   const noop = async () => undefined;
   const hono = new Hono();
@@ -100,7 +106,9 @@ function buildApp(): Hono {
         },
       },
     } as never,
+    ...(sessionAuthorization ? { sessionAuthorization } : {}),
   } as unknown as ApiRouteDeps;
+  if (full) return createApp(deps);
   registerWorkspaceRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
   registerApiKeyRoutes(hono, deps);
@@ -312,6 +320,55 @@ async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
     )`;
 }
 
+async function addOrdinaryWorkspaceMember(
+  owner: ManagedHuman,
+  member: ManagedHuman,
+): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, role, permissions
+    ) values (
+      ${owner.accountId}, ${owner.legacyWorkspaceId}, ${member.subjectId},
+      'member',
+      '["sessions:read","sessions:create","sessions:control"]'::jsonb
+    )`;
+}
+
+async function tenancyErrorFact(response: Response): Promise<unknown> {
+  const payload = (await response.json()) as {
+    error: Record<string, unknown> & { requestId?: string };
+  };
+  const { requestId: _, ...error } = payload.error;
+  return { status: response.status, error };
+}
+
+async function requestTenancyOperation(
+  app: Hono,
+  workspaceId: string,
+  sessionId: string,
+  headers: Record<string, string>,
+  operation: "visibility" | "fork",
+  suffix: string,
+): Promise<Response> {
+  return await app.request(
+    `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/${operation === "fork" ? "forks" : "visibility"}`,
+    {
+      method: operation === "fork" ? "POST" : "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(
+        operation === "fork"
+          ? { idempotencyKey: `matrix-fork-${suffix}` }
+          : {
+              visibility: "private",
+              expectedAuthorityEpoch: 1,
+              idempotencyKey: `matrix-visibility-${suffix}`,
+            },
+      ),
+    },
+  );
+}
+
 const draftBody = {
   expectedRevision: 0,
   text: "draft in my own personal workspace",
@@ -349,8 +406,19 @@ describe("managed-human session surface inside their own personal workspace", ()
     await activateSessionTenancy(human);
     const sessionId = await seedSession(human, human.personalWorkspaceId);
     const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
 
-    const visibility = await human.app.request(
+    const visibility = await app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/visibility`,
       {
         method: "PUT",
@@ -370,7 +438,7 @@ describe("managed-human session surface inside their own personal workspace", ()
       replay: false,
     });
 
-    const fork = await human.app.request(
+    const fork = await app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
       {
         method: "POST",
@@ -382,7 +450,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     const created = (await fork.json()) as { sessionId: string; eventId: string };
     expect(created).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
 
-    const replay = await human.app.request(
+    const replay = await app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
       {
         method: "POST",
@@ -396,6 +464,142 @@ describe("managed-human session surface inside their own personal workspace", ()
       sessionId: created.sessionId,
       eventId: created.eventId,
     });
+    expect(hostOperations).toEqual([
+      "session.visibility.write",
+      "session.fork.create",
+      "session.fork.create",
+    ]);
+  }, 180_000);
+
+  test("tenancy pre-gates are target-blind and each allowed request host-authorizes once", async () => {
+    if (!shared || !client) return;
+    const caller = await provisionManagedHuman();
+    const sessionOwner = await inviteIntoOrganization(caller, "member");
+    await addOrdinaryWorkspaceMember(caller, sessionOwner);
+    await activateSessionTenancy(caller);
+
+    const sharedSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
+    const privateSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
+    await transitionSessionVisibility(client.db, {
+      workspaceId: caller.legacyWorkspaceId,
+      sessionId: privateSessionId,
+      actorSubjectId: sessionOwner.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: "matrix-private-owner-transition",
+    });
+    const targetIds = [crypto.randomUUID(), sharedSessionId, privateSessionId];
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
+
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { cookie: caller.cookie },
+              operation,
+              `canonical-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts).toEqual([
+        {
+          status: 404,
+          error: {
+            status: 404,
+            code: "not_found",
+            message: "Session not found.",
+            retryable: false,
+          },
+        },
+        facts[0],
+        facts[0],
+      ]);
+    }
+    // Only each shared-session request reaches the host. The missing and
+    // another-owner private targets are denied by durable target resolution.
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId: caller.accountId,
+      workspaceId: caller.legacyWorkspaceId,
+      name: "session tenancy matrix key",
+      prefix: token.slice(0, 14),
+      keyHash: await sha256Hex(token),
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+    });
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { authorization: `Bearer ${token}` },
+              operation,
+              `noncanonical-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts[1]).toEqual(facts[0]);
+      expect(facts[2]).toEqual(facts[0]);
+      expect(facts[0]).toMatchObject({
+        status: 403,
+        error: { status: 403, code: "forbidden", retryable: false },
+      });
+    }
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+
+    await shared.admin`
+      delete from session_tenancy_activations where account_id = ${caller.accountId}`;
+    for (const operation of ["visibility", "fork"] as const) {
+      const facts = [];
+      for (const [index, targetId] of targetIds.entries()) {
+        facts.push(
+          await tenancyErrorFact(
+            await requestTenancyOperation(
+              app,
+              caller.legacyWorkspaceId,
+              targetId,
+              { cookie: caller.cookie },
+              operation,
+              `unactivated-${operation}-${index}`,
+            ),
+          ),
+        );
+      }
+      expect(facts[1]).toEqual(facts[0]);
+      expect(facts[2]).toEqual(facts[0]);
+      expect(facts[0]).toMatchObject({
+        status: 409,
+        error: {
+          status: 409,
+          code: "conflict",
+          retryable: false,
+          details: { reason: "not_activated" },
+        },
+      });
+    }
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
   }, 180_000);
 
   test("the premise: the personal workspace has no workspace_memberships row", async () => {

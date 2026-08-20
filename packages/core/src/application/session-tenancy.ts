@@ -11,6 +11,8 @@ import {
   forkSessionContent,
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
+  sessionTenancyProductActivated,
+  SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type Database,
 } from "@opengeni/db";
@@ -46,6 +48,22 @@ function requireCanonicalManagedHuman(
     authorization.grant.workspaceId !== workspaceId
   ) {
     throw new SessionTenancyManagedHumanRequiredError();
+  }
+}
+
+async function requireSessionTenancyMutationGate(
+  deps: Pick<SessionTenancyDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  permissions: ReadonlyArray<"sessions:read" | "sessions:create" | "sessions:control">,
+): Promise<void> {
+  // These checks are deliberately target-free. A rejected principal must not
+  // cause a session lookup or embedding-host callback that distinguishes a
+  // missing, shared, or another owner's private session.
+  requireCanonicalManagedHuman(authorization, workspaceId);
+  for (const permission of permissions) requirePermission(authorization.grant, permission);
+  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
+    throw new SessionTenancyNotActivatedError();
   }
 }
 
@@ -118,8 +136,7 @@ export async function updateManagedHumanSessionVisibility(
   request: UpdateSessionVisibilityRequest,
   authorizationSurface: SessionAuthorizationSurface = "core",
 ): Promise<UpdateSessionVisibilityResponse> {
-  requireCanonicalManagedHuman(authorization, workspaceId);
-  requirePermission(authorization.grant, "sessions:control");
+  await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:control"]);
   await requireSessionAuthorization(deps, authorization.grant, {
     sessionId,
     operation: "session.visibility.write",
@@ -165,9 +182,10 @@ export async function forkManagedHumanSessionPrivate(
   request: ForkSessionRequest,
   authorizationSurface: SessionAuthorizationSurface = "core",
 ): Promise<ForkSessionResponse> {
-  requireCanonicalManagedHuman(authorization, workspaceId);
-  requirePermission(authorization.grant, "sessions:read");
-  requirePermission(authorization.grant, "sessions:create");
+  await requireSessionTenancyMutationGate(deps, authorization, workspaceId, [
+    "sessions:read",
+    "sessions:create",
+  ]);
   await requireSessionAuthorization(deps, authorization.grant, {
     sessionId: sourceSessionId,
     operation: "session.fork.create",

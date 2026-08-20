@@ -5,6 +5,7 @@ import {
   createSession,
   ensureManagedAccessForUser,
   getSessionForSubject,
+  SessionTenancyNotActivatedError,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -13,6 +14,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { AccessGrantAuthorization } from "../src/access";
+import { HTTPException } from "hono/http-exception";
 import {
   forkManagedHumanSessionPrivate,
   SessionTenancyManagedHumanRequiredError,
@@ -160,7 +162,7 @@ describe("managed-human session tenancy application service", () => {
     });
   }, 180_000);
 
-  test("rejects a human-shaped bearer before persistence or host authorization", async () => {
+  test("rejects a human-shaped bearer before activation, target resolution, or host authorization", async () => {
     const authorization = {
       grant: {
         accountId: crypto.randomUUID(),
@@ -173,23 +175,127 @@ describe("managed-human session tenancy application service", () => {
       contextIntegrity: false,
       canonicalManagedHumanSession: false,
     } satisfies AccessGrantAuthorization;
-    await expect(
-      forkManagedHumanSessionPrivate(
-        {
-          db: null as never,
-          bus: null as never,
-          sessionAuthorization: {
-            authorizeSession: async () => {
-              throw new Error("host authorization must not run");
-            },
-            resolveListScope: async () => ({ kind: "all" }),
-          },
+    const deps = {
+      db: null as never,
+      bus: null as never,
+      sessionAuthorization: {
+        authorizeSession: async () => {
+          throw new Error("host authorization must not run");
         },
-        authorization,
-        authorization.grant.workspaceId,
-        crypto.randomUUID(),
-        { idempotencyKey: "denied" },
-      ),
-    ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+    for (const sessionId of [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]) {
+      await expect(
+        updateManagedHumanSessionVisibility(
+          deps,
+          authorization,
+          authorization.grant.workspaceId,
+          sessionId,
+          {
+            visibility: "private",
+            expectedAuthorityEpoch: 1,
+            idempotencyKey: `denied-visibility-${sessionId}`,
+          },
+        ),
+      ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+      await expect(
+        forkManagedHumanSessionPrivate(
+          deps,
+          authorization,
+          authorization.grant.workspaceId,
+          sessionId,
+          { idempotencyKey: `denied-fork-${sessionId}` },
+        ),
+      ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+    }
+  });
+
+  test("rejects missing exact permissions before activation or host authorization", async () => {
+    const workspaceId = crypto.randomUUID();
+    const subjectId = `user:${crypto.randomUUID()}`;
+    const authorization = {
+      grant: {
+        accountId: crypto.randomUUID(),
+        workspaceId,
+        subjectId,
+        permissions: [],
+      },
+      accountGrant: null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const deps = {
+      db: null as never,
+      bus: null as never,
+      sessionAuthorization: {
+        authorizeSession: async () => {
+          throw new Error("host authorization must not run");
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+    await expect(
+      updateManagedHumanSessionVisibility(deps, authorization, workspaceId, crypto.randomUUID(), {
+        visibility: "private",
+        expectedAuthorityEpoch: 1,
+        idempotencyKey: "missing-control",
+      }),
+    ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
+    await expect(
+      forkManagedHumanSessionPrivate(deps, authorization, workspaceId, crypto.randomUUID(), {
+        idempotencyKey: "missing-read-create",
+      }),
+    ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
+  });
+
+  test("rejects an unactivated organization before any target or host authorization", async () => {
+    if (!shared || !client) return;
+    const userId = `core-session-tenancy-inactive-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Inactive session tenancy",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    const authorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    let hostCalls = 0;
+    const deps = {
+      db: client.db,
+      bus: new MemoryEventBus(),
+      sessionAuthorization: {
+        authorizeSession: async () => {
+          hostCalls += 1;
+          return { allowed: true as const };
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+    for (const sessionId of [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]) {
+      await expect(
+        updateManagedHumanSessionVisibility(deps, authorization, grant.workspaceId, sessionId, {
+          visibility: "private",
+          expectedAuthorityEpoch: 1,
+          idempotencyKey: `inactive-visibility-${sessionId}`,
+        }),
+      ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+      await expect(
+        forkManagedHumanSessionPrivate(deps, authorization, grant.workspaceId, sessionId, {
+          idempotencyKey: `inactive-fork-${sessionId}`,
+        }),
+      ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    }
+    expect(hostCalls).toBe(0);
   });
 });

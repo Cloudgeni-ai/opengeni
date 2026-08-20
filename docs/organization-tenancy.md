@@ -324,8 +324,9 @@ else, so each is a broken feature, not an authority hole:
 - SQL seams without the personal-workspace disjunct: the xAI subscription
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
-  active-membership personal-workspace-or-ordinary-membership disjunction;
-  they still have no production caller today. 0225's
+  active-membership personal-workspace-or-ordinary-membership disjunction. The
+  API/core/SDK caller is now active for explicitly activated organizations;
+  worker, MCP, runtime, React, and web callers remain future work. 0225's
   `guard_session_authority_write` was the same defect and is repaired by
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
@@ -1413,9 +1414,10 @@ key. 0301 closes both halves of that gap:
   it is inert in every product projection while the session is private, and it
   becomes meaningful again if the owner re-shares.
 
-Severity was bounded: `transition_session_visibility` still has no product
-caller, so this is a correctness fix ahead of activation rather than a live
-exposure.
+Severity was bounded when the repair landed because
+`transition_session_visibility` had no product caller then. The later
+API/core/SDK activation now depends on this prerequisite; worker, MCP, runtime,
+React, and web surfaces remain out of scope.
 
 ### G. Retire
 
