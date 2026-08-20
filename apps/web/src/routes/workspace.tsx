@@ -3,13 +3,14 @@
 // session-contextual actions around every workspace-scoped route.
 import { OpenGeniProvider } from "@opengeni/react";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
 import { Button } from "@/components/ui/button";
+import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { useAppContext } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
@@ -31,20 +32,23 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const {
     accessKeyVersion,
-    resetSessionView,
     resetWorkspaceIntegrations,
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
     refreshWorkspaceMcpServers,
   } = context;
-  const previousWorkspaceId = useRef<string | null>(null);
   const [slackAccessRequest, setSlackAccessRequest] = useState<SlackUserLinkAccessRequest | null>(
     null,
   );
   const [slackAccessError, setSlackAccessError] = useState<string | null>(null);
   const [slackAccessBusy, setSlackAccessBusy] = useState(false);
-  useGitHubHistoryRefresh(workspaceId, activeWorkspaceId !== null, refreshGitHub);
+  const workspaceStateReady = context.workspaceStateOwnerId === workspaceId;
+  useGitHubHistoryRefresh(
+    workspaceId,
+    activeWorkspaceId !== null && workspaceStateReady,
+    refreshGitHub,
+  );
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
 
@@ -145,14 +149,10 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   useEffect(() => {
-    if (!activeWorkspaceId) {
+    if (!activeWorkspaceId || !workspaceStateReady) {
       return;
     }
     const abortController = new AbortController();
-    if (previousWorkspaceId.current !== workspaceId) {
-      resetSessionView();
-    }
-    previousWorkspaceId.current = workspaceId;
     resetWorkspaceIntegrations();
     setSelectedRepoIds(new Set());
     setSelectedRepoRefs({});
@@ -168,12 +168,24 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     activeWorkspaceId,
     refreshGitHub,
     refreshWorkspaceMcpServers,
-    resetSessionView,
     resetWorkspaceIntegrations,
     setSelectedRepoIds,
     setSelectedRepoRefs,
+    workspaceStateReady,
     workspaceId,
   ]);
+
+  if (!workspaceStateReady) {
+    return (
+      <WorkspaceTenantBoundary
+        workspaceId={workspaceId}
+        stateOwnerWorkspaceId={context.workspaceStateOwnerId}
+        prepareTransition={context.prepareWorkspaceTransition}
+      >
+        {null}
+      </WorkspaceTenantBoundary>
+    );
+  }
 
   if (!activeWorkspace) {
     if (hasSlackLinkContinuation || slackAccessRequest || slackAccessError) {

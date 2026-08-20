@@ -70,6 +70,11 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { upsertWorkspace } from "@/lib/workspaces";
+import {
+  beginWorkspaceTransition,
+  ownsWorkspaceTransition,
+  type WorkspaceTransitionIdentity,
+} from "@/lib/workspace-transition";
 import type {
   AccessContext,
   AuthSession,
@@ -166,6 +171,13 @@ export type AppContextValue = {
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
+  /**
+   * Workspace whose mutable console state is currently safe to render.
+   * This is a display fence only; server access grants remain authoritative.
+   */
+  workspaceStateOwnerId: string | null;
+  /** Clear and rebind every workspace/session-local draft and cache before display. */
+  prepareWorkspaceTransition: (workspaceId: string) => void;
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
@@ -407,6 +419,11 @@ export function RootRouteComponent() {
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [workspaceStateOwnerId, setWorkspaceStateOwnerId] = useState<string | null>(null);
+  const workspaceTransitionIdentity = useRef<WorkspaceTransitionIdentity>({
+    workspaceId: null,
+    revision: 0,
+  });
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
@@ -931,6 +948,7 @@ export function RootRouteComponent() {
       startMode?: "realtime";
     },
   ): Promise<Session | null> {
+    const acceptedWorkspaceTransition = workspaceTransitionIdentity.current;
     setBusy(true);
     try {
       const sessionTools = options?.sessionTools;
@@ -973,6 +991,18 @@ export function RootRouteComponent() {
       // Do not clear a newer concurrent attempt that replaced this one.
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
         pendingCreateAttempt.current = null;
+      }
+      // The create may commit after the operator has switched workspaces. The
+      // server result remains valid, but it must not repopulate or navigate the
+      // new workspace's UI with the previous tenant's session.
+      if (
+        !ownsWorkspaceTransition(
+          workspaceTransitionIdentity.current,
+          acceptedWorkspaceTransition,
+          workspaceId,
+        )
+      ) {
+        return null;
       }
       setSession(created);
       setConnectionState("idle");
@@ -1154,6 +1184,38 @@ export function RootRouteComponent() {
     setWorkspaceMcpCatalogReady(false);
   }, []);
 
+  const prepareWorkspaceTransition = useCallback(
+    (workspaceId: string) => {
+      const transition = beginWorkspaceTransition(workspaceTransitionIdentity.current, workspaceId);
+      if (!transition.changed) {
+        return;
+      }
+      workspaceTransitionIdentity.current = transition.identity;
+      // Fence late non-abortable catalog/status responses before clearing the
+      // projections they would otherwise be able to repopulate.
+      githubRefreshId.current += 1;
+      mcpRefreshId.current += 1;
+      pendingCreateAttempt.current = null;
+      resetSessionView();
+      setInspectorOpen(false);
+      setManualRepos([]);
+      setManualReposOpen(false);
+      setNextRepoId(1);
+      setSelectedRepoIds(new Set());
+      setSelectedRepoRefs({});
+      setSelectedCapabilityToolIds(new Set());
+      previousCapabilityToolIds.current = new Set();
+      setGithubAppOpen(false);
+      setGithubOrg("");
+      setBusy(false);
+      setRepoBusy(false);
+      setGithubAppBusy(false);
+      resetWorkspaceIntegrations();
+      setWorkspaceStateOwnerId(workspaceId);
+    },
+    [resetSessionView, resetWorkspaceIntegrations],
+  );
+
   // Context actions keep one identity while reading the newest committed state
   // through the callback ref. This prevents unrelated provider renders
   // (for example, an access-key draft keystroke) from invalidating the entire
@@ -1240,6 +1302,8 @@ export function RootRouteComponent() {
           workspaceMcpCatalogReady,
           workspaceCapabilityCatalog,
           currentResources,
+          workspaceStateOwnerId,
+          prepareWorkspaceTransition,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
@@ -1300,6 +1364,7 @@ export function RootRouteComponent() {
     manualReposOpen,
     model,
     preparePendingSlackLink,
+    prepareWorkspaceTransition,
     slackLinkContinuationWorkspaceId,
     latencyMode,
     reasoningEffort,
@@ -1320,6 +1385,7 @@ export function RootRouteComponent() {
     toolMcpServers,
     workspaceMcpCatalogReady,
     workspaceCapabilityCatalog,
+    workspaceStateOwnerId,
     workspaces,
   ]);
 
