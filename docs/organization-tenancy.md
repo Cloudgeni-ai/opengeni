@@ -740,6 +740,15 @@ as contextual evidence, before inserting one immutable
 `session_tenancy_activations` receipt. A mutation without that exact version-1
 organization receipt fails closed.
 
+0303 is also an intentional signature cutover: it removes the historical
+eight-argument transition and fork routines and installs only the corresponding
+nine-argument routines with a mandatory activation-version argument and no SQL
+default. There is no compatibility wrapper because no product caller exists and
+an omitted version must fail with undefined-function rather than infer or bypass
+activation. The 0225/0289 migration bodies remain historical checkpoints;
+anything running against the fully migrated schema, including later migration
+tests, must supply version `1` and operate under the exact durable receipt.
+
 The activated database contract is intentionally narrow:
 
 - Access is the exact disjunction of an active membership whose own

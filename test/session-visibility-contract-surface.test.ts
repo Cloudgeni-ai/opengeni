@@ -103,6 +103,17 @@ describe("session visibility and fork database contract is activated without pro
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);
     }
+    expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(2);
+  });
+
+  test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {
+    const regression = await readFile(
+      join(repo, "packages/db/test/migration-0241-atomic-personal-resource-delegation.test.ts"),
+      "utf8",
+    );
+    expect(regression).toContain("insert into session_tenancy_activations");
+    expect(regression).toMatch(/transition_session_visibility\([\s\S]*?'a{64}',\s*1\s*\)/u);
   });
 
   test("the two authorization operations remain declarations with no enforcement", async () => {

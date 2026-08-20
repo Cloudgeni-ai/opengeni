@@ -402,6 +402,12 @@ organization is activated, every subsequently started API and worker must keep
 the switch `true`, and a pre-0303 image or a new image with the switch disabled
 fails closed.
 
+The migration deliberately drops the legacy eight-argument visibility/fork
+routines and exposes only nine-argument, activation-versioned routines with no
+defaults. This is a drained protocol cutover, not an overload-compatible API:
+an old caller fails with undefined-function, and operators must not add a
+wrapper that supplies an activation version on its behalf.
+
 Three tenancy cutovers have now used this maintenance shape, and a pre-0264,
 pre-0275, or pre-0303 image must never be started again after its corresponding
 activation:

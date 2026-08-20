@@ -34,6 +34,71 @@ async function activate(accountId: string, inventory = "0".repeat(64)) {
 }
 
 describe("migration 0303 session tenancy product activation", () => {
+  test("exposes only mandatory activation-versioned lifecycle signatures", async () => {
+    if (!shared) return;
+    const routines = await shared.admin<
+      Array<{
+        name: string;
+        argumentCount: number;
+        defaultCount: number;
+        runtimeExecutable: boolean;
+      }>
+    >`
+      select procedure.proname as name,
+        procedure.pronargs::integer as "argumentCount",
+        procedure.pronargdefaults::integer as "defaultCount",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "runtimeExecutable"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = current_schema()
+        and procedure.proname in ('transition_session_visibility', 'fork_session_content')
+      order by procedure.proname
+    `;
+    expect(Array.from(routines)).toEqual([
+      {
+        name: "fork_session_content",
+        argumentCount: 9,
+        defaultCount: 0,
+        runtimeExecutable: true,
+      },
+      {
+        name: "transition_session_visibility",
+        argumentCount: 9,
+        defaultCount: 0,
+        runtimeExecutable: true,
+      },
+    ]);
+
+    const [signatures] = await shared.admin<
+      Array<{
+        legacyTransitionAbsent: boolean;
+        versionedTransitionPresent: boolean;
+        legacyForkAbsent: boolean;
+        versionedForkPresent: boolean;
+      }>
+    >`
+      select
+        to_regprocedure(
+          'transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)'
+        ) is null as "legacyTransitionAbsent",
+        to_regprocedure(
+          'transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)'
+        ) is not null as "versionedTransitionPresent",
+        to_regprocedure(
+          'fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text)'
+        ) is null as "legacyForkAbsent",
+        to_regprocedure(
+          'fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)'
+        ) is not null as "versionedForkPresent"
+    `;
+    expect(signatures).toEqual({
+      legacyTransitionAbsent: true,
+      versionedTransitionPresent: true,
+      legacyForkAbsent: true,
+      versionedForkPresent: true,
+    });
+  });
+
   test("enumerates every nonquiescent authority lane without stale auto-cancellation", async () => {
     const migration = await readFile(
       new URL("../drizzle/0303_session_tenancy_product_activation.sql", import.meta.url),

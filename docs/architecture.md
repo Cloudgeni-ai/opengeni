@@ -1129,6 +1129,9 @@ grant/delegation revocation, and a same-workspace/private-only canonical-content
 fork that creates a new root and sandbox group without copying live authority.
 The lock-taking quiescence helper is owner-internal and never a runtime
 capability; only the fully scoped lifecycle functions may invoke it.
+The historical eight-argument lifecycle signatures are removed; the only
+post-0303 transition/fork signatures require an explicit activation version and
+have no defaults, so an old caller fails closed instead of inferring activation.
 The drained operator command writes a forward-only per-organization activation
 receipt only after canonical inventory/parity checks; API/worker startup then
 requires the canonical activation switch. Applying 0303 itself remains safe
