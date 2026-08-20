@@ -163,6 +163,9 @@ type SlackCall = {
   unfurlMedia: string | null;
   hasText: boolean;
   query: string;
+  searchQuery: string | null;
+  channelTypes: string | null;
+  contentTypes: string | null;
 };
 
 type CommittedSlackPost = {
@@ -283,6 +286,9 @@ function fakeSlack(
       unfurlMedia: params.get("unfurl_media"),
       hasText: params.has("text"),
       query: url.search,
+      searchQuery: params.get("query"),
+      channelTypes: params.get("channel_types"),
+      contentTypes: params.get("content_types"),
     });
     const headers =
       method === "auth.test"
@@ -338,6 +344,52 @@ function fakeSlack(
             real_name: "OpenGeni",
           },
         },
+      });
+    }
+    if (method === "assistant.search.context") {
+      return Response.json({
+        ok: true,
+        results: {
+          messages: [
+            {
+              author_name: "Ada",
+              author_user_id: "U_ADA",
+              team_id: "T_TEAM",
+              channel_id: "C_MEMBER",
+              channel_name: "general",
+              message_ts: "1755300000.000100",
+              content: `decision: ${"x".repeat(3000)}`,
+              is_author_bot: false,
+              permalink: "https://team.slack.com/archives/C_MEMBER/p1755300000000100",
+            },
+            { content: "no channel or ts; must be dropped" },
+          ],
+          files: [
+            {
+              file_id: "F_DOC",
+              title: "Launch plan",
+              file_type: "canvas",
+              author_user_id: "U_ADA",
+              author_name: "Ada",
+              date_created: 1755200000,
+              date_updated: 1755210000,
+              content: "plan excerpt",
+              permalink: "http://attacker.example/not-https",
+            },
+          ],
+          channels: [
+            {
+              team_id: "T_TEAM",
+              creator_user_id: "U_ADA",
+              date_created: 1755100000,
+              name: "launch",
+              topic: "Launch coordination",
+              purpose: "Ship the launch",
+              permalink: "https://team.slack.com/archives/C_LAUNCH",
+            },
+          ],
+        },
+        response_metadata: { next_cursor: "search-cursor-2" },
       });
     }
     if (method === "conversations.list") {
@@ -972,6 +1024,7 @@ async function connectBot(
 async function connectedTestBot(
   workspace: { accountId: string; workspaceId: string },
   slackFetch: typeof globalThis.fetch,
+  authorizeProviderRequest?: () => Promise<boolean | void>,
 ) {
   const connected = await connectBot(workspace, slackFetch);
   const connection = await getConnectionMetadata(
@@ -994,7 +1047,15 @@ async function connectedTestBot(
   });
   return {
     connection,
-    bot: createOpenGeniSlackBotClient({ db: client.db, settings, slackFetch }, resolved),
+    bot: createOpenGeniSlackBotClient(
+      {
+        db: client.db,
+        settings,
+        slackFetch,
+        ...(authorizeProviderRequest ? { authorizeProviderRequest } : {}),
+      },
+      resolved,
+    ),
   };
 }
 
@@ -2249,6 +2310,138 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(3);
   });
 
+  test("authorizes every physical Slack call and denies a revoked continuation page", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      fileListResponse: ({ count, page }) => ({
+        files: [{ id: `F_PAGE_${page}` }],
+        paging: { count, total: 2, page, pages: 2 },
+      }),
+    });
+    let authorizations = 0;
+    const { bot, connection } = await connectedTestBot(workspace, slack.fetch, async () => {
+      authorizations += 1;
+      return true;
+    });
+    const before = slack.calls.length;
+    const first = await bot.listFiles({ channelId: "C_MEMBER", limit: 1 });
+    expect(authorizations).toBe(slack.calls.length - before);
+    expect(first.nextCursor).toBeString();
+    const current = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connection.id,
+      null,
+    );
+    if (!current) throw new Error("expected current Slack connection");
+    expect(
+      await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+        id: current.id,
+        version: current.version,
+        subjectId: null,
+      }),
+    ).toBe(true);
+    const callCount = slack.calls.length;
+    await expect(
+      bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
+    ).rejects.toThrow(/reinstalled|authority changed/);
+    expect(slack.calls).toHaveLength(callCount);
+  });
+
+  test("rechecks authority before a private-file redirect leg", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    let privateFileCalls = 0;
+    const redirectingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.hostname === "files.slack.com") {
+        privateFileCalls += 1;
+        const current = await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          connected.body.connection.id,
+          null,
+        );
+        if (!current) throw new Error("expected current Slack connection");
+        expect(
+          await setConnectionStatus(client.db, workspace.workspaceId, "revoked", null, {
+            id: current.id,
+            version: current.version,
+            subjectId: null,
+          }),
+        ).toBe(true);
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://files.slack.com/files-pri/T_OPEN_GENI-F_CANVAS/download/redirected.html",
+          },
+        });
+      }
+      return await slack.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: redirectingFetch },
+      resolved,
+    );
+    await expect(bot.fileContent({ channelId: "C_MEMBER", fileId: "F_CANVAS" })).rejects.toThrow(
+      /reinstalled|authority changed/,
+    );
+    expect(privateFileCalls).toBe(1);
+  });
+
+  test("denies a private-file preflight before recording provider use or fetching", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    let privateFileCalls = 0;
+    const countingFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.hostname === "files.slack.com") privateFileCalls += 1;
+      return await slack.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    let providerAuthorizations = 0;
+    const { bot } = await connectedTestBot(workspace, countingFetch, async () => {
+      providerAuthorizations += 1;
+      return true;
+    });
+    let sharedPreflights = 0;
+    await expect(
+      bot.downloadReactionImage(
+        {
+          fileId: "F_IMAGE",
+          filename: "image.png",
+          declaredMimeType: "image/png",
+          declaredSizeBytes: null,
+          downloadUrl: new URL(
+            "https://files.slack.com/files-pri/T_OPEN_GENI-F_IMAGE/download/image.png",
+          ),
+        },
+        async () => {
+          sharedPreflights += 1;
+          throw new Error("shared read authority changed");
+        },
+      ),
+    ).rejects.toThrow(/shared read authority changed/);
+    expect(sharedPreflights).toBe(1);
+    expect(providerAuthorizations).toBe(0);
+    expect(privateFileCalls).toBe(0);
+  });
+
   test("rejects malformed, mixed, and non-advancing files.list paging", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -2385,6 +2578,8 @@ describe("OpenGeni Slack bot connection", () => {
       },
       createdBy: { kind: "subject", subjectId: "subject-a" },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await expect(
@@ -2877,6 +3072,113 @@ describe("OpenGeni Slack bot connection", () => {
     }
   });
 
+  test("searches public Slack through the bot with pinned channel types and bounded projections", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+
+    const result = await bot.searchContext({
+      query: "launch decision",
+      contentTypes: ["messages", "files", "channels"],
+      limit: 5,
+      sort: "timestamp",
+      sortDir: "asc",
+    });
+
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    expect(call).toBeDefined();
+    // The bot identity is public-only: channel_types is pinned server-side and
+    // is not a caller input at any layer.
+    expect(call!.channelTypes).toBe("public_channel");
+    expect(call!.contentTypes).toBe("messages,files,channels");
+    expect(call!.searchQuery).toBe("launch decision");
+    expect(call!.limit).toBe("5");
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      channelId: "C_MEMBER",
+      channelName: "general",
+      ts: "1755300000.000100",
+      authorUserId: "U_ADA",
+      authorName: "Ada",
+      isAuthorBot: false,
+      permalink: "https://team.slack.com/archives/C_MEMBER/p1755300000000100",
+    });
+    // Content excerpts are bounded; the fixture message is 3000+ chars.
+    expect(result.messages[0]!.content.length).toBeLessThanOrEqual(2_000);
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0]).toMatchObject({
+      id: "F_DOC",
+      title: "Launch plan",
+      filetype: "canvas",
+      dateCreated: 1755200000,
+      // Non-https permalinks are dropped rather than surfaced.
+      permalink: null,
+    });
+    expect(result.channels).toHaveLength(1);
+    expect(result.channels[0]).toMatchObject({
+      name: "launch",
+      topic: "Launch coordination",
+      permalink: "https://team.slack.com/archives/C_LAUNCH",
+    });
+    expect(result.nextCursor).toBe("search-cursor-2");
+    expect(result.receipt).toMatchObject({ operation: "search.context" });
+  });
+
+  test("defaults search to messages and Slack's page cap when the caller omits options", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    await bot.searchContext({ query: "standup" });
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    expect(call!.contentTypes).toBe("messages");
+    expect(call!.channelTypes).toBe("public_channel");
+    expect(call!.limit).toBe("20");
+  });
+
+  test("fails search closed with a reinstall hint when the install predates the search scopes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // A legacy install: required scopes only, no search:read.* grants.
+    const slack = fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES] });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    await expect(bot.searchContext({ query: "anything" })).rejects.toThrow(
+      "slack_bot_search_scopes_missing",
+    );
+    // Fails before any provider call: Slack never sees the request.
+    expect(slack.calls.some((entry) => entry.method === "assistant.search.context")).toBe(false);
+    // The denial leaves the same failed audit evidence as a provider rejection.
+    const audits = await shared!.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from audit_events
+      where workspace_id = ${workspace.workspaceId}
+        and action = 'slack_bot.search.context'
+      order by occurred_at desc`;
+    expect(audits.length).toBeGreaterThan(0);
+    expect(audits[0]!.metadata).toMatchObject({
+      outcome: "failed",
+      failureCode: "slack_bot_search_scopes_missing",
+    });
+  });
+
+  test("accepts long natural-language queries up to the schema cap and rejects beyond it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+
+    // A 300-char semantic prompt is a legitimate Real-time Search query.
+    const longQuery = "what did we decide about the launch ".repeat(9).slice(0, 300);
+    await bot.searchContext({ query: longQuery });
+    const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
+    // The client sends the trimmed query.
+    expect(call!.searchQuery).toBe(longQuery.trim());
+
+    await expect(bot.searchContext({ query: "x".repeat(501) })).rejects.toThrow("invalid_query");
+    await expect(bot.searchContext({ query: "   " })).rejects.toThrow("invalid_query");
+  });
+
   test("retries explicit provider rejection and preserves distinct operation IDs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -3297,7 +3599,30 @@ describe("OpenGeni Slack bot connection", () => {
         ).toBe(true);
       }
 
-      await expect(bot.deleteMessage(request)).resolves.toMatchObject({
+      let completionBot = bot;
+      let expectedAttempts = 3;
+      if (failure === "headers") {
+        const callsBeforeStaleRetry = slack.calls.length;
+        await expect(bot.deleteMessage(request)).rejects.toThrow(/authority changed/);
+        expect(slack.calls).toHaveLength(callsBeforeStaleRetry);
+        const refreshed = await resolveSlackBotConnectionForTool({
+          db: client.db,
+          grant: {
+            ...workspace,
+            subjectId: "subject-a",
+            permissions: ["connections:read"],
+            metadata: {},
+          },
+          sessionId: null,
+          requestedConnectionId: connected.body.connection.id,
+        });
+        completionBot = createOpenGeniSlackBotClient(
+          { db: client.db, settings, slackFetch: slack.fetch },
+          refreshed,
+        );
+        expectedAttempts = 4;
+      }
+      await expect(completionBot.deleteMessage(request)).resolves.toMatchObject({
         deleted: true,
       });
       expect(slack.calls.filter((call) => call.method === "chat.getPermalink")).toHaveLength(1);
@@ -3309,7 +3634,7 @@ describe("OpenGeni Slack bot connection", () => {
           connected.body.connection.id,
           operationId,
         ),
-      ).toMatchObject({ status: "completed", attemptCount: 3 });
+      ).toMatchObject({ status: "completed", attemptCount: expectedAttempts });
     }
   });
 
@@ -3901,12 +4226,14 @@ describe("OpenGeni Slack bot connection", () => {
       ).connection,
     ).toMatchObject({ id: connectionId, version: 4 });
 
-    const capabilitiesSource = await Bun.file(
-      new URL("../../web/src/routes/capabilities.tsx", import.meta.url),
+    // The destination UI moved from the capabilities route into the Slack
+    // integration adapter when every integration adopted the shared sheet.
+    const slackAdapterSource = await Bun.file(
+      new URL("../../web/src/components/capabilities/use-slack-integration.tsx", import.meta.url),
     ).text();
-    expect(capabilitiesSource).toContain("Slack knowledge destination");
-    expect(capabilitiesSource).toContain("slackDestinationAuthority");
-    expect(capabilitiesSource).toContain("collectionId: null");
-    expect(capabilitiesSource).toContain("Save destination");
+    expect(slackAdapterSource).toContain("Slack knowledge destination");
+    expect(slackAdapterSource).toContain("slackBotPersistableDestinationAuthority");
+    expect(slackAdapterSource).toContain("collectionId: null");
+    expect(slackAdapterSource).toContain("saveDestination");
   });
 });

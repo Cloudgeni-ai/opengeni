@@ -78,7 +78,7 @@ describe("artifact runtime workflow contract", () => {
     }
     expect(candidate).toContain("cancel-in-progress: false");
     expect(ci).toContain("github.event_name != 'workflow_dispatch'");
-    expect(ci).toContain("playwright install --with-deps chromium firefox webkit");
+    expect(ci).toContain("browsers: chromium firefox webkit");
     for (const suite of [
       "artifact-spreadsheet-canvas.browser.e2e.ts",
       "artifact-spreadsheet-scroll.browser.e2e.ts",

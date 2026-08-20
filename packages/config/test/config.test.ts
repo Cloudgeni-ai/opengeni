@@ -374,7 +374,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.14");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.16");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
@@ -400,6 +400,51 @@ describe("rig verification lease ownership rollout", () => {
       withEnv({ OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED: "true" }, () => getSettings())
         .rigVerificationLeaseOwnershipEnabled,
     ).toBe(true);
+  });
+});
+
+describe("canonical organization-tenancy activation opt-out", () => {
+  test("defaults to the reversible pre-activation posture", () => {
+    expect(withEnv({}, () => getSettings()).organizationTenancyCanonicalActivationEnabled).toBe(
+      false,
+    );
+  });
+
+  test("parses an explicit decline and an explicit acceptance without truthy-string coercion", () => {
+    // The whole point of the switch is that an operator can write it out to say
+    // "no". A z.coerce.boolean() field would read "false" as TRUE and activate
+    // the one-way boundary for exactly the operator who tried to decline it.
+    for (const declined of ["false", "0", "no", "off", "FALSE"]) {
+      expect(
+        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: declined }, () =>
+          getSettings(),
+        ).organizationTenancyCanonicalActivationEnabled,
+      ).toBe(false);
+    }
+    for (const accepted of ["true", "1", "yes", "on", "TRUE"]) {
+      expect(
+        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: accepted }, () =>
+          getSettings(),
+        ).organizationTenancyCanonicalActivationEnabled,
+      ).toBe(true);
+    }
+  });
+
+  test("is independent of every other tenancy-adjacent posture", () => {
+    // Activation must never be inferred from managed product access or the
+    // delegation posture: it is one explicit operator statement.
+    const settings = withEnv(
+      {
+        OPENGENI_ENVIRONMENT: "test",
+        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+        OPENGENI_PUBLIC_BASE_URL: "https://opengeni.example.com",
+        OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret-value",
+        OPENGENI_DELEGATION_SECRET: "delegation-secret-value",
+      },
+      () => getSettings(),
+    );
+    expect(settings.productAccessMode).toBe("managed");
+    expect(settings.organizationTenancyCanonicalActivationEnabled).toBe(false);
   });
 });
 
@@ -1049,9 +1094,26 @@ describe("sandbox preparation profiles", () => {
     );
   });
 
+  test("keeps worker-internal first-party MCP routing separate from sandbox routing", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_MCP_INTERNAL_URL:
+          "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+        OPENGENI_MCP_URL: "https://sandbox-edge.example/v1/workspaces/{workspaceId}/mcp",
+      },
+      () => getSettings(),
+    );
+
+    expect(settings.opengeniMcpInternalUrl).toBe(
+      "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+    );
+    expect(settings.opengeniMcpUrl).toBe(
+      "https://sandbox-edge.example/v1/workspaces/{workspaceId}/mcp",
+    );
+  });
+
   test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
     const local = withEnv({}, () => getSettings());
-    expect(local.codemodeMaxCallsPerTurn).toBe(200);
     expect(local.ogtoolPackageSpec).toBeUndefined();
     expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
@@ -1061,13 +1123,12 @@ describe("sandbox preparation profiles", () => {
     const configured = withEnv(
       {
         OPENGENI_PRODUCT_ACCESS_MODE: "configured",
-        OPENGENI_CODEMODE_MAX_CALLS_PER_TURN: "17",
         OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
     );
-    expect(configured.codemodeMaxCallsPerTurn).toBe(17);
+    expect(configured.ogtoolPackageSpec).toBe("@opengeni/ogtool@0.1.0");
     expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",

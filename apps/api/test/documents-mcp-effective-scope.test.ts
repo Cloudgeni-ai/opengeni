@@ -27,7 +27,11 @@ mock.module("@opengeni/documents", () => ({
     async (...args: Parameters<typeof realSearchEffectiveKnowledge>) => {
       if (args[0] !== fakeDb) return await realSearchEffectiveKnowledge(...args);
       searchInputs.push(args[1]);
-      return { results: [] };
+      return realDocuments.selectKnowledgeSearchResults({
+        candidates: [],
+        rankedCandidateCount: 0,
+        requestedLimit: 5,
+      });
     },
   ),
   listEffectiveIndexedDocuments: mock(
@@ -52,7 +56,10 @@ mock.module("@opengeni/documents", () => ({
     async (...args: Parameters<typeof realBrowseEffectiveKnowledge>) => {
       if (args[0] !== fakeDb) return await realBrowseEffectiveKnowledge(...args);
       browseInputs.push(args[1]);
-      return { records: [], nextCursor: null, hasMore: false };
+      return realDocuments.selectKnowledgeBrowseRecords({
+        entries: [],
+        hasMoreAfterEntries: false,
+      });
     },
   ),
 }));
@@ -132,7 +139,18 @@ test("docs MCP binds effective retrieval to its immutable initiating subject", a
     });
     const text = result.content.find((entry) => entry.type === "text");
     if (!text || text.type !== "text") throw new Error("missing MCP text result");
-    expect(JSON.parse(text.text)).toEqual({ results: [] });
+    expect(JSON.parse(text.text)).toMatchObject({
+      results: [],
+      selection: {
+        candidates: { ranked: 0, rechecked: 0, omittedOnRecheck: 0 },
+        omitted: {
+          belowRelevanceFloor: 0,
+          asDuplicate: 0,
+          forLimit: 0,
+          forResponseBudget: 0,
+        },
+      },
+    });
     expect(searchInputs).toEqual([
       {
         accountId: "11111111-1111-4111-8111-111111111111",
@@ -140,6 +158,43 @@ test("docs MCP binds effective retrieval to its immutable initiating subject", a
         query: "network policy",
         mode: "keyword",
         initiatingSubjectId: "user:initiator",
+        surface: "agent",
+      },
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("docs MCP binds personal-document reads to the exact session attempt", async () => {
+  const sessionId = "33333333-3333-4333-8333-333333333333";
+  const attemptId = "44444444-4444-4444-8444-444444444444";
+  const start = searchInputs.length;
+  const server = buildDocumentsMcpServer(
+    fakeDb as never,
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    {} as never,
+    { initiatingSubjectId: "user:initiator", createdBySessionId: sessionId, attemptId },
+  );
+  const client = new Client({ name: "documents-attempt-authority-test", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    await client.callTool({
+      name: "knowledge_search",
+      arguments: { query: "personal evidence", mode: "keyword" },
+    });
+    expect(searchInputs.slice(start)).toEqual([
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        query: "personal evidence",
+        mode: "keyword",
+        initiatingSubjectId: "user:initiator",
+        agentAuthority: { sessionId, attemptId },
         surface: "agent",
       },
     ]);
@@ -179,7 +234,15 @@ test("docs MCP rebinds Knowledge fetch and browse to its immutable initiating su
     });
     const text = browseResult.content.find((entry) => entry.type === "text");
     if (!text || text.type !== "text") throw new Error("missing MCP text result");
-    expect(JSON.parse(text.text)).toEqual({ records: [], nextCursor: null, hasMore: false });
+    expect(JSON.parse(text.text)).toMatchObject({
+      records: [],
+      nextCursor: null,
+      hasMore: false,
+      selection: {
+        omitted: { forResponseBudget: 0 },
+        compactedRecordCount: 0,
+      },
+    });
     expect(getInputs).toEqual([
       {
         accountId: "11111111-1111-4111-8111-111111111111",

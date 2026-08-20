@@ -109,6 +109,32 @@ fn message_is_authentication_denial(message: &str) -> bool {
         || lower.contains("auth violation")
 }
 
+/// Build the exact refresh command for a rejected durable enrollment bearer.
+/// Persisted connection metadata predates strict URL validation, so unexpected
+/// shell metacharacters are replaced by a visible placeholder instead of being
+/// reflected into copy/pasteable operator guidance.
+fn rejected_bearer_reconnect_command(api_url: Option<&str>, workspace_id: &str) -> String {
+    fn safe_argument(value: &str) -> bool {
+        !value.is_empty()
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
+            })
+    }
+
+    let api_url = api_url.unwrap_or(crate::DEFAULT_API_URL);
+    let api_url = if safe_argument(api_url) {
+        api_url
+    } else {
+        "<api-url>"
+    };
+    let workspace_id = if safe_argument(workspace_id) {
+        workspace_id
+    } else {
+        "<workspace-id>"
+    };
+    format!("opengeni-agent connect --force --api-url {api_url} --workspace-id {workspace_id}")
+}
+
 /// NATS emits this server error when the intentionally short-lived user JWT
 /// reaches its expiry. The enrollment bearer remains valid and reconnecting
 /// mints a fresh user JWT, so this is planned credential rotation rather than
@@ -692,7 +718,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // knows a re-enroll may be needed, then treat it as a (slow) retry —
                 // a re-enroll can rotate the bearer in place and the next attempt
                 // re-presents it.
-                error!(connection_id = %link.connection_id, error = %e, "control plane rejected the enrollment bearer; will keep retrying — reconnect if this persists");
+                let reconnect_command = rejected_bearer_reconnect_command(
+                    link.api_url.as_deref(),
+                    &link.creds.workspace_id,
+                );
+                error!(
+                    connection_id = %link.connection_id,
+                    error = %e,
+                    "control plane rejected the enrollment bearer; run `{reconnect_command}` to replace the rejected credential (the agent will keep retrying in the meantime)"
+                );
                 return ConnectionOutcome::Disconnected(e.to_string());
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
@@ -985,7 +1019,17 @@ impl<P: Platform + 'static> Supervisor<P> {
                 .await;
             }
             Route::OpStart(start) => {
-                self.spawn_op_start(link, client, &request, start, reply, label, rpc_tasks);
+                let resource_policy = request.resource_policy;
+                self.spawn_op_start(
+                    link,
+                    client,
+                    &request,
+                    start,
+                    resource_policy,
+                    reply,
+                    label,
+                    rpc_tasks,
+                );
             }
             Route::OpControl => {
                 let response =
@@ -997,22 +1041,26 @@ impl<P: Platform + 'static> Supervisor<P> {
                     .await;
             }
             Route::LegacyExec(exec) => {
+                let resource_policy = request.resource_policy;
                 self.spawn_adapter(
                     link,
                     client,
                     &request,
                     AdapterWork::Exec(exec),
+                    resource_policy,
                     reply,
                     label,
                     rpc_tasks,
                 );
             }
             Route::LegacyGit(git) => {
+                let resource_policy = request.resource_policy;
                 self.spawn_adapter(
                     link,
                     client,
                     &request,
                     AdapterWork::Git(git),
+                    resource_policy,
                     reply,
                     label,
                     rpc_tasks,
@@ -1301,6 +1349,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         request: &ControlRequest,
         work: AdapterWork,
+        resource_policy: Option<v1::OperationResourcePolicy>,
         reply: async_nats::Subject,
         label: &'static str,
         rpc_tasks: &mut JoinSet<()>,
@@ -1318,14 +1367,26 @@ impl<P: Platform + 'static> Supervisor<P> {
             } else {
                 match work {
                     AdapterWork::Exec(exec) => {
-                        crate::legacy::serve_exec_scoped(
-                            &engine, &platform, &scope, request_id, exec,
+                        crate::legacy::serve_exec_scoped_with_policy(
+                            &engine,
+                            &platform,
+                            &scope,
+                            request_id,
+                            exec,
+                            resource_policy,
                         )
                         .await
                     }
                     AdapterWork::Git(git) => {
-                        crate::legacy::serve_git_scoped(&engine, &platform, &scope, request_id, git)
-                            .await
+                        crate::legacy::serve_git_scoped_with_policy(
+                            &engine,
+                            &platform,
+                            &scope,
+                            request_id,
+                            git,
+                            resource_policy,
+                        )
+                        .await
                     }
                 }
             };
@@ -1344,6 +1405,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         request: &ControlRequest,
         start: v1::OpStart,
+        resource_policy: Option<v1::OperationResourcePolicy>,
         reply: async_nats::Subject,
         label: &'static str,
         rpc_tasks: &mut JoinSet<()>,
@@ -1375,8 +1437,14 @@ impl<P: Platform + 'static> Supervisor<P> {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
-                crate::ops::serve_op_start_scoped(
-                    &engine, &platform, &scope, sink, request_id, start,
+                crate::ops::serve_op_start_scoped_with_policy(
+                    &engine,
+                    &platform,
+                    &scope,
+                    sink,
+                    request_id,
+                    start,
+                    resource_policy,
                 )
                 .await
             };
@@ -1410,7 +1478,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
-            return Err(SupervisorError::Connect(
+            return Err(SupervisorError::Authentication(
                 "no enrollment bearer; re-enroll to obtain a control-plane credential".to_string(),
             ));
         }
@@ -1565,6 +1633,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             // (PROTOCOL.md §Compatibility — no flag day, rollback safe).
             op_stream: true,
             browser_bridge: self.browser_bridge.is_some(),
+            operation_resource_policy: link.platform.operation_resource_policy_supported(),
+            operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
         }
     }
 
@@ -2043,6 +2113,28 @@ mod tests {
     }
 
     #[test]
+    fn rejected_bearer_guidance_is_forceful_and_deployment_specific() {
+        assert_eq!(
+            rejected_bearer_reconnect_command(
+                Some("https://app.opengeni.ai"),
+                "9c7b6e0e-7e3b-4aa3-9530-f3d914c08736",
+            ),
+            "opengeni-agent connect --force --api-url https://app.opengeni.ai --workspace-id 9c7b6e0e-7e3b-4aa3-9530-f3d914c08736",
+        );
+        assert_eq!(
+            rejected_bearer_reconnect_command(None, "workspace-id"),
+            "opengeni-agent connect --force --api-url https://app.opengeni.ai --workspace-id workspace-id",
+        );
+        assert_eq!(
+            rejected_bearer_reconnect_command(
+                Some("https://safe.example\nmalicious"),
+                "workspace-id"
+            ),
+            "opengeni-agent connect --force --api-url <api-url> --workspace-id workspace-id",
+        );
+    }
+
+    #[test]
     fn recognizes_only_the_scheduled_nats_credential_expiry_event() {
         assert!(message_is_expected_credential_rotation(
             "User Authentication Expired"
@@ -2070,6 +2162,7 @@ mod tests {
             let req = ControlRequest {
                 request_id: "r".to_string(),
                 epoch: 0,
+                resource_policy: None,
                 op: Some(op),
             };
             assert_ne!(op_label(&req), "none");
@@ -2085,6 +2178,7 @@ mod tests {
         let request = |op| ControlRequest {
             request_id: "r".to_string(),
             epoch: 0,
+            resource_policy: None,
             op: Some(op),
         };
         // Liveness never enters admission.
@@ -2262,7 +2356,7 @@ mod tests {
             subscription,
             ack_subscription,
             control_transport_lost,
-            bulk_transport_lost,
+            bulk_transport_lost.clone(),
         );
         let sever_bulk = async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2270,6 +2364,16 @@ mod tests {
                 .force_reconnect()
                 .await
                 .expect("force only the bulk client to disconnect");
+            // Keep the last client handle alive until its asynchronous event
+            // callback observes the forced disconnect. Dropping it immediately
+            // after queuing Reconnect can close the client task before the
+            // callback runs, leaving the generation wait nondeterministically
+            // pending instead of testing the intended transport event.
+            if !bulk_transport_lost.is_requested() {
+                tokio::time::timeout(Duration::from_secs(5), bulk_transport_lost.notified())
+                    .await
+                    .expect("bulk disconnect event should signal generation loss");
+            }
         };
         let (outcome, ()) = tokio::join!(generation, sever_bulk);
 
@@ -2492,6 +2596,7 @@ mod tests {
         let ping = ControlRequest {
             request_id: "still-live".to_string(),
             epoch: 0,
+            resource_policy: None,
             op: Some(v1::control_request::Op::Ping(v1::PingRequest { nonce: 42 })),
         };
         let reply = tokio::time::timeout(
@@ -2566,6 +2671,7 @@ mod tests {
         let start = ControlRequest {
             request_id: op_id.to_string(),
             epoch: 0,
+            resource_policy: None,
             op: Some(v1::control_request::Op::OpStart(v1::OpStart {
                 op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
                     command: vec!["printf over-the-wire".to_string()],
@@ -2641,6 +2747,7 @@ mod tests {
         let query = ControlRequest {
             request_id: "q-wire-1".to_string(),
             epoch: 0,
+            resource_policy: None,
             op: Some(v1::control_request::Op::OpQuery(v1::OpQuery {
                 op_id: op_id.to_string(),
             })),

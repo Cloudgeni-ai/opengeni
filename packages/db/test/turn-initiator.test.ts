@@ -1,17 +1,30 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   addSessionSystemUpdate,
+  addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
+  bindScheduledTaskRunSessionInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   createSessionGoal,
   createSessionWithIdempotencyKey,
   editQueuedTurnInTransaction,
   frozenInitiatorForCommandActor,
+  getNestedAgentDepthDeploymentPolicy,
+  getScheduledTargetSessionExecution,
+  getScheduledTaskPersonalResourceAuthoritySubject,
+  getScheduledTaskRevisionAuthority,
+  getScheduledTaskRunAcceptedExecution,
   getSessionTurn,
   getSessionTurnPersonalConnectionDelegations,
   initializeSessionStartAtomically,
@@ -19,6 +32,7 @@ import {
   listSessionSystemUpdatesForTurn,
   saveComposerDraftInTransaction,
   SessionIdConflictError,
+  settleScheduledTaskRunInTransaction,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
@@ -68,8 +82,162 @@ function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
       ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
     },
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none" as const,
   };
+}
+
+/**
+ * Scheduled occurrences are only admitted for an accepted run bound to the
+ * target session, so a scheduler-initiated turn needs the real task/run
+ * protocol instead of a synthetic update row.
+ */
+async function addAcceptedScheduledOccurrence(
+  grant: Awaited<ReturnType<typeof fixture>>,
+  sessionId: string,
+): Promise<{ taskId: string; runId: string }> {
+  const task = await createScheduledTask(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    name: "turn initiator scheduled task",
+    status: "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: `turn-initiator-${crypto.randomUUID()}`,
+    runMode: "existing_session",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: { prompt: "Scheduled work", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    targetSessionId: sessionId,
+    metadata: {},
+  });
+  const personalResourceAuthoritySubjectId = await getScheduledTaskPersonalResourceAuthoritySubject(
+    client.db,
+    {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+    },
+  );
+  const targetSessionExecution = await getScheduledTargetSessionExecution(
+    client.db,
+    task.workspaceId,
+    sessionId,
+    personalResourceAuthoritySubjectId,
+  );
+  const depthPolicy = targetSessionExecution
+    ? null
+    : await getNestedAgentDepthDeploymentPolicy(client.db);
+  const causalHumanAuthority = await getScheduledTaskRevisionAuthority(client.db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+  });
+  const runId = crypto.randomUUID();
+  const run = await createScheduledTaskRun(client.db, {
+    runId,
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+    taskExecutionDigest: task.executionDigest,
+    triggerType: "scheduled",
+    producerKey: `turn-initiator-run:${runId}`,
+    acceptedExecutionSnapshot: {
+      version: 1,
+      task,
+      resolvedModel: targetSessionExecution?.model ?? task.agentConfig.model ?? "scripted-model",
+      resolvedReasoningEffort:
+        targetSessionExecution?.reasoningEffort ?? task.agentConfig.reasoningEffort ?? "medium",
+      resolvedLatencyMode: targetSessionExecution?.latencyMode ?? "standard",
+      resolvedSandboxBackend:
+        targetSessionExecution?.sandboxBackend ?? task.agentConfig.sandboxBackend ?? "none",
+      resolvedSandboxOs: targetSessionExecution?.sandboxOs ?? "linux",
+      resolvedTools: targetSessionExecution?.tools ?? task.agentConfig.tools,
+      resolvedFirstPartyMcpTools: targetSessionExecution?.firstPartyMcpTools ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+      ],
+      resolvedFirstPartyMcpPermissions: targetSessionExecution?.firstPartyMcpPermissions ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+      ],
+      resolvedVariableSet: null,
+      resolvedRig: null,
+      resolvedSlackBotConnection: null,
+      targetSessionExecution,
+      generatedSessionBinding: depthPolicy
+        ? {
+            createIdempotencyKey: `turn-initiator-run:${runId}`,
+            effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+            nestedAgentDepthPolicySource: depthPolicy.policySource,
+            codexCompactionMode: "portable",
+          }
+        : null,
+      personalConnectionDelegations: [],
+      personalResourceAuthoritySubjectId,
+      causalHumanSubjectId:
+        personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
+      causalHumanAuthority,
+      xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      xaiAuthoritySubjectId: null,
+      connectionAuthoritySubjectId: null,
+      triggerInitiator: { kind: "service", subjectId: "scheduler" },
+      agentRunUsageIdempotencyKey: null,
+      incidentPreflightRequired: false,
+      alertOccurrenceLabels: null,
+    },
+  });
+  await bindScheduledTaskRunSessionInTransaction(client.db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    runId: run.id,
+    sessionId,
+  });
+  const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+    workspaceId: task.workspaceId,
+    runId: run.id,
+  });
+  if (!accepted) throw new Error("scheduled run is missing its accepted execution");
+  const added = await addSessionSystemUpdateWithSourceMutation(
+    client.db,
+    {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      sessionId,
+      kind: "scheduled_occurrence",
+      classification: "info",
+      sourceId: run.id,
+      dedupeKey: `scheduled-task-run:${run.id}`,
+      summary: task.agentConfig.prompt,
+      payload: {
+        type: "scheduled_occurrence",
+        text: task.agentConfig.prompt,
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: run.id,
+        ...(accepted.resolvedTools.length > 0 ? { tools: accepted.resolvedTools } : {}),
+      },
+      lineage: {
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: run.id,
+        causalHumanSubjectId: accepted.causalHumanSubjectId,
+      },
+      personalConnectionDelegations: accepted.personalConnectionDelegations,
+      xaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
+      scheduledTaskRunId: run.id,
+    },
+    async (tx, wakeEventId) => {
+      if (!wakeEventId) throw new Error("scheduled occurrence produced no wake event");
+      await settleScheduledTaskRunInTransaction(tx, {
+        workspaceId: task.workspaceId,
+        runId: run.id,
+        sessionId,
+        triggerEventId: wakeEventId,
+        status: "dispatched",
+      });
+    },
+  );
+  if (!added.added) throw new Error("scheduled occurrence was not added");
+  return { taskId: task.id, runId: run.id };
 }
 
 describe("immutable session turn initiators", () => {
@@ -310,6 +478,7 @@ describe("immutable session turn initiators", () => {
           resources: [],
           model: "scripted-model",
           reasoningEffort: "low",
+          latencyMode: "standard",
         }),
       ),
     );
@@ -367,6 +536,8 @@ describe("immutable session turn initiators", () => {
         }),
       ),
     );
+    if (!resubmitted.draft) throw new Error("editor composer draft was not rotated after resubmit");
+    const editorDraftRevision = resubmitted.draft.revision;
     const steerDraft = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
         editQueuedTurnInTransaction(tx as unknown as typeof db, {
@@ -376,7 +547,7 @@ describe("immutable session turn initiators", () => {
           turnId: steerSource.turnId,
           subjectId: editor,
           expectedTurnVersion: 1,
-          expectedDraftRevision: 0,
+          expectedDraftRevision: editorDraftRevision,
           replaceDraft: false,
           actor: { type: "human", subjectId: editor },
           operationKey: crypto.randomUUID(),
@@ -651,24 +822,10 @@ describe("immutable session turn initiators", () => {
       ...sessionInput(grant),
       createdBy: { kind: "service", subjectId: "scheduler" },
     });
-    const scheduledTaskId = crypto.randomUUID();
-    const scheduledRunId = crypto.randomUUID();
-    await addSessionSystemUpdate(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: scheduledTarget.id,
-      kind: "scheduled_occurrence",
-      classification: "info",
-      sourceId: scheduledRunId,
-      dedupeKey: crypto.randomUUID(),
-      summary: "Scheduled work",
-      payload: {
-        type: "scheduled_occurrence",
-        text: "Scheduled work",
-        scheduledTaskId,
-        scheduledTaskRunId: scheduledRunId,
-      },
-    });
+    const { runId: scheduledRunId } = await addAcceptedScheduledOccurrence(
+      grant,
+      scheduledTarget.id,
+    );
     const scheduledClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: scheduledTarget.id,
       workflowId: `session-${scheduledTarget.id}`,
@@ -717,16 +874,15 @@ describe("immutable session turn initiators", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: mixedTarget.id,
-      kind: "scheduled_occurrence",
+      kind: "agent_message",
       classification: "info",
       sourceId: crypto.randomUUID(),
       dedupeKey: crypto.randomUUID(),
-      summary: "Scheduled context",
+      summary: "Ordinary machine notice",
       payload: {
-        type: "scheduled_occurrence",
-        text: "Scheduled context",
-        scheduledTaskId: crypto.randomUUID(),
-        scheduledTaskRunId: crypto.randomUUID(),
+        type: "agent_message",
+        text: "Ordinary machine notice",
+        operationId: crypto.randomUUID(),
       },
     });
     const mixedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {

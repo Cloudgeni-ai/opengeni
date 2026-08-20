@@ -53,8 +53,8 @@ const ASSET_OPTIONS = {
   modality: "spreadsheet",
   kernelVersion: "kernel-test",
   protocolVersion: 1,
-  modelSchemaVersion: 1,
-  commandVersion: 1,
+  modelSchemaVersion: 2,
+  commandVersion: 2,
   applicationOrigin: "https://artifacts.test",
   workerUrl: "https://artifacts.test/worker.js",
   wasmGlueUrl: "https://artifacts.test/kernel.js",
@@ -64,8 +64,8 @@ const INITIALIZE_OPTIONS = {
   modality: "spreadsheet",
   kernelVersion: "kernel-test",
   protocolVersion: 1,
-  modelSchemaVersion: 1,
-  commandVersion: 1,
+  modelSchemaVersion: 2,
+  commandVersion: 2,
   wasmGlueUrl: ASSET_OPTIONS.wasmGlueUrl,
   wasmBinaryUrl: ASSET_OPTIONS.wasmBinaryUrl,
   maximumSnapshotBytes: 1024,
@@ -181,8 +181,8 @@ function createFakeAdapter(metrics = createMetrics()): ArtifactWorkerKernelAdapt
     modality: "spreadsheet",
     protocolVersion: 1,
     kernelVersion: "kernel-test",
-    modelSchemaVersion: 1,
-    commandVersion: 1,
+    modelSchemaVersion: 2,
+    commandVersion: 2,
     maximumSnapshotBytes: 64 * 1024 * 1024,
     maximumCommandBytes: EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
     maximumIntentBytes: EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
@@ -716,20 +716,20 @@ describe("browser editable artifact Worker bridge", () => {
     await live.dispose();
   });
 
-  test("fails closed on incompatible or noncanonical snapshots without installing partial state", async () => {
+  test("accepts another producer build but rejects noncanonical snapshots without partial state", async () => {
     const workers: InProcessArtifactWorker[] = [];
     const client = createClient(workers);
     const incompatible = await createSnapshot(1);
     incompatible.kernelVersion = "other-kernel";
-    await expect(client.loadSnapshot(incompatible)).rejects.toMatchObject({
-      code: "unsupported_protocol",
+    await expect(client.loadSnapshot(incompatible)).resolves.toMatchObject({
+      stateHash: incompatible.stateHash,
     });
 
     const good = await createSnapshot(2);
     await expect(client.loadSnapshot(good)).resolves.toMatchObject({ stateHash: good.stateHash });
     const badDigest = await createSnapshot(3);
     badDigest.digest = good.digest;
-    await expect(client.loadSnapshot(badDigest)).rejects.toMatchObject({ code: "kernel_diverged" });
+    await expect(client.loadSnapshot(badDigest)).rejects.toMatchObject({ code: "byte_corruption" });
 
     const expectedStateHash = await sha256Hex(new Uint8Array([6]));
     const transaction = testCommitted({
@@ -810,8 +810,8 @@ describe("browser editable artifact Worker bridge", () => {
     expect(adapter).toMatchObject({
       protocolVersion: 1,
       kernelVersion: "worker-test-build",
-      modelSchemaVersion: 1,
-      commandVersion: 1,
+      modelSchemaVersion: 2,
+      commandVersion: 2,
     });
   });
 
@@ -914,9 +914,10 @@ async function createSnapshot(
     stateHash: hash,
     causalFrontier: [],
     digest: hash,
-    protocolVersion: 1,
+    operationProtocolVersion: 2,
+    snapshotVersion: 2,
     kernelVersion: "kernel-test",
-    modelSchemaVersion: 1,
+    modelSchemaVersion: 2,
     bytes,
   };
 }
@@ -926,8 +927,8 @@ function authorInput(transactionId: string, command: number) {
     modality: "spreadsheet",
     protocolVersion: 1,
     kernelVersion: "kernel-test",
-    modelSchemaVersion: 1,
-    commandVersion: 1,
+    modelSchemaVersion: 2,
+    commandVersion: 2,
     artifactId: ARTIFACT_ID,
     clientTransactionId: transactionId,
     replicaId: REPLICA_ID,
@@ -958,6 +959,6 @@ async function committed(
     priorStateHash: previous.stateHash,
     stateHash,
     causalFrontier: [{ replicaId: REPLICA_ID, counter: endSequence }],
-    protocolVersion: 1,
+    operationProtocolVersion: 2,
   });
 }

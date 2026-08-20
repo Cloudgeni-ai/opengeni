@@ -77,6 +77,15 @@ pub struct StreamTokenClaims {
     pub port: u32,
     /// Expiry, unix seconds.
     pub exp: i64,
+    /// The authenticated viewer subject the token was minted for (0281).
+    /// Optional for rolling compatibility with pre-0281 mints.
+    #[serde(rename = "subjectId", default)]
+    pub subject_id: Option<String>,
+    /// The session authority epoch observed at mint (0281) - the relay tracks
+    /// the highest value presented per channel and rejects tokens below that
+    /// floor, mirroring the lease-epoch stale-viewer fence.
+    #[serde(rename = "authorityEpoch", default)]
+    pub authority_epoch: Option<u64>,
 }
 
 /// The verified claims of an agent `ogr_` relay producer token. Field names mirror
@@ -248,6 +257,26 @@ mod tests {
         assert_eq!(claims.lease_epoch, 3);
         assert_eq!(claims.port, 7681);
         assert_eq!(claims.mode, "view");
+    }
+
+    #[test]
+    fn parses_viewer_authority_claims_and_tolerates_their_absence() {
+        // A 0281 token carries the viewer subject + authority epoch.
+        let payload = r#"{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":3,"mode":"view","port":7681,"exp":9999999999,"subjectId":"user:abc","authorityEpoch":7}"#;
+        let token = mint(STREAM_TOKEN_PREFIX, "sekret", payload);
+        let claims = verify_stream_token("sekret", &token, 1_000).expect("verify");
+        assert_eq!(claims.subject_id.as_deref(), Some("user:abc"));
+        assert_eq!(claims.authority_epoch, Some(7));
+
+        // A pre-0281 token (no claims) still verifies with None fields.
+        let legacy = mint(
+            STREAM_TOKEN_PREFIX,
+            "sekret",
+            &stream_payload(3, 9_999_999_999),
+        );
+        let legacy_claims = verify_stream_token("sekret", &legacy, 1_000).expect("verify");
+        assert_eq!(legacy_claims.subject_id, None);
+        assert_eq!(legacy_claims.authority_epoch, None);
     }
 
     #[test]

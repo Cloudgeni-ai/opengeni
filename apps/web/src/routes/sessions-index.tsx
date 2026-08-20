@@ -61,8 +61,9 @@ import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
-  coerceReasoningEffortForModel,
+  effortOptionsForModel,
   findPickerRow,
+  runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
@@ -170,7 +171,10 @@ function SessionsIndexRouteContent({
   const persistedValue = useMemo(
     () => ({
       text: message,
-      resources: [...context.currentResources, ...attachments.readyResources],
+      resources: [
+        ...(draft.compute.kind === "machine" ? [] : context.currentResources),
+        ...attachments.readyResources,
+      ],
       tools: persistedToolPolicy.tools,
       toolsProvided: persistedToolPolicy.toolsProvided,
       model: context.model,
@@ -210,7 +214,7 @@ function SessionsIndexRouteContent({
       );
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
-      setLatencyMode(remote.latencyMode ?? "standard");
+      setLatencyMode(remote.latencyMode);
       setToolSelectionExplicit(remote.toolsProvided);
       const selected = new Set(
         remote.toolsProvided
@@ -246,6 +250,17 @@ function SessionsIndexRouteContent({
     resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
+  const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  const newSessionPolicyValid = Boolean(
+    selectedPolicyRow?.selectable &&
+    effortOptionsForModel(selectedPolicyRow.catalog).includes(context.reasoningEffort) &&
+    (context.latencyMode === "standard" ||
+      runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
+  );
+  const newSessionPolicyError =
+    !modelCatalog.loading && !newSessionPolicyValid
+      ? "Choose a supported model, reasoning level, and speed."
+      : null;
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -270,10 +285,14 @@ function SessionsIndexRouteContent({
       realtimeModel: SessionRealtimeModel | null,
       policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
     ): Promise<boolean> => {
-      const typedText = message.trim();
-      const text =
-        typedText || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (busy || newSessionDraft.loading || newSessionDraft.conflict) return false;
+      const hasTypedText = message.trim().length > 0;
+      const text = hasTypedText
+        ? message
+        : attachments.readyResources.length > 0
+          ? FILE_ONLY_MESSAGE_TEXT
+          : "";
+      if (busy || newSessionDraft.loading || newSessionDraft.conflict || !newSessionPolicyValid)
+        return false;
       if (
         createdSessionAuthority === null &&
         ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
@@ -321,10 +340,7 @@ function SessionsIndexRouteContent({
               };
             }
 
-            const submittedResources =
-              draft.compute.kind === "machine"
-                ? attachments.readyResources
-                : persistedValue.resources;
+            const submittedResources = persistedValue.resources;
             const flushed = await newSessionDraft.flush();
             if (!flushed) return null;
             const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
@@ -373,16 +389,10 @@ function SessionsIndexRouteContent({
             };
           },
           navigate: async (sessionId) => {
-            const search: ComposerLaunchSearch = {
-              ...(model ? { model } : {}),
-              ...(reasoningEffort ? { effort: reasoningEffort } : {}),
-              ...(latencyMode ? { latency: latencyMode } : {}),
-              ...(realtimeModel ? { realtime: realtimeModel } : {}),
-            };
             await navigate({
               to: "/workspaces/$workspaceId/sessions/$sessionId",
               params: { workspaceId, sessionId },
-              search,
+              search: realtimeModel ? { realtime: realtimeModel } : {},
             });
           },
         });
@@ -418,7 +428,13 @@ function SessionsIndexRouteContent({
       });
       return;
     }
-    if (busy || !computeReady || !context.workspaceMcpCatalogReady || attachments.hasUnresolved) {
+    if (
+      busy ||
+      !computeReady ||
+      !newSessionPolicyValid ||
+      !context.workspaceMcpCatalogReady ||
+      attachments.hasUnresolved
+    ) {
       return;
     }
     handledLaunchKeyRef.current = launchKey;
@@ -442,6 +458,7 @@ function SessionsIndexRouteContent({
     navigate,
     newSessionDraft.conflict,
     newSessionDraft.loading,
+    newSessionPolicyValid,
     setLatencyMode,
     setModel,
     setReasoningEffort,
@@ -467,6 +484,7 @@ function SessionsIndexRouteContent({
       !busy &&
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
+      newSessionPolicyValid &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -478,6 +496,15 @@ function SessionsIndexRouteContent({
     draftLoading: newSessionDraft.loading,
     draftSaving: newSessionDraft.saving,
     draftConflict: newSessionDraft.conflict,
+    policy: {
+      model: context.model,
+      reasoningEffort: context.reasoningEffort,
+      latencyMode: context.latencyMode,
+    },
+    setModel: context.setModel,
+    setReasoningEffort: context.setReasoningEffort,
+    setLatencyMode: context.setLatencyMode,
+    draftPersistence: "disabled",
     applyDraft: () => {},
     reloadDraft: newSessionDraft.reload,
     resolveDraftConflict: newSessionDraft.resolveConflict,
@@ -489,7 +516,9 @@ function SessionsIndexRouteContent({
     steer: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-      if (!text || busy || attachments.hasUnresolved || !computeReady) return false;
+      if (!text || busy || attachments.hasUnresolved || !computeReady || !newSessionPolicyValid) {
+        return false;
+      }
       return await createComposer.send();
     },
   };
@@ -577,6 +606,7 @@ function SessionsIndexRouteContent({
                   newSessionDraft.loading ||
                   newSessionDraft.conflict !== null ||
                   attachments.hasUnresolved ||
+                  !newSessionPolicyValid ||
                   !computeReady ||
                   !context.workspaceMcpCatalogReady
                 }
@@ -585,11 +615,13 @@ function SessionsIndexRouteContent({
                     ? "Resolve the draft conflict before starting voice."
                     : attachments.hasUnresolved
                       ? "Wait for attachments to finish before starting voice."
-                      : !computeReady
-                        ? "Choose where this session should run first."
-                        : !context.workspaceMcpCatalogReady
-                          ? "Wait for session tools to finish loading."
-                          : null
+                      : !newSessionPolicyValid
+                        ? "Choose supported model settings before starting voice."
+                        : !computeReady
+                          ? "Choose where this session should run first."
+                          : !context.workspaceMcpCatalogReady
+                            ? "Wait for session tools to finish loading."
+                            : null
                 }
                 onStart={async (model) => await submitNewSession(model)}
               />
@@ -598,6 +630,7 @@ function SessionsIndexRouteContent({
               <SessionControlStrip
                 workspaceId={workspaceId}
                 modelCatalog={modelCatalog}
+                policyError={newSessionPolicyError}
                 disabled={busy || newSessionDraft.loading}
                 showRepos={draft.compute.kind === "sandbox"}
                 selection={{
@@ -760,6 +793,7 @@ function RecentSessionRow({
 function SessionControlStrip({
   workspaceId,
   modelCatalog,
+  policyError,
   disabled,
   showRepos,
   selection,
@@ -767,6 +801,7 @@ function SessionControlStrip({
 }: {
   workspaceId: string;
   modelCatalog: WorkspaceModelCatalogState;
+  policyError: string | null;
   disabled: boolean;
   showRepos: boolean;
   selection: SessionToolSelection;
@@ -776,22 +811,6 @@ function SessionControlStrip({
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
-  useEffect(() => {
-    const row = findPickerRow(modelCatalog.rows, context.model);
-    if (!row?.selectable) {
-      return;
-    }
-    const coerced = coerceReasoningEffortForModel(row.catalog, context.reasoningEffort);
-    if (coerced !== context.reasoningEffort) {
-      context.setReasoningEffort(coerced);
-    }
-  }, [
-    context,
-    context.model,
-    context.reasoningEffort,
-    context.setReasoningEffort,
-    modelCatalog.rows,
-  ]);
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
       <ModelPicker
@@ -801,7 +820,7 @@ function SessionControlStrip({
         latencyMode={context.latencyMode}
         disabled={disabled}
         loading={modelCatalog.loading}
-        error={modelCatalog.error}
+        error={modelCatalog.error ?? policyError}
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
         onLatencyModeChange={context.setLatencyMode}
@@ -866,8 +885,9 @@ function workspaceRepositoryPickerProps(
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
-    onDisconnectInstallation: (installationId: number) =>
-      context.disconnectGitHubInstallation(workspaceId, installationId),
+    onDisconnectInstallation: async (installationId: number) => {
+      await context.disconnectGitHubInstallation(workspaceId, installationId);
+    },
   };
 }
 

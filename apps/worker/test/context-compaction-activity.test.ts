@@ -30,6 +30,7 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
+  type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import {
@@ -97,6 +98,39 @@ describe("standalone context compaction execution", () => {
     expect(ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES).toBe(65_536);
   });
 
+  test("does not touch durable history when provider accounting is below threshold", async () => {
+    const inaccessibleDb = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("durable history was touched");
+        },
+      },
+    ) as Database;
+    const scope = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      executionGeneration: 1,
+      attemptId: crypto.randomUUID(),
+    };
+    const settings = testSettings({
+      contextWindowTokens: 272_000,
+      contextAutoCompactThresholdTokens: 244_800,
+    });
+
+    await expect(maybeCompactContext(inaccessibleDb, settings, scope, 244_799)).resolves.toEqual({
+      compacted: false,
+      reason: "below_threshold",
+      events: [],
+      requestConsumed: false,
+    });
+    await expect(maybeCompactContext(inaccessibleDb, settings, scope, 244_800)).rejects.toThrow(
+      "durable history was touched",
+    );
+  });
+
   test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -116,6 +150,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -198,6 +234,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -321,6 +359,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -496,6 +536,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -615,6 +657,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const invalidatedAt = new Date();
@@ -701,6 +745,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const attachmentRefs = [{ kind: "file", fileId: "00000000-0000-4000-8000-000000000081" }];
@@ -799,6 +845,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -954,6 +1002,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1094,6 +1144,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await initializeSessionStartAtomically(client.db, {
@@ -1229,6 +1281,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1408,10 +1462,12 @@ describe("standalone context compaction execution", () => {
     );
     expect(historyAfter.at(-1)?.item).toMatchObject({
       type: "message",
-      role: "system",
+      role: "user",
     });
-    expect(String(historyAfter.at(-1)?.item.content)).toContain(ordinary.update.id);
-    expect(String(historyAfter.at(-1)?.item.content)).toContain(goalContinuation.update.id);
+    const continuationInput = JSON.stringify(historyAfter.at(-1)?.item);
+    expect(continuationInput).toContain(ordinary.update.id);
+    expect(continuationInput).toContain("Continue the goal");
+    expect(continuationInput).not.toContain(goalContinuation.update.id);
     expect(
       await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
     ).toEqual([]);
@@ -1532,6 +1588,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1617,6 +1675,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -1717,6 +1777,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1794,6 +1856,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -1873,6 +1937,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -2007,6 +2073,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItems = [
@@ -2113,6 +2181,8 @@ describe("standalone context compaction execution", () => {
       resources: [],
       metadata: {},
       model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const originalItem = {

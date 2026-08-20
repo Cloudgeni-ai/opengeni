@@ -334,6 +334,12 @@ describe("API helpers", () => {
         runtimeSettings as never,
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    expect(
+      validateToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", eager: true }],
+        runtimeSettings as never,
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
     expect(() =>
       validateToolRefs([{ kind: "mcp", id: "missing" }], runtimeSettings as never),
     ).toThrow("unknown MCP server id: missing");
@@ -522,6 +528,9 @@ describe("API helpers", () => {
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft/submit`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/composer-draft/submit",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/control`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",

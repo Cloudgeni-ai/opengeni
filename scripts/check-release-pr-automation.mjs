@@ -26,9 +26,11 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   defaultBranch: "main",
   versionBranch: "changeset-release/main",
   releaseWorkflowPath: ".github/workflows/release.yml",
+  openVersionPrWorkflowPath: ".github/workflows/open-version-pr.yml",
   ciWorkflowPath: ".github/workflows/ci.yml",
   ciWorkflowFile: "ci.yml",
   sealWorkflowPath: ".github/workflows/seal-release-head.yml",
+  retainControllerWorkflowPath: ".github/workflows/retain-release-controller.yml",
   sourceAdmissionWorkflowPath: ".github/workflows/source-admission.yml",
   releaseHeadTagPrefix: "opengeni-release-head-",
   releaseHeadReleaseNamePrefix: "Retained OpenGeni release head ",
@@ -59,7 +61,6 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const positiveIntegerPattern = /^[1-9][0-9]*$/;
-const decisiveReviewStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
 const retryableVersionProjectionErrors = new Set([
   "Version PR base SHA changed",
   "Version PR head SHA changed",
@@ -320,10 +321,6 @@ function assertIdentity(actual, expected, label) {
   return identity;
 }
 
-function hasStableIdentity(actual, expected) {
-  return actual?.id === expected.id && actual?.type === expected.type;
-}
-
 function assertVersionPull(pull, expected) {
   const expectedNumber = expected.prNumber ?? expected.number;
   invariant(pull?.number === expectedNumber, "Version PR number changed");
@@ -459,6 +456,21 @@ function baseGithubContext(env, workflowPath, eventName) {
 
 function releasePushContext(env) {
   const context = baseGithubContext(env, RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath, "push");
+  requiredEnvironment(env, ["GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID"]);
+  return {
+    ...context,
+    runAttempt: assertPositiveInteger(env.GITHUB_RUN_ATTEMPT, "GITHUB_RUN_ATTEMPT"),
+    runId: assertPositiveInteger(env.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
+  };
+}
+
+function versionPrDispatchContext(env) {
+  if (env.GITHUB_EVENT_NAME === "push") return releasePushContext(env);
+  const context = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath,
+    "workflow_dispatch",
+  );
   requiredEnvironment(env, ["GITHUB_RUN_ATTEMPT", "GITHUB_RUN_ID"]);
   return {
     ...context,
@@ -627,7 +639,7 @@ async function convergedVersionHeadSha(api, context, options = {}) {
 export async function validateVersionPrDispatch(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
-  const context = releasePushContext(env);
+  const context = versionPrDispatchContext(env);
   const prNumber = assertPositiveInteger(
     options.prNumber ?? env.VERSION_PR_NUMBER,
     "Version PR number",
@@ -675,15 +687,16 @@ export async function validateVersionPrDispatch(options = {}) {
 function assertSourceRun(run, context) {
   invariant(run?.id === context.sourceRunId, "source Release run ID changed");
   invariant(run?.run_attempt === context.sourceRunAttempt, "source Release run attempt changed");
-  invariant(run?.event === "push", "source Release run was not triggered by a push");
+  const pushRelease =
+    run?.event === "push" && run?.path === RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath;
+  const dispatchedVersion =
+    run?.event === "workflow_dispatch" &&
+    run?.path === RELEASE_AUTOMATION_CONTRACT.openVersionPrWorkflowPath;
+  invariant(pushRelease || dispatchedVersion, "source run is not a trusted Version PR producer");
   invariant(
     (run?.status === "in_progress" && run.conclusion === null) ||
       (run?.status === "completed" && run.conclusion === "success"),
     "source Release run is neither in progress nor successfully completed",
-  );
-  invariant(
-    run?.path === RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath,
-    "source run did not execute the Release workflow",
   );
   invariant(
     run?.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
@@ -1213,6 +1226,57 @@ export async function sealReleaseHeadEvidence(options = {}) {
     releaseHead,
     releaseHeadRelease,
   };
+}
+
+function retainedControllerContext(env, suppliedControllerSha) {
+  const github = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.retainControllerWorkflowPath,
+    "workflow_dispatch",
+  );
+  requiredEnvironment(env, ["GITHUB_REF"]);
+  const controllerSha = assertSha(
+    suppliedControllerSha ?? env.RELEASE_CONTROLLER_SHA,
+    "retained controller SHA",
+  );
+  invariant(
+    env.GITHUB_REF === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
+    "retained controller workflow is not running from the default branch",
+  );
+  invariant(github.sha === controllerSha, "retained controller differs from workflow SHA");
+  return { ...github, controllerSha };
+}
+
+export async function retainCurrentMainControllerEvidence(options = {}) {
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? console;
+  const context = retainedControllerContext(env, options.controllerSha);
+  const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
+  const [repository, main, controller] = await Promise.all([
+    api.get(repositoryPath("")),
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/git/commits/${context.controllerSha}`)),
+  ]);
+  assertRepository(repository);
+  assertMainRef(main, context.controllerSha, "retained controller default branch");
+  assertCommit(controller, context.controllerSha, "retained controller commit");
+
+  const releaseHead = await ensureReleaseHeadRef(api, context.controllerSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.controllerSha);
+  const [terminalMain, terminalRef, terminalRelease] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/git/ref/tags/${releaseHead.name}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHead.name}`)),
+  ]);
+  assertMainRef(terminalMain, context.controllerSha, "terminal retained controller default branch");
+  assertReleaseHeadRef(terminalRef, context.controllerSha);
+  const verifiedRelease = assertReleaseHeadRelease(terminalRelease, context.controllerSha);
+  invariant(
+    JSON.stringify(verifiedRelease) === JSON.stringify(releaseHeadRelease),
+    "retained controller immutable release moved during retention",
+  );
+  logger.log(`Retained current main ${context.controllerSha} as an immutable release controller.`);
+  return { ...context, releaseHead, releaseHeadRelease };
 }
 
 function checkIdentity(kind, context) {
@@ -1840,64 +1904,11 @@ function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
   );
 }
 
-function exactHeadReviewArtifact(baseSha, headSha, releaseApprover) {
-  return {
-    version: 3,
-    kind: "opengeni-exact-head-release-review",
-    repository: RELEASE_AUTOMATION_CONTRACT.repository,
-    reviewedBaseSha: baseSha,
-    reviewedHeadSha: headSha,
-    reviewerLogin: releaseApprover.login,
-    reviewProfile: "exact-head-maintainer-v1",
-    verdict: "PASS",
-  };
-}
-
 function canonicalSha256(value) {
   const canonical = Object.fromEntries(
     Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
   );
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
-}
-
-function verifyAdminPassBody(body, artifact) {
-  const match =
-    /^<!-- opengeni-exact-head-release-review:v3 -->\n\n?```json\n([\s\S]+)\n```\s*$/.exec(body);
-  invariant(match !== null, "single-maintainer admin PASS body is not canonical");
-  let parsed;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch {
-    throw new Error("single-maintainer admin PASS body is not valid JSON");
-  }
-  const reviewerLogin = assertString(
-    parsed?.reviewerLogin,
-    "single-maintainer admin PASS reviewer login snapshot",
-  );
-  const boundArtifact = { ...artifact, reviewerLogin };
-  invariant(
-    JSON.stringify(parsed) === JSON.stringify(boundArtifact),
-    "single-maintainer admin PASS does not bind the exact base/head contract",
-  );
-  invariant(
-    body ===
-      `<!-- opengeni-exact-head-release-review:v3 -->\n\n\u0060\u0060\u0060json\n${JSON.stringify(boundArtifact, null, 2)}\n\u0060\u0060\u0060`,
-    "single-maintainer admin PASS body is not canonical",
-  );
-  return canonicalSha256(boundArtifact);
-}
-
-function sameProviderReview(left, right) {
-  return (
-    left?.id === right?.id &&
-    left?.state === right?.state &&
-    left?.commit_id === right?.commit_id &&
-    left?.html_url === right?.html_url &&
-    left?.submitted_at === right?.submitted_at &&
-    left?.body === right?.body &&
-    left?.user?.id === right?.user?.id &&
-    left?.user?.type === right?.user?.type
-  );
 }
 
 function validateLinearCompare(value, baseSha, sourceSha, expectedCommitCount) {
@@ -2091,95 +2102,23 @@ export async function verifyApprovedMerge(options = {}) {
     "release source tree differs from the exact reviewed head",
   );
   const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
-
-  const reviews = await paginatedArray(
-    api,
-    repositoryPath(`/pulls/${pullNumber}/reviews`),
-    "pull-request reviews",
-  );
-  const decisions = reviews
-    .flatMap((review) => {
-      const releaseApprover = RELEASE_AUTOMATION_CONTRACT.releaseApprovers.find((candidate) =>
-        hasStableIdentity(review?.user, candidate),
-      );
-      if (
-        releaseApprover === undefined ||
-        review.commit_id !== pullIdentity.headSha ||
-        (!decisiveReviewStates.has(review.state) &&
-          !(
-            review.state === "COMMENTED" &&
-            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->")
-          ))
-      ) {
-        return [];
-      }
-      return [
-        {
-          id: assertPositiveInteger(review.id, "trusted review ID"),
-          releaseApprover,
-          review,
-          submittedAt: assertTimestamp(review.submitted_at, "trusted review timestamp"),
-        },
-      ];
-    })
-    .sort((left, right) => left.submittedAt - right.submittedAt || left.id - right.id);
-  invariant(decisions.length > 0, "trusted reviewer did not review the exact PR head");
-  const decision = decisions.at(-1);
-  invariant(
-    decision.submittedAt < pullIdentity.mergedAt,
-    "trusted approval was not submitted before merge",
-  );
-  assertIdentity(decision.review.user, decision.releaseApprover, "trusted reviewer");
   const reviewUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
-    `/pull/${pullNumber}#pullrequestreview-${decision.id}`;
-  invariant(decision.review.html_url === reviewUrl, "trusted review URL changed");
-  const reviewDetail = await api.get(repositoryPath(`/pulls/${pullNumber}/reviews/${decision.id}`));
-  assertIdentity(reviewDetail?.user, decision.review.user, "trusted review detail actor");
-  invariant(
-    sameProviderReview(decision.review, reviewDetail),
-    "trusted review detail differs from provider review history",
-  );
-  invariant(
-    !pull.requested_reviewers.some((candidate) =>
-      hasStableIdentity(candidate, decision.releaseApprover),
-    ),
-    "trusted review is no longer effective because review was re-requested",
-  );
-
-  let reviewType;
-  let reviewEvidenceSha256;
-  if (decision.review.state === "APPROVED") {
-    invariant(
-      pullIdentity.author.id !== decision.releaseApprover.id,
-      "trusted reviewer authored the independently approved pull request",
-    );
-    reviewType = "independent-approval";
-    reviewEvidenceSha256 = canonicalSha256({
+    `/pull/${pullNumber}`;
+  const review = {
+    type: "merged-source",
+    id: pullNumber,
+    url: reviewUrl,
+    evidenceSha256: canonicalSha256({
       version: 1,
+      kind: "merged-source",
       repository: RELEASE_AUTOMATION_CONTRACT.repository,
       pullRequestNumber: pullNumber,
+      sourceSha: context.sourceSha,
       reviewedBaseSha: pullIdentity.baseSha,
       reviewedHeadSha: pullIdentity.headSha,
-      reviewerLogin: decision.releaseApprover.login,
-      reviewId: decision.id,
-      verdict: "APPROVED",
-    });
-  } else {
-    invariant(
-      decision.review.state === "COMMENTED" &&
-        pullIdentity.author.id === decision.releaseApprover.id &&
-        pullIdentity.merger.id === decision.releaseApprover.id &&
-        pullIdentity.author.type === "User" &&
-        pullIdentity.merger.type === "User",
-      "trusted review is neither independent approval nor a provider-bound single-maintainer admin PASS",
-    );
-    reviewType = "single-maintainer-admin-pass";
-    reviewEvidenceSha256 = verifyAdminPassBody(
-      decision.review.body ?? "",
-      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha, decision.releaseApprover),
-    );
-  }
+    }),
+  };
 
   const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
   const [headChecks, sourceChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
@@ -2252,12 +2191,7 @@ export async function verifyApprovedMerge(options = {}) {
       sha: pullIdentity.headSha,
     },
     releaseHeadRelease,
-    review: {
-      type: reviewType,
-      id: decision.id,
-      url: reviewUrl,
-      evidenceSha256: reviewEvidenceSha256,
-    },
+    review,
     sourceAdmission,
     requiredSourceChecks,
   };
@@ -2328,6 +2262,17 @@ async function runCommand(env = process.env) {
         release_head_sha: result.headSha,
         release_head_ref: result.releaseHead.ref,
         release_head_merged_source_sha: result.sourceSha,
+      },
+      env,
+    );
+    return;
+  }
+  if (command === "retain-release-controller") {
+    const result = await retainCurrentMainControllerEvidence({ env });
+    writeOutputs(
+      {
+        release_controller_sha: result.controllerSha,
+        release_controller_ref: result.releaseHead.ref,
       },
       env,
     );

@@ -509,12 +509,14 @@ export function Thumbnail({
   alt = "screenshot",
   expandLabel = "Expand screenshot",
   lightboxLabel = "Screenshot",
+  downloadFilename,
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
   expandLabel?: string | undefined;
   lightboxLabel?: string | undefined;
+  downloadFilename?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -542,7 +544,7 @@ export function Thumbnail({
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        lightbox.open(src, caption, event.currentTarget, lightboxLabel);
+        lightbox.open(src, caption, event.currentTarget, lightboxLabel, downloadFilename);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -573,12 +575,14 @@ export function ScreenshotFigure({
   alt = "screenshot",
   expandLabel = "Expand screenshot",
   lightboxLabel = "Screenshot",
+  downloadFilename,
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
   expandLabel?: string | undefined;
   lightboxLabel?: string | undefined;
+  downloadFilename?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -602,7 +606,9 @@ export function ScreenshotFigure({
       ) : lightbox ? (
         <button
           type="button"
-          onClick={(event) => lightbox.open(src, caption, event.currentTarget, lightboxLabel)}
+          onClick={(event) =>
+            lightbox.open(src, caption, event.currentTarget, lightboxLabel, downloadFilename)
+          }
           className={surface}
           aria-label={expandLabel}
         >

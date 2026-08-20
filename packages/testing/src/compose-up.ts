@@ -87,6 +87,11 @@ async function pinPulledImage(image: string, index: number): Promise<string> {
   // stopped containers first and can then reap their images before Compose has
   // created the real service containers. The pin exposes no ports and bypasses
   // the image's service entrypoint. stopTestServices removes it with `rm -f -v`.
+  // Scratch images such as Garage have no /bin/sh, so their pin runs the
+  // isolated daemon with a throwaway config instead.
+  if (isGarageImage(image)) {
+    await Bun.write(garagePinTomlPath(), garagePinToml());
+  }
   const pinName = `${projectName}-image-pin-${index}`;
   let lastFailure = "";
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -107,22 +112,11 @@ async function pinPulledImage(image: string, index: number): Promise<string> {
         break;
       }
     }
-    const created = Bun.spawnSync(
-      [
-        "docker",
-        "create",
-        "--name",
-        pinName,
-        "--label",
-        `com.opengeni.test-image-pin=${projectName}`,
-        "--entrypoint",
-        "/bin/sh",
-        image,
-        "-c",
-        "while :; do sleep 3600; done",
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
-    );
+    const created = Bun.spawnSync(createImagePinArgs(image, pinName), {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
     if (created.exitCode === 0) {
       const started = Bun.spawnSync(["docker", "start", pinName], {
         stdin: "ignore",
@@ -260,4 +254,63 @@ function isRetryablePinRace(message: string): boolean {
   return ["No such image", "No such container", "No such object"].some((part) =>
     message.includes(part),
   );
+}
+
+function isGarageImage(image: string): boolean {
+  return image.includes("dxflrs/garage") || /(^|\/)garage[:@]/.test(image);
+}
+
+function garagePinTomlPath(): string {
+  return `${composeFile}.garage-pin.toml`;
+}
+
+function createImagePinArgs(image: string, pinName: string): string[] {
+  const args = [
+    "docker",
+    "create",
+    "--name",
+    pinName,
+    "--label",
+    `com.opengeni.test-image-pin=${projectName}`,
+  ];
+  if (isGarageImage(image)) {
+    args.push(
+      "--network",
+      "none",
+      "--tmpfs",
+      "/var/lib/garage/meta",
+      "--tmpfs",
+      "/var/lib/garage/data",
+      "--mount",
+      `type=bind,src=${garagePinTomlPath()},dst=/etc/garage.toml,readonly`,
+      "--entrypoint",
+      "/garage",
+      image,
+      "server",
+      "--single-node",
+    );
+    return args;
+  }
+  args.push("--entrypoint", "/bin/sh", image, "-c", "while :; do sleep 3600; done");
+  return args;
+}
+
+function garagePinToml(): string {
+  return `metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.localhost"
+[admin]
+api_bind_addr = "127.0.0.1:3903"
+`;
 }

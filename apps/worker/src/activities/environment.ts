@@ -44,6 +44,15 @@ export type ConnectionScope = {
   workspaceId: string;
 };
 
+export type VariableSetCredentialAuthority = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatingHumanSubjectId: string | null;
+};
+
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
 export type GitCredentialBindingSeed = {
@@ -122,27 +131,63 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   settings: Settings,
   scope: ConnectionScope,
   environmentId: string | null,
+  authority: VariableSetCredentialAuthority,
   sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
+  options: {
+    /**
+     * Exact accepted scheduled-occurrence generation for this Variable Set,
+     * resolved by the caller from the immutable run snapshot; null/omitted for
+     * ordinary live turns.
+     */
+    expectedGeneration?: number | null;
+  } = {},
 ): Promise<WorkspaceEnvironmentForRun | null> {
   if (!sandboxSecrets) {
-    // Standalone default: today's local decrypt, unchanged.
-    return loadWorkspaceEnvironmentForRunFromDb(db, settings, scope.workspaceId, environmentId);
+    return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
+      ...scope,
+      variableSetId: environmentId,
+      authority: {
+        kind: "agent_attempt",
+        subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
+        ...authority,
+      },
+    });
   }
   if (!environmentId) {
     return null;
   }
+  const expectedGeneration = options.expectedGeneration ?? null;
   const secrets: SandboxSecrets = await sandboxSecrets({
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
+    ...authority,
     variableSetId: environmentId,
+    ...(expectedGeneration === null ? {} : { expectedGeneration }),
   });
   // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
   // decrypted values into the sandbox.
   assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
+  if (
+    secrets.accountId !== scope.accountId ||
+    secrets.sessionId !== authority.sessionId ||
+    secrets.turnId !== authority.turnId ||
+    secrets.attemptId !== authority.attemptId ||
+    secrets.executionGeneration !== authority.executionGeneration ||
+    secrets.variableSetId !== environmentId ||
+    // A scheduled attempt materializes only the exact accepted generation:
+    // the host must echo it and return that generation's values.
+    (expectedGeneration !== null &&
+      (secrets.expectedGeneration !== expectedGeneration ||
+        secrets.generation !== expectedGeneration))
+  ) {
+    throw new Error("connection-credential provider (sandboxSecrets) returned stale authority");
+  }
   return {
     id: secrets.id ?? environmentId,
     name: secrets.name ?? environmentId,
     description: secrets.description ?? null,
+    scope: secrets.scope,
+    generation: secrets.generation,
     values: secrets.values,
   };
 }
@@ -309,7 +354,11 @@ export async function mintRunGitCredentials(
   }
   const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
   return minted.bindings.length > 0
-    ? { bindings: minted.bindings, gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
+    ? {
+        bindings: minted.bindings,
+        gitTokens: minted.gitTokens,
+        expiresAt: minted.expiresAt,
+      }
     : undefined;
 }
 
@@ -716,7 +765,10 @@ export function gitHubTokenMintSelections(
         candidate.installationId > 0 &&
         candidate.repositoryIds.length > 0,
     )
-    .map(({ installationId, repositoryIds }) => ({ installationId, repositoryIds }));
+    .map(({ installationId, repositoryIds }) => ({
+      installationId,
+      repositoryIds,
+    }));
 }
 
 /** @deprecated Use gitHubTokenMintSelections for multi-installation sessions. */

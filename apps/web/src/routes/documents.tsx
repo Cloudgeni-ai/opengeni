@@ -3,6 +3,7 @@
 // it belongs to, and search everything they are authorized to access.
 import {
   ArrowLeftIcon,
+  DownloadIcon,
   FileIcon,
   FileImageIcon,
   FileSearchIcon,
@@ -174,6 +175,7 @@ export function DocumentsRoute({
   // nothing reads as "No results" rather than the initial prompt.
   const [searched, setSearched] = useState<string | null>(null);
   const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
+  const [downloadingIds, setDownloadingIds] = useState<Set<string>>(() => new Set());
   const [retryingAll, setRetryingAll] = useState(false);
   // Set when background indexing-status polling fails, so stale "indexing…"
   // rows carry a visible notice instead of silently freezing.
@@ -210,26 +212,19 @@ export function DocumentsRoute({
     }
   }, [client, workspaceId]);
 
-  const refreshDocuments = useCallback(
-    async (availableBases: DocumentBase[]) => {
-      setDocumentsLoading(true);
-      try {
-        const grouped = await Promise.all(
-          availableBases.map((base) => client.listDocuments(workspaceId, base.id)),
-        );
-        setDocuments(
-          grouped.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-        );
-        setDocumentsError(null);
-      } catch (error) {
-        setDocumentsError(error instanceof Error ? error : new Error(String(error)));
-        toast.error("Failed to load documents", { description: String(error) });
-      } finally {
-        setDocumentsLoading(false);
-      }
-    },
-    [client, workspaceId],
-  );
+  const refreshDocuments = useCallback(async () => {
+    setDocumentsLoading(true);
+    try {
+      const next = await client.listAccessibleDocuments(workspaceId);
+      setDocuments(next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+      setDocumentsError(null);
+    } catch (error) {
+      setDocumentsError(error instanceof Error ? error : new Error(String(error)));
+      toast.error("Failed to load documents", { description: String(error) });
+    } finally {
+      setDocumentsLoading(false);
+    }
+  }, [client, workspaceId]);
 
   useEffect(() => {
     void refreshBases();
@@ -244,7 +239,7 @@ export function DocumentsRoute({
       setDocumentsError(null);
       return;
     }
-    void refreshDocuments(bases);
+    void refreshDocuments();
   }, [bases, basesError, basesLoading, refreshDocuments]);
 
   useEffect(() => {
@@ -258,12 +253,11 @@ export function DocumentsRoute({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
-      await Promise.all(bases.map((base) => client.listDocuments(workspaceId, base.id)))
+      await client
+        .listAccessibleDocuments(workspaceId)
         .then((next) => {
           if (!cancelled) {
-            setDocuments(
-              next.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-            );
+            setDocuments(next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
             setPollFailed(false);
           }
         })
@@ -289,7 +283,7 @@ export function DocumentsRoute({
     } catch {
       // The existing inventory can still be refreshed if the base-list request fails.
     }
-    await refreshDocuments(nextBases);
+    await refreshDocuments();
   }
 
   async function handleDropText() {
@@ -419,6 +413,24 @@ export function DocumentsRoute({
     }
   }
 
+  async function handleDownloadDocument(document: IndexedDocument) {
+    setDownloadingIds((current) => new Set(current).add(document.id));
+    try {
+      const signed = await client.createDocumentOriginalFileDownloadUrl(workspaceId, document.id);
+      window.open(signed.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error("Failed to download document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDownloadingIds((current) => {
+        const next = new Set(current);
+        next.delete(document.id);
+        return next;
+      });
+    }
+  }
+
   return (
     <ContentPage>
       <section className="flex min-h-0 flex-1 flex-col text-left">
@@ -435,7 +447,7 @@ export function DocumentsRoute({
             className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Agent Brain
+            Back to Company Brain
           </Link>
         ) : null}
 
@@ -565,7 +577,7 @@ export function DocumentsRoute({
                           type="button"
                           variant="ghost"
                           size="xs"
-                          onClick={() => void refreshDocuments(bases)}
+                          onClick={() => void refreshDocuments()}
                         >
                           <RefreshCwIcon className="size-3" />
                           Refresh
@@ -584,7 +596,7 @@ export function DocumentsRoute({
                     <LoadErrorState
                       title="Couldn't load documents"
                       error={documentsError}
-                      onRetry={() => void refreshDocuments(bases)}
+                      onRetry={() => void refreshDocuments()}
                     />
                   ) : visibleDocumentsView === "empty" ? (
                     <EmptyState
@@ -645,6 +657,21 @@ export function DocumentsRoute({
                             pulse={document.status === "indexing"}
                           />
                           <span className="sr-only">{document.status}</span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            disabled={downloadingIds.has(document.id)}
+                            onClick={() => void handleDownloadDocument(document)}
+                            aria-label={`Download ${document.title}`}
+                            title="Download original file"
+                          >
+                            {downloadingIds.has(document.id) ? (
+                              <Loader2Icon className="size-4 animate-spin" />
+                            ) : (
+                              <DownloadIcon className="size-4" />
+                            )}
+                          </Button>
                           {document.status === "failed" ? (
                             <Button
                               type="button"

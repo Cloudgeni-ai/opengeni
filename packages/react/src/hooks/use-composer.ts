@@ -4,7 +4,9 @@ import {
   type DraftTimelineAnnotation,
   type EffectiveControlResumeOption,
   type EffectiveSessionControl,
+  type LatencyMode,
   type OpenGeniApiError,
+  type ReasoningEffort,
   type ResourceRef,
   type SaveComposerDraftRequest,
   type SendMessageInput,
@@ -14,7 +16,16 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
-export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId" | "annotations">;
+export type ComposerPolicy = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
+};
+
+export type ComposerSendExtras = Omit<
+  SendMessageInput,
+  "text" | "clientEventId" | "annotations" | "model" | "reasoningEffort" | "latencyMode"
+>;
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
@@ -23,9 +34,8 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     /** Called with the exact accepted wire input after a successful send. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /**
-     * Extra message fields (resources, tools, model, reasoningEffort, latencyMode) merged
-     * into every send. A function is evaluated at send time so it can read the
-     * surrounding UI state (attachment pickers, model selectors, ...).
+     * Non-policy message fields merged into every send. Durable policy belongs
+     * to this composer draft; attachments and credentials may remain host-owned.
      */
     sendExtras?: ComposerSendExtras | (() => ComposerSendExtras) | undefined;
     /**
@@ -36,16 +46,17 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     sendBlocked?: (() => boolean) | undefined;
     /** Latest server-derived workstream control; bound into Send/Steer OCC. */
     effectiveControl?: EffectiveSessionControl | null | undefined;
-    /** Apply durable model/tool/reasoning settings in the host's controlled UI. */
-    onDraftApplied?: ((draft: ComposerDraft) => void) | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
+    /** Required explicit authority when durable draft persistence is disabled. */
+    initialPolicy?: ComposerPolicy | undefined;
   };
 
 type ComposerDraftShadow = {
   text: string;
   resources: ResourceRef[];
   annotations: DraftTimelineAnnotation[];
+  policy?: ComposerPolicy | undefined;
 };
 
 type PendingComposerOperation = {
@@ -344,6 +355,7 @@ function rememberPendingComposerOperation(
       text: operation.newerShadow.text,
       resources: [...operation.newerShadow.resources],
       annotations: cloneAnnotations(operation.newerShadow.annotations),
+      ...(operation.newerShadow.policy ? { policy: { ...operation.newerShadow.policy } } : {}),
     },
   } satisfies StoredPendingComposerOperation;
   pendingComposerOperations.set(key, stored);
@@ -417,6 +429,11 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
+  /** Exact policy owned by this actor/session composer. Null while hydrating. */
+  policy?: ComposerPolicy | null | undefined;
+  setModel?: ((model: string) => void) | undefined;
+  setReasoningEffort?: ((effort: ReasoningEffort) => void) | undefined;
+  setLatencyMode?: ((mode: LatencyMode) => void) | undefined;
   /** Whether this controller owns a durable server-side draft. */
   draftPersistence?: "durable" | "disabled" | undefined;
   /** Apply an atomic queue Edit checkout without a second read. */
@@ -427,6 +444,13 @@ export type ComposerState = {
   removeRestoredResource: (index: number) => void;
   error: Error | null;
   clearError: () => void;
+};
+
+export type ComposerControllerState = ComposerState & {
+  policy: ComposerPolicy | null;
+  setModel: (model: string) => void;
+  setReasoningEffort: (effort: ReasoningEffort) => void;
+  setLatencyMode: (mode: LatencyMode) => void;
 };
 
 export type ComposerSteeringState = {
@@ -498,9 +522,12 @@ function steeringSettledByEvents(
 export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
-): ComposerState {
+): ComposerControllerState {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const durableDrafts = options.draftPersistence !== "disabled";
+  if (!durableDrafts && !options.initialPolicy) {
+    throw new Error("useComposer requires initialPolicy when draft persistence is disabled");
+  }
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
@@ -537,6 +564,9 @@ export function useComposer(
   const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
+  const [policy, setPolicy] = useState<ComposerPolicy | null>(
+    () => initialShadow?.policy ?? options.initialPolicy ?? null,
+  );
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>(
     () => initialShadow?.resources ?? [],
   );
@@ -551,6 +581,9 @@ export function useComposer(
   );
   const valueRef = useRef(initialShadow?.text ?? "");
   const annotationsRef = useRef<DraftTimelineAnnotation[]>(initialShadow?.annotations ?? []);
+  const policyRef = useRef<ComposerPolicy | null>(
+    initialShadow?.policy ?? options.initialPolicy ?? null,
+  );
   const draftRef = useRef<ComposerDraft | null>(null);
   const restoredResourcesRef = useRef<ResourceRef[]>(initialShadow?.resources ?? []);
   const localEditRevision = useRef(initialShadow ? 1 : 0);
@@ -560,15 +593,6 @@ export function useComposer(
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
   const onSubmitted = options.onSubmitted;
-  const onDraftApplied = options.onDraftApplied;
-  // Read through a ref so live session/policy projections can replace their
-  // apply callback without invalidating the draft loader and re-running its
-  // initial-load effect. Publish only committed callbacks: a suspended target
-  // render must not retarget an in-flight read owned by the committed session.
-  const onDraftAppliedRef = useRef(onDraftApplied);
-  useLayoutEffect(() => {
-    onDraftAppliedRef.current = onDraftApplied;
-  }, [onDraftApplied]);
   useLayoutEffect(() => {
     steeringRef.current = steering;
   }, [steering]);
@@ -600,6 +624,7 @@ export function useComposer(
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
     annotationsRef.current = shadow?.annotations ?? [];
+    policyRef.current = shadow?.policy ?? options.initialPolicy ?? null;
     draftRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
@@ -609,6 +634,7 @@ export function useComposer(
     setStateTargetKey(targetKey);
     setValue(shadow?.text ?? "");
     setAnnotations(shadow?.annotations ?? []);
+    setPolicy(policyRef.current);
     setAnnotationReviewTargetId(null);
     setSending(false);
     setOptimisticSends(restoredOptimisticSends);
@@ -632,7 +658,7 @@ export function useComposer(
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
-  }, [durableDrafts, pendingOperationKey, sessionId, targetKey]);
+  }, [durableDrafts, options.initialPolicy, pendingOperationKey, sessionId, targetKey]);
 
   const setOptimisticDraftShadow = useCallback(
     (shadow: ComposerDraftShadow): void => {
@@ -643,6 +669,7 @@ export function useComposer(
           text: shadow.text,
           resources: [...shadow.resources],
           annotations: cloneAnnotations(shadow.annotations),
+          ...(shadow.policy ? { policy: { ...shadow.policy } } : {}),
         },
       }));
       optimisticSendsRef.current = next;
@@ -656,15 +683,18 @@ export function useComposer(
     (next: ComposerDraft): void => {
       if (targetKeyRef.current !== targetKey) return;
       if (!durableDrafts) {
+        const nextPolicy = policyFromDraft(next);
         localEditRevision.current += 1;
         valueRef.current = next.text;
         annotationsRef.current = next.annotations ?? [];
+        policyRef.current = nextPolicy;
         restoredResourcesRef.current = next.resources;
         draftRef.current = null;
         lastSavedSignature.current = null;
         setDraft(null);
         setValue(next.text);
         setAnnotations(next.annotations ?? []);
+        setPolicy(nextPolicy);
         setRestoredResources(next.resources);
         pendingOperationRef.current = updatePendingComposerShadow(
           pendingOperationKey,
@@ -676,6 +706,7 @@ export function useComposer(
               resolveSendExtras(sendExtrasRef.current).resources ?? [],
             ),
             annotations: next.annotations ?? [],
+            policy: nextPolicy,
           },
         );
         setOptimisticDraftShadow({
@@ -685,12 +716,15 @@ export function useComposer(
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
           annotations: next.annotations ?? [],
+          policy: nextPolicy,
         });
         setDraftConflict(null);
         return;
       }
+      const nextPolicy = policyFromDraft(next);
       valueRef.current = next.text;
       annotationsRef.current = next.annotations ?? [];
+      policyRef.current = nextPolicy;
       draftRef.current = next;
       restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
@@ -698,6 +732,7 @@ export function useComposer(
       setDraft(next);
       setValue(next.text);
       setAnnotations(next.annotations ?? []);
+      setPolicy(nextPolicy);
       setRestoredResources(next.resources);
       pendingOperationRef.current = updatePendingComposerShadow(
         pendingOperationKey,
@@ -709,6 +744,7 @@ export function useComposer(
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
           annotations: next.annotations ?? [],
+          policy: nextPolicy,
         },
       );
       setOptimisticDraftShadow({
@@ -718,9 +754,9 @@ export function useComposer(
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
         annotations: next.annotations ?? [],
+        policy: nextPolicy,
       });
       setDraftConflict(null);
-      onDraftAppliedRef.current?.(next);
     },
     [durableDrafts, pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
@@ -736,17 +772,20 @@ export function useComposer(
       const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
       const baseAtStart = draftRef.current;
-      const extrasAtStart = resolveSendExtras(sendExtrasRef.current);
+      const policyAtStart = policyRef.current;
       const localSignatureAtStart = baseAtStart
-        ? draftSignature(
-            composerDraftPayload(
-              baseAtStart,
-              valueRef.current,
-              restoredResourcesRef.current,
-              annotationsRef.current,
-              extrasAtStart,
-            ),
-          )
+        ? policyAtStart
+          ? draftSignature(
+              composerDraftPayload(
+                baseAtStart,
+                valueRef.current,
+                restoredResourcesRef.current,
+                annotationsRef.current,
+                policyAtStart,
+                resolveSendExtras(sendExtrasRef.current).resources ?? [],
+              ),
+            )
+          : null
         : null;
       const localWasDirtyAtStart =
         localSignatureAtStart === null
@@ -782,32 +821,35 @@ export function useComposer(
             valueRef.current = shadow.text;
             restoredResourcesRef.current = shadow.resources;
             annotationsRef.current = shadow.annotations;
+            if (shadow.policy) policyRef.current = shadow.policy;
             localEditRevision.current ||= 1;
             setValue(shadow.text);
             setRestoredResources(shadow.resources);
             setAnnotations(shadow.annotations);
+            if (shadow.policy) setPolicy(shadow.policy);
           } else if (
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
-            // Model/effort/latency ride in sendExtras (outside
-            // localEditRevision). If
-            // the picker changed during this fetch, skip onDraftApplied so a
-            // stale server policy cannot undo the operator's pick.
-            const extrasNow = resolveSendExtras(sendExtrasRef.current);
-            const pickerChangedDuringFetch =
-              extrasNow.model !== extrasAtStart.model ||
-              extrasNow.reasoningEffort !== extrasAtStart.reasoningEffort ||
-              extrasNow.latencyMode !== extrasAtStart.latencyMode;
+            const fetchedPolicy = policyFromDraft(fetched);
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             annotationsRef.current = fetched.annotations ?? [];
+            policyRef.current = fetchedPolicy;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
             setAnnotations(fetched.annotations ?? []);
-            if (replaceLocal || !pickerChangedDuringFetch) {
-              onDraftAppliedRef.current?.(fetched);
+            setPolicy(fetchedPolicy);
+          } else {
+            // Keep the in-flight edit, but the fetched row is still the OCC
+            // base. First hydrate has no local policy until this read lands;
+            // without it autosave cannot persist the typed text.
+            lastSavedSignature.current = draftSignature(draftPayload(fetched));
+            if (!policyRef.current) {
+              const fetchedPolicy = policyFromDraft(fetched);
+              policyRef.current = fetchedPolicy;
+              setPolicy(fetchedPolicy);
             }
           }
         }
@@ -951,10 +993,29 @@ export function useComposer(
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
     const base = draftRef.current;
-    if (!base) return null;
-    const extras = resolveSendExtras(sendExtrasRef.current);
-    return composerDraftPayload(base, value, restoredResources, annotations, extras);
+    const currentPolicy = policyRef.current;
+    if (!base || !currentPolicy) return null;
+    return composerDraftPayload(
+      base,
+      value,
+      restoredResources,
+      annotations,
+      currentPolicy,
+      resolveSendExtras(sendExtrasRef.current).resources ?? [],
+    );
   }, [annotations, durableDrafts, restoredResources, targetKey, value]);
+
+  const adoptDraftBase = useCallback(
+    (next: ComposerDraft): void => {
+      if (targetKeyRef.current !== targetKey) return;
+      draftRef.current = next;
+      setDraft(next);
+      lastSavedSignature.current = draftSignature(draftPayload(next));
+      setDraftConflict(null);
+      setError(null);
+    },
+    [targetKey],
+  );
 
   const persistPayload = useCallback(
     async (payload: SaveComposerDraftRequest): Promise<boolean> => {
@@ -981,30 +1042,14 @@ export function useComposer(
         }
         setDraftSaving(true);
         try {
-          const saved = await saveComposerDraftWithStaleRetry({
-            client,
-            workspaceId,
-            sessionId,
-            request,
-            onAdoptRemote: (remote) => {
-              draftRef.current = remote;
-              setDraft(remote);
-            },
-          });
+          const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
           if (
             targetKeyRef.current !== ownedTargetKey ||
             targetGeneration.current !== ownedGeneration
           ) {
             return;
           }
-          draftRef.current = saved;
-          setDraft(saved);
-          lastSavedSignature.current = draftSignature({
-            ...request,
-            expectedRevision: saved.revision,
-          });
-          setDraftConflict(null);
-          setError(null);
+          adoptDraftBase(saved);
           success = true;
         } catch (cause) {
           if (
@@ -1028,7 +1073,7 @@ export function useComposer(
       await saveChain.current;
       return success;
     },
-    [client, durableDrafts, sessionId, targetKey, workspaceId],
+    [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
   );
 
   const replaceOptimisticSends = useCallback(
@@ -1095,6 +1140,7 @@ export function useComposer(
                 event.type === "user.message" && event.clientEventId === operation.clientEventId,
             )
           ) {
+            if (durableDrafts) await loadDraft(false);
             markOptimisticAccepted(operation);
             return;
           }
@@ -1121,7 +1167,33 @@ export function useComposer(
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
-        await client.sendMessage(workspaceId, sessionId, wireInput);
+        if (durableDrafts) {
+          if (!operation.draftPayload || expectedDraftRevision === undefined) {
+            throw new Error("The durable composer draft is not ready for delivery.");
+          }
+          const result = await client.submitComposerDraft(workspaceId, sessionId, {
+            text: operation.draftPayload.text,
+            annotations: operation.draftPayload.annotations,
+            resources: operation.draftPayload.resources,
+            model: operation.draftPayload.model,
+            reasoningEffort: operation.draftPayload.reasoningEffort,
+            latencyMode: operation.draftPayload.latencyMode,
+            expectedDraftRevision,
+            clientEventId: operation.clientEventId,
+            delivery: "send",
+            ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
+            ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
+            ...(wireInput.mcpCredentialUpdates
+              ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
+              : {}),
+            ...(wireInput.connectionAuthorities
+              ? { connectionAuthorities: wireInput.connectionAuthorities }
+              : {}),
+          });
+          adoptDraftBase(result.draft);
+        } else {
+          await client.sendMessage(workspaceId, sessionId, wireInput);
+        }
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
@@ -1142,21 +1214,6 @@ export function useComposer(
         if (!optimisticCallbackIdsRef.current.has(operation.clientEventId)) {
           optimisticCallbackIdsRef.current.add(operation.clientEventId);
           onSent?.(wireInput.text, wireInput);
-        }
-        if (durableDrafts && draftRef.current) {
-          const cleared = {
-            ...draftRef.current,
-            revision: 0,
-            text: "",
-            resources: [],
-            annotations: [],
-            sourceTurnId: null,
-            sourceTurnVersion: null,
-            updatedAt: null,
-          };
-          draftRef.current = cleared;
-          setDraft(cleared);
-          lastSavedSignature.current = draftSignature(draftPayload(cleared));
         }
       } catch (cause) {
         const problem = asError(cause);
@@ -1186,9 +1243,11 @@ export function useComposer(
       }
     })();
   }, [
+    adoptDraftBase,
     client,
     durableDrafts,
     markOptimisticAccepted,
+    loadDraft,
     onSent,
     options.events,
     persistPayload,
@@ -1214,11 +1273,13 @@ export function useComposer(
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
         annotations: annotationsRef.current,
+        ...(policyRef.current ? { policy: policyRef.current } : {}),
       };
       if (
         pending.newerShadow.text !== shadow.text ||
         JSON.stringify(pending.newerShadow.resources) !== JSON.stringify(shadow.resources) ||
-        JSON.stringify(pending.newerShadow.annotations) !== JSON.stringify(shadow.annotations)
+        JSON.stringify(pending.newerShadow.annotations) !== JSON.stringify(shadow.annotations) ||
+        JSON.stringify(pending.newerShadow.policy) !== JSON.stringify(shadow.policy)
       ) {
         pendingOperationRef.current = updatePendingComposerShadow(
           pendingOperationKey,
@@ -1237,11 +1298,13 @@ export function useComposer(
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
         annotations: annotationsRef.current,
+        ...(policyRef.current ? { policy: policyRef.current } : {}),
       };
       if (
         optimistic.newerShadow.text !== shadow.text ||
         JSON.stringify(optimistic.newerShadow.resources) !== JSON.stringify(shadow.resources) ||
-        JSON.stringify(optimistic.newerShadow.annotations) !== JSON.stringify(shadow.annotations)
+        JSON.stringify(optimistic.newerShadow.annotations) !== JSON.stringify(shadow.annotations) ||
+        JSON.stringify(optimistic.newerShadow.policy) !== JSON.stringify(shadow.policy)
       ) {
         setOptimisticDraftShadow(shadow);
       }
@@ -1290,6 +1353,7 @@ export function useComposer(
       const rawText = explicit ?? draftAtSend;
       const hasText = rawText.trim().length > 0;
       const hasAnnotations = annotationsAtSend.length > 0;
+      const currentPolicy = policyRef.current;
       const annotationsComplete = annotationsAtSend.every(
         (annotation) => annotation.note.trim().length > 0,
       );
@@ -1300,6 +1364,7 @@ export function useComposer(
       if (
         (!pending && (!annotationsComplete || (!hasText && !hasResources && !hasAnnotations))) ||
         !sessionId ||
+        !currentPolicy ||
         sending ||
         sendBlockedRef.current?.() === true ||
         targetKeyRef.current !== ownedTargetKey
@@ -1323,22 +1388,6 @@ export function useComposer(
           JSON.stringify(operation.resourcesAtSend);
         const annotationsWereUnchanged =
           JSON.stringify(annotationsRef.current) === JSON.stringify(operation.annotationsAtSend);
-        const previousDraft = draftRef.current;
-        if (previousDraft) {
-          const cleared = {
-            ...previousDraft,
-            revision: 0,
-            text: "",
-            resources: [],
-            annotations: [],
-            sourceTurnId: null,
-            sourceTurnVersion: null,
-            updatedAt: null,
-          };
-          draftRef.current = cleared;
-          setDraft(cleared);
-          lastSavedSignature.current = draftSignature(draftPayload(cleared));
-        }
         if (resourcesWereUnchanged) {
           restoredResourcesRef.current = [];
           setRestoredResources([]);
@@ -1356,6 +1405,39 @@ export function useComposer(
       };
 
       const deliver = async (operation: PendingComposerOperation) => {
+        if (durableDrafts) {
+          const input = operation.input;
+          if (
+            input.expectedDraftRevision === undefined ||
+            input.clientEventId === undefined ||
+            input.model === undefined ||
+            input.reasoningEffort === undefined ||
+            input.latencyMode === undefined
+          ) {
+            throw new Error("The durable composer draft is not ready for delivery.");
+          }
+          const result = await client.submitComposerDraft(workspaceId, sessionId, {
+            text: input.text,
+            annotations: input.annotations ?? [],
+            resources: input.resources ?? [],
+            model: input.model,
+            reasoningEffort: input.reasoningEffort,
+            latencyMode: input.latencyMode,
+            expectedDraftRevision: input.expectedDraftRevision,
+            clientEventId: input.clientEventId,
+            delivery: operation.delivery,
+            ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
+            ...(input.modelContext ? { modelContext: input.modelContext } : {}),
+            ...(input.mcpCredentialUpdates
+              ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
+              : {}),
+            ...(input.connectionAuthorities
+              ? { connectionAuthorities: input.connectionAuthorities }
+              : {}),
+          });
+          adoptDraftBase(result.draft);
+          return result;
+        }
         if (operation.delivery === "steer") {
           return await client.steerMessage(workspaceId, sessionId, operation.input);
         }
@@ -1405,6 +1487,7 @@ export function useComposer(
             return false;
           }
           if (acceptedEvent) {
+            if (durableDrafts) await loadDraft(false);
             if (pending.delivery === "steer") {
               keepSteering = true;
               setSteering({
@@ -1479,6 +1562,7 @@ export function useComposer(
         // carries a minimal default so the attachments still get delivered.
         pendingClientEventId.current ??= generateClientEventId();
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
+          ...currentPolicy,
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
             : {}),
@@ -1498,6 +1582,7 @@ export function useComposer(
             text: draftAtSend,
             resources: mergeResources(restoredResources, extras.resources ?? []),
             annotations: cloneAnnotations(annotationsAtSend),
+            policy: currentPolicy,
           },
           clearDraftOnAccept: explicit === undefined,
           canRetry: true,
@@ -1568,11 +1653,13 @@ export function useComposer(
       persistPayload,
       restoredResources,
       annotations,
+      adoptDraftBase,
       sending,
       sessionId,
       targetKey,
       value,
       workspaceId,
+      loadDraft,
     ],
   );
 
@@ -1583,6 +1670,7 @@ export function useComposer(
       }
       const rawText = explicit ?? valueRef.current;
       const annotationsAtSend = cloneAnnotations(annotationsRef.current);
+      const currentPolicy = policyRef.current;
       const hasText = rawText.trim().length > 0;
       const hasAnnotations = annotationsAtSend.length > 0;
       const annotationsComplete = annotationsAtSend.every(
@@ -1592,6 +1680,7 @@ export function useComposer(
       const resources = mergeResources(restoredResourcesRef.current, extras.resources ?? []);
       if (
         !sessionId ||
+        !currentPolicy ||
         sending ||
         !annotationsComplete ||
         (!hasText && !hasAnnotations && resources.length === 0) ||
@@ -1603,6 +1692,7 @@ export function useComposer(
       const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
       const clientEventId = generateClientEventId();
       const input = composeSendInput(sendText, clientEventId, extras, {
+        ...currentPolicy,
         ...(options.effectiveControl?.controlEtag
           ? { controlEtag: options.effectiveControl.controlEtag }
           : {}),
@@ -1623,6 +1713,7 @@ export function useComposer(
           text: explicit === undefined ? "" : valueRef.current,
           resources: explicit === undefined ? [] : [...restoredResourcesRef.current],
           annotations: explicit === undefined ? [] : cloneAnnotations(annotationsRef.current),
+          policy: currentPolicy,
         },
         canRetry: true,
       };
@@ -1667,8 +1758,7 @@ export function useComposer(
             return { ...operation, state: "sending", error: undefined };
           }
           const nextClientEventId = generateClientEventId();
-          const retryExtras = resolveSendExtras(sendExtrasRef.current);
-          const retryInput = composeSendInput(operation.text, nextClientEventId, retryExtras, {
+          const retryInput = composeSendInput(operation.text, nextClientEventId, operation.input, {
             ...(options.effectiveControl?.controlEtag
               ? { controlEtag: options.effectiveControl.controlEtag }
               : {}),
@@ -1679,15 +1769,7 @@ export function useComposer(
             ...operation,
             clientEventId: nextClientEventId,
             input: retryInput,
-            draftPayload: operation.draftPayload
-              ? {
-                  ...operation.draftPayload,
-                  model: retryExtras.model ?? operation.draftPayload.model,
-                  reasoningEffort:
-                    retryExtras.reasoningEffort ?? operation.draftPayload.reasoningEffort,
-                  latencyMode: retryExtras.latencyMode ?? operation.draftPayload.latencyMode,
-                }
-              : null,
+            draftPayload: operation.draftPayload,
             occurredAt: new Date().toISOString(),
             state: "sending",
             error: undefined,
@@ -1878,6 +1960,7 @@ export function useComposer(
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
           annotations: annotationsRef.current,
+          policy: policyRef.current ?? undefined,
         },
       );
       setOptimisticDraftShadow({
@@ -1887,6 +1970,7 @@ export function useComposer(
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
         annotations: annotationsRef.current,
+        policy: policyRef.current ?? undefined,
       });
       setValue(next);
     },
@@ -1908,6 +1992,7 @@ export function useComposer(
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
           annotations: next,
+          policy: policyRef.current ?? undefined,
         },
       );
       setOptimisticDraftShadow({
@@ -1917,6 +2002,7 @@ export function useComposer(
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
         annotations: next,
+        policy: policyRef.current ?? undefined,
       });
       setAnnotations(next);
       setAnnotationReviewTargetId(reviewTargetId);
@@ -1958,6 +2044,55 @@ export function useComposer(
     setAnnotationReviewTargetId(null);
   }, []);
 
+  const updatePolicy = useCallback(
+    (next: ComposerPolicy): void => {
+      if (targetKeyRef.current !== targetKey) return;
+      localEditRevision.current += 1;
+      policyRef.current = next;
+      const shadow = {
+        text: valueRef.current,
+        resources: mergeResources(
+          restoredResourcesRef.current,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+        annotations: annotationsRef.current,
+        policy: next,
+      };
+      pendingOperationRef.current = updatePendingComposerShadow(
+        pendingOperationKey,
+        pendingOperationRef.current,
+        shadow,
+      );
+      setOptimisticDraftShadow(shadow);
+      setPolicy(next);
+    },
+    [pendingOperationKey, setOptimisticDraftShadow, targetKey],
+  );
+
+  const updateModel = useCallback(
+    (model: string): void => {
+      const current = policyRef.current;
+      if (current) updatePolicy({ ...current, model });
+    },
+    [updatePolicy],
+  );
+
+  const updateReasoningEffort = useCallback(
+    (reasoningEffort: ReasoningEffort): void => {
+      const current = policyRef.current;
+      if (current) updatePolicy({ ...current, reasoningEffort });
+    },
+    [updatePolicy],
+  );
+
+  const updateLatencyMode = useCallback(
+    (latencyMode: LatencyMode): void => {
+      const current = policyRef.current;
+      if (current) updatePolicy({ ...current, latencyMode });
+    },
+    [updatePolicy],
+  );
+
   const removeRestoredResource = useCallback(
     (index: number) => {
       if (targetKeyRef.current !== targetKey) return;
@@ -1971,12 +2106,14 @@ export function useComposer(
           text: valueRef.current,
           resources: mergeResources(next, resolveSendExtras(sendExtrasRef.current).resources ?? []),
           annotations: annotationsRef.current,
+          policy: policyRef.current ?? undefined,
         },
       );
       setOptimisticDraftShadow({
         text: valueRef.current,
         resources: mergeResources(next, resolveSendExtras(sendExtrasRef.current).resources ?? []),
         annotations: annotationsRef.current,
+        policy: policyRef.current ?? undefined,
       });
       setRestoredResources(next);
     },
@@ -2069,6 +2206,8 @@ export function useComposer(
       identityMatches &&
       Boolean(sessionId) &&
       !sending &&
+      !draftLoading &&
+      policy !== null &&
       sendBlockedRef.current?.() !== true &&
       annotationsComplete &&
       (hasPendingOperation ||
@@ -2085,6 +2224,10 @@ export function useComposer(
     draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
     draftSaving: identityMatches ? draftSaving : false,
     draftConflict: identityMatches ? draftConflict : null,
+    policy: identityMatches ? policy : null,
+    setModel: updateModel,
+    setReasoningEffort: updateReasoningEffort,
+    setLatencyMode: updateLatencyMode,
     draftPersistence: durableDrafts ? "durable" : "disabled",
     applyDraft,
     reloadDraft,
@@ -2166,52 +2309,9 @@ function asError(cause: unknown): Error {
 
 function isDraftConflictError(error: Error): boolean {
   const apiError = error as Partial<OpenGeniApiError>;
-  if (apiError.status !== 409 || apiError.outcomeUnknown === true) return false;
-  // Production queue OCC returns `DRAFT_CHANGED`. Older/SDK-shaped 409s may
-  // omit code or use the generic conflict labels — all are recoverable OCC.
-  const code = apiError.code;
-  if (
-    code === undefined ||
-    code === "DRAFT_CHANGED" ||
-    code === "conflict" ||
-    code === "idempotency_conflict"
-  ) {
-    return true;
-  }
-  return /draft changed/i.test(error.message);
-}
-
-/**
- * One OCC retry: adopt the server revision and rewrite the same local content.
- * Covers the common "tab slept through a successful autosave" case without
- * stranding the operator on a raw 409 toast.
- */
-async function saveComposerDraftWithStaleRetry(input: {
-  client: {
-    getComposerDraft: (workspaceId: string, sessionId: string) => Promise<ComposerDraft>;
-    saveComposerDraft: (
-      workspaceId: string,
-      sessionId: string,
-      request: SaveComposerDraftRequest,
-    ) => Promise<ComposerDraft>;
-  };
-  workspaceId: string;
-  sessionId: string;
-  request: SaveComposerDraftRequest;
-  onAdoptRemote: (remote: ComposerDraft) => void;
-}): Promise<ComposerDraft> {
-  try {
-    return await input.client.saveComposerDraft(input.workspaceId, input.sessionId, input.request);
-  } catch (cause) {
-    const problem = asError(cause);
-    if (!isDraftConflictError(problem)) throw problem;
-    const remote = await input.client.getComposerDraft(input.workspaceId, input.sessionId);
-    input.onAdoptRemote(remote);
-    return await input.client.saveComposerDraft(input.workspaceId, input.sessionId, {
-      ...input.request,
-      expectedRevision: remote.revision,
-    });
-  }
+  return (
+    apiError.status === 409 && apiError.outcomeUnknown !== true && apiError.code === "DRAFT_CHANGED"
+  );
 }
 
 function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
@@ -2222,7 +2322,15 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     annotations: draft.annotations ?? [],
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
-    latencyMode: draft.latencyMode ?? "standard",
+    latencyMode: draft.latencyMode,
+  };
+}
+
+function policyFromDraft(draft: ComposerDraft): ComposerPolicy {
+  return {
+    model: draft.model,
+    reasoningEffort: draft.reasoningEffort,
+    latencyMode: draft.latencyMode,
   };
 }
 
@@ -2231,16 +2339,17 @@ function composerDraftPayload(
   text: string,
   restoredResources: ResourceRef[],
   annotations: DraftTimelineAnnotation[],
-  extras: ComposerSendExtras,
+  policy: ComposerPolicy,
+  additionalResources: ResourceRef[],
 ): SaveComposerDraftRequest {
   return {
     expectedRevision: base.revision,
     text,
-    resources: mergeResources(restoredResources, extras.resources ?? []),
+    resources: mergeResources(restoredResources, additionalResources),
     annotations,
-    model: extras.model ?? base.model,
-    reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
-    latencyMode: extras.latencyMode ?? base.latencyMode ?? "standard",
+    model: policy.model,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
   };
 }
 

@@ -172,7 +172,7 @@ export async function startDeviceEnrollment(
     throw lastError instanceof Error ? lastError : new Error("failed to start device enrollment");
   }
 
-  const base = input.verificationOrigin.replace(/\/$/, "");
+  const base = input.verificationOrigin.replace(/\/+$/, "");
   const verificationUri = `${base}/device`;
   const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(request.userCode)}`;
   return {
@@ -193,12 +193,18 @@ export async function approveDeviceEnrollment(
   input: {
     accountId: string;
     workspaceId: string;
+    scope?: "organization" | "workspace" | "user";
+    allowOrganization?: boolean;
     userCode: string;
     allowScreenControl: boolean;
     approvedBySubjectId: string;
     approvedBySubjectLabel?: string | null;
   },
-): Promise<{ enrollmentId: string; sandboxId: string; allowScreenControl: boolean } | null> {
+): Promise<{
+  enrollmentId: string;
+  sandboxId: string;
+  allowScreenControl: boolean;
+} | null> {
   const { db } = services;
   const pending = await getPendingDeviceEnrollmentRequestByUserCode(
     db,
@@ -213,6 +219,8 @@ export async function approveDeviceEnrollment(
   const result = await approveDeviceEnrollmentRequest(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
+    ...(input.scope ? { scope: input.scope } : {}),
+    allowOrganization: input.allowOrganization === true,
     requestId: pending.id,
     allowScreenControl: input.allowScreenControl,
     approvedBySubjectId: input.approvedBySubjectId,
@@ -291,7 +299,11 @@ export async function denyDeviceEnrollment(
  *  mirror poll's "disabled" handling. The token value is NEVER logged. */
 export async function mintEnrollToken(
   services: EnrollmentServices,
-  input: { accountId: string; workspaceId: string; allowScreenControl: boolean },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    allowScreenControl: boolean;
+  },
 ): Promise<MintEnrollTokenResponse | null> {
   const { settings } = services;
   const secret = resolveEnrollmentSigningSecret(settings);

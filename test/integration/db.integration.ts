@@ -25,6 +25,8 @@ import {
   getSessionHistoryItems,
   createScheduledTask,
   createScheduledTaskRun,
+  getNestedAgentDepthDeploymentPolicy,
+  markScheduledTaskRunFailedIfQueued,
   createApiKey,
   createSession,
   createSessionGoal,
@@ -51,7 +53,6 @@ import {
   listSessionEvents,
   listSessionsForSubject,
   updateScheduledTask,
-  updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
   requireScheduledTaskTargetInTransaction,
   ScheduledTaskTargetConflictError,
@@ -60,7 +61,12 @@ import {
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
-import type { AccessGrant, Permission } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   applyRawSql,
   expectContiguousSequences,
@@ -177,6 +183,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const events = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
@@ -215,6 +223,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const sentinel = new Date("2001-02-03T04:05:06.000Z");
@@ -347,6 +357,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       mcpServers: [
         {
@@ -480,6 +492,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await Promise.all(
@@ -508,6 +522,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
@@ -562,6 +578,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none" as const,
       createIdempotencyKey: key,
     });
@@ -610,6 +628,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createIdempotencyKey: seqKey,
     });
@@ -625,6 +645,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const plainB = await createSession(dbClient.db, {
@@ -634,6 +656,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     expect(plainA.id).not.toBe(plainB.id);
@@ -660,6 +684,57 @@ describe("DB integration", () => {
       },
       metadata: {},
     });
+    // Every agent occurrence is admitted against the task's immutable accepted
+    // execution while the task is still active; pausing afterwards keeps the
+    // retained run history readable.
+    const depthPolicy = await getNestedAgentDepthDeploymentPolicy(dbClient.db);
+    const runId = crypto.randomUUID();
+    const run = await createScheduledTaskRun(dbClient.db, {
+      runId,
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+      taskExecutionDigest: task.executionDigest,
+      triggerType: "manual",
+      producerKey: `db-integration-run:${runId}`,
+      scheduledAt: null,
+      acceptedExecutionSnapshot: {
+        version: 1,
+        task,
+        resolvedModel: "scripted-model",
+        resolvedReasoningEffort: "medium",
+        resolvedLatencyMode: "standard",
+        resolvedSandboxBackend: "none",
+        resolvedSandboxOs: "linux",
+        resolvedTools: [],
+        resolvedFirstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        resolvedFirstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+        resolvedVariableSet: null,
+        resolvedRig: null,
+        resolvedSlackBotConnection: null,
+        targetSessionExecution: null,
+        generatedSessionBinding: {
+          createIdempotencyKey: `db-integration-run:${runId}`,
+          effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+          nestedAgentDepthPolicySource: depthPolicy.policySource,
+          codexCompactionMode: "portable",
+        },
+        personalConnectionDelegations: [],
+        personalResourceAuthoritySubjectId: null,
+        causalHumanSubjectId: null,
+        causalHumanAuthority: null,
+        xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        xaiAuthoritySubjectId: null,
+        connectionAuthoritySubjectId: null,
+        triggerInitiator: { kind: "service", subjectId: "scheduler" },
+        agentRunUsageIdempotencyKey: null,
+        incidentPreflightRequired: false,
+        alertOccurrenceLabels: null,
+      },
+    });
+    // Agent run status is lifecycle-only: direct row updates are fenced, and
+    // the terminal transition goes through the run lifecycle capability.
+    await markScheduledTaskRunFailedIfQueued(dbClient.db, grant.workspaceId, run.id, "no worker");
     const updated = await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
       status: "paused",
     });
@@ -669,17 +744,6 @@ describe("DB integration", () => {
         (item) => item.id === task.id,
       ),
     ).toBe(true);
-
-    const run = await createScheduledTaskRun(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "manual",
-      scheduledAt: null,
-    });
-    await updateScheduledTaskRun(dbClient.db, grant.workspaceId, run.id, {
-      status: "failed",
-      error: "no worker",
-    });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.error).toBe("no worker");
@@ -694,6 +758,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const secondTarget = await createSession(dbClient.db, {
@@ -703,6 +769,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const task = await createScheduledTask(dbClient.db, {
@@ -761,6 +829,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     expect(await getSessionGoal(dbClient.db, grant.workspaceId, session.id)).toBeNull();
@@ -826,7 +896,7 @@ describe("DB integration", () => {
     expect(replaced.goal.version).toBeGreaterThan(completed.goal.version);
   });
 
-  test("evaluateGoalContinuation honors queue, approvals, progress, and caps", async () => {
+  test("evaluateGoalContinuation honors queue, approvals, and caps", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -835,9 +905,11 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
-    const guards = { defaultMaxAutoContinuations: 5, noProgressLimit: 2 };
+    const guards = { defaultMaxAutoContinuations: 5 };
 
     // No goal yet.
     expect(
@@ -916,37 +988,14 @@ describe("DB integration", () => {
       cap: 5,
     });
 
-    // A continuation turn that finishes without tool calls or a goal revision
-    // increments the no-progress streak; noProgressLimit 2 pauses the goal.
-    for (let round = 1; round <= 2; round += 1) {
-      const continuationTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, continuationTurn, "completed");
-      const next = await evaluateGoalContinuation(dbClient.db, {
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        ...guards,
-      });
-      if (round < 2) {
-        expect(next.decision).toBe("continue");
-      } else {
-        expect(next).toMatchObject({
-          decision: "paused",
-          reason: "no_progress",
-        });
-      }
-    }
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.pausedReason).toBe(
-      "no_progress",
-    );
-
-    // Replacing the goal re-arms it; the per-goal cap is enforced.
+    // A user-authoritative redirect re-arms it; the per-goal cap is enforced.
     await upsertSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       text: "one more push",
       maxAutoContinuations: 1,
-      createdBy: "agent",
+      createdBy: "api",
     });
     const capped = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
@@ -958,11 +1007,8 @@ describe("DB integration", () => {
       autoContinuation: 1,
       cap: 1,
     });
-    // Mark progress in that continuation so the cap (not no-progress) triggers.
     const capTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-    await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed", [
-      { type: "agent.toolCall.created", payload: {} },
-    ]);
+    await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed");
     const atCap = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -974,7 +1020,7 @@ describe("DB integration", () => {
     });
   });
 
-  test("provider backpressure turns freeze the no-progress streak", async () => {
+  test("continuations are not paused by inferred progress", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -983,9 +1029,11 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
-    const guards = { defaultMaxAutoContinuations: 10, noProgressLimit: 2 };
+    const guards = { defaultMaxAutoContinuations: null };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1000,22 +1048,12 @@ describe("DB integration", () => {
     });
     expect(first).toMatchObject({ decision: "continue", autoContinuation: 1 });
 
-    // Three consecutive rate-limited continuations (no tool calls) exceed
-    // noProgressLimit 2, but backpressure failures must not advance the
-    // streak: the goal keeps continuing instead of pausing as no_progress.
+    // Tool-call shape and provider outcome are not reliable progress signals.
+    // Repeated continuations without either remain active until the model,
+    // user, budget, or an explicit configured cap ends the goal.
     for (let round = 1; round <= 3; round += 1) {
       const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, turn, "failed", [
-        {
-          type: "turn.failed",
-          payload: {
-            code: "provider_rate_limited",
-            retryable: true,
-            recovery: "goal_continuation",
-            runStateSaved: false,
-          },
-        },
-      ]);
+      await settleRegisteredExecution(dbClient.db, grant, turn, "completed");
       const next = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -1026,25 +1064,10 @@ describe("DB integration", () => {
         autoContinuation: 1 + round,
       });
     }
-
-    // Ordinary empty continuations still count: two of them pause the goal.
-    for (let round = 1; round <= 2; round += 1) {
-      const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
-      await settleRegisteredExecution(dbClient.db, grant, turn, "completed");
-      const next = await evaluateGoalContinuation(dbClient.db, {
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        ...guards,
-      });
-      if (round < 2) {
-        expect(next.decision).toBe("continue");
-      } else {
-        expect(next).toMatchObject({
-          decision: "paused",
-          reason: "no_progress",
-        });
-      }
-    }
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+      status: "active",
+      noProgressStreak: 0,
+    });
   });
 
   test("goals are uncapped by count when no default cap is configured", async () => {
@@ -1056,10 +1079,13 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
-    // No deployment default: length is governed by progress/budget guards only.
-    const guards = { defaultMaxAutoContinuations: null, noProgressLimit: 2 };
+    // No deployment default: length is governed by explicit lifecycle and
+    // budget guards only.
+    const guards = { defaultMaxAutoContinuations: null };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1067,8 +1093,8 @@ describe("DB integration", () => {
       text: "keep going for days",
       createdBy: "api",
     });
-    // Run well past the old default cap of 20; with progress every round the
-    // loop must keep continuing, with a null cap throughout.
+    // Run well past the old default cap of 20; the loop keeps continuing with
+    // a null cap throughout.
     let decision = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1140,6 +1166,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
         firstPartyMcpPermissions,
       });
@@ -1233,6 +1261,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await createSessionGoal(dbClient.db, {
@@ -1257,6 +1287,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       await createSessionGoal(appDbClient.db, {
@@ -1304,6 +1336,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
 
@@ -1319,6 +1353,8 @@ describe("DB integration", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
       expect(created.workspaceId).toBe(grantA.workspaceId);
@@ -1347,6 +1383,8 @@ describe("DB integration", () => {
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
           sandboxBackend: "none",
         }),
       ).rejects.toThrow();
@@ -2326,13 +2364,20 @@ describe("DB integration", () => {
       },
       memoryEmbedder,
     );
-    const block = await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId);
-    expect(block).toContain("## Workspace memory");
-    expect(block).toContain("### Preferences");
-    expect(block).toContain("Prefer Terraform for infra.");
-    expect(block).toContain("Staging deploys from main.");
-    // Episodic is excluded from the injected block.
-    expect(block).not.toContain("one-off thing");
+    // Enabled with an absent memoryPromptMode → the retrieval_only default
+    // default: no standing block even though records exist.
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
+
+    // Explicit legacy_standing is the rollback opt-out and restores the block.
+    await dbClient.db.execute(dbSql`
+      update workspaces
+      set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
+      where id = ${grant.workspaceId}::uuid
+    `);
+    // The standing block is retired: even a workspace that stored the old
+    // opt-out composes nothing into the prompt. The rows themselves are
+    // untouched and still reachable through search.
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
     // Candidate containment removes the broad block and legacy preference-kind
     // records only from agent retrieval. The canonical row remains available
@@ -2365,11 +2410,16 @@ describe("DB integration", () => {
       "Prefer Terraform for infra.",
     );
 
-    // Enabled but empty → the empty-state bootstrap block, not null.
+    // Enabled but empty under legacy_standing → the empty-state bootstrap
+    // block, not null.
     const empty = await testGrant(dbClient.db);
     await enableWorkspaceMemory(empty.workspaceId);
-    const emptyBlock = await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId);
-    expect(emptyBlock).toContain("currently empty");
+    await dbClient.db.execute(dbSql`
+      update workspaces
+      set settings = settings || '{"memoryPromptMode":"legacy_standing"}'::jsonb
+      where id = ${empty.workspaceId}::uuid
+    `);
+    expect(await resolveWorkspaceMemoryBlock(dbClient.db, empty.workspaceId)).toBeNull();
   });
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {
@@ -2560,6 +2610,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     // A second session that must stay completely untouched — proves the repair
@@ -2571,6 +2623,8 @@ describe("DB integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     // Legacy corruption: an orphaned function_call_result (no preceding call), a

@@ -70,37 +70,42 @@ async function seedAttempt(input: {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
-  await shared!.admin`
-    insert into session_turns (
-      id, account_id, workspace_id, session_id, trigger_event_id,
-      temporal_workflow_id, status, position, prompt, model,
-      reasoning_effort, sandbox_backend, execution_generation,
-      initiator_kind, initiator_subject_id, initiating_human_subject_id, initiator_context
-    ) values (
-      ${turnId}, ${input.accountId}, ${input.workspaceId}, ${session.id},
-      ${crypto.randomUUID()}, ${`learning-policy-${turnId}`}, 'running', 1,
-      'learning policy fixture', 'test-model', 'high', 'none', 1,
-      'subject', ${input.subjectId}, ${input.subjectId},
-      ${shared!.admin.json({ source: "test" })}
-    )`;
-  await shared!.admin`
-    insert into session_turn_attempts (
-      id, account_id, workspace_id, session_id, turn_id, execution_generation,
-      state, temporal_workflow_id, temporal_workflow_run_id,
-      temporal_activity_id, verified_control_revision, mcp_approval_policies
-    ) values (
-      ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${session.id},
-      ${turnId}, 1, 'running', ${`learning-policy-${turnId}`},
-      ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
-    )`;
-  await shared!.admin`
-    update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}`;
-  await shared!.admin`
-    update sessions set active_turn_id = ${turnId}, status = 'running' where id = ${session.id}`;
+  await shared!.admin.begin(async (tx) => {
+    await tx`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, execution_generation,
+        initiator_kind, initiator_subject_id, initiating_human_subject_id, initiator_context
+      ) values (
+        ${turnId}, ${input.accountId}, ${input.workspaceId}, ${session.id},
+        ${crypto.randomUUID()}, ${`learning-policy-${turnId}`}, 'running', 1,
+        'learning policy fixture', 'test-model', 'high', 'none', 1,
+        'subject', ${input.subjectId}, ${input.subjectId},
+        ${shared!.admin.json({ source: "test" })}
+      )`;
+    await tx`
+      update sessions set active_turn_id = ${turnId}, status = 'running'
+      where id = ${session.id}`;
+    await tx`
+      update session_turns set active_attempt_id = ${attemptId} where id = ${turnId}`;
+    await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${session.id},
+        ${turnId}, 1, 'running', ${`learning-policy-${turnId}`},
+        ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
   return { sessionId: session.id, turnId, attemptId, executionGeneration: 1 };
 }
 
@@ -325,6 +330,13 @@ describe("migration 0199 workspace learning policy", () => {
       head: { revisionId: first.id, activationVersion: 3 },
       event: { type: "rollback", oldRevision: { id: raceWinner.revisionId } },
     });
+    const activeOnly = await listWorkspaceLearningPolicyHistory(client.db, {
+      accountId: fixture.accountA,
+      workspaceId: fixture.workspaceA,
+      limit: 1,
+    });
+    expect(activeOnly.revisions).toEqual([first]);
+    expect(activeOnly.truncated).toBe(true);
 
     const frozen = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, {
       accountId: fixture.accountA,

@@ -148,6 +148,7 @@ function goal(overrides: Partial<UseGoalResult["goal"]> = {}): UseGoalResult {
     createdAt: "2026-07-31T06:00:00.000Z",
     updatedAt: "2026-07-31T12:00:00.000Z",
     ...overrides,
+    rootConstraints: overrides?.rootConstraints ?? [],
   };
   return {
     goal: record,

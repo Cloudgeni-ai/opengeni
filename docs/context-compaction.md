@@ -48,7 +48,8 @@ If a model has no explicit automatic limit, OpenGeni uses
 window, matching Codex core.
 
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
-has:
+has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
+triple instead of the 1.05M deployment fallback:
 
 | quantity | tokens |
 | --- | ---: |
@@ -274,7 +275,7 @@ and receives the pending updates at its normal boundary. Explicit `/compact`
 also remains runnable; it does not consume those updates, but a successful
 checkpoint supplies newer finished-turn truth so the existing pending batch can
 run next. This gate neither creates queue work nor consumes a goal
-continuation/no-progress counter.
+continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
 the worker observes it at the next model boundary and retries sampling in the

@@ -6,6 +6,7 @@ import {
   createConnection,
   createDb,
   createSocialConnection,
+  enableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityInstallation,
   listEnabledMcpCapabilityServers,
@@ -389,6 +390,44 @@ describe("subject-owned capability connection references", () => {
     expect(projected).not.toContain(bob.id);
   });
 
+  test("a legacy workspace-scoped Slack MCP installation is not runnable at runtime", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:legacy-workspace-slack-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId);
+    const legacy = await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    // enableCapability now rejects this shape, so write the installation the
+    // way an earlier release did: directly, with a workspace-scoped ref.
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          subjectScope: "workspace",
+          connectionId: legacy.id,
+        },
+      },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+
+    const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(installation?.status).toBe("active");
+
+    // The row exists and is active, but the runtime fence omits it: no shared
+    // human token executes for the hosted Slack MCP.
+    const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
+    expect(servers.find((server) => server.capabilityId === capabilityId)).toBeUndefined();
+  });
+
   test("keeps Gmail personal even when a workspace-owned mailbox row exists", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -480,13 +519,86 @@ describe("subject-owned capability connection references", () => {
     expect(JSON.stringify(installation)).not.toContain(sharedConnection.id);
   });
 
+  test("keeps the hosted Slack MCP personal even when a legacy workspace-owned row exists", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:slack-personal-${crypto.randomUUID()}`;
+    // The catalog row carries no personal_only marker: the exact official
+    // resource alone must fail closed, exactly like Gmail.
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://mcp.slack.com/mcp",
+    });
+    const legacyShared = await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+    });
+    await createConnection(db, {
+      ...workspace,
+      subjectId: "subject-alice",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
+    });
+
+    for (const connectionRef of [
+      {
+        connectionId: legacyShared.id,
+        providerDomain: "slack.com",
+        kind: "oauth2" as const,
+        subjectScope: "workspace" as const,
+      },
+      { providerDomain: "slack.com", kind: "oauth2" as const },
+    ]) {
+      await expect(
+        enableCapability({
+          db,
+          grant: grant(workspace, "subject-alice"),
+          ...workspace,
+          settings,
+          capabilityId,
+          payload: { config: {}, metadata: {}, headers: {}, connectionRef },
+        }),
+      ).rejects.toThrow("requires a personal connection");
+    }
+
+    await enableCapability({
+      db,
+      grant: grant(workspace, "subject-alice"),
+      ...workspace,
+      settings,
+      capabilityId,
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: { providerDomain: "slack.com", kind: "oauth2", subjectScope: "subject" },
+      },
+    });
+    expect(
+      (await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.config
+        .connectionRef,
+    ).toEqual({ providerDomain: "slack.com", kind: "oauth2", subjectScope: "subject" });
+  });
+
   test("rejects cross-subject and workspace misuse while preserving shared app-install refs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const personalCapabilityId = `mcp:subject-explicit-${crypto.randomUUID()}`;
     const sharedCapabilityId = `mcp:workspace-explicit-${crypto.randomUUID()}`;
-    await createMcpCapability(workspace, personalCapabilityId);
-    await createMcpCapability(workspace, sharedCapabilityId);
+    // The hosted Slack MCP resource is personal-only by itself (covered above);
+    // exercise the generic subject/workspace ownership checks on ordinary
+    // endpoints so this test proves the generic rule, not the Slack fence.
+    await createMcpCapability(workspace, personalCapabilityId, {
+      endpointUrl: "https://mcp.example.test/personal",
+    });
+    await createMcpCapability(workspace, sharedCapabilityId, {
+      endpointUrl: "https://mcp.example.test/shared",
+    });
     const alice = await createConnection(db, {
       ...workspace,
       subjectId: "subject-alice",

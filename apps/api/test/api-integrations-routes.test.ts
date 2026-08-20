@@ -1,12 +1,21 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { GOOGLE_DRIVE_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
+import {
+  CORE_INTEGRATION_DEFINITIONS,
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  INTEGRATION_DEFINITION_PRESENTATIONS,
+} from "@opengeni/capabilities";
+import { CURATED_CATALOG } from "../../../scripts/catalog-curation";
 import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveConnectionMetadata,
 } from "@opengeni/contracts/google-drive";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  IntegrationPresentation,
+  ListIntegrationDefinitionsResponse,
+  signDelegatedAccessToken,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -233,20 +242,51 @@ describe("API Integration routes", () => {
     const response = await request("/integrations/definitions");
     expect(response.status).toBe(200);
     const payload = await response.json();
-    expect(payload.definitions).toHaveLength(6);
+    // Gmail is not one of these API integration definitions: it is a
+    // Connector, consolidated onto its catalog row and the REST bridge
+    // (packages/runtime/src/gmail-rest-mcp.ts). It must never reappear here.
+    expect(payload.definitions).toHaveLength(5);
+    expect(payload.definitions.some((definition) => definition.id === "google-gmail")).toBe(false);
     expect(payload.definitions).toContainEqual(
       expect.objectContaining({
-        id: "google-gmail",
-        name: "Gmail",
+        id: "google-drive",
+        name: "Google Drive",
         provider: {
           id: "google",
-          domain: "gmail.googleapis.com",
+          domain: "www.googleapis.com",
         },
         authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
     );
     expect(JSON.stringify(payload)).not.toContain("clientSecret");
     expect(JSON.stringify(payload)).not.toContain("clientId");
+
+    // Reviewed consent copy is served with the definition (presentation-only;
+    // grants nothing). Every core definition carries it, and the whole payload
+    // must satisfy the published contract, bounds included.
+    const parsed = ListIntegrationDefinitionsResponse.parse(payload);
+    const drive = parsed.definitions.find((definition) => definition.id === "google-drive");
+    expect(drive?.presentation).toMatchObject({ providerName: "Google", icon: "files" });
+    for (const definition of parsed.definitions) {
+      expect(definition.presentation).toBeDefined();
+    }
+  });
+
+  test("every shipped presentation satisfies the contracts schema, bounds included", () => {
+    // A copy edit that exceeds a contract bound (or an invalid icon) must fail
+    // here, not ship a response that violates the published contract.
+    for (const [id, presentation] of Object.entries(INTEGRATION_DEFINITION_PRESENTATIONS)) {
+      expect(() => IntegrationPresentation.parse(presentation), id).not.toThrow();
+    }
+    expect(Object.keys(INTEGRATION_DEFINITION_PRESENTATIONS).sort()).toEqual(
+      CORE_INTEGRATION_DEFINITIONS.map((definition) => definition.id).sort(),
+    );
+    // The connector lane's curated copy rides the same shape.
+    for (const entry of CURATED_CATALOG.entries) {
+      if (entry.presentation !== undefined) {
+        expect(() => IntegrationPresentation.parse(entry.presentation), entry.mcpUrl).not.toThrow();
+      }
+    }
   });
 
   test("previews, fences source drift, installs, lists, and OCC-uninstalls", async () => {

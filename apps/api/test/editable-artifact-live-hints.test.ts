@@ -60,7 +60,7 @@ describe("event-bus editable artifact live hints", () => {
           sequenceStart: 1,
           sequenceEnd: 4,
           stateHash: editableArtifactStateHash(`sha256:${"4".repeat(64)}`),
-          operationProtocolVersion: 1,
+          operationProtocolVersion: 2,
           committedAt: "2026-08-08T12:00:00.000Z",
         },
         state: "publishing",

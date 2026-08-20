@@ -87,6 +87,63 @@ function brokerCredential(
   };
 }
 
+const authorityIds = {
+  organizationId: "00000000-0000-4000-8000-000000000101",
+  workspaceId: "00000000-0000-4000-8000-000000000102",
+  originWorkspaceId: "00000000-0000-4000-8000-000000000106",
+  sessionId: "00000000-0000-4000-8000-000000000103",
+  turnId: "00000000-0000-4000-8000-000000000104",
+  connectionId: "00000000-0000-4000-8000-000000000105",
+};
+
+function workspaceConnectionUseAuthority() {
+  return {
+    organizationId: authorityIds.organizationId,
+    originWorkspaceId: authorityIds.workspaceId,
+    targetWorkspaceId: authorityIds.workspaceId,
+    targetSessionId: authorityIds.sessionId,
+    targetSessionVisibility: "workspace_shared",
+    targetSessionAuthorityEpoch: 1,
+    acceptedWork: { kind: "turn", turnId: authorityIds.turnId },
+    connectionId: authorityIds.connectionId,
+    connectionGeneration: 7,
+    connectionStatus: "active",
+    providerDomain: "api.example.com",
+    connectionKind: "api_key",
+    scope: "workspace",
+    ownerSubjectId: null,
+    ownerOrganizationMembershipId: null,
+    authoritySource: "explicit_workspace",
+    selectionSources: ["mcp:workspace"],
+    userDelegation: null,
+  } as const;
+}
+
+function personalConnectionUseAuthority() {
+  return {
+    ...workspaceConnectionUseAuthority(),
+    originWorkspaceId: authorityIds.originWorkspaceId,
+    scope: "user",
+    ownerSubjectId: "user:owner",
+    ownerOrganizationMembershipId: "00000000-0000-4000-8000-000000000107",
+    ownerMembershipAuthorizationRevision: 2,
+    authoritySource: "user_delegation",
+    userDelegation: {
+      authorityId: "00000000-0000-4000-8000-000000000108",
+      grantId: "00000000-0000-4000-8000-000000000109",
+      organizationId: authorityIds.organizationId,
+      workspaceId: authorityIds.workspaceId,
+      sessionId: null,
+      action: "connection.use",
+      mode: "always",
+      context: "workspace_shared",
+      authorityEpoch: null,
+      authorityGeneration: 1,
+      grantGeneration: 1,
+    },
+  } as const;
+}
+
 type Counts = {
   load: number;
   refresh: number;
@@ -1053,23 +1110,10 @@ describe("buildHostConnectionTokenResolver", () => {
         providerDomain: "gmailmcp.googleapis.com",
       };
     };
-    const disabledResolver = buildHostConnectionTokenResolver(resolveHost, context);
-    await expect(
-      disabledResolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        toolName: "list_labels",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: ref,
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-    expect(received).toEqual([]);
-
-    const resolver = buildHostConnectionTokenResolver(resolveHost, {
-      ...context,
-      allowOfficialGmailRestDestination: true,
-    });
+    // The Gmail REST bridge is the unconditional sole execution path (no
+    // deployment flag): the host resolver allows the exact users/me exception
+    // by default.
+    const resolver = buildHostConnectionTokenResolver(resolveHost, context);
 
     await expect(
       resolver({
@@ -1227,6 +1271,193 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(0);
   });
 
+  test("revalidates immutable connection authority before credential lookup", async () => {
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({ status: "denied", reason: "connection_generation_changed" }),
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "authority-denied",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+      connectionUseAuthority: workspaceConnectionUseAuthority(),
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "missing_connection",
+      providerDomain: "api.example.com",
+      connectionId: authorityIds.connectionId,
+    });
+    expect(counts.load).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
+  test("pins credential lookup to the authorized generation and preserves attribution", async () => {
+    const attribution = {
+      organizationId: authorityIds.organizationId,
+      workspaceId: authorityIds.workspaceId,
+      sessionId: authorityIds.sessionId,
+      connectionId: authorityIds.connectionId,
+      connectionGeneration: 7,
+      scope: "workspace" as const,
+      ownerSubjectId: null,
+      authorityId: null,
+      grantId: null,
+    };
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({ status: "authorized", attribution }),
+      loadCredential: async (_db, _settings, input) => {
+        counts.load += 1;
+        counts.loadInputs.push(input);
+        return brokerCredential({
+          id: authorityIds.connectionId,
+          accountId: authorityIds.organizationId,
+          workspaceId: authorityIds.workspaceId,
+          authorityGeneration: 7,
+        });
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "authority-allowed",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+      connectionUseAuthority: workspaceConnectionUseAuthority(),
+    });
+    expect(counts.loadInputs).toEqual([
+      {
+        workspaceId: authorityIds.workspaceId,
+        providerDomain: "api.example.com",
+        allowSubjectOwned: false,
+        expectedAuthorityGeneration: 7,
+        connectionId: authorityIds.connectionId,
+        kind: "api_key",
+      },
+    ]);
+    expect(result).toMatchObject({
+      status: "ok",
+      connectionId: authorityIds.connectionId,
+      connectionUseAttribution: attribution,
+    });
+    expect(counts.recordUsed).toBe(1);
+  });
+
+  test("loads an authorized personal connection from its frozen origin workspace", async () => {
+    const authority = personalConnectionUseAuthority();
+    const attribution = {
+      organizationId: authorityIds.organizationId,
+      workspaceId: authorityIds.workspaceId,
+      sessionId: authorityIds.sessionId,
+      connectionId: authorityIds.connectionId,
+      connectionGeneration: 7,
+      scope: "user" as const,
+      ownerSubjectId: authority.ownerSubjectId,
+      authorityId: authority.userDelegation.authorityId,
+      grantId: authority.userDelegation.grantId,
+    };
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({ status: "authorized", attribution }),
+      loadCredential: async (_db, _settings, input) => {
+        counts.load += 1;
+        counts.loadInputs.push(input);
+        return brokerCredential({
+          id: authorityIds.connectionId,
+          accountId: authorityIds.organizationId,
+          workspaceId: authorityIds.originWorkspaceId,
+          subjectId: authority.ownerSubjectId,
+          authorityGeneration: 7,
+        });
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "personal-cross-workspace",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+        subjectScope: "subject",
+      },
+      connectionUseAuthority: authority,
+    });
+    expect(counts.loadInputs).toEqual([
+      {
+        workspaceId: authorityIds.originWorkspaceId,
+        providerDomain: "api.example.com",
+        allowSubjectOwned: true,
+        subjectId: authority.ownerSubjectId,
+        expectedAuthorityGeneration: 7,
+        connectionId: authorityIds.connectionId,
+        kind: "api_key",
+      },
+    ]);
+    expect(result).toMatchObject({
+      status: "ok",
+      connectionId: authorityIds.connectionId,
+      connectionUseAttribution: attribution,
+    });
+  });
+
+  test("rejects a credential whose authority generation changed after authorization", async () => {
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({
+        status: "authorized",
+        attribution: {
+          organizationId: authorityIds.organizationId,
+          workspaceId: authorityIds.workspaceId,
+          sessionId: authorityIds.sessionId,
+          connectionId: authorityIds.connectionId,
+          connectionGeneration: 7,
+          scope: "workspace",
+          ownerSubjectId: null,
+          authorityId: null,
+          grantId: null,
+        },
+      }),
+      loadCredential: async (_db, _settings, input) => {
+        counts.load += 1;
+        counts.loadInputs.push(input);
+        return brokerCredential({
+          id: authorityIds.connectionId,
+          accountId: authorityIds.organizationId,
+          workspaceId: authorityIds.workspaceId,
+          authorityGeneration: 8,
+        });
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "authority-raced",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+      connectionUseAuthority: workspaceConnectionUseAuthority(),
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "missing_connection",
+      providerDomain: "api.example.com",
+    });
+    expect(counts.load).toBe(1);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes api_key headers and records usage", async () => {
     const { deps, counts } = resolverDeps();
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
@@ -1352,31 +1583,9 @@ describe("buildConnectionTokenResolver", () => {
       ],
     });
     const { deps, counts } = resolverDeps({ loadCredential: async () => gmailCredential });
-    const disabledResolver = buildConnectionTokenResolver({} as Database, settings, deps);
-    await expect(
-      disabledResolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        toolName: "list_labels",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: {
-          providerDomain: "gmailmcp.googleapis.com",
-          kind: "oauth2",
-          subjectScope: "subject",
-        },
-      }),
-    ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
-    expect(counts.recordUsed).toBe(0);
-
-    const resolver = buildConnectionTokenResolver(
-      {} as Database,
-      testSettings({
-        environmentsEncryptionKey: rawKey.toString("base64"),
-        gmailRestAdapterEnabled: true,
-      }) as Settings,
-      deps,
-    );
+    // The Gmail REST bridge is the unconditional sole execution path (no
+    // deployment flag): the exact users/me exception always applies.
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
     const connectionRef = {
       providerDomain: "gmailmcp.googleapis.com",
       kind: "oauth2" as const,

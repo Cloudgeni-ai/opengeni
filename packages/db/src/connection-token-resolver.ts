@@ -15,6 +15,11 @@ import type {
   TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
+  ConnectionUseAuthoritySnapshot,
+  type ConnectionUseAttribution,
+  type ConnectionUseAuthorizationResult,
+} from "@opengeni/contracts/connection-authority";
+import {
   OAUTH_MAX_RESPONSE_BYTES,
   pinnedFetch,
   readResponseJsonBounded,
@@ -28,6 +33,10 @@ import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
+import type {
+  AcceptedConnectionUseContext,
+  AcceptedConnectionUseResolution,
+} from "./connection-authority";
 import { connectionScopeKey } from "./connection-scopes";
 
 const MAX_CREDENTIAL_PLACEMENTS = 32;
@@ -61,6 +70,8 @@ export type ConnectionCredentialForBroker = {
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
   version: number;
+  /** Immutable execution authority generation; distinct from token refresh version. */
+  authorityGeneration?: number;
   metadata: Record<string, unknown>;
 };
 
@@ -71,6 +82,7 @@ export type ConnectionCredentialLookupInput = {
   kind?: ConnectionKind;
   subjectId?: string | null;
   allowSubjectOwned?: boolean;
+  expectedAuthorityGeneration?: number;
 };
 
 export type ConnectionTokenRefreshInput = {
@@ -99,6 +111,14 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       /** Exact durable version when the credential came from the local connection store. */
       connectionVersion?: number;
+      /** Metadata-only owner attribution from the immediate pre-use fence. */
+      connectionUseAttribution?: ConnectionUseAttribution;
+      /**
+       * Revalidate the exact accepted attempt immediately before one target
+       * provider request. Credential lookup/refresh is a separate audited
+       * boundary and must not manufacture a provider-request fact by itself.
+       */
+      authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
   | {
@@ -130,6 +150,10 @@ export type ResolveConnectionCredentialInput = {
   /** Defaults to header-only MCP transport. */
   credentialTarget?: "mcp" | "http_api";
   forceRefresh?: boolean;
+  /** Exact immutable accepted-work authority; never credential-bearing. */
+  connectionUseAuthority?: unknown;
+  /** Exact accepted attempt plus one stable physical-provider request id. */
+  connectionUseContext?: AcceptedConnectionUseContext;
 };
 
 export type HostMcpCredentialResolverContext = {
@@ -143,7 +167,6 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
-  allowOfficialGmailRestDestination?: boolean;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -174,10 +197,11 @@ const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
 const OFFICIAL_GMAIL_REST_HOST = "gmail.googleapis.com";
 
 /**
- * The opt-in Gmail REST adapter reuses the exact OAuth grant created for
- * Google's hosted Gmail MCP while the preview endpoint is unavailable. Keep
- * this exception narrower than ordinary provider-domain binding: HTTPS only,
- * Google's canonical Gmail API host, and the authenticated `users/me` path.
+ * The Gmail bridge reuses the exact OAuth grant created for the official
+ * hosted Gmail MCP resource, executing every tool against Gmail's REST API
+ * instead of Google's Developer Preview MCP endpoint. Keep this exception
+ * narrower than ordinary provider-domain binding: HTTPS only, Google's
+ * canonical Gmail API host, and the authenticated `users/me` path.
  */
 function isOfficialGmailRestDestination(
   destinationUrl: string,
@@ -217,10 +241,7 @@ export function buildHostConnectionTokenResolver(
     if (
       !destinationUrl ||
       (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
-        !(
-          context.allowOfficialGmailRestDestination === true &&
-          isOfficialGmailRestDestination(destinationUrl, input.connectionRef)
-        ))
+        !isOfficialGmailRestDestination(destinationUrl, input.connectionRef))
     ) {
       throw new HostMcpCredentialBindingError("destinationUrl");
     }
@@ -256,6 +277,12 @@ export function buildHostConnectionTokenResolver(
           : {}),
       },
       forceRefresh: input.forceRefresh === true,
+      ...(input.connectionUseAuthority !== undefined
+        ? { connectionUseAuthority: input.connectionUseAuthority }
+        : {}),
+      ...(input.connectionUseContext
+        ? { connectionUseRequestId: input.connectionUseContext.physicalRequestId }
+        : {}),
       ...(toolName ? { toolName } : {}),
       ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
     };
@@ -576,6 +603,21 @@ export type ConnectionBrokerDeps = {
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
   now: () => Date;
+  authorizeUse?: (
+    db: Database,
+    input: { snapshot: unknown },
+  ) => Promise<ConnectionUseAuthorizationResult>;
+  authorizeAcceptedUse?: (
+    db: Database,
+    input: AcceptedConnectionUseContext & {
+      serverId: string;
+      connectionId?: string;
+      providerDomain: string;
+      connectionKind?: ConnectionKind;
+      subjectScope?: "workspace" | "subject";
+      ownerSubjectId?: string;
+    },
+  ) => Promise<AcceptedConnectionUseResolution>;
 };
 
 export type PermanentConnectionRefreshFailure = {
@@ -619,7 +661,7 @@ export function buildConnectionTokenResolver(
   type CredentialLookupInput = Pick<
     ResolveConnectionCredentialInput,
     "workspaceId" | "connectionRef" | "subjectId"
-  >;
+  > & { expectedAuthorityGeneration?: number };
   const load = async (
     input: CredentialLookupInput,
   ): Promise<ConnectionCredentialForBroker | null> => {
@@ -632,6 +674,9 @@ export function buildConnectionTokenResolver(
       providerDomain: input.connectionRef.providerDomain,
       allowSubjectOwned: subjectOwned,
       ...(subjectOwned ? { subjectId: input.subjectId! } : {}),
+      ...(input.expectedAuthorityGeneration !== undefined
+        ? { expectedAuthorityGeneration: input.expectedAuthorityGeneration }
+        : {}),
     };
     if (input.connectionRef.connectionId !== undefined) {
       request.connectionId = input.connectionRef.connectionId;
@@ -641,6 +686,12 @@ export function buildConnectionTokenResolver(
     }
     const credential = await deps.loadCredential(db, settings, request);
     if (!credential) return null;
+    if (
+      input.expectedAuthorityGeneration !== undefined &&
+      credential.authorityGeneration !== input.expectedAuthorityGeneration
+    ) {
+      return null;
+    }
     if (subjectOwned) {
       return credential.subjectId === input.subjectId ? credential : null;
     }
@@ -652,11 +703,12 @@ export function buildConnectionTokenResolver(
     ref: McpServerConnectionRef,
     destinationUrl: string,
     inputCredentialTarget: "mcp" | "http_api",
+    connectionUseAttribution?: ConnectionUseAttribution,
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
-    if (!connectionBindingMatches(cred, ref, destinationUrl, settings.gmailRestAdapterEnabled)) {
+    if (!connectionBindingMatches(cred, ref, destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     const missingScopes = missingRequestedScopes(
@@ -700,6 +752,7 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
     };
   };
@@ -766,10 +819,11 @@ export function buildConnectionTokenResolver(
   };
 
   return async (input) => {
-    const ref = input.connectionRef;
-    if (ref.subjectScope === "subject" && !input.subjectId) {
-      return authNeeded(ref, "personal_authority_unavailable", ref.connectionId);
-    }
+    let ref = input.connectionRef;
+    let subjectId = input.subjectId;
+    let credentialWorkspaceId = input.workspaceId;
+    let expectedAuthorityGeneration: number | undefined;
+    let connectionUseAttribution: ConnectionUseAttribution | undefined;
     // Repository-scoped provider bindings require a broker that can prove the
     // selected-resource boundary. The generic standalone credential store has
     // no provider-specific containment adapter, so it must fail closed instead
@@ -777,9 +831,99 @@ export function buildConnectionTokenResolver(
     if (ref.selectedResources) {
       return authNeeded(ref, "resource_scope_unavailable", ref.connectionId);
     }
+    if (input.connectionUseContext !== undefined) {
+      if (!deps.authorizeAcceptedUse) {
+        return authNeeded(
+          ref,
+          ref.subjectScope === "subject" ? "personal_authority_unavailable" : "missing_connection",
+          ref.connectionId,
+        );
+      }
+      const authorization = await deps.authorizeAcceptedUse(db, {
+        ...input.connectionUseContext,
+        serverId: input.serverId,
+        ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+        providerDomain: ref.providerDomain,
+        ...(ref.kind ? { connectionKind: ref.kind } : {}),
+        subjectScope: ref.subjectScope === "subject" ? "subject" : "workspace",
+        // An owner binding belongs only to the personal lanes. Interactive
+        // turns stamp the initiating human's subjectId on every credential
+        // request regardless of ref scope; forwarding it for a workspace ref
+        // would make the 0279 workspace lane deny the ambient shared row.
+        ...(ref.subjectScope === "subject" && subjectId ? { ownerSubjectId: subjectId } : {}),
+      });
+      if (authorization.status === "denied") {
+        return authNeeded(
+          ref,
+          ref.subjectScope === "subject" ? "personal_authority_unavailable" : "missing_connection",
+          ref.connectionId,
+        );
+      }
+      connectionUseAttribution = authorization.attribution;
+      expectedAuthorityGeneration = authorization.attribution.connectionGeneration;
+      const expectedPersonal = authorization.attribution.scope !== "workspace";
+      credentialWorkspaceId = authorization.originWorkspaceId;
+      subjectId = authorization.attribution.ownerSubjectId ?? undefined;
+      ref = {
+        ...ref,
+        connectionId: authorization.attribution.connectionId,
+        kind: authorization.connectionKind,
+        subjectScope: expectedPersonal ? "subject" : "workspace",
+      };
+    } else if (input.connectionUseAuthority !== undefined) {
+      const authority = ConnectionUseAuthoritySnapshot.parse(input.connectionUseAuthority);
+      const expectedPersonal = authority.scope === "user";
+      if (
+        authority.targetWorkspaceId !== input.workspaceId ||
+        authority.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
+        (ref.connectionId !== undefined && ref.connectionId !== authority.connectionId) ||
+        (ref.kind !== undefined && ref.kind !== authority.connectionKind) ||
+        (ref.subjectScope === "subject") !== expectedPersonal ||
+        !deps.authorizeUse
+      ) {
+        return authNeeded(
+          ref,
+          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
+          ref.connectionId,
+        );
+      }
+      const authorization = await deps.authorizeUse(db, { snapshot: authority });
+      if (authorization.status === "denied") {
+        return authNeeded(
+          ref,
+          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
+          authority.connectionId,
+        );
+      }
+      connectionUseAttribution = authorization.attribution;
+      expectedAuthorityGeneration = authority.connectionGeneration;
+      // Personal resources are organization-user owned and may originate in a
+      // different workspace from the session using them. Authorization is
+      // evaluated against the target workspace above; the exact credential is
+      // then loaded from its frozen physical origin, never rediscovered in the
+      // target workspace.
+      credentialWorkspaceId = expectedPersonal
+        ? authority.originWorkspaceId
+        : authority.targetWorkspaceId;
+      subjectId = authority.ownerSubjectId ?? undefined;
+      ref = {
+        ...ref,
+        connectionId: authority.connectionId,
+        kind: authority.connectionKind,
+        subjectScope: expectedPersonal ? "subject" : "workspace",
+      };
+    }
+    if (ref.subjectScope === "subject" && !subjectId) {
+      return authNeeded(ref, "personal_authority_unavailable", ref.connectionId);
+    }
     let cred: ConnectionCredentialForBroker | null;
     try {
-      cred = await load(input);
+      cred = await load({
+        workspaceId: credentialWorkspaceId,
+        connectionRef: ref,
+        ...(subjectId ? { subjectId } : {}),
+        ...(expectedAuthorityGeneration !== undefined ? { expectedAuthorityGeneration } : {}),
+      });
     } catch {
       return authNeeded(ref, "refresh_failed");
     }
@@ -792,9 +936,7 @@ export function buildConnectionTokenResolver(
     // Reject an audience/destination mismatch before any provider-side refresh
     // or usage update. Refreshing first would still create an unauthorized
     // external side effect even though the token was never sent to the target.
-    if (
-      !connectionBindingMatches(cred, ref, input.destinationUrl, settings.gmailRestAdapterEnabled)
-    ) {
+    if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
@@ -833,15 +975,30 @@ export function buildConnectionTokenResolver(
         return authNeeded(ref, "refresh_failed", cred.id);
       }
     }
-    return await snapshot(cred, ref, input.destinationUrl, input.credentialTarget ?? "mcp");
+    if (
+      expectedAuthorityGeneration !== undefined &&
+      cred.authorityGeneration !== expectedAuthorityGeneration
+    ) {
+      return authNeeded(ref, authorityReasonForScope(ref.subjectScope === "subject"), cred.id);
+    }
+    return await snapshot(
+      cred,
+      ref,
+      input.destinationUrl,
+      input.credentialTarget ?? "mcp",
+      connectionUseAttribution,
+    );
   };
+}
+
+function authorityReasonForScope(personal: boolean): AuthNeededReason {
+  return personal ? "personal_authority_unavailable" : "missing_connection";
 }
 
 function connectionBindingMatches(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
   destinationUrl: string,
-  gmailRestAdapterEnabled: boolean,
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
@@ -857,7 +1014,6 @@ function connectionBindingMatches(
       !binding ||
       (destination !== binding &&
         !(
-          gmailRestAdapterEnabled &&
           binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
           isOfficialGmailRestDestination(destination, ref)
         ))

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
-import { createObjectStorage } from "../src";
+import { createObjectStorage, retryWhileMissing } from "../src";
 
 const endpoint = process.env.OPENGENI_TEST_OBJECT_STORAGE_ENDPOINT;
 const accessKeyId = process.env.OPENGENI_TEST_OBJECT_STORAGE_ACCESS_KEY_ID;
@@ -39,7 +39,11 @@ describe.skipIf(!live)("real S3-compatible retained-output ranges", () => {
         sha256,
       });
 
-      const head = await storage!.headFile(file);
+      const head = await retryWhileMissing(async () => {
+        if (!(await storage!.fileExists(file))) return null;
+        return await storage!.headFile(file);
+      });
+      expect(head).not.toBeNull();
       expect(head.ContentLength).toBe(body.byteLength);
       expect(head.ContentType).toBe(file.contentType);
       expect(head.Metadata?.sha256).toBe(sha256);

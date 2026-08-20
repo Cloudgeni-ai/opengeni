@@ -55,7 +55,9 @@ describe("get.<domain> install routes", () => {
     const res = await appFor(settings).request("/install.sh");
     const body = await res.text();
     expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://cp.example.com"');
+    expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://cp.example.com"');
     expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).not.toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
     // The user-facing override var name is untouched (operator can still repoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
   });
@@ -65,7 +67,9 @@ describe("get.<domain> install routes", () => {
     const res = await appFor(settings).request("/install.ps1");
     const body = await res.text();
     expect(body).toContain("$OpengeniInstallDefaultBaseUrl = 'https://cp.example.com'");
+    expect(body).toContain("$OpengeniApiDefaultUrl = 'https://cp.example.com'");
     expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'");
+    expect(body).not.toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
   });
 
   test("GET /install.sh keeps the public-archive default when no public base URL is configured", async () => {
@@ -73,6 +77,9 @@ describe("get.<domain> install routes", () => {
     const res = await appFor(settings).request("/install.sh");
     const body = await res.text();
     expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
+    const windows = await appFor(settings).request("/install.ps1");
+    expect(await windows.text()).toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
   });
 
   test("GET /install.ps1 serves the Windows installer", async () => {
@@ -83,6 +90,7 @@ describe("get.<domain> install routes", () => {
     expect(body).toContain("connect --token $enrollToken --non-interactive");
     expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
     expect(body).toContain("Test-KeepNewerAgent");
+    expect(body).toContain("--api-url '$quotedApiUrl' connect");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {
@@ -109,8 +117,16 @@ describe("get.<domain> install routes", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.14/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.16/opengeni-agent-universal-apple-darwin",
     );
+  });
+
+  test("GET /agent/latest/OpenGeni-Agent.icns serves the committed macOS bundle icon", async () => {
+    const res = await appFor(testSettings()).request("/agent/latest/OpenGeni-Agent.icns");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/icns");
+    expect(res.headers.get("x-opengeni-agent-source")).toBe("committed");
+    expect(new TextDecoder().decode((await res.arrayBuffer()).slice(0, 4))).toBe("icns");
   });
 
   test("GET /agent/v<ver>/<unbaked-asset> redirects to the immutable agent-v<ver> tag asset", async () => {
@@ -247,7 +263,7 @@ describe("get.<domain> install routes — baked binary serving", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
-      "/releases/download/agent-v0.1.14/opengeni-agent-universal-apple-darwin",
+      "/releases/download/agent-v0.1.16/opengeni-agent-universal-apple-darwin",
     );
   });
 });

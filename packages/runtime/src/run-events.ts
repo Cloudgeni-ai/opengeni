@@ -12,6 +12,7 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
+import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -302,6 +303,9 @@ export function normalizeSdkEvent(
   }
   const item = (event as any).item;
   if (!item) {
+    return out;
+  }
+  if (isInternalGenericDispatchRegistrationItem(item.rawItem)) {
     return out;
   }
   if (item.type === "tool_call_item") {

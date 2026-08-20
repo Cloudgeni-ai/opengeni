@@ -94,6 +94,7 @@ run_local_install() {
   MOCK_CODESIGN_LOG="$WORK/codesign-$1.log"; : > "$MOCK_CODESIGN_LOG"
   export MOCK_CODESIGN_LOG
   HOME="$_home" install_macos_local_bundle "$FAKE_BIN" "$_home/bin" "$_runtime" \
+    "$REPO_ROOT/agent/install/OpenGeni-Agent.icns" \
     >"$WORK/out-$1" 2>"$WORK/log-$1"
 }
 
@@ -116,6 +117,13 @@ if [ -d "$WORK/home-one/Applications/OpenGeni Agent.app" ]; then
   ok "bundle installed under \$HOME/Applications"
 else
   bad "bundle not installed"; ls -la "$WORK/home-one/Applications" 2>&1
+fi
+if [ -f "$WORK/home-one/Applications/OpenGeni Agent.app/Contents/Resources/OpenGeni-Agent.icns" ] \
+   && grep -q '<key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>' \
+     "$WORK/home-one/Applications/OpenGeni Agent.app/Contents/Info.plist"; then
+  ok "bundle carries and declares the branded app icon"
+else
+  bad "bundle icon resource or plist declaration is missing"
 fi
 
 echo "SIM 2: NO Developer ID identity -> ad-hoc signed"

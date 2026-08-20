@@ -2,7 +2,9 @@ import { useCallback, useRef, useState } from "react";
 import type {
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  MachineOperationPolicy,
   SwapActiveSandboxResponse,
+  UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
@@ -48,6 +50,12 @@ export type MachinesClientLike = {
     workspaceId: string,
     enrollmentId: string,
   ) => Promise<UpdateMachineAgentResponse>;
+  /** PATCH .../machines/:enrollmentId/operation-policy — revision-fenced policy. */
+  updateMachineOperationPolicy?: (
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateMachineOperationPolicyRequest,
+  ) => Promise<MachineOperationPolicy>;
   /**
    * POST .../sessions/:sessionId/active-sandbox — swap the session's active
    * sandbox to a machine. The default swap path; the real SDK client provides it.
@@ -97,6 +105,13 @@ export type UseMachinesResult = {
   updateAgent: (enrollmentId: string) => Promise<UpdateMachineAgentResponse | null>;
   canUpdateAgent: boolean;
   updatingEnrollmentId: string | null;
+  /** Update the optional per-enrollment command memory policy. */
+  updateOperationPolicy: (
+    enrollmentId: string,
+    request: UpdateMachineOperationPolicyRequest,
+  ) => Promise<MachineOperationPolicy | null>;
+  canUpdateOperationPolicy: boolean;
+  updatingOperationPolicyEnrollmentId: string | null;
   /** Whether the host wired an attach/swap path (drives the card affordance). */
   canAttach: boolean;
   /** Fetch a downsampled metric series for one enrolled machine. */
@@ -186,6 +201,12 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   }>(() => ({ identity: identityKey, enrollmentId: null }));
   const updatingEnrollmentId =
     updateState.identity === identityKey ? updateState.enrollmentId : null;
+  const [operationPolicyState, setOperationPolicyState] = useState<{
+    identity: string;
+    enrollmentId: string | null;
+  }>(() => ({ identity: identityKey, enrollmentId: null }));
+  const updatingOperationPolicyEnrollmentId =
+    operationPolicyState.identity === identityKey ? operationPolicyState.enrollmentId : null;
 
   const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
@@ -197,6 +218,8 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
       typeof machinesClient.swapActiveSandbox === "function");
   const canRemove = typeof machinesClient.removeEnrollment === "function";
   const canUpdateAgent = typeof machinesClient.updateMachineAgent === "function";
+  const canUpdateOperationPolicy =
+    typeof machinesClient.updateMachineOperationPolicy === "function";
 
   const attach = useCallback(
     async (sandboxId: string): Promise<boolean> => {
@@ -278,6 +301,26 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     [machinesClient, workspaceId, identityKey, run, refresh],
   );
 
+  const updateOperationPolicy = useCallback(
+    async (
+      enrollmentId: string,
+      request: UpdateMachineOperationPolicyRequest,
+    ): Promise<MachineOperationPolicy | null> => {
+      if (!machinesClient.updateMachineOperationPolicy) return null;
+      const ownedIdentity = identityKey;
+      setOperationPolicyState({ identity: ownedIdentity, enrollmentId });
+      const result = await run(() =>
+        machinesClient.updateMachineOperationPolicy!(workspaceId, enrollmentId, request),
+      );
+      if (identityRef.current === ownedIdentity) {
+        setOperationPolicyState({ identity: ownedIdentity, enrollmentId: null });
+        if (result) await refresh();
+      }
+      return result;
+    },
+    [machinesClient, workspaceId, identityKey, run, refresh],
+  );
+
   return {
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
@@ -296,6 +339,9 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     updateAgent,
     canUpdateAgent,
     updatingEnrollmentId,
+    updateOperationPolicy,
+    canUpdateOperationPolicy,
+    updatingOperationPolicyEnrollmentId,
     mutationError,
     clearMutationError,
   };

@@ -35,6 +35,7 @@ import {
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   MODEL_ATTACHMENT_REFS_FIELD,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
@@ -56,6 +57,7 @@ import {
   appendGitCredentialBindingInstructions,
   appendPersistentSessionSettings,
   appendSessionGoal,
+  renderSessionGoalContext,
   appendCodemodeInstructions,
   appendWorkspaceMemory,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -109,6 +111,7 @@ import {
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
+  sandboxLifecycleHooksForIds,
   sandboxRunAs,
   codemodeTokenSeedCommand,
   withSandboxFileDownloads,
@@ -119,6 +122,7 @@ import {
   type ConnectorActionPolicyHooks,
   type RuntimeMetricsHooks,
 } from "../src/index";
+import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
 import { Manifest } from "@openai/agents/sandbox";
@@ -2930,6 +2934,17 @@ describe("runtime event normalization", () => {
     ).rejects.toThrow(/context was cleared/i);
   });
 
+  test("refuses an approval resume against the open-suffix sentinel", async () => {
+    await expect(
+      prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
+        kind: "approval",
+        serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
+        approvalId: "appr_1",
+        decision: "approve",
+      }),
+    ).rejects.toThrow(/open suffix is the resume authority/i);
+  });
+
   test("sanitizes an orphaned tool output out of replayed items-mode history", async () => {
     // A session whose stored history carries an orphaned function_call_result
     // (its function_call lost to a write-path desync) must still produce a
@@ -3094,15 +3109,20 @@ describe("runtime event normalization", () => {
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
   ].join(" ");
+  const withOperationalInstructions = (instructions: string) =>
+    `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
+  const EXPECTED_DEFAULT_INSTRUCTIONS = withOperationalInstructions(
+    HISTORICAL_DEFAULT_INSTRUCTIONS,
+  );
 
-  test("default template composes byte-identically to the pinned default preamble (no override, no environment)", () => {
+  test("prepends the operational contract without changing the pinned default persona composition", () => {
     // Direct composition: default template + empty CORE-with-no-env.
     expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(
       HISTORICAL_DEFAULT_INSTRUCTIONS,
     );
     // End-to-end through the agent builder with the default settings template.
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(agent.instructions).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("default template with an attached environment appends the env block exactly as before", () => {
@@ -3121,7 +3141,7 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       workspaceEnvironment: env,
     });
-    expect(agent.instructions).toBe(expected);
+    expect(agent.instructions).toBe(withOperationalInstructions(expected));
   });
 
   test("a white-label persona override is substituted at {{core}} but keeps the non-bypassable CORE", () => {
@@ -3134,7 +3154,9 @@ describe("runtime event normalization", () => {
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
     expect(agent.instructions).toContain("you call opengeni__goal_complete with concrete evidence");
     expect(agent.instructions).toBe(
-      `You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`,
+      withOperationalInstructions(
+        `You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`,
+      ),
     );
   });
 
@@ -3143,7 +3165,9 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       instructionsTemplate: template,
     });
-    expect(agent.instructions).toBe(`${template} ${coreInstructions().join(" ")}`);
+    expect(agent.instructions).toBe(
+      withOperationalInstructions(`${template} ${coreInstructions().join(" ")}`),
+    );
     expect(agent.instructions).toContain("opengeni__goal_complete");
   });
 
@@ -3153,11 +3177,13 @@ describe("runtime event normalization", () => {
       agentInstructionsTemplate: `DEPLOY DEFAULT ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
     });
     const withoutOverride = buildOpenGeniAgent(settings, []);
-    expect(withoutOverride.instructions.startsWith("DEPLOY DEFAULT ")).toBe(true);
+    expect(withoutOverride.instructions.startsWith(OPENGENI_OPERATIONAL_INSTRUCTIONS)).toBe(true);
+    expect(withoutOverride.instructions).toContain("DEPLOY DEFAULT ");
     const withOverride = buildOpenGeniAgent(settings, [], {
       instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
     });
-    expect(withOverride.instructions.startsWith("WORKSPACE OVERRIDE ")).toBe(true);
+    expect(withOverride.instructions.startsWith(OPENGENI_OPERATIONAL_INSTRUCTIONS)).toBe(true);
+    expect(withOverride.instructions).toContain("WORKSPACE OVERRIDE ");
     expect(withOverride.instructions).not.toContain("DEPLOY DEFAULT");
   });
 
@@ -3169,9 +3195,11 @@ describe("runtime event normalization", () => {
     });
     // Exact ordering: workspace persona + CORE first, session instructions last.
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
+      ),
     );
-    // And it rides the same instructions string (system-level), never a message.
+    // And it rides the same application-owned instructions string, never a message.
     expect(agent.instructions.endsWith("SESSION RULE: always answer in French.")).toBe(true);
   });
 
@@ -3179,7 +3207,7 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Be terse.",
     });
-    expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
+    expect(agent.instructions).toBe(`${EXPECTED_DEFAULT_INSTRUCTIONS} Be terse.`);
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
@@ -3193,7 +3221,7 @@ describe("runtime event normalization", () => {
     });
     expect(withUndefined.instructions).toBe(base.instructions);
     expect(withBlank.instructions).toBe(base.instructions);
-    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(base.instructions).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("absent workspace memory is byte-identical to today's composition", () => {
@@ -3209,7 +3237,7 @@ describe("runtime event normalization", () => {
     });
     expect(withUndefined.instructions).toBe(base.instructions);
     expect(withBlank.instructions).toBe(base.instructions);
-    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(base.instructions).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
@@ -3222,7 +3250,9 @@ describe("runtime event normalization", () => {
     });
 
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
+      ),
     );
     expect(agent.instructions.indexOf(workspaceMemory)).toBeLessThan(
       agent.instructions.indexOf("SESSION RULE"),
@@ -3252,8 +3282,9 @@ describe("runtime event normalization", () => {
     expect(followUp.instructions).toBe(agent.instructions);
   });
 
-  test("persistent session settings survive turn reconstruction without restarting genesis setup", () => {
+  test("persistent display metadata never changes system instructions", () => {
     expect(appendPersistentSessionSettings("base")).toBe("base");
+    expect(appendPersistentSessionSettings("base", { titleIsSet: true })).toBe("base");
 
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
@@ -3263,34 +3294,51 @@ describe("runtime event normalization", () => {
       genesisTitleHint: true,
     });
 
-    expect(agent.instructions).toContain(
-      "Persistent session settings already in effect: the display title is set.",
-    );
-    expect(agent.instructions).toContain(
-      "Do not call opengeni__set_session_title merely to reassert an unchanged value",
-    );
-    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
-      agent.instructions.indexOf("Persistent session settings already in effect"),
-    );
+    expect(agent.instructions).toContain("Session-scoped rule.");
+    expect(agent.instructions).not.toContain("Persistent session settings");
+    expect(agent.instructions).not.toContain("display title");
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
   });
 
-  test("standing goal instructions render only the accepted snapshot and its mutation policy", () => {
+  test("standing goal renderer stays outside persistent instructions", () => {
     const capturedAt = "2026-08-13T10:00:00.000Z";
     expect(appendSessionGoal("base", { state: "none", capturedAt })).toBe("base");
-    const instructions = appendSessionGoal("base", {
-      state: "active",
+    expect(renderSessionGoalContext({ state: "none", capturedAt })).toBeUndefined();
+    const snapshot = {
+      state: "active" as const,
       goalId: "11111111-1111-4111-8111-111111111111",
       objectiveRevision: 7,
       text: "Ship the durable goal boundary",
       successCriteria: "Recovery sees revision seven",
+      rootConstraints: ["Do not deploy without approval", "Preserve tenant isolation"],
+      mutationPolicy: "review_changes" as const,
+      capturedAt,
+    };
+    const goalContext = renderSessionGoalContext(snapshot)!;
+    expect(goalContext).toContain("objective revision 7");
+    expect(goalContext).toContain("Ship the durable goal boundary");
+    expect(goalContext).toContain("Semantic changes are proposals until a user applies them");
+    expect(goalContext).not.toContain("opengeni__goal_progress");
+    expect(goalContext).toContain("Root constraints (must remain satisfied)");
+    expect(goalContext).toContain("Preserve tenant isolation");
+    expect(appendSessionGoal("base", snapshot)).toBe(`base ${goalContext}`);
+
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect(agent.instructions).not.toContain("Ship the durable goal boundary");
+
+    const completedContext = renderSessionGoalContext({
+      state: "completed",
+      goalId: "11111111-1111-4111-8111-111111111111",
+      objectiveRevision: 8,
+      text: "Ship the durable goal boundary",
+      successCriteria: "Recovery sees revision seven",
+      rootConstraints: [],
       mutationPolicy: "review_changes",
       capturedAt,
-    });
-    expect(instructions).toContain("objective revision 7");
-    expect(instructions).toContain("Ship the durable goal boundary");
-    expect(instructions).toContain("Semantic changes are proposals until a user applies them");
-    expect(instructions).toContain("opengeni__goal_progress");
+    })!;
+    expect(completedContext).toContain("remains as historical context");
+    expect(completedContext).toContain("create it with opengeni__goal_set");
+    expect(completedContext).toContain("goal_update cannot revise a completed goal");
   });
 
   // ── generic programmatic-tool-calling (codemode) substrate directive ──────
@@ -3309,14 +3357,14 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     // No exact-attempt authority means no advertised programmatic surface.
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(off.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(off.instructions).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
     expect(off.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
   });
 
   test("no token minted for the turn omits the directive", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
     expect(agent.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
-    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(agent.instructions).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("a Connected Machine advertises Codemode without installing a token file", () => {
@@ -3353,7 +3401,9 @@ describe("runtime event normalization", () => {
     // Exact ordering: workspace persona + CORE, then the codemode directive,
     // then the session slice last (host/session specificity wins).
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
+      ),
     );
     expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf("SESSION RULE"),
@@ -3372,7 +3422,9 @@ describe("runtime event normalization", () => {
     });
 
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+      ),
     );
     expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf(workspaceMemory),
@@ -3422,15 +3474,6 @@ describe("runtime event normalization", () => {
     expect(instructions).not.toContain("token-one");
     expect(appendGitCredentialBindingInstructions("BASE", bindings, "selfhosted")).toBe("BASE");
     expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
-  });
-
-  test("the codemode directive text is a stable, generic, host-agnostic snapshot", () => {
-    // Pinned verbatim so an unintended edit to the substrate prompt fails here.
-    // It must name only generic substrate handles (ogtool, $OPENGENI_CODEMODE_*),
-    // never a host/product name.
-    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toBe(
-      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
-    );
   });
 
   test("builds native S3 mount entries for file resources", () => {
@@ -3997,7 +4040,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "start_repository_clone '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -4007,6 +4050,30 @@ describe("runtime event normalization", () => {
     // token-carrying env assignment ever rides the command text.
     expect(command).not.toContain("GITHUB_TOKEN=");
     expect(command).not.toContain("ghs_liveToken123");
+  });
+
+  test("runs independent repository clones in bounded batches of four", () => {
+    const resources = Array.from({ length: 5 }, (_, index) => ({
+      kind: "repository" as const,
+      uri: `https://github.com/acme/repo-${index}.git`,
+      ref: "main",
+    }));
+    const command = repositoryCloneCommand(resources);
+    const lines = command.split("\n");
+    const starts = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.startsWith("start_repository_clone "));
+    const waits = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line === "wait_repository_clone_batch");
+
+    expect(starts).toHaveLength(5);
+    expect(waits).toHaveLength(2);
+    expect(waits[0]!.index).toBeGreaterThan(starts[3]!.index);
+    expect(waits[0]!.index).toBeLessThan(starts[4]!.index);
+    expect(waits[1]!.index).toBeGreaterThan(starts[4]!.index);
+    expect(command).toContain('if ! wait "$clone_pid"; then');
+    expect(command).toContain('if [ "$clone_failed" -ne 0 ]; then');
   });
 
   test("TOKEN-BROKER (B1/B2): the clone command writes provider token FILES and provisions askpass + CLI wrappers before the clone", () => {
@@ -6287,7 +6354,7 @@ describe("runtime event normalization", () => {
       testSettings({
         authRequired: true,
         accessKey,
-        opengeniMcpUrl: mcp.url,
+        opengeniMcpInternalUrl: mcp.url,
         mcpServers: [
           {
             id: "opengeni",
@@ -6346,6 +6413,7 @@ describe("runtime event normalization", () => {
     try {
       const prepared = await prepareAgentTools(
         testSettings({
+          opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
           // A `{workspaceId}` template keeps the config first-party (isFirstParty
           // short-circuits on it) and resolves to the test server's /mcp path
           // (the token goes in a query param the server ignores), so the real
@@ -6415,6 +6483,7 @@ describe("runtime event normalization", () => {
     });
     const prepared = await prepareAgentTools(
       testSettings({
+        opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
         mcpServers: [
           {
             id: "opengeni",
@@ -6458,6 +6527,7 @@ describe("runtime event normalization", () => {
     });
     const prepared = await prepareAgentTools(
       testSettings({
+        opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
         mcpServers: [
           {
             id: "opengeni",
@@ -6499,6 +6569,7 @@ describe("runtime event normalization", () => {
       await expect(
         prepareAgentTools(
           testSettings({
+            opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}`,
             mcpServers: [
               {
                 id: "opengeni",
@@ -6576,12 +6647,11 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("substitutes the opt-in Gmail REST adapter for the hosted preview MCP", async () => {
+  test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];
     const prepared = await prepareAgentTools(
       testSettings({
-        gmailRestAdapterEnabled: true,
         mcpServers: [
           {
             id: "gmail",
@@ -6753,6 +6823,7 @@ describe("runtime event normalization", () => {
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
     const resolved: ResolveConnectionCredentialInput[] = [];
+    let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -6781,6 +6852,10 @@ describe("runtime event normalization", () => {
             headers: {
               authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
             },
+            authorizeProviderRequest: async () => {
+              providerAuthorizations += 1;
+              return true;
+            },
           };
         },
       },
@@ -6789,6 +6864,7 @@ describe("runtime event normalization", () => {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+      expect(providerAuthorizations).toBe(mcp.requests.length);
     } finally {
       await prepared.close();
       mcp.close();
@@ -6801,6 +6877,7 @@ describe("runtime event normalization", () => {
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
     const resolved: ResolveConnectionCredentialInput[] = [];
+    let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -6829,11 +6906,16 @@ describe("runtime event normalization", () => {
             headers: {
               authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
             },
+            authorizeProviderRequest: async () => {
+              providerAuthorizations += 1;
+              return true;
+            },
           };
         },
       },
     );
     try {
+      const setupAuthorizations = providerAuthorizations;
       const result = await prepared.mcpServers[0]!.callToolResult!(
         "cap-uncertain__search_documents",
         {
@@ -6851,6 +6933,7 @@ describe("runtime event normalization", () => {
         1,
       );
       expect(mcp.calls).toHaveLength(0);
+      expect(providerAuthorizations - setupAuthorizations).toBe(1);
       expect(
         resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
       ).toBe(true);
@@ -7733,6 +7816,97 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("waits only for session-eager MCP preparation and defers strict and optional servers", async () => {
+    let releaseOptional!: () => void;
+    const optionalConnect = new Promise<void>((resolve) => {
+      releaseOptional = resolve;
+    });
+    const makeServer = (name: string, connect: () => Promise<void>): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      connect,
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "lookup",
+            description: `Lookup through ${name}`,
+            inputSchema: {
+              type: "object" as const,
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text", text: name }];
+      },
+      async invalidateToolsCache() {},
+    });
+    const eager = makeServer("eager-inner", async () => {});
+    const strict = makeServer("strict-inner", async () => await optionalConnect);
+    const optional = makeServer("optional-inner", async () => await optionalConnect);
+    const configs = [
+      {
+        id: "eager",
+        name: "Eager",
+        url: "https://eager.invalid/mcp",
+        cacheToolsList: false,
+      },
+      {
+        id: "strict",
+        name: "Strict",
+        url: "https://strict.invalid/mcp",
+        cacheToolsList: false,
+      },
+      {
+        id: "optional",
+        name: "Optional",
+        url: "https://optional.invalid/mcp",
+        cacheToolsList: false,
+      },
+    ];
+    const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "eager", eager: true },
+        { kind: "mcp", id: "strict" },
+        { kind: "mcp", id: "optional", optional: true },
+      ],
+      {
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [
+          { id: "eager", server: eager },
+          { id: "strict", server: strict },
+          { id: "optional", server: optional },
+        ],
+      },
+    );
+    try {
+      expect(prepared.ready).toBeDefined();
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+      });
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name)).toEqual([
+        "eager__lookup",
+      ]);
+
+      releaseOptional();
+      const complete = await prepared.ready!;
+      expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
+        "eager__lookup",
+        "optional__lookup",
+        "strict__lookup",
+      ]);
+      expect(complete.attemptToolEnvironment).toBeNull();
+    } finally {
+      releaseOptional();
+      await prepared.close();
+    }
+  });
+
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";
@@ -8158,7 +8332,7 @@ describe("runtime event normalization", () => {
       try {
         await prepareAgentTools(
           testSettings({
-            opengeniMcpUrl: url,
+            opengeniMcpInternalUrl: url,
             mcpServers: [
               {
                 id: "opengeni",
@@ -8788,6 +8962,106 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("does not reuse an SDK-global tools-list across attempt-scoped allowedTools", async () => {
+    const registryId = `scoped_${crypto.randomUUID().replaceAll("-", "_")}`;
+    let remoteLists = 0;
+    const localServer = (): MCPServer => ({
+      name: `inner-${crypto.randomUUID()}`,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        remoteLists += 1;
+        return [
+          {
+            name: "read_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "delete_records",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    });
+    const toolNamesFor = async (allowedTools: string[]): Promise<string[]> => {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: registryId,
+              name: "Attempt-scoped server",
+              url: "https://attempt-scoped.example.test/mcp",
+              cacheToolsList: true,
+              allowedTools,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: registryId }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+          localMcpServers: [{ id: registryId, server: localServer() }],
+        },
+      );
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers }))
+          .map((tool) => tool.name)
+          .sort();
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor(["read_records", "delete_records"])).toEqual([
+      prefixedMcpToolName(registryId, "delete_records"),
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(await toolNamesFor(["read_records"])).toEqual([
+      prefixedMcpToolName(registryId, "read_records"),
+    ]);
+    expect(remoteLists).toBe(2);
+  });
+
+  test("does not reuse an SDK-global list across in-process attempt definitions", async () => {
+    const toolNamesFor = async (modelName: string): Promise<string[]> => {
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "attempt", toolName: modelName },
+            modelName,
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+          },
+        ],
+      });
+      try {
+        return (await getAllMcpTools({ mcpServers: prepared.mcpServers })).map((tool) => tool.name);
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    expect(await toolNamesFor("attempt_alpha")).toEqual(["attempt_alpha"]);
+    expect(await toolNamesFor("attempt_beta")).toEqual(["attempt_beta"]);
+  });
+
   test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
     const connectionId = "11111111-2222-4333-8444-555555555555";
     let connected = 0;
@@ -9089,6 +9363,30 @@ describe("runtime Skill activation", () => {
         { environment: {} },
       ),
     ).rejects.toThrow("Artifact runtime doctor failed");
+  });
+
+  test("credential hook resolution validates every id and deduplicates first-seen hooks", async () => {
+    const hooks = sandboxLifecycleHooksForIds([
+      "azure-cli-login",
+      "azure-cli-login",
+      "azure-cli-login",
+    ]);
+    const commands: string[] = [];
+    await runBeforeAgentStartHooks({} as any, hooks, {
+      environment: {
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_TENANT_ID: "tenant",
+      },
+      commandRunner: async (_session, { cmd }) => {
+        commands.push(cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+    expect(commands).toEqual([azureCliLoginCommand()]);
+    expect(() =>
+      sandboxLifecycleHooksForIds(["azure-cli-login", "unknown", "azure-cli-login"]),
+    ).toThrow("Unknown sandbox lifecycle hook unknown");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {
@@ -10345,7 +10643,7 @@ describe("provider item id stripping", () => {
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
-    let selectedSchemaAccountingDeferred = false;
+    let selectedSchemaAccountingDeferred = true;
     let mandatorySchemaAccountingDeferred = false;
     const selectedMcp = {
       name: "selected",
@@ -10358,6 +10656,7 @@ describe("provider item id stripping", () => {
       deferModelToolSchemaAccounting: () => {
         selectedSchemaAccountingDeferred = true;
       },
+      modelToolSchemasAreDeferred: () => true,
     } as unknown as MCPServer;
     const mandatoryMcp = {
       name: "opengeni",
@@ -10370,6 +10669,7 @@ describe("provider item id stripping", () => {
       deferModelToolSchemaAccounting: () => {
         mandatorySchemaAccountingDeferred = true;
       },
+      modelToolSchemasAreDeferred: () => false,
     } as unknown as MCPServer;
     const settings = testSettings({
       codexToolSearchEnabled: true,

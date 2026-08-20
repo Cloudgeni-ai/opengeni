@@ -47,6 +47,7 @@ import {
 } from "@opengeni/runtime";
 import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
 import {
+  establishSelfhostedTurnSession,
   wrapLazyTurnBoxWithRouting,
   wrapTurnBoxWithRouting,
   routingEnabled,
@@ -81,17 +82,22 @@ function busWithAgent(
   agentId: string,
   connectionInstanceId: string,
   hostname: string,
+  onRequest?: () => void,
 ): MemoryEventBus {
   const bus = new MemoryEventBus();
   const enc = new TextEncoder();
   bus.subscribeRequests(subjectFor(workspaceId, agentId, connectionInstanceId), (payload) => {
+    onRequest?.();
     const req = ControlRequest.decode(payload);
     const op = req.op;
     let res: ControlResponse;
     if (op?.$case === "ping") {
       res = {
         requestId: req.requestId,
-        result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+        result: {
+          $case: "ping",
+          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+        },
       };
     } else if (op?.$case === "exec") {
       res = {
@@ -161,7 +167,13 @@ function fakeGroupBox(marker: string): EstablishedSandboxSession {
       return { stdout: marker, exitCode: 0 };
     },
   };
-  return { client: {}, session, sessionState: {}, instanceId: "group-box", backendId: "modal" };
+  return {
+    client: {},
+    session,
+    sessionState: {},
+    instanceId: "group-box",
+    backendId: "modal",
+  };
 }
 
 async function claimRoutingAttempt(input: {
@@ -243,6 +255,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const workspaceMutationFence = await claimRoutingAttempt({
@@ -324,7 +338,9 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       },
       fakeGroupBox("group-box-marker"),
     );
-    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    const proxy = established.session as {
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
 
     // Default pointer (null) → the op lands on the GROUP box.
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
@@ -370,6 +386,278 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
   }, 60_000);
 
+  test("organization-scoped cross-workspace primary routes its first operation through the origin", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const [account] = await admin<Array<{ id: string }>>`
+      insert into managed_accounts (name) values (${`org-primary-${crypto.randomUUID()}`})
+      returning id
+    `;
+    const [originWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'organization machine origin') returning id
+    `;
+    const [targetWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'organization machine target') returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${originWorkspace!.id}, ${account!.id}),
+        (${targetWorkspace!.id}, ${account!.id})
+    `;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${account!.id}, ${subjectId}, 'active', ${originWorkspace!.id}, 1)
+    `;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${account!.id}, ${targetWorkspace!.id}, ${subjectId})
+    `;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${originWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string }>>`
+        select enrollment_id as "enrollmentId"
+        from finalize_scoped_enrollment(
+          ${account!.id}::uuid, ${originWorkspace!.id}::uuid, 'organization',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'Organization route machine', true
+        )
+      `;
+      return row!;
+    });
+    const [machineCredential] = await admin<Array<{ credentialGeneration: number }>>`
+      select credential_generation as "credentialGeneration"
+      from enrollments
+      where id = ${machine.enrollmentId} and authority_scope = 'organization'
+    `;
+    const connectionInstanceId = await claimTestConnection({
+      workspaceId: originWorkspace!.id,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: machineCredential!.credentialGeneration,
+    });
+    let providerRequests = 0;
+    const bus = busWithAgent(
+      originWorkspace!.id,
+      machine.enrollmentId,
+      connectionInstanceId,
+      "organization-route-machine",
+      () => {
+        providerRequests += 1;
+      },
+    ) as never;
+    const established = await establishSelfhostedTurnSession(
+      { db, settings, bus, opJournal: testOpJournal },
+      {
+        workspaceId: targetWorkspace!.id,
+        controlWorkspaceId: originWorkspace!.id,
+        agentId: machine.enrollmentId,
+        connectionInstanceId,
+        opStream: false,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        epoch: 0,
+        environment: {},
+        workingDir: null,
+      },
+    );
+
+    expect(
+      (
+        (await (established.session as { exec(args: unknown): Promise<unknown> }).exec({
+          cmd: "hostname",
+        })) as { stdout: string }
+      ).stdout.trim(),
+    ).toBe("organization-route-machine");
+    expect(providerRequests).toBe(1);
+  }, 60_000);
+
+  test("revocation fences both cached swapped and pinned personal-machine sessions before dispatch", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const [account] = await admin<Array<{ id: string }>>`
+      insert into managed_accounts (name) values (${`personal-route-${crypto.randomUUID()}`})
+      returning id
+    `;
+    const [originWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'personal machine origin') returning id
+    `;
+    const [targetWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'personal machine target') returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id) values
+        (${originWorkspace!.id}, ${account!.id}),
+        (${targetWorkspace!.id}, ${account!.id})
+    `;
+    const [membership] = await admin<Array<{ id: string }>>`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${account!.id}, ${subjectId}, 'active', ${originWorkspace!.id}, 1)
+      returning id
+    `;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${account!.id}, ${targetWorkspace!.id}, ${subjectId})
+    `;
+    const machine = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${originWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true),
+        set_config('opengeni.initiating_human_subject_id', ${subjectId}, true)`;
+      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(
+          ${account!.id}::uuid, ${originWorkspace!.id}::uuid, 'user',
+          ${`ed25519:${crypto.randomUUID()}`}, true, true, 'linux', 'x86_64',
+          'Personal route machine', false
+        )
+      `;
+      return row!;
+    });
+    const [machineCredential] = await admin<Array<{ credentialGeneration: number }>>`
+      select credential_generation as "credentialGeneration"
+      from enrollments where id = ${machine.enrollmentId}
+    `;
+    const connectionInstanceId = await claimTestConnection({
+      workspaceId: originWorkspace!.id,
+      enrollmentId: machine.enrollmentId,
+      credentialGeneration: machineCredential!.credentialGeneration,
+    });
+    const session = await createSession(db, {
+      accountId: account!.id,
+      workspaceId: targetWorkspace!.id,
+      initialMessage: "use my personal machine",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+    });
+    const [authority] = await admin<Array<{ id: string }>>`
+      select id from organization_user_resource_authorities
+      where account_id = ${account!.id}
+        and organization_membership_id = ${membership!.id}
+        and resource_kind = 'connected_machine'
+        and resource_id = ${machine.enrollmentId}
+    `;
+    const [sessionAuthority] = await admin<Array<{ visibility: string; authorityEpoch: number }>>`
+      select visibility, authority_epoch as "authorityEpoch"
+      from sessions where id = ${session.id}
+    `;
+    const [grant] = await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true),
+        set_config('opengeni.initiating_human_subject_id', ${subjectId}, true)`;
+      return await tx<Array<{ grantId: string }>>`
+        select grant_id as "grantId" from issue_self_user_resource_grant(
+          ${account!.id}::uuid, ${authority!.id}::uuid,
+          ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
+          ${sessionAuthority!.visibility}, ${session.id}::uuid, true
+        )
+      `;
+    });
+    await admin`
+      update sessions set active_sandbox_id = ${machine.sandboxId}
+      where account_id = ${account!.id} and workspace_id = ${targetWorkspace!.id}
+        and id = ${session.id}
+    `;
+    const attempt = await claimRoutingAttempt({
+      accountId: account!.id,
+      workspaceId: targetWorkspace!.id,
+      sessionId: session.id,
+    });
+    let providerRequests = 0;
+    const bus = busWithAgent(
+      originWorkspace!.id,
+      machine.enrollmentId,
+      connectionInstanceId,
+      "personal-route-machine",
+      () => {
+        providerRequests += 1;
+      },
+    ) as never;
+    const exactAttempt = {
+      accountId: account!.id,
+      subjectId,
+      turnId: attempt.turnId,
+      attemptId: attempt.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    };
+    const swapped = wrapTurnBoxWithRouting(
+      { db, settings, bus, opJournal: testOpJournal },
+      {
+        workspaceId: targetWorkspace!.id,
+        sessionId: session.id,
+        workspaceMutationFence: attempt,
+        resourceAccountId: account!.id,
+        resourceSubjectId: subjectId,
+        personalMachineAttempt: exactAttempt,
+      },
+      fakeGroupBox("unused-home"),
+    ).session as {
+      exec(args: unknown): Promise<unknown>;
+      readFile(args: unknown): Promise<unknown>;
+    };
+    const pinned = await establishSelfhostedTurnSession(
+      { db, settings, bus, opJournal: testOpJournal },
+      {
+        workspaceId: targetWorkspace!.id,
+        controlWorkspaceId: originWorkspace!.id,
+        agentId: machine.enrollmentId,
+        connectionInstanceId,
+        opStream: false,
+        epoch: 0,
+        environment: {},
+        workingDir: null,
+        personalMachineAttempt: { ...exactAttempt, sessionId: session.id },
+      },
+    );
+    expect(((await swapped.exec({ cmd: "hostname" })) as { stdout: string }).stdout.trim()).toBe(
+      "personal-route-machine",
+    );
+    expect(
+      (
+        (await (pinned.session as { exec(args: unknown): Promise<unknown> }).exec({
+          cmd: "hostname",
+        })) as { stdout: string }
+      ).stdout.trim(),
+    ).toBe("personal-route-machine");
+    expect(providerRequests).toBe(2);
+
+    await admin`
+      update organization_user_resource_grants
+      set status = 'revoked', revoked_at = now()
+      where id = ${grant!.grantId}
+    `;
+    await expect(swapped.readFile({ path: "/workspace/private" })).rejects.toThrow();
+    await expect(
+      (pinned.session as { exec(args: unknown): Promise<unknown> }).exec({
+        cmd: "hostname",
+      }),
+    ).rejects.toThrow();
+    expect(providerRequests).toBe(2);
+  }, 60_000);
+
   test("operation-level 404/NOT_FOUND preserves the warm provider identity and epoch", async () => {
     if (!available) return;
     const [a] = await admin<
@@ -388,6 +676,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const acquired = await acquireLease(db, {
@@ -432,7 +722,12 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       backendId: "modal",
     };
     const established = wrapTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+      {
+        db,
+        settings,
+        bus: new MemoryEventBus() as never,
+        opJournal: testOpJournal,
+      },
       {
         workspaceId,
         sessionId: session.id,
@@ -456,7 +751,9 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       liveness: "warm",
       instanceId: "box-still-live",
       leaseEpoch: warmEpoch,
-      recovery: { provider: { status: "exists", instanceId: "box-still-live" } },
+      recovery: {
+        provider: { status: "exists", instanceId: "box-still-live" },
+      },
     });
   }, 60_000);
 
@@ -478,6 +775,8 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
 
@@ -587,7 +886,9 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       },
       groupBox,
     );
-    const proxy = established.session as { writeFile: (args: unknown) => Promise<unknown> };
+    const proxy = established.session as {
+      writeFile: (args: unknown) => Promise<unknown>;
+    };
 
     const results = await Promise.allSettled(
       operationCalls.map((_, index) => proxy.writeFile({ path: `/workspace/${index}`, index })),
@@ -663,7 +964,10 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
           instanceId: "box-before-concurrent-loss",
           diagnostic: "provider_not_found_during_routed_operation",
         },
-        archive: { status: "available", current: { revision: descriptor.revision } },
+        archive: {
+          status: "available",
+          current: { revision: descriptor.revision },
+        },
         restore: { status: "pending", selectedRevision: descriptor.revision },
         workspace: { status: "not_ready", verifiedRevision: null },
       },
@@ -695,14 +999,28 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
-    const manifest = buildManifest(settings, [], { HOME: "/workspace", LAZY: "1" });
+    const manifest = buildManifest(settings, [], {
+      HOME: "/workspace",
+      LAZY: "1",
+    });
     let provisions = 0;
     const real = fakeGroupBox("lazy-real");
     const lazy = wrapLazyTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
-      { workspaceId, sessionId: session.id, environment: { HOME: "/workspace", LAZY: "1" } },
+      {
+        db,
+        settings,
+        bus: new MemoryEventBus() as never,
+        opJournal: testOpJournal,
+      },
+      {
+        workspaceId,
+        sessionId: session.id,
+        environment: { HOME: "/workspace", LAZY: "1" },
+      },
       {
         client: { backendId: "modal" },
         backendId: "modal",
@@ -756,6 +1074,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     // A first-class Modal sibling row (no group/lease/box) — the categorical strand.
@@ -818,6 +1138,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const enrollment = await createEnrollment(db, {
@@ -903,6 +1225,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     // A stranded Modal-sibling pointer that WOULD reconcile if the lookup succeeded.
@@ -980,6 +1304,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
     });
     const enrollment = await createEnrollment(db, {
@@ -1032,7 +1358,9 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       { workspaceId, sessionId: session.id },
       fakeGroupBox("group-box-marker"),
     );
-    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    const proxy = established.session as {
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
     // The op currently routes to the machine (the pre-swap backend).
     expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
 

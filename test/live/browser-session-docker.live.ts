@@ -25,10 +25,14 @@ import {
 } from "@opengeni/db";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
 import type { ObjectStorage } from "@opengeni/storage";
+import { WebSocket, type RawData } from "ws";
+import type { ApiWebSocketConnection } from "../../apps/api/src/api-websocket";
 import { createApp } from "../../apps/api/src/app";
+import { InteractionFrameProxyTransport } from "../../apps/api/src/interaction-frame-proxy";
 
 const image = process.env.OPENGENI_BROWSER_CANARY_IMAGE?.trim() ?? "";
 const engine = process.env.OPENGENI_BROWSER_CANARY_ENGINE?.trim() || "chromium";
+const frameOnly = process.env.OPENGENI_BROWSER_CANARY_FRAME_ONLY === "1";
 if (engine !== "chromium" && engine !== "lightpanda") {
   throw new Error(`unsupported BrowserSession canary engine: ${engine}`);
 }
@@ -72,6 +76,8 @@ describe("BrowserSession API Docker canary", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "docker",
       });
       const settings = testSettings({
@@ -119,6 +125,20 @@ describe("BrowserSession API Docker canary", () => {
         "content-type": "application/json",
         origin,
       };
+      const frameProxies = new InteractionFrameProxyTransport(delegationSecret);
+      const frameProxyServer = Bun.serve<ApiWebSocketConnection>({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(request, server) {
+          if (frameProxies.handles(request)) return frameProxies.upgrade(request, server);
+          return new Response(null, { status: 404 });
+        },
+        websocket: {
+          open: (socket) => socket.data.attach(socket),
+          message: (socket, message) => socket.data.receive(message),
+          close: (socket) => socket.data.transportClosed(),
+        },
+      });
       let containerId: string | null = null;
       let primaryError: unknown;
       let cleanupError: Error | undefined;
@@ -176,6 +196,31 @@ describe("BrowserSession API Docker canary", () => {
         const observation = BrowserObservation.parse(await observationResponse.json());
         expect(observation.target.title).toBe("Browser Canary");
 
+        if (engine === "chromium") {
+          const attachmentResponse = await app.request(
+            `http://127.0.0.1:${frameProxyServer.port}/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/attachments`,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ targetId: target.id, expiresInSeconds: 30 }),
+            },
+          );
+          const attachment = BrowserSessionAttachment.parse(await attachmentResponse.json());
+          expect(attachment.stream.kind).toBe("direct_websocket");
+          if (attachment.stream.kind !== "direct_websocket")
+            throw new Error("expected direct stream");
+          expect(attachment.stream.url).toBe(
+            `ws://127.0.0.1:${frameProxyServer.port}/v1/interaction/frame-proxy`,
+          );
+          expect(attachment.stream.protocols).toHaveLength(2);
+          const firstFrame = await receiveFirstFrame(
+            attachment.stream.url,
+            attachment.stream.protocols,
+            origin,
+          );
+          expect(firstFrame.byteLength).toBeGreaterThan(4);
+        }
+
         const actionResponse = await app.request(
           `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/actions`,
           {
@@ -200,7 +245,7 @@ describe("BrowserSession API Docker canary", () => {
         });
         if (!navigated.observation) throw new Error("navigation returned no observation");
 
-        if (engine === "chromium") {
+        if (engine === "chromium" && !frameOnly) {
           const downloadAction = await app.request(
             `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/actions`,
             {
@@ -296,21 +341,6 @@ describe("BrowserSession API Docker canary", () => {
           });
           expect(storageFixture.putCount()).toBe(1);
           expect(storageFixture.getCount()).toBe(1);
-
-          const attachmentResponse = await app.request(
-            `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/attachments`,
-            {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ targetId: target.id, expiresInSeconds: 30 }),
-            },
-          );
-          const attachment = BrowserSessionAttachment.parse(await attachmentResponse.json());
-          expect(attachment.stream.kind).toBe("direct_websocket");
-          if (attachment.stream.kind !== "direct_websocket")
-            throw new Error("expected direct stream");
-          expect(attachment.stream.url).toMatch(/^ws:\/\/127\.0\.0\.1:/u);
-          expect(attachment.stream.protocols).toHaveLength(2);
         }
 
         const heartbeatResponse = await app.request(
@@ -333,6 +363,7 @@ describe("BrowserSession API Docker canary", () => {
       } catch (error) {
         primaryError = error;
       } finally {
+        frameProxyServer.stop(true);
         storageFixture.stop();
         if (containerId && /^[a-f0-9]{64}$/u.test(containerId)) {
           if (primaryError !== undefined) {
@@ -368,6 +399,72 @@ describe("BrowserSession API Docker canary", () => {
     300_000,
   );
 });
+
+async function receiveFirstFrame(
+  url: string,
+  protocols: readonly string[],
+  clientOrigin: string,
+): Promise<Uint8Array> {
+  const socket = new WebSocket(url, [...protocols], { headers: { origin: clientOrigin } });
+  return await new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      fail(new Error("BrowserSession live frame timed out"));
+    }, 10_000);
+    socket.binaryType = "arraybuffer";
+    socket.once("message", (data) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      if (typeof data === "string") {
+        reject(new Error("BrowserSession live frame was not binary"));
+        return;
+      }
+      resolve(rawDataBytes(data));
+    });
+    socket.on("error", (error) => {
+      const event = error as unknown as {
+        message?: unknown;
+        error?: { message?: unknown; code?: unknown };
+      };
+      fail(
+        new Error(
+          `BrowserSession live frame socket error: ${String(event.message ?? event.error?.message ?? error)}${event.error?.code ? ` (code=${String(event.error.code)})` : ""}`,
+        ),
+      );
+    });
+    socket.once("close", (code, reason) => {
+      fail(
+        new Error(
+          `BrowserSession live frame closed before a frame (code=${code}, reason=${reason.toString("utf8") || "none"})`,
+        ),
+      );
+    });
+  });
+}
+
+function rawDataBytes(data: RawData): Uint8Array {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data).slice();
+  if (Array.isArray(data)) {
+    const size = data.reduce((total, chunk) => total + chunk.byteLength, 0);
+    const joined = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of data) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return joined;
+  }
+  return Uint8Array.from(data);
+}
 
 async function readContainerDiagnostics(containerId: string): Promise<string | null> {
   const logs = Bun.spawn(["docker", "logs", "--tail", "200", containerId], {

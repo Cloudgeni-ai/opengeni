@@ -12,7 +12,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { OPEN_SUFFIX_RUN_STATE_BLOB, signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -91,6 +91,8 @@ async function frozenFixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId!, subjectId, (db) =>
@@ -139,7 +141,7 @@ async function frozenFixture() {
     sessionStatus: "requires_action",
     activeTurnId: claimed.turn.id,
     runState: {
-      serializedRunState: "frozen-state",
+      serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals: [],
       humanInputRequests: [
         {
@@ -195,6 +197,8 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const [source] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
@@ -327,6 +331,8 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const token = await signDelegatedAccessToken(DELEGATION_SECRET, {

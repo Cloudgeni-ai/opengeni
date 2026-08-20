@@ -394,8 +394,10 @@ replacement for review or acceptance.
    hibernation, signed-URL expiry, and scheduled canary cycles.
 7. Promote the identical digests to production; do not rebuild.
 8. Re-run the production-safe acceptance subset immediately.
-9. Run 72 hours of production canaries with zero failed, skipped, missing, or
-   late cycles and no workbench SLO breach.
+9. Optionally retain a 72-hour production canary soak as evidence; it is not a
+   publish gate. When the soak row is present it must still be failure-free
+   with zero failed, skipped, missing, or late cycles and no workbench SLO
+   breach.
 10. Publish packages only from the verified release commit, then retag the
     accepted manifests and emit the immutable package/image BOM without a
     Docker build.

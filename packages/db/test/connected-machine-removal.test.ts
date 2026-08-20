@@ -242,6 +242,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "selfhosted",
     });
     await admin`update sessions set title = 'Machine home session' where id = ${session.id}`;
@@ -283,6 +285,67 @@ describe("connected machine removal lifecycle", () => {
       sandbox_group_id: session.id,
     });
     expect((await getEnrollment(db, workspaceId, enrollment.id))?.status).toBe("revoked");
+  }, 60_000);
+
+  test("revocation detaches same-account sessions that selected the machine from another workspace", async () => {
+    if (!available) return;
+    const { accountId, workspaceId: originWorkspaceId } = await freshWorkspace();
+    const [targetWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${accountId}, 'connected-machine-consumer') returning id`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${targetWorkspace!.id}, ${accountId})`;
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId: originWorkspaceId,
+      pubkey: `ed25519:cross-workspace-removal-${crypto.randomUUID()}`,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId: originWorkspaceId,
+      kind: "selfhosted",
+      name: "Personal machine",
+      enrollmentId: enrollment.id,
+    });
+    const session = await createSession(db, {
+      accountId,
+      workspaceId: targetWorkspace!.id,
+      initialMessage: "cross-workspace machine",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      metadata: {},
+      model: "gpt-5",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "modal",
+    });
+    await admin`
+      update sessions set active_sandbox_id = ${machine.id}, active_epoch = active_epoch + 1
+      where id = ${session.id}`;
+
+    const removed = await removeEnrollment(db, {
+      accountId,
+      workspaceId: originWorkspaceId,
+      enrollmentId: enrollment.id,
+      operationKey: "cross-workspace-detach",
+    });
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      removed: true,
+      dependentSessions: [{ id: session.id, title: null }],
+    });
+    const [pointer] = await admin<
+      { active_sandbox_id: string | null; active_epoch: number; sandbox_backend: string }[]
+    >`select active_sandbox_id, active_epoch, sandbox_backend from sessions where id = ${session.id}`;
+    expect(pointer).toEqual({
+      active_sandbox_id: null,
+      active_epoch: 2,
+      sandbox_backend: "modal",
+    });
   }, 60_000);
 
   test("fences idempotency keys by enrollment with omitted and equal revisions", async () => {
@@ -383,6 +446,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     const routed = await setActiveSandbox(db, {
@@ -400,6 +465,8 @@ describe("connected machine removal lifecycle", () => {
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     await admin`update sessions set title = 'Second routed session' where id = ${secondSession.id}`;

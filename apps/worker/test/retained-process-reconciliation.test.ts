@@ -120,6 +120,8 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   ids.groupId = session.sandboxGroupId;
@@ -289,6 +291,8 @@ async function promoteDirectProcess(
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   ids.groupId = session.sandboxGroupId;
@@ -306,6 +310,7 @@ async function promoteDirectProcess(
     sessionId: session.id,
     requestId,
     holderId,
+    initiatorSubjectId: "subject-retained-direct",
     sandboxGroupId: ids.groupId,
     expectedEpoch: 7,
     expectedInstanceId: instanceId,
@@ -328,6 +333,7 @@ async function promoteDirectProcess(
       kind: "direct",
       requestId,
       holderId,
+      initiatorSubjectId: "subject-retained-direct",
       sandboxGroupId: ids.groupId,
       expectedEpoch: 7,
       expectedInstanceId: instanceId,

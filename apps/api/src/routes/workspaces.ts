@@ -41,7 +41,12 @@ import {
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessContext,
+  requireAccessGrant,
+  requireFreshAccessGrant,
+} from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -324,7 +329,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       after,
       c.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        reauthorize: async () => {
+          await requireFreshAccessGrant(c, deps, workspaceId, "workspace:read");
+        },
+      },
     );
   });
 
@@ -458,8 +468,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
+    // The fenced removal command re-enforces both guards fail-closed.
     assertWorkspaceMemberRemovable({ members, subjectId, callerSubjectId: grant.subjectId });
-    await removeWorkspaceMember(deps.db, workspaceId, subjectId);
+    await removeWorkspaceMember(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      actorSubjectId: grant.subjectId,
+      targetSubjectId: subjectId,
+    });
     return c.body(null, 204);
   });
 }

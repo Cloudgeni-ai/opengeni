@@ -160,7 +160,7 @@ export type MessageTimelineProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
-  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
   loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /** Mint short-lived native playback sources for retained generated videos. */
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;

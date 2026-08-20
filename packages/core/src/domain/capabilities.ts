@@ -16,6 +16,7 @@ import {
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
+  OPENGENI_PERSONAL_SLACK_MCP_URL,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
@@ -407,9 +408,14 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   const subjectScope = ref.subjectScope ?? "workspace";
+  const endpointUrl = item.endpointUrl?.replace(/\/+$/, "");
+  // Gmail is a consumer mailbox; Slack's hosted MCP issues user tokens only and
+  // shared Slack authority belongs to the OpenGeni workspace bot. Neither may
+  // become a workspace-owned connection reference.
   const personalOnly =
     item.metadata.connectionOwnership === "personal_only" ||
-    item.endpointUrl?.replace(/\/+$/, "") === officialGmailMcpUrl;
+    endpointUrl === officialGmailMcpUrl ||
+    endpointUrl === OPENGENI_PERSONAL_SLACK_MCP_URL;
   if (personalOnly && subjectScope !== "subject") {
     throw new HTTPException(422, {
       message:

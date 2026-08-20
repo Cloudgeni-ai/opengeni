@@ -19,7 +19,7 @@ import {
   type Database,
   type RetainedScreenshotArtifact,
 } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
@@ -592,9 +592,7 @@ export async function retainComputerScreenshot(input: {
   }
 
   if (prepared.status === "ready") {
-    return (await verifyReadyArtifact(input.objectStorage, prepared))
-      ? reference(prepared)
-      : unavailable(identity.artifactId, "missing_storage");
+    return reference(prepared);
   }
   if (prepared.status !== "pending" && prepared.status !== "reconciling") {
     return unavailable(identity.artifactId, unavailableReasonForStatus(prepared.status));
@@ -607,8 +605,6 @@ export async function retainComputerScreenshot(input: {
       body: screenshot.bytes,
       sha256: screenshot.sha256,
     });
-    const head = await input.objectStorage.headFile(prepared.file);
-    assertStoredScreenshotHead(head, screenshot);
   } catch (error) {
     await recordRetainedScreenshotArtifactError(input.db, {
       accountId: input.accountId,
@@ -639,9 +635,7 @@ export async function retainComputerScreenshot(input: {
       identity.artifactId,
     ).catch(() => undefined);
     if (stillReferenced?.status === "ready") {
-      return (await verifyReadyArtifact(input.objectStorage, stillReferenced))
-        ? reference(stillReferenced)
-        : unavailable(identity.artifactId, "missing_storage");
+      return reference(stillReferenced);
     }
     if (
       stillReferenced === null ||
@@ -810,9 +804,6 @@ async function materializeRetainedScreenshotHistoryWithCache(
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
   const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string> => {
-    if (!receipt.available) {
-      throw new RetainedScreenshotUnavailableError(receipt.artifactId, receipt.reason);
-    }
     let dataUrl = cache.get(receipt.artifactId);
     if (!dataUrl) {
       if (!input.objectStorage) {
@@ -834,9 +825,12 @@ async function materializeRetainedScreenshotHistoryWithCache(
       if (artifact.retentionExpiresAt.getTime() <= now.getTime()) {
         throw new RetainedScreenshotUnavailableError(receipt.artifactId, "expired");
       }
-      const bytes = await input.objectStorage.getFileBytes(artifact.file).catch(() => null);
-      if (!bytes)
+      const object = await retryWhileMissing(async () =>
+        input.objectStorage!.getObjectBytes(artifact.file.objectKey),
+      );
+      if (!object)
         throw new RetainedScreenshotUnavailableError(receipt.artifactId, "missing_storage");
+      const bytes = object.bytes;
       const validated = validateRetainableSessionImage({
         bytes,
         declaredMediaType: artifact.mediaType,
@@ -846,8 +840,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
         validated.sha256 !== artifact.sha256 ||
         validated.width !== artifact.width ||
         validated.height !== artifact.height ||
-        receipt.sha256 !== artifact.sha256 ||
-        receipt.originalBytes !== artifact.sizeBytes
+        (receipt.available &&
+          (receipt.sha256 !== artifact.sha256 || receipt.originalBytes !== artifact.sizeBytes))
       ) {
         throw new RetainedScreenshotUnavailableError(receipt.artifactId, "invalid_content");
       }
@@ -1017,37 +1011,6 @@ function unavailableReasonForStatus(
       return status;
     case "ready":
       return "missing_storage";
-  }
-}
-
-async function verifyReadyArtifact(
-  storage: ObjectStorage,
-  artifact: RetainedScreenshotArtifact,
-): Promise<boolean> {
-  try {
-    assertStoredScreenshotHead(await storage.headFile(artifact.file), {
-      sizeBytes: artifact.sizeBytes,
-      mediaType: artifact.mediaType as RetainableSessionImageMediaType,
-      sha256: artifact.sha256,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function assertStoredScreenshotHead(
-  head: ObjectHead,
-  expected: Pick<ValidatedSessionImage, "sizeBytes" | "mediaType" | "sha256">,
-): void {
-  if (head.ContentLength !== expected.sizeBytes) {
-    throw new Error("retained screenshot object size mismatch");
-  }
-  if (head.ContentType !== expected.mediaType) {
-    throw new Error("retained screenshot object MIME mismatch");
-  }
-  if (head.Metadata?.sha256 !== expected.sha256) {
-    throw new Error("retained screenshot object SHA-256 metadata mismatch");
   }
 }
 

@@ -509,7 +509,9 @@ class FormulaParser {
     if (this.isOperator("^")) {
       this.consume();
       const right = this.withNesting(() => this.power());
-      left = calculate(left, right, (a, b) => finiteNumber(Math.pow(numeric(a), numeric(b))));
+      left = calculate(left, right, (a, b) =>
+        finiteNumber(deterministicIntegerPower(numeric(a), numeric(b))),
+      );
     }
     return left;
   }
@@ -974,24 +976,24 @@ function callFunction(name: string, args: Evaluated[], budget: FormulaEvaluation
       return Math.abs(numeric(args[0] ?? 0));
     case "ROUND": {
       const digits = numeric(args[1] ?? 0);
-      const factor = 10 ** digits;
+      const factor = deterministicIntegerPower(10, digits);
       const value = numeric(args[0] ?? 0) * factor;
       return (Math.sign(value) * Math.round(Math.abs(value))) / factor;
     }
     case "ROUNDUP": {
       const digits = numeric(args[1] ?? 0);
-      const factor = 10 ** digits;
+      const factor = deterministicIntegerPower(10, digits);
       const value = numeric(args[0] ?? 0) * factor;
       return (Math.sign(value) * Math.ceil(Math.abs(value))) / factor;
     }
     case "ROUNDDOWN": {
       const digits = numeric(args[1] ?? 0);
-      const factor = 10 ** digits;
+      const factor = deterministicIntegerPower(10, digits);
       const value = numeric(args[0] ?? 0) * factor;
       return (Math.sign(value) * Math.floor(Math.abs(value))) / factor;
     }
     case "POWER":
-      return finiteNumber(Math.pow(numeric(args[0] ?? 0), numeric(args[1] ?? 0)));
+      return finiteNumber(deterministicIntegerPower(numeric(args[0] ?? 0), numeric(args[1] ?? 0)));
     case "SQRT": {
       const value = numeric(args[0] ?? 0);
       if (value < 0) throw new FormulaFault("#NUM!");
@@ -1067,7 +1069,30 @@ function dateValue(value: Evaluated | undefined): Date {
 
 function finiteNumber(value: number): number {
   if (!Number.isFinite(value)) throw new FormulaFault("#NUM!");
-  return value;
+  return value === 0 ? 0 : value;
+}
+
+/** Mirrors the kernel's explicitly ordered path for exact integer exponents. */
+function deterministicIntegerPower(base: number, exponent: number): number {
+  if (
+    Number.isFinite(exponent) &&
+    Number.isInteger(exponent) &&
+    Math.abs(exponent) <= Number.MAX_SAFE_INTEGER
+  ) {
+    const reciprocal = exponent < 0;
+    let remaining = Math.abs(exponent);
+    // Match the kernel at underflow boundaries: forming the positive power
+    // first can overflow before a representable reciprocal is taken.
+    let factor = reciprocal ? 1 / base : base;
+    let result = 1;
+    while (remaining !== 0) {
+      if (remaining % 2 === 1) result *= factor;
+      remaining = Math.floor(remaining / 2);
+      if (remaining !== 0) factor *= factor;
+    }
+    return result;
+  }
+  return Math.pow(base, exponent);
 }
 
 function boundedText(value: string, maximum: number): string {
@@ -1079,7 +1104,10 @@ function boundedText(value: string, maximum: number): string {
 
 function boundedScalar(value: Scalar, maximum: number): Scalar {
   if (typeof value === "string") return boundedText(value, maximum);
-  if (typeof value === "number" && !Number.isFinite(value)) throw new FormulaFault("#NUM!");
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new FormulaFault("#NUM!");
+    return value === 0 ? 0 : value;
+  }
   return value;
 }
 

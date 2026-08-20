@@ -37,6 +37,7 @@ let managedSubjectId = "";
 let managedApp: Hono | null = null;
 let available = true;
 let deviceSequence = 0;
+let userinfoRequests = 0;
 
 const settings = testSettings({
   productAccessMode: "configured",
@@ -51,6 +52,10 @@ const managedSettings = testSettings({
   publicBaseUrl: PUBLIC_ORIGIN,
   supergrokSubscriptionEnabled: true,
 });
+
+function jwt(payload: Record<string, unknown>): string {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+}
 
 const xaiFetch: typeof fetch = async (input, init) => {
   const url = String(input);
@@ -75,18 +80,24 @@ const xaiFetch: typeof fetch = async (input, init) => {
       });
     }
     return Response.json({
-      access_token: `access-${deviceSequence}`,
+      access_token: jwt({
+        principal_type: "User",
+        principal_id: "xai-user-1",
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      }),
       refresh_token: `refresh-${deviceSequence}`,
+      id_token: jwt({
+        sub: "xai-user-1",
+        email: "owner@example.com",
+        email_verified: true,
+        name: "Owner",
+      }),
       expires_in: 3600,
     });
   }
   if (url.endsWith("/oauth2/userinfo")) {
-    return Response.json({
-      sub: "xai-user-1",
-      email: "owner@example.com",
-      email_verified: true,
-      name: "Owner",
-    });
+    userinfoRequests += 1;
+    throw new Error("device connection must not call xAI userinfo");
   }
   if (url.endsWith("/models")) {
     return Response.json({
@@ -346,6 +357,7 @@ describe("SuperGrok subscription routes", () => {
     expect(serialized).not.toContain("access-");
     expect(serialized).not.toContain("refresh-");
     expect(serialized).not.toContain("credentialEncrypted");
+    expect(userinfoRequests).toBe(0);
 
     const status = await request("/supergrok/status");
     expect(status.status).toBe(200);

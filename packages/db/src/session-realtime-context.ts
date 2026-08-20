@@ -275,7 +275,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
   }
 
   const [session] = await db
-    .select({ metadata: schema.sessions.metadata })
+    .select({ reasoningEffort: schema.sessions.reasoningEffort })
     .from(schema.sessions)
     .where(
       and(
@@ -285,7 +285,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     )
     .limit(1);
   if (!session) throw new Error(`Realtime tail session ${input.sessionId} disappeared`);
-  const reasoning = ReasoningEffort.safeParse(session.metadata.reasoningEffort);
+  const reasoningEffort = ReasoningEffort.parse(session.reasoningEffort);
   const admitted = await submitHumanPromptInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -308,7 +308,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       context: rendered.context,
     },
     resources: [],
-    reasoningEffortFallback: reasoning.success ? reasoning.data : "medium",
+    reasoningEffortFallback: reasoningEffort,
     turnMetadata: {
       realtimeTailFlush: {
         source: SESSION_REALTIME_TAIL_SOURCE,

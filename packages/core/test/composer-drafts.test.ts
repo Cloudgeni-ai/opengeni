@@ -60,6 +60,8 @@ describe("established-session composer drafts", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const otherSession = await createSession(db, {
@@ -69,6 +71,8 @@ describe("established-session composer drafts", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const [sourceEvent] = await appendSessionEvents(db, workspaceId, sourceSession.id, [
@@ -213,6 +217,8 @@ describe("established-session composer drafts", () => {
       resources: [],
       metadata: {},
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const resources: ResourceRef[] = [

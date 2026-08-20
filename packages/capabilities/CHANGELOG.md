@@ -1,5 +1,25 @@
 # @opengeni/capabilities
 
+## 0.2.3
+
+### Patch Changes
+
+- b06071c: Publish the Gmail integration visibility fix with product release 0.23.8.
+
+## 0.2.2
+
+### Patch Changes
+
+- a77e804: Publish the Gmail integration visibility fix with product release 0.23.7.
+
+## 0.2.1
+
+### Patch Changes
+
+- a551666: Fix local Gmail provider OAuth callbacks, Google scope equivalence, stable
+  Discovery compilation, and installed API integration visibility in session
+  tool selection.
+
 ## 0.2.0
 
 ### Minor Changes

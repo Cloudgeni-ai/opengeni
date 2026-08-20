@@ -16,6 +16,8 @@ export const UNATTRIBUTED_LEGACY_INITIATOR: TurnInitiator = {
 export type FrozenTurnInitiator = {
   initiator: TurnInitiator;
   context: TurnInitiatorContext;
+  /** Exact causal human frozen only after the caller/attempt authority is validated. */
+  initiatingHumanSubjectId?: string | null;
 };
 
 const MAX_AGENT_PROVENANCE_HOPS = 32;
@@ -100,6 +102,7 @@ export async function frozenInitiatorForCommandActor(
         ...(actor.subjectLabel ? { label: actor.subjectLabel } : {}),
       },
       context: { ...(actor.context ?? {}) },
+      initiatingHumanSubjectId: null,
     };
   }
   if (actor.type !== "agent_attempt") {
@@ -110,6 +113,7 @@ export async function frozenInitiatorForCommandActor(
         ...(subjectLabel ? { label: subjectLabel } : {}),
       },
       context: {},
+      initiatingHumanSubjectId: actor.subjectId,
     };
   }
 
@@ -118,6 +122,7 @@ export async function frozenInitiatorForCommandActor(
       initiatorKind: schema.sessionTurns.initiatorKind,
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
       initiatorContext: schema.sessionTurns.initiatorContext,
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
     })
     .from(schema.sessionTurns)
     .where(
@@ -151,5 +156,8 @@ export async function frozenInitiatorForCommandActor(
       via: clipped,
       ...(hops.length > clipped.length ? { viaTruncated: true } : {}),
     },
+    initiatingHumanSubjectId:
+      turn.initiatingHumanSubjectId ??
+      (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null),
   };
 }

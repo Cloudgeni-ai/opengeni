@@ -428,13 +428,7 @@ export const WORKSPACE_MEMORY_BLOCK_EMPTY = `## Workspace memory
 This workspace has shared long-lived memory, currently empty. Your context is lost when the session ends; memory is not. When you learn something durably useful — a preference, an environment fact, a procedure that worked, a decision and its reason — save it with memory_save (one crisp, self-contained fact per record). Never store secrets.`;
 
 export const MEMORY_SEARCH_TOOL_DESCRIPTION =
-  "Search this workspace's shared long-lived memory (semantic + keyword). Use it before starting a new non-trivial task when the injected notes or current conversation do not already answer how the workspace does something. Results persist in conversation context: do not repeat the same search as routine setup on every continuation, resume, or interrupted turn. Returns scored records with ids.";
-
-export const MEMORY_SAVE_TOOL_DESCRIPTION =
-  "Save one durable, future-useful fact to this workspace's shared memory: a stable preference, an environment fact, a procedure that worked, or a decision and its reason. Write it compactly (1–3 sentences), self-contained (no 'this session/above' references, absolute dates, name concrete things), so a future session can act on it alone. Do NOT save: session-specific state, speculation, anything derivable from the repo/docs, or near-duplicates of existing memories (search first — to refine or replace an existing record pass replaces_id). Most turns have nothing worth saving.";
-
-export const MEMORY_CORRECT_TOOL_DESCRIPTION =
-  "Flag a workspace memory as wrong or outdated the moment you discover it — this is the most valuable memory action, because a wrong memory misleads every future session. Pass the record's id (as shown in [brackets]); optionally give replacement_text with the corrected fact, otherwise the record is archived.";
+  "Search this workspace's shared long-lived memory (semantic + keyword). Use it before starting a new non-trivial task when the injected notes or current conversation do not already answer how the workspace does something. Results persist in conversation context: do not repeat the same search as routine setup on every continuation, resume, or interrupted turn. Returns scored records with ids. Indexed workspace documents are a separate store: search those with `knowledge_search`/`knowledge_get` (or `search_documents`) on the Document Search (docs) MCP server, not with this tool.";
 
 // ---------------------------------------------------------------------------
 // Text normalization + hashing (MUST match migration 0045 backfill exactly)
@@ -469,7 +463,7 @@ export function isMemoryTextTooLong(text: string): boolean {
 // ---------------------------------------------------------------------------
 
 export function estimateMemoryTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(Buffer.byteLength(text, "utf8") / 4);
 }
 
 // Short id shown in the block/tool output = first 8 chars of the uuid. Tools
@@ -491,33 +485,10 @@ export type MemoryBlockRecord = {
 // into kind sections. Episodic is excluded. Returns null if nothing renders
 // (no non-episodic records) — the caller substitutes the empty-state block.
 export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]): string | null {
-  const renderable = records.filter((record) => record.kind !== "episodic");
-  if (renderable.length === 0) {
+  if (!records.some((record) => record.kind !== "episodic")) {
     return null;
   }
-
-  // Greedy budget fill in priority order. We track the running token estimate of
-  // the whole block (header + section titles introduced so far + entries).
-  const headerTokens = estimateMemoryTokens(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED);
-  let usedTokens = headerTokens;
-  const seenSections = new Set<KnowledgeMemoryKind>();
-  const selected: MemoryBlockRecord[] = [];
-  for (const record of renderable) {
-    const entryLine = renderMemoryEntry(record);
-    let cost = estimateMemoryTokens(entryLine) + 1; // +1 for the entry's newline
-    if (!seenSections.has(record.kind)) {
-      const sectionTitle = `### ${MEMORY_KIND_SECTION_TITLES[record.kind]}`;
-      cost += estimateMemoryTokens(sectionTitle) + 2; // title + blank line separator
-    }
-    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) {
-      // Skip entries that don't fit instead of stopping: one oversized entry
-      // must not starve smaller lower-priority records of the remaining budget.
-      continue;
-    }
-    usedTokens += cost;
-    seenSections.add(record.kind);
-    selected.push(record);
-  }
+  const selected = selectWorkspaceMemoryBlockRecords(records);
 
   const lines: string[] = [WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED];
   for (const kind of MEMORY_BLOCK_KIND_ORDER) {
@@ -531,6 +502,30 @@ export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]
     }
   }
   return lines.join("\n");
+}
+
+/** Canonical whole-entry prompt-budget selector, shared with receipt validation. */
+export function selectWorkspaceMemoryBlockRecords(
+  records: readonly MemoryBlockRecord[],
+): readonly MemoryBlockRecord[] {
+  const renderable = records.filter((record) => record.kind !== "episodic");
+  const headerTokens = estimateMemoryTokens(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED);
+  let usedTokens = headerTokens;
+  const seenSections = new Set<KnowledgeMemoryKind>();
+  const selected: MemoryBlockRecord[] = [];
+  for (const record of renderable) {
+    const entryLine = renderMemoryEntry(record);
+    let cost = estimateMemoryTokens(entryLine) + 1;
+    if (!seenSections.has(record.kind)) {
+      const sectionTitle = `### ${MEMORY_KIND_SECTION_TITLES[record.kind]}`;
+      cost += estimateMemoryTokens(sectionTitle) + 2;
+    }
+    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) continue;
+    usedTokens += cost;
+    seenSections.add(record.kind);
+    selected.push(record);
+  }
+  return selected;
 }
 
 function renderMemoryEntry(record: MemoryBlockRecord): string {

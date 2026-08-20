@@ -35,6 +35,7 @@ import {
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
+  SESSION_GOAL_CONTEXT_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
@@ -51,6 +52,7 @@ import {
   SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
   SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
   SESSION_MCP_SERVERS_MAX,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   Session,
   SessionGoal,
   SessionRealtimeInboundEntry,
@@ -62,12 +64,17 @@ import {
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
+  renderSessionGoalContext,
   renderUserMessageContentForModel,
+  sessionSystemUpdateBatchHistoryItem,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
+  OPEN_SUFFIX_RUN_STATE_MARKER,
+  isOpenSuffixRunStateBlob,
   SessionEvent,
   compactSessionEventResult,
   ToolAuthNeededPayload,
@@ -86,6 +93,8 @@ import {
   GoalSpec,
   UpdateSessionGoalRequest,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
+  SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
 } from "../src";
 
 describe("contracts", () => {
@@ -122,6 +131,30 @@ describe("contracts", () => {
         expectedObjectiveRevision: 1,
       }).success,
     ).toBe(false);
+  });
+
+  test("goal root constraints normalize deterministically and enforce bounded UTF-8 input", () => {
+    const parsed = GoalSpec.parse({
+      text: "delegate",
+      rootConstraints: [" beta ", "alpha", "beta", "éclair"],
+    });
+    expect(parsed.rootConstraints).toEqual(["alpha", "beta", "éclair"]);
+    expect(
+      GoalSpec.safeParse({
+        text: "delegate",
+        rootConstraints: ["é".repeat(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES / 2 + 1)],
+      }).success,
+    ).toBe(false);
+    expect(
+      GoalSpec.safeParse({
+        text: "delegate",
+        rootConstraints: Array.from(
+          { length: SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS + 1 },
+          (_, index) => `constraint-${index}`,
+        ),
+      }).success,
+    ).toBe(false);
+    expect(GoalSpec.safeParse({ text: "delegate", rootConstraints: ["   "] }).success).toBe(false);
   });
 
   const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
@@ -626,6 +659,30 @@ describe("contracts", () => {
         initialMessage: "do not fabricate this turn",
       }).success,
     ).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        connectionAuthorities: [
+          {
+            serverId: "example",
+            connectionId: "00000000-0000-4000-8000-000000000001",
+            userDelegation: {
+              authorityId: "00000000-0000-4000-8000-000000000002",
+              grantId: "00000000-0000-4000-8000-000000000003",
+              organizationId: "00000000-0000-4000-8000-000000000004",
+              workspaceId: "00000000-0000-4000-8000-000000000005",
+              sessionId: null,
+              action: "connection.use",
+              mode: "always",
+              context: "workspace_shared",
+              authorityEpoch: null,
+              authorityGeneration: 1,
+              grantGeneration: 1,
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts validated inline session skills", () => {
@@ -1109,19 +1166,19 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("rejects per-session instructions over the 32768-char cap", () => {
+  test("accepts 65536-character per-session instructions and rejects larger values", () => {
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "inspect repo",
-        instructions: "x".repeat(32769),
+        instructions: "x".repeat(SESSION_INSTRUCTIONS_MAX_CHARACTERS + 1),
       }),
     ).toThrow();
     // Exactly at the cap is accepted.
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      instructions: "x".repeat(32768),
+      instructions: "x".repeat(SESSION_INSTRUCTIONS_MAX_CHARACTERS),
     });
-    expect(payload.instructions?.length).toBe(32768);
+    expect(payload.instructions?.length).toBe(SESSION_INSTRUCTIONS_MAX_CHARACTERS);
   });
 
   test("rejects the removed turnInstructions request field", () => {
@@ -1163,6 +1220,45 @@ describe("contracts", () => {
       { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
       { type: "input_text", text: "Visible request" },
     ]);
+  });
+
+  test("renders the frozen goal on the newest durable turn input", () => {
+    const goalSnapshot = {
+      state: "active" as const,
+      goalId: "11111111-1111-4111-8111-111111111111",
+      objectiveRevision: 3,
+      text: "Ship the cache-safe goal context",
+      successCriteria: "The persistent instruction prefix remains stable",
+      rootConstraints: ["Do not deploy"],
+      mutationPolicy: "preserve_intent" as const,
+      capturedAt: "2026-08-17T12:00:00.000Z",
+    };
+    const goalContext = renderSessionGoalContext(goalSnapshot)!;
+    expect(
+      renderUserMessageContentForModel("Continue", [], "selected record 42", goalSnapshot),
+    ).toEqual([
+      { type: "input_text", text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` },
+      { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
+      { type: "input_text", text: "Continue" },
+    ]);
+
+    const update = {
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "goal_continuation" as const,
+      classification: "action_required" as const,
+      sourceId: "goal",
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation" as const,
+        goalId: goalSnapshot.goalId,
+        goalVersion: 1,
+        prompt: "Continue working.",
+      },
+      lineage: {},
+    };
+    const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
+    expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
+    expect(internal.content).toContain("[OpenGeni internal updates]");
   });
 
   test("accepts client config payloads", () => {
@@ -1944,12 +2040,40 @@ describe("contracts", () => {
           },
           retrieval: {
             score: 0.75,
+            semanticScore: 0.74,
             matchType: "keyword",
             vectorScore: null,
             keywordScore: 0.75,
+            relevanceSignals: ["keyword"],
+            freshness: "current",
+            qualityAdjustment: 0.01,
+            duplicateCount: 0,
           },
         },
       ],
+      selection: {
+        relevanceFloor: {
+          policy: "any_signal",
+          vectorScore: 0.52,
+          keywordScore: 0.01,
+        },
+        dedupe: { policy: "exact_textual_content" },
+        candidates: { ranked: 1, rechecked: 1, omittedOnRecheck: 0 },
+        omitted: {
+          belowRelevanceFloor: 0,
+          asDuplicate: 0,
+          forLimit: 0,
+          forResponseBudget: 0,
+        },
+        budget: {
+          maxResults: 50,
+          maxResponseBytes: 65_536,
+          responseBytes: 1_000,
+          tokenEstimateBytesPerToken: 4,
+          estimatedTokens: 250,
+          maxEstimatedTokens: 16_384,
+        },
+      },
     });
     expect(knowledge.results[0]?.record.authority).toEqual({ kind: "personal" });
   });
@@ -2008,6 +2132,14 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    // Eager is an affirmative startup request and survives policy/default
+    // merging regardless of which source contributed it.
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", eager: true }],
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
   });
 });
 
@@ -2274,6 +2406,30 @@ describe("cleared run-state sentinel", () => {
       false,
     );
     expect(isClearedRunStateBlob("null")).toBe(false);
+  });
+});
+
+describe("open-suffix run-state sentinel", () => {
+  test("the canonical blob is recognized as the leftover-heap placeholder", () => {
+    expect(isOpenSuffixRunStateBlob(OPEN_SUFFIX_RUN_STATE_BLOB)).toBe(true);
+    expect(
+      isOpenSuffixRunStateBlob(JSON.stringify({ [OPEN_SUFFIX_RUN_STATE_MARKER]: true, note: "x" })),
+    ).toBe(true);
+    expect(isClearedRunStateBlob(OPEN_SUFFIX_RUN_STATE_BLOB)).toBe(false);
+  });
+
+  test("real run-state blobs and junk are not treated as the open-suffix sentinel", () => {
+    expect(
+      isOpenSuffixRunStateBlob(
+        JSON.stringify({
+          $schemaVersion: "1.11",
+          currentTurn: 1,
+          generatedItems: [],
+        }),
+      ),
+    ).toBe(false);
+    expect(isOpenSuffixRunStateBlob(null)).toBe(false);
+    expect(isOpenSuffixRunStateBlob(CLEARED_RUN_STATE_BLOB)).toBe(false);
   });
 });
 

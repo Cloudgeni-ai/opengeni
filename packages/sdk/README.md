@@ -37,6 +37,38 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Scheduled connection authority
+
+Agent schedules may carry explicit personal Connection authority. The public
+request contains only the credential-free server, Connection, and common-user
+grant tuple returned by the authority-selection API; the SDK never receives or
+stores provider credentials:
+
+```ts
+const task = await client.createScheduledTask(workspaceId, {
+  name: "Daily triage",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  runMode: "reusable_session",
+  agentConfig: { prompt: "Triage the new support issues" },
+  connectionAuthorities: [selection],
+});
+```
+
+PATCH semantics are deliberate: omit `connectionAuthorities` to preserve the
+exact prior immutable selection, pass `[]` to clear it, or pass a non-empty
+array to replace and revalidate it. Execution-changing edits that preserve
+personal authority must be made by the same causal human; use an explicit fresh
+selection when authority should move. `once` grants are consumed by the durable
+scheduled occurrence, not by an activity attempt, so retries reuse the same run
+receipt. `listScheduledTaskRuns` exposes terminal occurrence state while private
+Connection ids, subjects, and authority snapshots stay server-side.
+
+Deleting a task is externally idempotent and immediately removes it from live
+lists and quota, but the server retains a tombstone plus run/session/turn audit
+evidence until workspace/account retention cleanup. A stable `triggerId` is
+still required when a caller wants manual-trigger retries to coalesce; ordinary
+scheduled fires derive their producer identity from the Temporal fire workflow.
+
 ## Realtime browser controller (`@opengeni/sdk/realtime`)
 
 The public realtime subpath owns the provider-neutral browser controller and
@@ -447,6 +479,17 @@ it is not public web search.
 const goal = await client.getGoal(workspaceId, sessionId); // counters: autoContinuations, noProgressStreak
 await client.pauseGoal(workspaceId, sessionId, { rationale: "manual review" });
 await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms continuations
+
+const revisions = await client.listGoalRevisions(workspaceId, sessionId); // legacy raw array
+const page = await client.listGoalRevisionPage(workspaceId, sessionId, { limit: 25 });
+await client.rejectGoalRevision(workspaceId, sessionId, proposalId, {
+  expectedObjectiveRevision: goal.objectiveRevision,
+  rationale: "Keep the existing objective",
+});
+await client.rollbackGoalRevision(workspaceId, sessionId, appliedRevisionId, {
+  expectedObjectiveRevision: goal.objectiveRevision,
+  rationale: "Restore the last known-good objective",
+});
 ```
 
 ## Files
@@ -530,7 +573,7 @@ Every public endpoint group has typed methods:
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
-| Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
+| Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
 | Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |

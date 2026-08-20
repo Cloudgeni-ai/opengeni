@@ -39,6 +39,7 @@ jobs:
   guard:
     name: Guard
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -68,6 +69,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: guard
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -133,22 +135,39 @@ jobs:
             "../opengeni-computer-native-${{ matrix.target }}"
           file "../${{ matrix.asset }}"
 
-      - name: Build interaction helpers (Linux musl)
+      # Linux interaction helpers must be OS-native glibc, matching Mac's host libc
+      # join. The agent itself stays static musl (portable parent). Bun's musl
+      # compile is dynamically linked against /lib/ld-musl-*.so.1, which Ubuntu,
+      # Fedora, Arch, and NixOS do not ship, so connected-machine browser sessions
+      # fail with ENOENT/driver_failed. A static musl parent can exec a glibc child.
+      - name: Build interaction helpers (Linux glibc)
         if: matrix.kind == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
-            x86_64-*) bun_target=bun-linux-x64-musl; browser_arch=x64 ;;
-            aarch64-*) bun_target=bun-linux-arm64-musl; browser_arch=arm64 ;;
+            x86_64-*) bun_target=bun-linux-x64; browser_arch=x64 ;;
+            aarch64-*) bun_target=bun-linux-arm64; browser_arch=arm64 ;;
             *) echo "unsupported Linux interaction target" >&2; exit 1 ;;
           esac
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
+          interp="$(readelf -l "opengeni-browserd-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
+          case "$interp" in
+            /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
+            *)
+              echo "::error::linux browserd must use the glibc dynamic linker; got ${interp:-<missing>}" >&2
+              exit 1
+              ;;
+          esac
+          if readelf -d "opengeni-browserd-${{ matrix.target }}" | grep -F 'libc.musl'; then
+            echo "::error::linux browserd must not link musl libc" >&2
+            exit 1
+          fi
           OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
           OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
-          OPENGENI_BROWSERD_TARGET_MUSL=true \
+          OPENGENI_BROWSERD_TARGET_MUSL=false \
           OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}" \
             bun packages/browserd/scripts/stage-agent-browser.ts
           mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}" .
@@ -373,7 +392,7 @@ jobs:
           set -euo pipefail
           APP="OpenGeni Agent.app"
           rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
           # The universal binary built above becomes the bundle's executable. Its
           # CFBundleExecutable is `opengeni-agent` (matches install.sh's local path).
           cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
@@ -382,6 +401,7 @@ jobs:
           cp "opengeni-agent-browser-${{ matrix.target }}" "$APP/Contents/Helpers/agent-browser"
           cp "opengeni-computer-native-${{ matrix.target }}" \
             "$APP/Contents/Helpers/opengeni-computer-native"
+          cp agent/install/OpenGeni-Agent.icns "$APP/Contents/Resources/OpenGeni-Agent.icns"
           chmod 0755 "$APP/Contents/Helpers/"*
           # Info.plist kept in sync with install.sh's write_info_plist (same keys +
           # STABLE bundle id ai.opengeni.agent; LSUIElement hides the Dock icon).
@@ -394,6 +414,7 @@ jobs:
               <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
               <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
               <key>CFBundleExecutable</key><string>opengeni-agent</string>
+              <key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>
               <key>CFBundleShortVersionString</key><string>${VERSION}</string>
               <key>CFBundleVersion</key><string>${VERSION}</string>
               <key>CFBundlePackageType</key><string>APPL</string>
@@ -418,6 +439,29 @@ jobs:
           rcodesign staple "$APP"
           rm -f "OpenGeni-Agent.app.zip"
           ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"
+          # Validate the FINAL post-staple archive rather than trusting the
+          # staging tree. Missing interaction helpers make screen/browser control
+          # unusable and must fail publication before signatures are generated.
+          VERIFY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$VERIFY_DIR"; rm -f /tmp/cert.p12 /tmp/asc.json' EXIT
+          ditto -x -k "OpenGeni-Agent.app.zip" "$VERIFY_DIR"
+          for executable in \
+            "Contents/MacOS/opengeni-agent" \
+            "Contents/Helpers/opengeni-browserd" \
+            "Contents/Helpers/agent-browser" \
+            "Contents/Helpers/opengeni-computer-native"
+          do
+            if [ ! -x "$VERIFY_DIR/$APP/$executable" ]; then
+              echo "::error::final macOS app archive is missing executable $executable" >&2
+              exit 1
+            fi
+          done
+          test -f "$VERIFY_DIR/$APP/Contents/Info.plist"
+          test -f "$VERIFY_DIR/$APP/Contents/Resources/OpenGeni-Agent.icns"
+          test "$(plutil -extract CFBundleIconFile raw \
+            "$VERIFY_DIR/$APP/Contents/Info.plist")" = "OpenGeni-Agent.icns"
+          codesign --verify --deep --strict "$VERIFY_DIR/$APP"
+          rm -rf "$VERIFY_DIR"
           rm -f /tmp/cert.p12 /tmp/asc.json
 
       # ---- Windows Authenticode (POLISH, guarded). ----
@@ -528,6 +572,7 @@ jobs:
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -649,6 +694,7 @@ jobs:
             agent/install/install.ps1
             agent/install/uninstall.sh
             agent/install/opengeni-agent-minisign.pub
+            agent/install/OpenGeni-Agent.icns
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

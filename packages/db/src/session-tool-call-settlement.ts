@@ -85,6 +85,7 @@ export type ClosePendingSessionToolCallsInput = {
   reason: string;
   sequence: number;
   now: Date;
+  turnAssociation?: "current" | null;
 };
 
 function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
@@ -297,7 +298,7 @@ export async function closePendingSessionToolCallsInTransaction(
       turnId: input.turnId,
       turnGeneration: resolution.call.executionGeneration,
       turnAttemptId: resolution.call.attemptId,
-      turnAssociation: "current",
+      turnAssociation: input.turnAssociation === undefined ? "current" : input.turnAssociation,
       payload: {
         id: resolution.call.callId,
         output: resolution.interrupted

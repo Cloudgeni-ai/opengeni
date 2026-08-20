@@ -233,7 +233,7 @@ describe("applyCodexToolSearch", () => {
     ).toBeUndefined();
   });
 
-  test("uses authoritative MCP identities for mandatory, underscore, and non-MCP names", () => {
+  test("uses authoritative deferred MCP identities for underscore and non-MCP names", () => {
     const mcpServerIds = new Set(["opengeni", "opengeni_", "my", "my_", "my__"]);
     const tools = [
       plainTool("opengeni__set_session_title"),
@@ -252,15 +252,16 @@ describe("applyCodexToolSearch", () => {
 
     expect(deferredNames).toEqual(
       new Set([
+        "opengeni__set_session_title",
         "opengeni___selected_tool",
         "my__selected_tool",
         "my___selected_tool",
         "my____selected_tool",
       ]),
     );
-    expect(deferredNames.has("opengeni__set_session_title")).toBe(false);
+    expect(deferredNames.has("opengeni__set_session_title")).toBe(true);
     expect(deferredNames.has("ordinary__function")).toBe(false);
-    expect(isSearchableMcpFunctionTool(tools[0], mcpServerIds)).toBe(false);
+    expect(isSearchableMcpFunctionTool(tools[0], mcpServerIds)).toBe(true);
     expect(isSearchableMcpFunctionTool(tools[1], mcpServerIds)).toBe(true);
     expect(isSearchableMcpFunctionTool(tools[5], mcpServerIds)).toBe(false);
   });
@@ -491,7 +492,7 @@ describe("tool_search RunState replay", () => {
 });
 
 describe("tool_search tool wiring", () => {
-  test("wrapped OpenGeni stays eager while selected MCP schemas defer", async () => {
+  test("session-eager MCP schemas stay visible while non-eager schemas defer", async () => {
     const makeServer = (registryId: string) =>
       new PrefixedMcpServer(
         {
@@ -514,6 +515,7 @@ describe("tool_search tool wiring", () => {
       );
     const opengeni = makeServer("opengeni");
     const apps = makeServer("codex_apps");
+    apps.deferModelToolSchemaAccounting();
     const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
       structuredToolTransport: false,
       lazyToolTransport: "codex_native",
@@ -548,6 +550,7 @@ describe("tool_search tool wiring", () => {
       } as never,
       "codex_apps",
     );
+    apps.deferModelToolSchemaAccounting();
     const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
       structuredToolTransport: false,
       lazyToolTransport: "codex_native",

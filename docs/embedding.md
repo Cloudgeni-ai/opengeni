@@ -37,7 +37,7 @@ path, not both. Theme, density, and brand overrides remain runtime `--og-*`
 tokens; portalled surfaces copy the effective tokens from their trigger onto
 their own standalone `.og-root`.
 
-**V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
+**V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes worker loopback wrong, set `OPENGENI_MCP_INTERNAL_URL` / `settings.opengeniMcpInternalUrl`. `OPENGENI_MCP_URL` remains the sandbox/external route used by Codemode and remote placements; `firstPartyMcpInternalBaseUrl` and `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` own the split.
 
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:
 
@@ -69,7 +69,7 @@ non-bypassable CORE (goal-loop ownership + variable set block) always
 substituted in. Exact-message application context does not enter this prefix.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
-- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, and carries system-level authority.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, carries system-level authority, and is capped at 65536 characters.
 - **Per-message `modelContext`** (`CreateSessionRequest.modelContext`,
   `SendMessageInput.modelContext`, and supported realtime inbound entries) —
   optional application context for one exact accepted message. OpenGeni stores
@@ -196,7 +196,10 @@ the authenticated subject or a live exact agent attempt. Agent authority is
 reconstructed from durable attempt ownership and includes the caller session,
 caller root, turn, attempt, execution generation, and frozen initiator; caller
 input cannot nominate those fields. A settled, superseded, interrupted, or
-otherwise stale attempt is rejected before the host is called.
+otherwise stale attempt is rejected before the host is called. Slack-private
+and `user_private` owner checks also run before the host; the host may narrow
+further and cannot grant those sessions. Cross-session agent access keeps
+exact-target projection even when the host returns `relatedSessionAccess: "root"`.
 
 An allowed decision may set `relatedSessionAccess: "root"` when the principal
 may see the target's full tree. The fail-closed default is `"target"`: detail,
@@ -366,9 +369,13 @@ or replace a healthy sibling token. Renewal may rotate a broker bearer but may
 not change its exact routes during the admitted attempt; any route change fails
 closed and waits for a newer turn. Renewal requires no model/MCP call and never
 mutates the manifest.
-`sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
-plaintext variable set values plus the scoped `workspaceId`, with the same echo
-check before values are applied.
+`sandboxSecrets` receives the account/workspace/resource ids plus the exact
+session/turn/attempt/execution generation, frozen turn initiator, and nullable
+causal-human subject. Organization/workspace Variable Sets may be resolved for
+a pure service initiator; user-scoped sets must reject a null causal human and
+revalidate the exact admitted personal-resource grant. The provider returns
+plaintext values plus exact scope/resource/attempt echoes, which the worker
+checks before applying any value.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,

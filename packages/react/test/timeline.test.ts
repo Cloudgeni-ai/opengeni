@@ -12,6 +12,7 @@ import {
   type FleetDecisionItem,
   type MemoryItem,
   type SandboxItem,
+  type StartupPhaseItem,
   type TimelineGroup,
   type TurnEndItem,
   type ToolCallItem,
@@ -44,7 +45,7 @@ let sequence = 0;
 function event(
   type: string,
   payload: unknown,
-  options: { turnId?: string | null } = {},
+  options: { turnId?: string | null; turnAttemptId?: string | null } = {},
 ): SessionEvent {
   sequence += 1;
   return {
@@ -56,6 +57,7 @@ function event(
     payload,
     occurredAt: new Date(1718000000000 + sequence * 1000).toISOString(),
     turnId: options.turnId === undefined ? "turn-1" : options.turnId,
+    ...(options.turnAttemptId === undefined ? {} : { turnAttemptId: options.turnAttemptId }),
   };
 }
 
@@ -63,7 +65,7 @@ function eventAt(
   sequenceNumber: number,
   type: string,
   payload: unknown,
-  options: { turnId?: string | null } = {},
+  options: { turnId?: string | null; turnAttemptId?: string | null } = {},
 ): SessionEvent {
   return {
     id: `evt-${sequenceNumber}`,
@@ -74,6 +76,7 @@ function eventAt(
     payload,
     occurredAt: new Date(1718000000000 + sequenceNumber * 1000).toISOString(),
     turnId: options.turnId === undefined ? "turn-1" : options.turnId,
+    ...(options.turnAttemptId === undefined ? {} : { turnAttemptId: options.turnAttemptId }),
   };
 }
 
@@ -527,7 +530,11 @@ describe("buildTimeline", () => {
       eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
       eventAt(9, "agent.message.completed", { text: "First answer." }, { turnId: "turn-a" }),
     ]);
-    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message"]);
+    expect(items.map((item) => item.kind)).toEqual([
+      "user-message",
+      "startup-phase",
+      "agent-message",
+    ]);
     expect((items[0] as UserMessageItem).text).toBe("First message");
   });
 
@@ -599,8 +606,8 @@ describe("buildTimeline", () => {
     ]);
     const turns = turnGroups(groups);
     expect(turns).toHaveLength(2);
-    expect(flattenActivityIds(turns[0])).toEqual(["evt-9", "evt-41"]);
-    expect(flattenActivityIds(turns[1])).toEqual(["evt-62"]);
+    expect(flattenActivityIds(turns[0])).toEqual(["evt-6-queue", "evt-9", "evt-41"]);
+    expect(flattenActivityIds(turns[1])).toEqual(["evt-61-queue", "evt-62"]);
     expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
       kind: "agent-message",
       text: "Turn A final answer.",
@@ -640,6 +647,9 @@ describe("buildTimeline", () => {
     );
     expect(promptIndex).toBeGreaterThanOrEqual(0);
     expect(durableOutputIndex).toBeGreaterThan(promptIndex);
+    expect(
+      items.filter((item) => item.kind === "startup-phase" && item.phase === "queue"),
+    ).toHaveLength(1);
   });
 
   test("a queued user message stays out of the timeline until the queued turn starts", () => {
@@ -767,7 +777,7 @@ describe("buildTimeline", () => {
     ).toEqual(["item:user-message", "turn", "item:agent-message"]);
     const [turn] = turnGroups(groups);
     expect(turn?.outcome).toBe("complete");
-    expect(flattenActivityIds(turn)).toEqual(["evt-9", "evt-41"]);
+    expect(flattenActivityIds(turn)).toEqual(["evt-6-queue", "evt-9", "evt-41"]);
   });
 
   test("a queued turn without turn.started anchors on the first same-turn activity", () => {
@@ -794,8 +804,13 @@ describe("buildTimeline", () => {
         { turnId: "turn-b" },
       ),
     ]);
-    expect(items.map((item) => item.kind)).toEqual(["user-message", "user-message", "tool-call"]);
-    expect(items[1]).toMatchObject({ kind: "user-message", text: "Crash-resumed follow-up" });
+    expect(items.map((item) => item.kind)).toEqual([
+      "user-message",
+      "startup-phase",
+      "user-message",
+      "tool-call",
+    ]);
+    expect(items[2]).toMatchObject({ kind: "user-message", text: "Crash-resumed follow-up" });
   });
 
   test("user messages carry their attached resources and requested tools", () => {
@@ -1177,8 +1192,13 @@ describe("buildTimeline", () => {
       event("sandbox.operation.completed", { name: "sandbox.provision", origin: "resumed" }),
     ]);
     expect(items).toHaveLength(1);
-    expect((items[0] as SandboxItem).origin).toBe("resumed");
-    expect((items[0] as SandboxItem).status).toBe("complete");
+    expect(items[0]).toMatchObject({
+      kind: "startup-phase",
+      phase: "sandbox",
+      outcome: "resumed",
+      status: "complete",
+      durationMs: 1_000,
+    });
   });
 
   test("shows an expected sandbox lifecycle transition as superseded rather than failed", () => {
@@ -1406,15 +1426,20 @@ describe("buildTimeline", () => {
     expect(items).toEqual([]);
   });
 
-  test("routine repository-clone operations never render", () => {
-    // Per-turn platform plumbing (idempotent clone check + token re-seed) —
-    // rendering it every turn reads as the agent redoing work.
+  test("repository preparation keeps its exact durable duration", () => {
     reset();
     const items = buildTimeline([
       event("sandbox.operation.started", { name: "repository-clone" }),
       event("sandbox.operation.completed", { name: "repository-clone" }),
     ]);
-    expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "startup-phase",
+        phase: "repository",
+        status: "complete",
+        durationMs: 1_000,
+      }),
+    ]);
   });
 
   test("failed repository-clone operations still surface loudly", () => {
@@ -1426,16 +1451,11 @@ describe("buildTimeline", () => {
         error: "authentication failed",
       }),
     ]);
-    const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
-    expect(sandbox?.name).toBe("repository-clone");
-    expect(sandbox?.status).toBe("failed");
-    expect(sandbox?.output).toContain("authentication failed");
+    const phase = items.find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(phase).toMatchObject({ phase: "repository", status: "failed", durationMs: 1_000 });
   });
 
-  test("routine file-resource-download operations never render", () => {
-    // Per-turn plumbing: an idempotent `if [ ! -f ] then curl` re-materializes
-    // an attached file after a box re-warm and emits its operation every turn
-    // even when the file is already present — it must not read as re-downloading.
+  test("file materialization is a distinct settled startup span", () => {
     reset();
     const items = buildTimeline([
       event("sandbox.operation.started", {
@@ -1449,7 +1469,14 @@ describe("buildTimeline", () => {
         path: "files/photo.png",
       }),
     ]);
-    expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "startup-phase",
+        phase: "files",
+        status: "complete",
+        durationMs: 1_000,
+      }),
+    ]);
   });
 
   test("failed file-resource-download operations still surface loudly", () => {
@@ -1462,10 +1489,279 @@ describe("buildTimeline", () => {
         error: "signed URL expired",
       }),
     ]);
-    const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
-    expect(sandbox?.name).toBe("file-resource-download");
-    expect(sandbox?.status).toBe("failed");
-    expect(sandbox?.output).toContain("signed URL expired");
+    const phase = items.find((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(phase).toMatchObject({ phase: "files", status: "failed", durationMs: 1_000 });
+  });
+
+  test("reconstructs queue through provider first byte without conflating startup phases", () => {
+    reset();
+    const turn = { turnId: "turn-startup" };
+    const events = [
+      event("turn.queued", { turnId: "turn-startup", triggerEventId: "prompt-1" }, turn),
+      event("turn.started", { triggerEventId: "prompt-1" }, turn),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, turn),
+      event("sandbox.operation.completed", { name: "sandbox.provision", origin: "created" }, turn),
+      event("rig.setup.started", {}, turn),
+      event("rig.setup.completed", {}, turn),
+      event("sandbox.operation.started", { name: "repository-clone" }, turn),
+      event("sandbox.operation.completed", { name: "repository-clone" }, turn),
+      event("sandbox.operation.started", { name: "file-resource-download" }, turn),
+      event("sandbox.operation.completed", { name: "file-resource-download" }, turn),
+      event("turn.startup.phase.started", { phase: "tools" }, turn),
+      event("turn.startup.phase.completed", { phase: "tools", durationMs: 350 }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 420 }, turn),
+      event("agent.model.request", { phase: "started" }, turn),
+      event("agent.model.request", { phase: "first_byte", durationMs: 1_250 }, turn),
+    ];
+    const phases = buildTimeline(events).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+
+    expect(phases.map((phase) => phase.phase)).toEqual([
+      "queue",
+      "sandbox",
+      "rig",
+      "repository",
+      "files",
+      "tools",
+      "model_preparation",
+      "provider_first_byte",
+    ]);
+    expect(phases.every((phase) => phase.status === "complete")).toBe(true);
+    expect(phases.find((phase) => phase.phase === "tools")?.durationMs).toBe(350);
+    expect(phases.find((phase) => phase.phase === "provider_first_byte")?.durationMs).toBe(1_250);
+  });
+
+  test("recovery replaces an abandoned startup attempt without leaving a stale duplicate", () => {
+    reset();
+    const turnId = "turn-recovered-tools";
+    const firstAttemptId = "11111111-1111-4111-8111-111111111111";
+    const recoveredAttemptId = "22222222-2222-4222-8222-222222222222";
+    const firstStarted = event(
+      "turn.startup.phase.started",
+      { phase: "tools" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "worker_shutdown" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredTurnStarted = event(
+      "turn.started",
+      { triggerEventId: "prompt-recovery" },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredStarted = event(
+      "turn.startup.phase.started",
+      { phase: "tools" },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredCompleted = event(
+      "turn.startup.phase.completed",
+      { phase: "tools", durationMs: 650 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      recoveryRequested,
+      recoveredTurnStarted,
+      recoveredStarted,
+      recoveredCompleted,
+    ]).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase" && item.phase === "tools",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: recoveredStarted.id,
+      status: "complete",
+      startedAt: recoveredStarted.occurredAt,
+      completedAt: recoveredCompleted.occurredAt,
+      durationMs: 650,
+    });
+  });
+
+  test("a successful recovered provider attempt replaces the earlier failed wait", () => {
+    reset();
+    const turnId = "turn-recovered-provider";
+    const firstAttemptId = "33333333-3333-4333-8333-333333333333";
+    const recoveredAttemptId = "44444444-4444-4444-8444-444444444444";
+    const firstStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: firstAttemptId },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const firstFailed = event(
+      "agent.model.request",
+      { phase: "failed", attemptId: firstAttemptId, durationMs: 900 },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "provider_recovery" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: recoveredAttemptId },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredFirstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: recoveredAttemptId, durationMs: 425 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      firstFailed,
+      recoveryRequested,
+      recoveredStarted,
+      recoveredFirstByte,
+    ]).filter(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === "provider_first_byte",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: recoveredStarted.id,
+      status: "complete",
+      startedAt: recoveredStarted.occurredAt,
+      completedAt: recoveredFirstByte.occurredAt,
+      durationMs: 425,
+    });
+  });
+
+  test("recovery preserves a provider first byte already completed by the logical turn", () => {
+    reset();
+    const turnId = "turn-provider-already-started";
+    const firstAttemptId = "55555555-5555-4555-8555-555555555555";
+    const recoveredAttemptId = "66666666-6666-4666-8666-666666666666";
+    const firstStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: firstAttemptId },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const firstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: firstAttemptId, durationMs: 300 },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveryRequested = event(
+      "turn.recovery.requested",
+      { reason: "worker_shutdown" },
+      { turnId, turnAttemptId: firstAttemptId },
+    );
+    const recoveredStarted = event(
+      "agent.model.request",
+      { phase: "started", attemptId: recoveredAttemptId },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+    const recoveredFirstByte = event(
+      "agent.model.request",
+      { phase: "first_byte", attemptId: recoveredAttemptId, durationMs: 700 },
+      { turnId, turnAttemptId: recoveredAttemptId },
+    );
+
+    const phases = buildTimeline([
+      firstStarted,
+      firstByte,
+      recoveryRequested,
+      recoveredStarted,
+      recoveredFirstByte,
+    ]).filter(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === "provider_first_byte",
+    );
+
+    expect(phases).toHaveLength(1);
+    expect(phases[0]).toMatchObject({
+      id: firstStarted.id,
+      status: "complete",
+      startedAt: firstStarted.occurredAt,
+      completedAt: firstByte.occurredAt,
+      durationMs: 300,
+    });
+  });
+
+  test("a lazy chat-only path never claims that a sandbox was started", () => {
+    reset();
+    const turn = { turnId: "turn-chat-only" };
+    const phases = buildTimeline([
+      event("turn.queued", { turnId: "turn-chat-only", triggerEventId: "prompt-chat" }, turn),
+      event("turn.started", { triggerEventId: "prompt-chat" }, turn),
+      event("turn.startup.phase.started", { phase: "tools" }, turn),
+      event("turn.startup.phase.completed", { phase: "tools" }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event("turn.startup.phase.completed", { phase: "model_preparation" }, turn),
+      event("agent.model.request", { phase: "started" }, turn),
+      event("agent.model.request", { phase: "first_event" }, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+
+    expect(phases.map((phase) => phase.phase)).toEqual([
+      "queue",
+      "tools",
+      "model_preparation",
+      "provider_first_byte",
+    ]);
+    expect(phases.some((phase) => phase.phase === "sandbox")).toBe(false);
+  });
+
+  test("a first-tool lazy provision starts a later sandbox span without relabeling model wait", () => {
+    reset();
+    const turn = { turnId: "turn-first-tool" };
+    const phases = buildTimeline([
+      event("turn.queued", { turnId: "turn-first-tool", triggerEventId: "prompt-tool" }, turn),
+      event("turn.started", { triggerEventId: "prompt-tool" }, turn),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
+      event("turn.startup.phase.completed", { phase: "model_preparation" }, turn),
+      event("agent.model.request", { phase: "started" }, turn),
+      event("agent.model.request", { phase: "first_byte" }, turn),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, turn),
+      event("sandbox.operation.completed", { name: "sandbox.provision", origin: "created" }, turn),
+      event("rig.setup.started", {}, turn),
+      event("rig.setup.completed", {}, turn),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+
+    expect(phases.map((phase) => phase.phase)).toEqual([
+      "queue",
+      "model_preparation",
+      "provider_first_byte",
+      "sandbox",
+      "rig",
+    ]);
+    expect(phases.find((phase) => phase.phase === "sandbox")?.outcome).toBe("created");
+  });
+
+  test("warm reuse and setup failure retain their distinct outcomes", () => {
+    reset();
+    const warmTurn = { turnId: "turn-warm" };
+    const failedTurn = { turnId: "turn-startup-failed" };
+    const phases = buildTimeline([
+      event("sandbox.operation.started", { name: "sandbox.provision" }, warmTurn),
+      event(
+        "sandbox.operation.completed",
+        { name: "sandbox.provision", origin: "resumed" },
+        warmTurn,
+      ),
+      event("rig.setup.skipped", { durationMs: 0 }, warmTurn),
+      event("turn.startup.phase.started", { phase: "tools" }, failedTurn),
+      event(
+        "turn.startup.phase.failed",
+        { phase: "tools", durationMs: 275, error: "required MCP unavailable" },
+        failedTurn,
+      ),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+
+    expect(phases).toEqual([
+      expect.objectContaining({ phase: "sandbox", status: "complete", outcome: "resumed" }),
+      expect.objectContaining({ phase: "rig", status: "complete", outcome: "skipped" }),
+      expect.objectContaining({ phase: "tools", status: "failed", durationMs: 275 }),
+    ]);
   });
 
   test("sandbox durability lifecycle events are ignored by the projection", () => {

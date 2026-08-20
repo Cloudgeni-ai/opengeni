@@ -65,6 +65,8 @@ async function fixture(count = 3) {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const turns = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
@@ -244,6 +246,7 @@ describe("canonical queue commands", () => {
       tools: value.turns[1]!.tools,
       model: "model-2",
       reasoningEffort: "high",
+      latencyMode: "standard",
       sourceTurnId: value.turns[1]!.id,
       sourceTurnVersion: value.turns[1]!.version,
     });
@@ -307,7 +310,8 @@ describe("canonical queue commands", () => {
             text: "edited prompt with replacement content",
             resources: [],
             model: "edited-model",
-            reasoningEffort: "medium",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
           }),
         ),
     );
@@ -539,6 +543,7 @@ describe("canonical queue commands", () => {
           tools: [],
           model: "scripted-model",
           reasoningEffort: "low",
+          latencyMode: "standard",
           sandboxBackend: "none",
           executionGeneration: 1,
           activeAttemptId: attemptId,
@@ -553,6 +558,10 @@ describe("canonical queue commands", () => {
         .from(schema.sessions)
         .where(eq(schema.sessions.id, value.session.id));
       if (!sessionAuthority) throw new Error("Queue test session authority snapshot missing");
+      await db
+        .update(schema.sessions)
+        .set({ activeTurnId: turn!.id, status: "running" })
+        .where(eq(schema.sessions.id, value.session.id));
       await db.insert(schema.sessionTurnAttempts).values({
         id: attemptId,
         accountId: value.grant.accountId,
@@ -571,10 +580,6 @@ describe("canonical queue commands", () => {
           sessionAuthority.authorityOwnerOrganizationMembershipId,
         mcpApprovalPolicies: {},
       });
-      await db
-        .update(schema.sessions)
-        .set({ activeTurnId: turn!.id, status: "running" })
-        .where(eq(schema.sessions.id, value.session.id));
       return turn!;
     });
 
@@ -884,6 +889,7 @@ describe("canonical queue commands", () => {
       tools: [],
       model: "scripted-model",
       reasoningEffort: "low" as const,
+      latencyMode: "standard" as const,
       reasoningEffortFallback: "medium" as const,
       source: "user" as const,
     };
@@ -910,7 +916,19 @@ describe("canonical queue commands", () => {
           .from(schema.composerDrafts)
           .where(eq(schema.composerDrafts.sessionId, value.session.id)),
     );
-    expect(drafts).toHaveLength(0);
+    expect(drafts).toMatchObject([
+      {
+        revision: 2,
+        text: "",
+        resources: [],
+        model: "scripted-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+      },
+    ]);
+    expect(submitted.draft).toMatchObject(drafts[0]!);
     expect((await storedOrder(value.grant.workspaceId!, value.session.id)).at(-1)?.id).toBe(
       submitted.turnId,
     );
@@ -921,7 +939,7 @@ describe("canonical queue commands", () => {
       (db) =>
         db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
     );
-    expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+    expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId, draft: drafts[0] });
   });
 
   for (const attachmentSource of ["chooser", "drop", "paste"] as const) {
@@ -949,6 +967,7 @@ describe("canonical queue commands", () => {
               resources: [bareResource],
               model: "scripted-model",
               reasoningEffort: "low",
+              latencyMode: "standard",
             }),
           ),
       );
@@ -1028,6 +1047,7 @@ describe("canonical queue commands", () => {
               resources: [canonicalResource, bareResource],
               model: "scripted-model",
               reasoningEffort: "low",
+              latencyMode: "standard",
             }),
           ),
       );
@@ -1105,6 +1125,7 @@ describe("canonical queue commands", () => {
             resources: [customResource],
             model: "scripted-model",
             reasoningEffort: "low",
+            latencyMode: "standard",
           }),
         ),
     );

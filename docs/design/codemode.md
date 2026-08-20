@@ -25,8 +25,13 @@ into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
 pack, interaction, and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
-The catalog is persisted in `session_attempt_tool_catalogs` before model
-execution is allowed to begin. It is immutable for the attempt. A recovery or
+The catalog is persisted in `session_attempt_tool_catalogs` before Codemode is
+activated. On a fresh progressive-disclosure turn, only exact session refs with
+`eager: true` plus in-process tools are prepared before the first model request;
+all other MCPs build the same combined immutable catalog concurrently. A plain
+model response may settle without Codemode ever activating, while search,
+deferred invocation, or Codemode joins the catalog promise. Resume and
+editable-artifact turns prepare it fully before model execution. A recovery or
 successor attempt receives its own catalog and digest.
 
 ## Public attempt-scoped surface
@@ -45,12 +50,12 @@ cannot use this surface, and the Codemode bearer cannot use the ordinary MCP
 mount as a back door.
 
 The caller supplies a UUID operation id. The first valid submission atomically
-binds it to the exact request digest, reserves one turn budget slot, and creates
-a durable `queued` row. An identical submission is a free idempotent replay. The
-same id with different bytes is a conflict. Catalog absence, stale authority,
-unknown tools, approval-required tools, invalid payloads, and exhausted budgets
-fail before execution; approval-required tools must be called through the model
-path so the normal human approval lifecycle remains authoritative.
+binds it to the exact request digest and creates a durable `queued` row. An
+identical submission is a free idempotent replay. The same id with different
+bytes is a conflict. Catalog absence, stale authority, unknown tools,
+approval-required tools, and invalid payloads fail before execution;
+approval-required tools must be called through the model path so the normal
+human approval lifecycle remains authoritative.
 
 ## Dispatch and execution
 

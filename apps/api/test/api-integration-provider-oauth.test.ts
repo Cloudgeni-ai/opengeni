@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 
 import {
-  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
@@ -143,7 +143,7 @@ function providerFixture() {
   let microsoftPrincipalId = "microsoft-principal-1";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
-    if (url.href === GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "google",
@@ -151,7 +151,7 @@ function providerFixture() {
         authorization: new Headers(init?.headers).get("authorization"),
       });
       const plan = googlePlans.shift() ?? {
-        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
+        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-token",
       };
       return Response.json({
@@ -271,19 +271,19 @@ describe("API Integration provider OAuth", () => {
         "openid",
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
-        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/drive",
       ],
       refreshToken: "google-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     expect(started.response.status).toBe(200);
     const authorizationUrl = new URL(started.authorizationUrl);
     expect(authorizationUrl.origin).toBe("https://accounts.google.com");
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
-      GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes,
+      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
     );
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
@@ -302,7 +302,7 @@ describe("API Integration provider OAuth", () => {
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
     expect(location.searchParams.get("integration_oauth")).toBe("success");
-    expect(location.searchParams.get("definitionId")).toBe(GOOGLE_GMAIL_INTEGRATION_DEFINITION.id);
+    expect(location.searchParams.get("definitionId")).toBe(GOOGLE_DRIVE_INTEGRATION_DEFINITION.id);
 
     const connections = await listConnectionsMetadata(
       client.db,
@@ -313,21 +313,21 @@ describe("API Integration provider OAuth", () => {
     const connection = connections[0]!;
     expect(connection).toMatchObject({
       subjectId: workspace.subjectId,
-      providerDomain: "gmail.googleapis.com",
+      providerDomain: "www.googleapis.com",
       kind: "oauth2",
       status: "active",
       grantedScopes: [
         "openid",
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
-        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/drive",
       ],
       metadata: {
         credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
         providerFamily: "google",
         providerPrincipalId: "google-principal-1",
         providerEmail: "google.user@example.com",
-        authorizedDefinitionIds: [GOOGLE_GMAIL_INTEGRATION_DEFINITION.id],
+        authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
       },
     });
     expect(JSON.stringify(connection)).not.toContain("google-access");
@@ -344,7 +344,7 @@ describe("API Integration provider OAuth", () => {
       refresh_token: "google-refresh-token",
       client_id: GOOGLE_CLIENT_ID,
       client_secret: GOOGLE_CLIENT_SECRET,
-      token_endpoint: GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.tokenUrl,
+      token_endpoint: GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
     });
     expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(GOOGLE_CLIENT_SECRET);
 
@@ -466,21 +466,21 @@ describe("API Integration provider OAuth", () => {
     const fixture = providerFixture();
     fixture.googlePlans.push(
       {
-        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
+        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-a",
       },
       {
-        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
+        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-b",
       },
     );
     const [left, right] = await Promise.all([
       start(fixture, workspace, {
-        definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
       start(fixture, workspace, {
-        definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
     ]);
@@ -495,7 +495,7 @@ describe("API Integration provider OAuth", () => {
     ).toEqual(["success", "success"]);
     const connections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
-    ).filter((connection) => connection.providerDomain === "gmail.googleapis.com");
+    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
     expect(connections).toHaveLength(1);
 
     const insufficientWorkspace = await freshWorkspace();
@@ -505,7 +505,7 @@ describe("API Integration provider OAuth", () => {
       refreshToken: "must-not-persist",
     });
     const insufficientStart = await start(insufficient, insufficientWorkspace, {
-      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const denied = await callback(

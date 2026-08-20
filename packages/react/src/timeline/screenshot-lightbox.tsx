@@ -1,4 +1,4 @@
-import { XIcon } from "lucide-react";
+import { DownloadIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
@@ -19,7 +19,13 @@ import { usePortalTokenStyle } from "../lib/use-portal-token-style";
    -------------------------------------------------------------------------- */
 
 type LightboxController = {
-  open: (src: string, caption?: string, source?: HTMLElement | null, label?: string) => void;
+  open: (
+    src: string,
+    caption?: string,
+    source?: HTMLElement | null,
+    label?: string,
+    downloadFilename?: string,
+  ) => void;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
@@ -63,14 +69,26 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     src: string;
     caption?: string;
     label: string;
+    downloadFilename?: string;
   } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
   const portalStyle = usePortalTokenStyle(tokenSource);
 
   const open = useCallback(
-    (src: string, caption?: string, source?: HTMLElement | null, label = "Screenshot") => {
+    (
+      src: string,
+      caption?: string,
+      source?: HTMLElement | null,
+      label = "Screenshot",
+      downloadFilename?: string,
+    ) => {
       setTokenSource(source ?? null);
-      setState(caption ? { src, caption, label } : { src, label });
+      setState({
+        src,
+        label,
+        ...(caption ? { caption } : {}),
+        ...(downloadFilename ? { downloadFilename } : {}),
+      });
     },
     [],
   );
@@ -141,16 +159,32 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                         alt={state.caption ?? state.label}
                         className="min-h-0 max-h-[82vh] w-auto max-w-full rounded-og-md border border-white/10 object-contain shadow-og-lg"
                       />
-                      <Dialog.Close
-                        className={cn(
-                          "absolute -right-3 -top-3 inline-flex size-9 items-center justify-center rounded-full",
-                          "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-                          "transition-colors hover:border-white/30 hover:text-white",
-                        )}
-                        aria-label="Close"
-                      >
-                        <XIcon className="size-4" />
-                      </Dialog.Close>
+                      <div className="absolute -right-3 -top-3 flex items-center gap-2">
+                        {state.downloadFilename ? (
+                          <a
+                            href={state.src}
+                            download={state.downloadFilename}
+                            className={cn(
+                              "inline-flex size-9 items-center justify-center rounded-full",
+                              "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+                              "transition-colors hover:border-white/30 hover:text-white",
+                            )}
+                            aria-label={`Download ${state.downloadFilename}`}
+                          >
+                            <DownloadIcon className="size-4" />
+                          </a>
+                        ) : null}
+                        <Dialog.Close
+                          className={cn(
+                            "inline-flex size-9 items-center justify-center rounded-full",
+                            "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+                            "transition-colors hover:border-white/30 hover:text-white",
+                          )}
+                          aria-label="Close"
+                        >
+                          <XIcon className="size-4" />
+                        </Dialog.Close>
+                      </div>
                     </div>
                     {state.caption ? (
                       <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">

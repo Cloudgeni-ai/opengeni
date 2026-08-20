@@ -36,6 +36,8 @@ describe("NATS integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const seenA: SessionEvent[] = [];
@@ -68,6 +70,8 @@ describe("NATS integration", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const live: SessionEvent[] = [];

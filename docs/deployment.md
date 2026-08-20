@@ -56,7 +56,7 @@ machine. Kubernetes is used only as the process, restart, volume, and upgrade
 supervisor. It is not an autoscaling or failover layer in this profile.
 
 The profile renders one API, web, control worker, turn worker, relay, Postgres,
-Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
+Temporal, NATS, and Garage process. It disables HPAs, disruption budgets, and
 topology spreading. Container resource requests and limits are omitted, so a
 busy role may use otherwise-idle CPU and memory on the machine.
 
@@ -107,27 +107,27 @@ hard per-process maximum with resource-based admission and HPA.
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 
-| NodePort | Destination | Purpose |
+| NodePort | Destination    | Purpose                                      |
 | --- | --- | --- |
-| `30080` | web | browser application |
-| `30081` | API | API, SSE, enrollment, and agent distribution |
-| `30222` | NATS websocket | enrolled-machine command/event transport |
-| `30443` | relay | live terminal/desktop byte streams |
-| `30900` | MinIO API | signed browser file transfer only |
+| `30080`  | web            | browser application                          |
+| `30081`  | API            | API, SSE, enrollment, and agent distribution |
+| `30222`  | NATS websocket | enrolled-machine command/event transport     |
+| `30443`  | relay          | live terminal/desktop byte streams           |
+| `30900`  | Garage S3 API  | signed browser file transfer only            |
 
-The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
+The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
-websocket, relay, and MinIO API their own private TLS ports. Set
-`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
+websocket, relay, and Garage S3 API their own private TLS ports. Set
+`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
-agent version baked into this deployment rather than falling back to the public
-archive.
+agent version baked into this deployment and connects back to that same external
+HTTPS origin rather than falling back to either public default.
 
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
@@ -139,7 +139,8 @@ are not an additional user-facing gateway.
 Create the four Secrets before installation:
 
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
-- `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
+- `opengeni-garage`: `GARAGE_ACCESS_KEY_ID`, `GARAGE_SECRET_ACCESS_KEY`,
+  `GARAGE_RPC_SECRET`, and the `garage.toml` file (the image has no shell);
 - `opengeni-runtime`: the restricted `opengeni_app`
   `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
@@ -161,8 +162,9 @@ kubectl create namespace opengeni --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n opengeni create secret generic opengeni-postgres \
   --from-env-file=.agent/generated/single-node/secrets/postgres.env
 
-kubectl -n opengeni create secret generic opengeni-minio \
-  --from-env-file=.agent/generated/single-node/secrets/minio.env
+kubectl -n opengeni create secret generic opengeni-garage \
+  --from-env-file=.agent/generated/single-node/secrets/garage.env \
+  --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml
 
 kubectl -n opengeni create secret generic opengeni-runtime \
   --from-env-file=.agent/generated/single-node/secrets/runtime.env
@@ -217,7 +219,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Future versions use the same second command with a new official chart/image
-version or digest. Postgres and MinIO PVCs remain attached. Database migrations
+version or digest. Postgres and Garage PVCs remain attached. Database migrations
 are forward-only: if the migration gate fails, the old application stays in
 place; after a migration succeeds, roll the application forward unless the
 older image is explicitly proven compatible with the new schema.
@@ -229,7 +231,7 @@ Failure behavior is intentionally uneven:
 - a turn worker can restart while queued work remains in Temporal/Postgres;
 - NATS stores no authoritative history, but losing it disconnects enrolled
   machines and pauses their command path as well as live fanout;
-- MinIO owns uploaded file bytes;
+- Garage owns uploaded file bytes;
 - Temporal owns durable orchestration state;
 - Postgres owns the durable product record and database migration ledger.
 
@@ -271,9 +273,14 @@ from the migration-only Secret because global catalog and import-provenance
 tables are deliberately unavailable to the runtime role. The Job uses a SHA-256
 snapshot reference and performs no database, network, or logo-storage work when
 that exact revision already completed. Set `catalogImport.enabled=false` to opt
-out. Logo fetching is disabled by default so third-party availability cannot
-block a rollout; set `catalogImport.skipLogos=false` to opt into validated,
-self-hosted catalog logos.
+out. Network logo fetching is disabled by default so third-party availability
+cannot block a rollout, but the curated connector set still renders logos: the
+importer copies the reviewed assets vendored under `data/catalog/logos/` into
+object storage regardless of `skipLogos`, so a default install shows logos for
+every curated connector without an external image request. Set
+`catalogImport.skipLogos=false` to additionally fetch, validate, and self-host
+logos for the uncurated long tail. See the vendored-logo notes in
+[`capabilities.md`](capabilities.md#vendored-logos).
 
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
@@ -371,6 +378,67 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Canonical organization-tenancy authority activation
+
+Organization-tenancy activation follows the same maintenance shape, one
+subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself -
+what is reversible before activation, what becomes forward-recovery-only after,
+and the exact preconditions - and this section owns the operator procedure.
+
+The named switch for declining or deferring the boundary is
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`. It defaults to
+`false` in both `.env.example` and the chart's `config` map, and leaving it at
+`false` is the supported way to decline or defer activation indefinitely: the
+deployment keeps the legacy workspace-owned lane and an image rollback stays an
+ordinary deployment decision. Every rolling tenancy migration still applies
+normally with the switch off.
+
+Be precise about what that switch is today: **no runtime path reads it.**
+Canonical activation is unshipped, so the setting reserves the name, pins the
+safe default in the chart and `.env.example`, and gives every future activation
+slice one gate to consult. It is an operator declaration, not an enforced
+interlock - `false` does not by itself prevent an activation migration from
+being applied, and step 3 below is therefore a procedural gate rather than a
+runtime one. `docs/organization-tenancy.md` owns the switch's full contract.
+
+Two tenancy cutovers have already run this maintenance path, and a pre-0264 or
+pre-0275 image must never be started again:
+
+- `0264_connection_authority_runtime_activation.sql` activated canonical
+  Connection authority; and
+- `0275_scheduled_connection_authority.sql` froze common-user Connection
+  authority on scheduled-task revisions.
+
+Both declare `-- deployment-mode: maintenance`, both reject a live application
+with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
+`ACCESS EXCLUSIVE` locks that include `organization_user_resource_grants`, and
+neither has a down-migration. For each subsequent activation:
+
+1. bind and verify the exact production subscription, cluster context,
+   namespace, release, database, and image digests;
+2. prove the activation preconditions in
+   [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
+   - completed backfill counters from
+   `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
+   cross-organization/RLS evidence, and immediate-revocation evidence - and
+   record that evidence in private operator storage before touching the cluster;
+3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
+   new image generation only - this records the operator's acceptance of the
+   one-way boundary and is not yet enforced by any runtime path. Never flip it
+   on a running pre-activation generation as a way to "test" activation;
+4. stop the API plus every control and turn worker while preserving the
+   migration-only secret and Job identity;
+5. query `pg_stat_activity` through the migration connection and prove zero
+   other sessions with `usename = 'opengeni_app'`;
+6. run the new digest's migration Job and require the activation migration to
+   appear in `schema_migrations`;
+7. start only that same digest's API and workers, and require the startup and
+   readiness posture checks to pass before reopening admission.
+
+After the activation migration commits, rollback to an earlier application image
+is forbidden, and setting the switch back to `false` is not a rollback - it
+cannot restore the legacy authority. Remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
@@ -438,12 +506,12 @@ explicit blocking gates. The canonical configuration, retry, observability, and
 acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
 `deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
 
-For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
+For private in-cluster Garage behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
 bun run deployment:conformance -- \
   --base-url http://127.0.0.1:18080 \
-  --object-connect-to opengeni-minio:9000:127.0.0.1:19000
+  --object-connect-to opengeni-garage:3900:127.0.0.1:19000
 ```
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
@@ -461,6 +529,9 @@ without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
 is only the allowlist for origins that may send browser cookies cross-origin.
 Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
 CORS responses and therefore cannot use a managed-login session cookie.
+Browser and desktop controller requests also admit the configured
+`OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
+does not grant those origins credentialed cross-origin responses.
 
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
@@ -564,7 +635,7 @@ Current profiles:
 ## Local Docker Compose
 
 `bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
 integrations catalog, builds the sandbox image, and starts the API, control and
 turn workers, artifact materializer, artifact outbox dispatcher, and web. The
 two artifact roles receive distinct generated least-privilege database logins
@@ -587,7 +658,7 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -619,6 +690,27 @@ Image builds default to `linux/amd64`, matching the Azure AKS reference node poo
 For production Helm releases, pin API, worker, web, and migration images by digest as well as tag. The chart renders images as `repository:tag@sha256:...` when `image.digest` is set, which keeps tags readable while making the deployed artifact immutable.
 
 ## Verified public release
+
+`main` is the daily integration branch and remains GitHub's default branch.
+`production` is the official source pointer in this repository; it is not a
+live-cluster deploy. Staging is a manual pin of already-baked
+`canary-sha-<commit>` images from any `main` SHA
+(`.github/workflows/staging-canary-dispatch.yml`). Merging `main` does not
+auto-deploy staging. Promote with a GitHub PR base `production` / compare
+`main` and **Create a merge commit** (never squash, never GitHub
+rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
+`production` → `main`. Official cuts: dispatch `open-version-pr.yml` on `main`
+(or `VERSION_PR_ON_PUSH=true`), merge that Version PR, promote, then
+`workflow_dispatch` candidate/acceptance/publication. Official source ancestry
+is `origin/production`. The `production` pointer already exists; do not
+recreate it and do not force-push.
+
+Protect `production`: no force-push; merge commits only (disable squash and
+rebase-and-merge); required checks `Admit production PR head` and
+`Current-base source admission` (skip-success aggregate so promote PRs from
+live `main` stay mergeable). Drop `Current-base source admission` from the
+`main` ruleset; Version PRs still receive that named check from trusted
+`ci.yml` dispatch.
 
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
@@ -822,11 +914,14 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The legacy context name is retained for
-the repository ruleset, but the check admits the immutable provider event head
-against the PR's provider merge-base tree; it does not require the event base
-to equal continuously moving `main`. The base-owned workflow/helper SHA must
-remain in protected `main` ancestry, and the provider base/head/repository,
+`Current-base source admission` check. Version PRs receive that named check
+from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
+hotfix-into-production only; its required-check name stays on a skip-success
+report job so promote PRs from live `main` remain mergeable. The check admits
+the immutable provider event head against the PR's provider merge-base tree; it
+does not require the event base to equal continuously moving `main`. The
+base-owned workflow/helper SHA must remain in protected `production` ancestry
+for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
 and terminal head identity remain fail-closed. Exact-head review stays bound to
 the candidate. The merge authority separately performs the fresh latest-main
@@ -877,8 +972,8 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest.
-Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
-SHA-configured images and records that tag in the dogfood receipt. The
+Protected main CI uses the separate `canary-sha-<source>` namespace for its
+SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
 produce different digests from the same source tree.
@@ -964,7 +1059,7 @@ application/chart/image bytes to pair with a newer coherent package publication
 without floating to registry `latest`, inventing source ownership, or attempting
 to publish superseded package versions.
 
-After staging, production, and the 72-hour canary have consumed those exact
+After staging and production have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
@@ -979,13 +1074,14 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. The canary row is bound to the same
-source tree, exact chart bytes, and complete API/migration/worker/web/relay/
-sandbox digest map as candidate, staging, and production; a source-only canary
-claim fails closed. Acceptance requires the accepted source to remain an
-ancestor of current `main`, but does not require it to remain the current tip:
-compatible reviewed work can continue to merge during the canary window without
-freezing `main` or invalidating an otherwise unchanged proven train. No
+before validating every schema-v2 row. A 72-hour production soak row is
+optional evidence, not a publish gate; when present it is still bound to the
+same source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production. Acceptance requires
+the accepted source to remain an ancestor of current `production`, but does not
+require it to remain the current tip: compatible reviewed work can continue to
+merge to `main` during an official train without freezing daily integration or
+invalidating an otherwise unchanged proven train. No
 dispatcher can select an evidence URL, hash, repository, workflow path, or
 artifact name.
 
@@ -1158,7 +1254,7 @@ helm template opengeni deploy/helm/opengeni \
   --set postgres.enabled=true \
   --set temporal.enabled=true \
   --set nats.enabled=true \
-  --set minio.enabled=true \
+  --set garage.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
 
@@ -1185,17 +1281,17 @@ Then run conformance through port-forwards:
 
 ```bash
 kubectl -n opengeni-local port-forward svc/opengeni-local-api 28080:8000
-kubectl -n opengeni-local port-forward svc/opengeni-local-minio 29000:9000
+kubectl -n opengeni-local port-forward svc/opengeni-local-garage 29000:3900
 
 OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- \
   --base-url http://127.0.0.1:28080 \
-  --object-connect-to opengeni-local-minio:9000:127.0.0.1:29000
+  --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
-The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
 
@@ -1329,14 +1425,14 @@ poll task queues until that Temporal namespace exists.
 
 Use this boundary when building a production cluster:
 
-| Capability | Production source | OpenGeni wiring |
+| Capability    | Production source                                                                                                                 | OpenGeni wiring                                                                                            |
 | --- | --- | --- |
-| NATS | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/` | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL` |
-| Temporal | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
-| Postgres | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts` | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL` |
-| Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
-| TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
-| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels |
+| NATS          | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/`                                        | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL`                                                |
+| Temporal      | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
+| Postgres      | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts`                        | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL`                                                      |
+| Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
+| TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
+| Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
 
 The runtime secret must provide values such as:
 
@@ -1371,10 +1467,10 @@ OpenGeni's storage package intentionally exposes a small provider-neutral bounda
 
 Sandbox file mount support is also backend-specific:
 
-| Sandbox backend | S3-compatible | Azure Blob | AWS S3 | GCS |
+| Sandbox backend                     | S3-compatible          | Azure Blob                      | AWS S3                          | GCS                             |
 | --- | --- | --- | --- | --- |
-| Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
-| Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+| Docker/local in-container sandboxes | rclone mount           | rclone mount                    | signed download materialization | signed download materialization |
+| Modal                               | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
 
 ## Terraform Registry MCP Docs
 
@@ -1497,12 +1593,14 @@ install script and the per-deploy agent binary at auth-exempt paths
 (`/install.sh`, `/install.ps1`, `/uninstall.sh`, and `/agent/*`), so
 `curl -fsSL https://<host>/install.sh | sh` installs the exact agent build that
 matches the running control plane (the per-SHA binary baked into the API image),
-with no dependency on an external CDN. A public release archive is the fallback
-for other OS/arch assets and the self-update channel. Route these paths (and an
-optional `get.<domain>` host) to the `api` service in the ingress.
+and the served script defaults enrollment to that same public origin. A configured
+`OPENGENI_API_URL` still overrides it, so this works with no dependency on an
+external CDN. A public release archive is the fallback for other OS/arch assets
+and the self-update channel. Route these paths (and an optional `get.<domain>`
+host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.14`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.16`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
@@ -1637,12 +1735,12 @@ bun run deployment:health-audit -- \
 The command always prints one bounded
 `opengeni.deployment-health-audit.v1` JSON document and uses stable exit codes:
 
-| Exit | Status | Meaning |
+| Exit | Status        | Meaning                                                                                                                     |
 | ---: | --- | --- |
-| `0` | `healthy` | Every requested read-only check passed. |
-| `1` | `degraded` | The deployment is serving, but recent restarts or warning events need observation. |
-| `2` | `incident` | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed. |
-| `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
+|  `0` | `healthy`     | Every requested read-only check passed.                                                                                     |
+|  `1` | `degraded`    | The deployment is serving, but recent restarts or warning events need observation.                                          |
+|  `2` | `incident`    | A workload, endpoint, Helm release, PVC, or deployment-revision invariant failed.                                           |
+|  `3` | `audit_error` | The audit itself could not establish trustworthy evidence, for example because inventory JSON was unavailable or malformed. |
 
 `--upstream-revision` is context only. A coherent, intentionally pinned
 deployment behind upstream is healthy. `--expected-revision` is declarative
@@ -1693,6 +1791,7 @@ Minimum production dashboards should cover:
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.
+- Turn startup: the canonical `OpenGeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
 - Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_mcp_tool_calls_total{outcome}`, `opengeni_mcp_tool_call_duration_seconds{outcome}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
@@ -1740,6 +1839,7 @@ Minimum production alerts:
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
 - Turn stuck: the oldest in-flight turn is older than 15 minutes for 5 minutes.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
+- Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 60 seconds, or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
 - Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`.
@@ -1878,18 +1978,18 @@ the exact literal `null` for supplied nullable values; omission means “not
 supplied” and blocks. Hashes are 64 lowercase hexadecimal characters and times
 are canonical ISO-8601 UTC strings.
 
-| Fence | Environment variables |
+| Fence                | Environment variables                                                                                                                                                                                                                                |
 | --- | --- |
-| Locator | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID` |
-| Lease/loss | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND` |
-| Route | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH` |
-| Workspace/restore | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE` |
-| Archive generation | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE` |
-| Descriptor/object | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID` |
-| Reference integrity | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256` |
-| Workspace tree | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
-| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT` |
-| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT` |
+| Locator              | `OPENGENI_RECOVERY_ACCOUNT_ID`, `OPENGENI_RECOVERY_WORKSPACE_ID`, `OPENGENI_RECOVERY_SESSION_ID`, `OPENGENI_RECOVERY_SANDBOX_GROUP_ID`                                                                                                               |
+| Lease/loss           | `OPENGENI_RECOVERY_LEASE_ID`, `OPENGENI_RECOVERY_BACKEND`, `OPENGENI_RECOVERY_CURRENT_EPOCH`, `OPENGENI_RECOVERY_LOST_EPOCH`, `OPENGENI_RECOVERY_LOST_INSTANCE_ID`, `OPENGENI_RECOVERY_REFCOUNT`, `OPENGENI_RECOVERY_PROVIDER_BACKEND`               |
+| Route                | `OPENGENI_RECOVERY_ROUTE_KIND`, `OPENGENI_RECOVERY_ROUTE_TARGET_ID`, `OPENGENI_RECOVERY_ROUTE_EPOCH`                                                                                                                                                 |
+| Workspace/restore    | `OPENGENI_RECOVERY_WORKSPACE_GENERATION`, `OPENGENI_RECOVERY_WORKSPACE_STATUS`, `OPENGENI_RECOVERY_RESTORE_STATUS`, `OPENGENI_RECOVERY_RESTORE_FAILURE_CODE`                                                                                         |
+| Archive generation   | `OPENGENI_RECOVERY_ARCHIVE_GENERATION`, `OPENGENI_RECOVERY_ARCHIVE_COMPLETE`                                                                                                                                                                         |
+| Descriptor/object    | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_VERSION`, `OPENGENI_RECOVERY_ARCHIVE_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_KIND`, `OPENGENI_RECOVERY_ARCHIVE_OBJECT_ID`                                                                                 |
+| Reference integrity  | `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_DESCRIPTOR_REFERENCE_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_BYTES`, `OPENGENI_RECOVERY_ARCHIVE_REFERENCE_SHA256`                                           |
+| Workspace tree       | `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_ALGORITHM`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FINGERPRINT_SHA256`, `OPENGENI_RECOVERY_ARCHIVE_TREE_ENTRY_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TREE_FILE_COUNT`, `OPENGENI_RECOVERY_ARCHIVE_TOTAL_FILE_BYTES` |
+| Capture/verification | `OPENGENI_RECOVERY_ARCHIVE_CAPTURED_AT`, `OPENGENI_RECOVERY_ARCHIVE_VERIFICATION_STATE`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_REVISION`, `OPENGENI_RECOVERY_ARCHIVE_VERIFIED_AT`                                                                      |
+| External observation | `OPENGENI_RECOVERY_PROVIDER_OBJECT_KIND`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_ID`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_STATUS`, `OPENGENI_RECOVERY_PROVIDER_OBJECT_OBSERVED_AT`                                                                        |
 
 The descriptor's `archiveBytes`/`archiveSha256` describe the opaque provider
 reference payload. Preview independently decodes `workspaceArchive` and

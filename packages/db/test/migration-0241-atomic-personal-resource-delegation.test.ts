@@ -391,9 +391,13 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           `;
         const [variableSets] = await app<Array<{ count: number }>>`
             select count(*)::int as count
-            from workspace_variable_sets
-            where account_id = ${ids.account}
-              and workspace_id = ${ids.targetWorkspace}
+            from list_scoped_variable_sets(
+              ${ids.account}::uuid,
+              ${ids.targetWorkspace}::uuid,
+              null,
+              ${`target-${order}`},
+              null
+            )
           `;
         expect(variableSets?.count).toBe(1);
         await expect(
@@ -465,35 +469,43 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         resources: [],
         metadata: {},
         model: "codex/gpt-5.6-sol",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
       });
-      await sql`
-        insert into session_turns (
-          id, account_id, workspace_id, session_id, trigger_event_id,
-          temporal_workflow_id, status, position, prompt, model,
-          reasoning_effort, sandbox_backend
-        ) values (
-          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
-          'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
-          'low', 'modal'
-        )
-      `;
-      await sql`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id, execution_generation,
-          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, mcp_approval_policies
-        ) values (
-          ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 0,
-          'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
-          '{}'::jsonb
-        )
-      `;
-      await sql`
-        update session_turns
-        set active_attempt_id = ${attemptId}
-        where id = ${turnId}
-      `;
+      await sql.begin(async (tx) => {
+        await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+        await tx`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, position, prompt, model,
+            reasoning_effort, sandbox_backend, execution_generation
+          ) values (
+            ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
+            'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
+            'low', 'modal', 1
+          )
+        `;
+        await tx`
+          update sessions set active_turn_id = ${turnId}, status = 'running'
+          where id = ${sessionId}
+        `;
+        await tx`
+          update session_turns set active_attempt_id = ${attemptId}
+          where id = ${turnId}
+        `;
+        await tx`
+          insert into session_turn_attempts (
+            id, account_id, workspace_id, session_id, turn_id, execution_generation,
+            state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+            verified_control_revision, mcp_approval_policies
+          ) values (
+            ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 1,
+            'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
+            '{}'::jsonb
+          )
+        `;
+      });
 
       const [attempt] = await sql<
         Array<{
@@ -512,7 +524,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       expect(attempt).toEqual({
         authorityOwnerOrganizationMembershipId: null,
         authorityVisibility: "workspace_shared",
-        executionGeneration: 0,
+        executionGeneration: 1,
       });
 
       for (const table of [
@@ -533,10 +545,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     }
   }, 180_000);
 
-  test("rejects cross-workspace rig versions at admission and resolution", async () => {
+  test("admits an exact rig version regardless of workspace provenance", async () => {
     let admin: postgres.Sql | undefined;
     let app: postgres.Sql | undefined;
-    const blank = await acquireMigrationTestDatabase("migration-0241-rig-version-workspace-fence");
+    const blank = await acquireMigrationTestDatabase(
+      "migration-0241-rig-version-workspace-provenance",
+    );
     if (!blank) return;
 
     const appPassword = "apppw";
@@ -580,45 +594,43 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         set rig_version_id = ${mismatchedVersion!.id}
         where id = ${ids.session}
       `;
-      await expect(
-        insertAttempt(
-          app,
-          ids,
-          ids.attemptA,
-          "workflow-mismatched-admission",
-          "run-mismatched-admission",
-          "activity-mismatched-admission",
-        ),
-      ).rejects.toThrow("personal resource identity changed during admission");
-
-      await admin`
-        update rig_versions
-        set active = false
-        where id = ${mismatchedVersion!.id}
-      `;
-      await admin`
-        update rig_versions
-        set active = true
-        where id = ${ids.rigVersion}
-      `;
-      await app`
-        update sessions
-        set rig_version_id = ${ids.rigVersion}
-        where id = ${ids.session}
-      `;
       await insertAttempt(
         app,
         ids,
         ids.attemptA,
-        "workflow-valid-admission",
-        "run-valid-admission",
-        "activity-valid-admission",
+        "workflow-cross-workspace-version",
+        "run-cross-workspace-version",
+        "activity-cross-workspace-version",
       );
-      await admin`
-        update session_attempt_personal_resource_snapshots
-        set resource_version_id = ${mismatchedVersion!.id}
+
+      const [snapshot] = await admin<
+        Array<{
+          resourceVersionId: string;
+          originWorkspaceId: string;
+          authorityId: string;
+          grantId: string;
+        }>
+      >`
+        select resource_version_id as "resourceVersionId",
+          origin_workspace_id as "originWorkspaceId",
+          authority_id as "authorityId", grant_id as "grantId"
+        from session_attempt_personal_resource_snapshots
         where attempt_id = ${ids.attemptA}
           and resource_kind = 'rig'
+          and resource_id = ${ids.rig}
+      `;
+      expect(snapshot).toEqual({
+        resourceVersionId: mismatchedVersion!.id,
+        originWorkspaceId: ids.personalWorkspace,
+        authorityId: expect.any(String),
+        grantId: expect.any(String),
+      });
+
+      await admin`
+        update organization_user_resource_grants
+        set status = 'revoked', revoked_at = clock_timestamp(),
+          generation = generation + 1, updated_at = clock_timestamp()
+        where id = ${snapshot!.grantId}
       `;
       await expect(
         Promise.resolve(
@@ -904,40 +916,50 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       });
       const exactAttemptError =
         "personal-resource admission requires the exact current uninterrupted attempt";
-
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-inactive-pointer",
-          "run-inactive-pointer",
-          "activity-inactive-pointer",
-          { sessionActiveTurnId: null },
-        ),
-      ).rejects.toThrow(exactAttemptError);
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-stale-generation",
-          "run-stale-generation",
-          "activity-stale-generation",
-          { turnExecutionGeneration: 2 },
-        ),
-      ).rejects.toThrow(exactAttemptError);
-      await expect(
-        insertAttemptWithLifecycle(
-          sql,
-          ids,
-          ids.attemptA,
-          "workflow-stale-status",
-          "run-stale-status",
-          "activity-stale-status",
-          { turnStatus: "completed" },
-        ),
-      ).rejects.toThrow(exactAttemptError);
+      await sql`
+        alter table session_turn_attempts
+        disable trigger session_attempt_personal_document_admission
+      `;
+      try {
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-inactive-pointer",
+            "run-inactive-pointer",
+            "activity-inactive-pointer",
+            { sessionActiveTurnId: null },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-stale-generation",
+            "run-stale-generation",
+            "activity-stale-generation",
+            { turnExecutionGeneration: 2 },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+        await expect(
+          insertAttemptWithLifecycle(
+            sql,
+            ids,
+            ids.attemptA,
+            "workflow-stale-status",
+            "run-stale-status",
+            "activity-stale-status",
+            { turnStatus: "completed" },
+          ),
+        ).rejects.toThrow(exactAttemptError);
+      } finally {
+        await sql`
+          alter table session_turn_attempts
+          enable trigger session_attempt_personal_document_admission
+        `;
+      }
 
       const [unconsumedGrant] = await sql<Array<{ status: string }>>`
         select status from organization_user_resource_grants
@@ -1226,6 +1248,8 @@ async function createFixture(
       createdBy: { kind: "subject", subjectId: subject },
       subjectId: subject,
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
       variableSetId: directVariableSet!.id,
       rigId: options.directOnly ? null : rig!.id,

@@ -3,7 +3,8 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
-  firstPartyMcpBaseUrl,
+  firstPartyMcpInternalBaseUrl,
+  firstPartyMcpInternalWorkspaceUrl,
   resolveFirstPartyDelegationSecret,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
@@ -29,10 +30,12 @@ import {
   gitRemotePathAliases,
   gitRemoteUriAliases,
   isClearedRunStateBlob,
+  isOpenSuffixRunStateBlob,
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
+  renderSessionGoalContext,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   GenerateVideoToolInput,
@@ -56,6 +59,7 @@ import {
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
 } from "@opengeni/contracts";
+export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -74,6 +78,7 @@ import {
 } from "./mcp-network";
 import {
   LazyToolModelProvider,
+  createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
@@ -170,7 +175,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
-import { installCodexToolSearch } from "./codex-tool-search";
+import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
@@ -262,6 +267,7 @@ import {
   withModelPreparationClientDiagnostics,
   withModelPreparationObserver,
   withModelPreparationSessionDiagnostics,
+  withModelTransportStartedObserver,
   type ModelPreparationMeasurement,
   type ModelPreparationPhase,
 } from "./model-preparation-diagnostics";
@@ -312,6 +318,10 @@ export {
 export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
+} from "./model-preparation-diagnostics";
+export {
+  markModelPreparationFirstSandboxOperation,
+  recordModelPreparationMeasurement,
 } from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
@@ -435,6 +445,7 @@ setSelfhostedApplyDiff(
 
 export {
   elideSupersededViewImagePairs,
+  extractOpenSuffixMembers,
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
@@ -443,7 +454,19 @@ export {
   projectRejectedReasoningArtifact,
   serializedRunStateHasOpaqueProviderArtifact,
 } from "./history-sanitizer";
-export type { HistoryItem } from "./history-sanitizer";
+export type { HistoryItem, OpenSuffixMember } from "./history-sanitizer";
+export {
+  OpenSuffixUnresumableError,
+  OPEN_SUFFIX_MAX_JSON_BYTES,
+  assertOpenSuffixResumable,
+  extractOpenSuffixFromRunState,
+  extractOpenSuffixFromSerializedRunState,
+  functionCallResultItem,
+  interruptionKindForCallItem,
+  invokePreparedAgentTool,
+  protocolItemsFromGeneratedItems,
+  type OpenSuffixInterruptionKind,
+} from "./open-suffix";
 export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
 export {
   projectHistoryForProvider,
@@ -562,6 +585,7 @@ export type ResolveConnectionCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
   | {
@@ -1376,7 +1400,13 @@ export type ConnectorActionExecutionAdmission =
       allowed: false;
       managed: true;
       requestId: string;
-      reason: "approval_required" | "blocked" | "rejected" | "already_executed" | "uncertain_retry";
+      reason:
+        | "approval_required"
+        | "blocked"
+        | "rejected"
+        | "already_executed"
+        | "uncertain_retry"
+        | "not_executed";
     };
 
 /** Secret-free persistence boundary supplied by the worker for one attempt. */
@@ -1454,6 +1484,12 @@ export type BuildAgentOptions = {
   structuredToolTransport?: boolean;
   /** Explicit provider-contained progressive tool-disclosure strategy. */
   lazyToolTransport?: LazyToolTransport;
+  /**
+   * Exact-attempt tool preparation fence. When present, progressive disclosure
+   * may issue the first provider request with only eager tools plus tool_search;
+   * only a search, deferred invocation, or catalog-dependent runtime joins it.
+   */
+  toolPreparationReady?: Promise<void>;
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -1526,8 +1562,6 @@ export type BuildAgentOptions = {
   // runtime uses the structured governance precedence branch; absent preserves
   // the historical instruction composition byte-for-byte.
   workspaceGovernance?: string;
-  /** Standing goal frozen when this logical turn was accepted. */
-  goalSnapshot?: SessionGoalSnapshot;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -1574,11 +1608,10 @@ export type BuildAgentOptions = {
   // Keeping this out of the persistent Agent.instructions prevents every
   // tool-follow-up model call in a long first turn from re-running setup.
   genesisTitleHint?: boolean;
-  // Persistent session settings, resolved by the worker from the durable
-  // session row at turn start. Tool schemas are rebuilt on every turn, so
-  // without this factual state the model can mistake persistent metadata tools
-  // for per-turn initialization and re-apply the same title/notification mode.
-  // Values only — never the user-controlled title text — enter instructions.
+  /**
+   * @deprecated Retained as an input-compatibility shim. Persistent display
+   * metadata no longer enters the prompt-cache-critical system instructions.
+   */
   persistentSessionSettings?: PersistentSessionSettings;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
@@ -1631,6 +1664,7 @@ export type WorkspaceEnvironmentContext = {
   variableNames?: string[];
 };
 
+/** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
@@ -1729,38 +1763,18 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
-/**
- * Append the standing goal accepted with this logical turn. The worker passes
- * the persisted turn snapshot, never the mutable current goal head, so queued
- * work and recovery cannot observe a later rewrite. A no-goal snapshot remains
- * intentionally prompt-silent while still being durable execution authority.
- */
+/** @deprecated Goal context now belongs on the accepted turn's durable input item. */
 export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapshot): string {
-  if (!snapshot || snapshot.state === "none") return composed;
-  const policy =
-    snapshot.mutationPolicy === "review_changes"
-      ? "Semantic changes are proposals until a user applies them."
-      : snapshot.mutationPolicy === "preserve_intent"
-        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
-        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
-  return `${composed} Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+  const context = renderSessionGoalContext(snapshot);
+  return context ? `${composed} ${context}` : composed;
 }
 
-/**
- * Append the durable session metadata the model otherwise cannot observe.
- * This is deliberately declarative and excludes the title text: the title is
- * user-controlled display metadata, while the agent only needs to know whether
- * initialization has already happened. The block is present on every turn when
- * supplied so compaction cannot erase knowledge that these settings persist.
- */
+/** @deprecated Persistent display metadata must not alter system instructions. */
 export function appendPersistentSessionSettings(
   composed: string,
-  settings?: PersistentSessionSettings,
+  _settings?: PersistentSessionSettings,
 ): string {
-  if (!settings) {
-    return composed;
-  }
-  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}. This setting persists across turns, continuations, and interruptions. Do not call opengeni__set_session_title merely to reassert an unchanged value; call it only when the current value actually needs to change.`;
+  return composed;
 }
 
 /**
@@ -1784,25 +1798,20 @@ function composedPersistentAgentInstructions(
     options.workspaceEnvironment,
     options.rig,
   );
+  const operationalPersonaAndCore = `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`;
   if (!options.workspaceGovernance?.trim()) {
-    // Preserve the legacy path byte-for-byte when no structured governance
+    // Preserve the existing relative ordering when no structured governance
     // authority is active for this exact attempt.
-    return appendPersistentSessionSettings(
-      appendSessionGoal(
-        appendSessionInstructions(
-          appendWorkspaceMemory(
-            appendGitCredentialBindingInstructions(
-              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
-              options.gitCredentialBindings,
-              options.activeSandboxBackend,
-            ),
-            options.workspaceMemory,
-          ),
-          options.sessionInstructions,
+    return appendSessionInstructions(
+      appendWorkspaceMemory(
+        appendGitCredentialBindingInstructions(
+          appendCodemodeInstructions(operationalPersonaAndCore, codemodeIsAvailable(options)),
+          options.gitCredentialBindings,
+          options.activeSandboxBackend,
         ),
-        options.goalSnapshot,
+        options.workspaceMemory,
       ),
-      options.persistentSessionSettings,
+      options.sessionInstructions,
     );
   }
 
@@ -1812,15 +1821,9 @@ function composedPersistentAgentInstructions(
   return appendWorkspaceMemory(
     appendGitCredentialBindingInstructions(
       appendCodemodeInstructions(
-        appendPersistentSessionSettings(
-          appendSessionGoal(
-            appendSessionInstructions(
-              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
-              options.sessionInstructions,
-            ),
-            options.goalSnapshot,
-          ),
-          options.persistentSessionSettings,
+        appendSessionInstructions(
+          appendWorkspaceGovernance(operationalPersonaAndCore, options.workspaceGovernance),
+          options.sessionInstructions,
         ),
         codemodeIsAvailable(options),
       ),
@@ -2170,22 +2173,21 @@ export function buildOpenGeniAgent(
     // (settings.agentInstructionsTemplate, default DEFAULT_AGENT_INSTRUCTIONS).
     // composeAgentInstructions substitutes the non-bypassable CORE (goal-loop
     // ownership + workspace-environment block) at the {{core}} marker, or
-    // appends it when the template omits the marker. With the default template
-    // and no environment this is byte-identical to the historical preamble.
-    // Persona composition order (all one system-level instructions string):
-    //   1. workspace instructionsTemplate (or deployment default) with the
+    // appends it when the template omits the marker. The configurable
+    // persona+CORE slice remains byte-identical to the historical preamble.
+    // Instruction composition order (all one system-level instructions string):
+    //   1. non-configurable, provider-neutral operational contract,
+    //   2. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
-    //   2. + the generic programmatic-tool-calling (codemode) directive, ONLY
+    //   3. + the generic programmatic-tool-calling (codemode) directive, ONLY
     //      when a codemode token was minted for this managed-sandbox turn,
-    //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
+    //   4. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
-    //   4. + workspace memory working set, ONLY when the workspace setting is on
+    //   5. + workspace memory working set, ONLY when the workspace setting is on
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
-    //   5. + the per-session persona instructions (session-specific, so it
+    //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   6. + host context for this exact turn, when supplied,
-    //   7. + durable session-setting state (title present + child notification
-    //      mode), when supplied by the worker,
+    //   7. + host context for this exact turn, when supplied,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
     instructions: composedPersistentAgentInstructions(settings, options),
@@ -2371,13 +2373,12 @@ export function buildOpenGeniAgent(
  * rollout flag remains only an on/off switch; provider selection never depends
  * on the unrelated sandbox structured-tool Boolean.
  *
- * Codex stays on its existing native `defer_loading` implementation. Direct
- * OpenAI/Azure keep full real tools in Runner's execution registry while a model
- * wrapper omits searchable MCP schemas from the provider request and native
- * client tool_search discloses the same objects. Generic providers receive only
- * stable ordinary tool_search/tool_invoke schemas; every function tool stays in
- * Runner's registry and valid dispatcher calls are rewritten back to the real
- * runtime tool before Runner handles approval and execution.
+ * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
+ * exact MCP objects may finish materializing after the first request begins.
+ * A remembered authorized name binds through resolveMissingFunctionTool after
+ * that catalog is ready. Generic providers receive only stable ordinary
+ * tool_search/tool_invoke schemas; a valid dispatcher call is renamed to the
+ * real tool and bound by the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -2391,37 +2392,35 @@ function maybeInstallLazyToolTransport(
   if (!enabled) return;
 
   const mcpServers = options.mcpServers ?? [];
-  // Every transport removes non-mandatory MCP definitions from the provider's
-  // initial tool block. Keep proactive compaction accounting on that wire truth.
-  for (const server of mcpServers) {
-    const registryId = server instanceof PrefixedMcpServer ? server.registryId : server.name;
-    if (registryId === "opengeni") continue;
-    (
-      server as MCPServer & {
-        deferModelToolSchemaAccounting?: () => void;
-      }
-    ).deferModelToolSchemaAccounting?.();
-  }
   // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
   // their registry identity. Preserve the fallback for embedded/test servers.
-  const mcpServerIds = new Set(
-    mcpServers.map((server) =>
-      server instanceof PrefixedMcpServer ? server.registryId : server.name,
-    ),
+  const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
+  const deferredMcpServerIds = new Set(
+    mcpServers
+      .filter((server) => mcpServerDefersModelSchemas(server))
+      .map((server) => mcpServerRegistryId(server)),
   );
-
-  if (transport === "codex_native") {
-    installCodexToolSearch(
-      agent as unknown as Parameters<typeof installCodexToolSearch>[0],
-      options.codexConnectorNamespaces ?? new Set<string>(),
-      mcpServerIds,
-    );
-    return;
-  }
   installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
     mcpServerIds,
+    options.toolPreparationReady,
+    deferredMcpServerIds,
+  );
+}
+
+function mcpServerRegistryId(server: MCPServer): string {
+  const registryId = (server as MCPServer & { registryId?: unknown }).registryId;
+  return typeof registryId === "string" && registryId.length > 0 ? registryId : server.name;
+}
+
+function mcpServerDefersModelSchemas(server: MCPServer): boolean {
+  const candidate = server as MCPServer & {
+    deferredPreparation?: unknown;
+    modelToolSchemasAreDeferred?: () => boolean;
+  };
+  return (
+    candidate.deferredPreparation === true || candidate.modelToolSchemasAreDeferred?.() === true
   );
 }
 
@@ -2445,7 +2444,7 @@ type McpApprovalPolicy = {
   serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
   connectorBacked: boolean;
-  connectionId: string | null;
+  connectionId: () => string | null;
 };
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
@@ -2461,7 +2460,7 @@ type ApprovalCapableAgent = {
  * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
  * unprefixed tool name.
  *
- * CLONE SURVIVAL (mirrors {@link installCodexToolSearch}): the sandbox runtime
+ * CLONE SURVIVAL (mirrors `installCodexToolSearch`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
  * `prepareSandboxAgent` calls `agent.clone(...)`, and `SandboxAgent.clone`
  * reconstructs from a FIXED field list (name/tools/mcpServers/…), so an
@@ -2499,12 +2498,13 @@ function installMcpApprovalPolicy(
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
-        if (!policy.connectionId) {
+        const connectionId = policy.connectionId();
+        if (!connectionId) {
           throw new Error("Connector action is missing its resolved connection identity");
         }
         return {
           approvalId,
-          connectionId: policy.connectionId,
+          connectionId,
           serverId: policy.serverId,
           toolName: unprefixed,
           arguments: args,
@@ -2750,24 +2750,28 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const staticConnectionId = server.connectionRef?.connectionId ?? null;
-      const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
-      if (
-        staticConnectionId &&
-        resolvedConnectionId &&
-        staticConnectionId !== resolvedConnectionId
-      ) {
-        throw new Error("MCP connection identity changed between configuration and preparation");
-      }
+      const connectionId = (): string | null => {
+        const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
+        if (
+          staticConnectionId &&
+          resolvedConnectionId &&
+          staticConnectionId !== resolvedConnectionId
+        ) {
+          throw new Error("MCP connection identity changed between configuration and preparation");
+        }
+        return (
+          resolvedConnectionId ??
+          staticConnectionId ??
+          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
+        );
+      };
       return {
         prefix: prefixedMcpToolName(server.id, ""),
         serverId: server.id,
         requireApproval:
           server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
         connectorBacked: Boolean(server.connectionRef),
-        connectionId:
-          resolvedConnectionId ??
-          staticConnectionId ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url)),
+        connectionId,
       };
     })
     .sort((a, b) => b.prefix.length - a.prefix.length);
@@ -3014,10 +3018,8 @@ function buildAgentCapabilitiesFromComposition(
     settings.sandboxDesktopEnabled &&
     desktopCapableBackend(settings.sandboxBackend)
   ) {
-    // computer-use is transport-aware, exactly like filesystem: `tools()` emits the
-    // HOSTED `computer_use_preview` tool on the structured transport and a set of
-    // FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex backend
-    // rejects hosted tool types (only function/custom/web_search accepted).
+    // computer-use is ordinary `computer_*` function tools on a proven visual
+    // transport. Chat-wire and omitted/unproven callers fail closed.
     //
     // The worker declares an explicit mode from authoritative provider resolution.
     // Exported/public callers that omit it are unproven and therefore disabled.
@@ -3064,6 +3066,13 @@ export type PreparedAgentTools = {
   // tool_search description accurate. It is never persisted or used for inference
   // credential selection.
   codexConnectorNamespaces: Set<string>;
+  /**
+   * Optional completion fence for non-eager MCP discovery. Only session-marked
+   * eager servers are connected/listed before this handle is returned. Search,
+   * deferred invocation, Codemode activation, and final cleanup may join this
+   * promise; an ordinary first model response does not.
+   */
+  ready?: Promise<PreparedAgentTools>;
 };
 
 /**
@@ -3138,7 +3147,7 @@ export type PrepareToolsOptions = {
   localMcpServers?: readonly LocalMcpServerRegistration[];
   /** Monotonic catalog generation for this execution attempt. */
   attemptToolCatalogGeneration?: number;
-  /** Durable host seam; completion is required before the model can run. */
+  /** Durable host seam; completion is required before the prepared catalog is demanded. */
   onAttemptToolCatalog?: (catalog: AttemptToolCatalog) => Promise<void> | void;
   /** Bounded critical-path timings; telemetry failures never affect preparation. */
   onPreparationPhase?: (measurement: ToolPreparationPhaseMeasurement) => void;
@@ -3155,6 +3164,12 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
+  /** Overlap every non-eager MCP connection/catalog with the first model request. */
+  deferNonEagerUntilToolDemand?: boolean;
+  /** @internal Shared live cells used by deferred preparation handles. */
+  deferredCodexConnectorNamespaces?: Set<string>;
+  /** @internal Shared live cells used by deferred preparation handles. */
+  deferredResolvedMcpConnectionIds?: Map<string, string>;
 };
 
 type PrefixedMcpConnectorAttachmentAuthority = Readonly<{
@@ -3291,6 +3306,93 @@ function unwrapMcpLifecycleErrorFromServers(
   return error;
 }
 
+/**
+ * One attempt-local SDK projection whose physical MCP server is still being
+ * prepared. It exposes no tools until listTools is actually requested; then it
+ * joins the one shared preparation promise and delegates every operation to the
+ * exact prepared server. The handle owns cleanup, so proxy close is a no-op.
+ */
+class DeferredPreparedMcpServer implements MCPServer {
+  readonly cacheToolsList = false;
+  readonly deferredPreparation = true;
+  readonly name: string;
+
+  constructor(
+    readonly registryId: string,
+    private readonly isPrepared: () => boolean,
+    private readonly resolveTarget: () => Promise<MCPServer | null>,
+  ) {
+    this.name = `${MCP_SDK_LIFECYCLE_NAME}:deferred:${safeMcpServerIdentity(registryId)}`;
+  }
+
+  readonly toolMetaResolver: NonNullable<MCPServer["toolMetaResolver"]> = async (context) => {
+    const target = await this.resolveTarget();
+    return await target?.toolMetaResolver?.(context);
+  };
+
+  readonly customDataExtractor: NonNullable<MCPServer["customDataExtractor"]> = async (context) => {
+    const target = await this.resolveTarget();
+    return await target?.customDataExtractor?.(context);
+  };
+
+  async connect(): Promise<void> {
+    // Physical connection is already running inside resolveTarget.
+  }
+
+  async close(): Promise<void> {
+    // PreparedAgentTools.close owns the physical server exactly once.
+  }
+
+  async listTools(): Promise<RuntimeMcpTool[]> {
+    if (!this.isPrepared()) return [];
+    const target = await this.resolveTarget();
+    return target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+  }
+
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    const target = await this.requiredTarget();
+    return await target.callTool(toolName, args, meta, options);
+  }
+
+  async callToolResult(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    const target = await this.requiredTarget();
+    return target.callToolResult
+      ? await target.callToolResult(toolName, args, meta, options)
+      : { content: await target.callTool(toolName, args, meta, options) };
+  }
+
+  async invalidateToolsCache(): Promise<void> {
+    const target = await this.resolveTarget();
+    await target?.invalidateToolsCache();
+  }
+
+  deferModelToolSchemaAccounting(): void {
+    // No deferred schema has entered provider context yet.
+  }
+
+  modelToolSchemasAreDeferred(): boolean {
+    return true;
+  }
+
+  private async requiredTarget(): Promise<MCPServer> {
+    const target = await this.resolveTarget();
+    if (!target) {
+      throw new Error(`MCP server ${this.registryId} is unavailable for this attempt`);
+    }
+    return target;
+  }
+}
+
 export async function prepareAgentTools(
   settings: Settings,
   tools: ToolRef[],
@@ -3298,8 +3400,8 @@ export async function prepareAgentTools(
 ): Promise<PreparedAgentTools> {
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
-  const codexConnectorNamespaces = new Set<string>();
-  const resolvedMcpConnectionIds = new Map<string, string>();
+  const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
+  const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
@@ -3353,9 +3455,11 @@ export async function prepareAgentTools(
                 config.url,
                 local.resolvedConnectionId,
               ),
+              tool.eager !== true,
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
+            eager: tool.eager === true,
             timeoutMs: config.timeoutMs,
           };
         }
@@ -3409,9 +3513,10 @@ export async function prepareAgentTools(
         // auth misses are still published as actionable state because the
         // workspace catalog explicitly told the user that the surface existed.
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
-        const useGmailRestAdapter =
-          settings.gmailRestAdapterEnabled &&
-          isOfficialGmailMcpConfig(config.url, config.connectionRef);
+        // Every official-Gmail-resource turn executes through OpenGeni's own
+        // REST bridge, never Google's Developer Preview MCP endpoint directly:
+        // the bridge is the sole Gmail path (see gmail-rest-mcp.ts).
+        const useGmailRestAdapter = isOfficialGmailMcpConfig(config.url, config.connectionRef);
         const innerServer = useGmailRestAdapter
           ? new GmailRestMcpServer({
               workspaceId: options.workspaceId ?? "",
@@ -3468,19 +3573,24 @@ export async function prepareAgentTools(
           `${config.id}:${index}`,
           firstParty && !bestEffort,
           buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
+          tool.eager !== true,
         );
         return {
           server,
           bestEffort,
           optional,
+          eager: tool.eager === true,
           timeoutMs: config.timeoutMs,
         };
       }),
   );
-  const requiredEntries = servers.filter((entry) => !entry.bestEffort);
-  const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
-  const requiredServers = requiredEntries.map((entry) => entry.server);
-  const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
+  const deferNonEager = options.deferNonEagerUntilToolDemand === true;
+  const eagerEntries = deferNonEager ? servers.filter((entry) => entry.eager) : servers;
+  const deferredEntries = deferNonEager ? servers.filter((entry) => !entry.eager) : [];
+  const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
+  const eagerBestEffortEntries = eagerEntries.filter((entry) => entry.bestEffort);
+  const deferredRequiredEntries = deferredEntries.filter((entry) => !entry.bestEffort);
+  const deferredBestEffortEntries = deferredEntries.filter((entry) => entry.bestEffort);
   // Names of optional servers so a setup drop is surfaced with the registry
   // identity and safe retry metadata. Codex Apps is intentionally included:
   // its catalog entry told the user the surface was available, so an auth or
@@ -3492,33 +3602,28 @@ export async function prepareAgentTools(
       .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
       .map((server) => server.registryId),
   );
-  const connectedRequired = await measureToolPreparationPhase(
-    options,
-    "required_connect",
-    async () =>
-      await connectMcpServersInBatches(requiredServers, {
-        strict: true,
-        connectTimeoutMs: mcpOuterConnectTimeoutMs(requiredEntries.map((entry) => entry.timeoutMs)),
-      }),
-  );
-  let connectedBestEffort: ConnectedMcpServerBatches | null = null;
-  try {
-    connectedBestEffort = await measureToolPreparationPhase(options, "optional_connect", async () =>
-      bestEffortServers.length
-        ? await connectMcpServersInBatches(bestEffortServers, {
-            strict: false,
-            connectTimeoutMs: mcpOuterConnectTimeoutMs(
-              bestEffortEntries.map((entry) => entry.timeoutMs),
+  const connectEntries = async (
+    entries: typeof servers,
+    strict: boolean,
+    phase: "required_connect" | "optional_connect",
+  ): Promise<ConnectedMcpServerBatches | null> =>
+    entries.length === 0
+      ? null
+      : await measureToolPreparationPhase(
+          options,
+          phase,
+          async () =>
+            await connectMcpServersInBatches(
+              entries.map((entry) => entry.server),
+              {
+                strict,
+                connectTimeoutMs: mcpOuterConnectTimeoutMs(entries.map((entry) => entry.timeoutMs)),
+              },
             ),
-          })
-        : null,
-    );
-  } catch (error) {
-    await connectedRequired.close().catch(() => undefined);
-    throw error;
-  }
-  if (connectedBestEffort) {
-    for (const failed of connectedBestEffort.failed) {
+        );
+  const warnBestEffortFailures = (connected: ConnectedMcpServerBatches | null): void => {
+    if (!connected) return;
+    for (const failed of connected.failed) {
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
       }
@@ -3529,7 +3634,7 @@ export async function prepareAgentTools(
       ) {
         continue;
       }
-      const error = connectedBestEffort.errors.get(failed);
+      const error = connected.errors.get(failed);
       console.warn(
         failed.registryId === CODEX_APPS_MCP_SERVER_ID
           ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
@@ -3537,66 +3642,179 @@ export async function prepareAgentTools(
         mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
       );
     }
-  }
-  const activeMcpServers = [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])];
-  let localToolServer: AttemptDefinitionMcpServer | null = null;
-  let attemptToolEnvironment: AttemptToolEnvironment | null = null;
-  try {
-    localToolServer = options.attemptToolDefinitions?.length
-      ? new AttemptDefinitionMcpServer(
-          options.attemptToolDefinitions,
-          aggregateToolBudget,
-          options.subjectId ?? "worker:mcp-model",
-        )
-      : null;
-    attemptToolEnvironment = await measureToolPreparationPhase(
-      options,
-      "attempt_catalog_build",
-      async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
+  };
+  const connectEntryGroups = async (
+    required: typeof servers,
+    bestEffort: typeof servers,
+  ): Promise<{
+    required: ConnectedMcpServerBatches | null;
+    bestEffort: ConnectedMcpServerBatches | null;
+  }> => {
+    const [requiredResult, bestEffortResult] = await Promise.allSettled([
+      connectEntries(required, true, "required_connect"),
+      connectEntries(bestEffort, false, "optional_connect"),
+    ]);
+    const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
+    const connectedBestEffort =
+      bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
+    const failure =
+      requiredResult.status === "rejected"
+        ? requiredResult.reason
+        : bestEffortResult.status === "rejected"
+          ? bestEffortResult.reason
+          : undefined;
+    if (failure !== undefined) {
+      await connectedBestEffort?.close().catch(() => undefined);
+      await connectedRequired?.close().catch(() => undefined);
+      throw failure;
+    }
+    return { required: connectedRequired, bestEffort: connectedBestEffort };
+  };
+  const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
+  const connectedEagerRequired = connectedEager.required;
+  const connectedEagerBestEffort = connectedEager.bestEffort;
+  warnBestEffortFailures(connectedEagerBestEffort);
+  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
+  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
+  let localToolServer: AttemptDefinitionMcpServer | null = options.attemptToolDefinitions?.length
+    ? new AttemptDefinitionMcpServer(
+        options.attemptToolDefinitions,
+        aggregateToolBudget,
+        options.subjectId ?? "worker:mcp-model",
+      )
+    : null;
+  const localScope = attemptToolScope(options);
+  if (localToolServer && localScope) {
+    localToolServer.bindAttemptToolEnvironment(
+      createAttemptToolEnvironment({
+        scope: localScope,
+        generation: options.attemptToolCatalogGeneration ?? 1,
+        definitions: [...(options.attemptToolDefinitions ?? [])],
+        ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
+      }),
     );
-    if (attemptToolEnvironment && localToolServer) {
-      localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
-    }
-    if (attemptToolEnvironment) {
-      await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
-        await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
-      });
-    }
-  } catch (error) {
-    await localToolServer?.close().catch(() => undefined);
-    await connectedBestEffort?.close().catch(() => undefined);
-    await connectedRequired.close().catch(() => undefined);
-    throw error;
   }
+  const completePreparation = async (): Promise<PreparedAgentTools> => {
+    let attemptToolEnvironment: AttemptToolEnvironment | null = null;
+    try {
+      const connectedDeferred = await connectEntryGroups(
+        deferredRequiredEntries,
+        deferredBestEffortEntries,
+      );
+      connectedDeferredRequired = connectedDeferred.required;
+      connectedDeferredBestEffort = connectedDeferred.bestEffort;
+      warnBestEffortFailures(connectedDeferredBestEffort);
+      const activeMcpServers = [
+        ...(connectedEagerRequired?.active ?? []),
+        ...(connectedEagerBestEffort?.active ?? []),
+        ...(connectedDeferredRequired?.active ?? []),
+        ...(connectedDeferredBestEffort?.active ?? []),
+      ];
+      attemptToolEnvironment = await measureToolPreparationPhase(
+        options,
+        "attempt_catalog_build",
+        async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
+      );
+      if (attemptToolEnvironment) {
+        await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
+          await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
+        });
+      }
+      return {
+        mcpServers: localToolServer ? [...activeMcpServers, localToolServer] : activeMcpServers,
+        attemptToolCatalog: attemptToolEnvironment?.catalog ?? null,
+        attemptToolEnvironment,
+        // Keep this by-reference so connector approval can observe an identity
+        // resolved while best-effort preparation was running in parallel.
+        resolvedMcpConnectionIds,
+        close: async () => {
+          let firstError: unknown;
+          if (localToolServer) {
+            try {
+              await localToolServer.close();
+            } catch (error) {
+              firstError ??= error;
+            }
+          }
+          for (const connected of [
+            connectedDeferredBestEffort,
+            connectedDeferredRequired,
+            connectedEagerBestEffort,
+            connectedEagerRequired,
+          ]) {
+            if (!connected) continue;
+            try {
+              await connected.close();
+            } catch (error) {
+              firstError ??= error;
+            }
+          }
+          if (firstError !== undefined) throw firstError;
+        },
+        codexConnectorNamespaces,
+      };
+    } catch (error) {
+      await localToolServer?.close().catch(() => undefined);
+      await connectedDeferredBestEffort?.close().catch(() => undefined);
+      await connectedDeferredRequired?.close().catch(() => undefined);
+      await connectedEagerBestEffort?.close().catch(() => undefined);
+      await connectedEagerRequired?.close().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  if (!deferNonEager || deferredEntries.length === 0) {
+    return await completePreparation();
+  }
+
+  // Non-eager connection/listing starts immediately but is not a first-request
+  // dependency. Search and direct deferred invocation join this exact promise.
+  const ready = completePreparation();
+  let preparationSettled = false;
+  void ready.then(
+    () => {
+      preparationSettled = true;
+    },
+    () => {
+      // The exact rejection remains on ready and crosses the model fence.
+    },
+  );
+  void ready.catch(() => undefined);
+  await Promise.all(
+    [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
+      async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      },
+    ),
+  );
+
+  const deferredServers = deferredEntries.map(
+    (entry) =>
+      new DeferredPreparedMcpServer(
+        entry.server.registryId,
+        () => preparationSettled,
+        async () => {
+          const prepared = await ready;
+          return prepared.mcpServers.includes(entry.server) ? entry.server : null;
+        },
+      ),
+  );
   return {
-    mcpServers: localToolServer ? [...activeMcpServers, localToolServer] : activeMcpServers,
-    attemptToolCatalog: attemptToolEnvironment?.catalog ?? null,
-    attemptToolEnvironment,
-    resolvedMcpConnectionIds: new Map(resolvedMcpConnectionIds),
+    mcpServers: [
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+      ...deferredServers,
+      ...(localToolServer ? [localToolServer] : []),
+    ],
+    attemptToolCatalog: null,
+    attemptToolEnvironment: null,
+    resolvedMcpConnectionIds,
     close: async () => {
-      let firstError: unknown;
-      if (localToolServer) {
-        try {
-          await localToolServer.close();
-        } catch (error) {
-          firstError ??= error;
-        }
-      }
-      if (connectedBestEffort) {
-        try {
-          await connectedBestEffort.close();
-        } catch (error) {
-          firstError ??= error;
-        }
-      }
-      try {
-        await connectedRequired.close();
-      } catch (error) {
-        firstError ??= error;
-      }
-      if (firstError !== undefined) throw firstError;
+      const prepared = await ready;
+      await prepared.close();
     },
     codexConnectorNamespaces,
+    ready,
   };
 }
 
@@ -3781,6 +3999,16 @@ function connectionBrokerFetch(
       request,
       first.connectionId,
     );
+    if (!(await authorizeResolvedProviderRequest(first))) {
+      return await authNeededFetchResponse(
+        options,
+        config.id,
+        request,
+        providerRequestAuthorizationDenied(connectionRef, first.connectionId),
+        connectionRef,
+        suppressSetupAuthNeeded,
+      );
+    }
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -3828,6 +4056,16 @@ function connectionBrokerFetch(
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
         return mcpOutcomeUncertainResponse(request, providerFailure!);
+      }
+      if (!(await authorizeResolvedProviderRequest(refreshed))) {
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          providerRequestAuthorizationDenied(connectionRef, refreshed.connectionId),
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3888,6 +4126,34 @@ function connectionBrokerFetch(
       return response;
     }
     return response;
+  };
+}
+
+async function authorizeResolvedProviderRequest(
+  result: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
+): Promise<boolean> {
+  try {
+    return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+  } catch {
+    return false;
+  }
+}
+
+function providerRequestAuthorizationDenied(
+  connectionRef: McpServerConnectionRef,
+  connectionId: string,
+): Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }> {
+  return {
+    status: "auth_needed",
+    reason: "personal_authority_unavailable",
+    providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
+    connectionId,
+    ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+    ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -4050,7 +4316,12 @@ function buildConnectorAttachmentAuthority(
       ) {
         throw new ConnectorAttachmentTransferError();
       }
-      return await materializeConnectorAttachments(input);
+      return await materializeConnectorAttachments({
+        ...input,
+        ...(revalidated.authorizeProviderRequest
+          ? { authorizeProviderRequest: revalidated.authorizeProviderRequest }
+          : {}),
+      });
     },
   };
 }
@@ -5015,44 +5286,34 @@ function firstPartyMcpServerUrlForRun(
   if (!workspaceId || !["opengeni", "files", "docs"].includes(config.id)) {
     return null;
   }
-  if (config.url.includes("{workspaceId}")) {
-    return config.url.replaceAll("{workspaceId}", workspaceId);
-  }
   if (!isFirstPartyMcpServer(settings, config)) {
     return null;
   }
-  const rawBase = settings.opengeniMcpUrl?.includes("{workspaceId}")
-    ? settings.opengeniMcpUrl.replaceAll("{workspaceId}", workspaceId)
-    : settings.opengeniMcpUrl
-      ? scopedMcpUrlFromConfiguredBase(settings.opengeniMcpUrl, workspaceId)
-      : // unset → the shared loopback default (a `{workspaceId}` template owned by
-        // @opengeni/config's firstPartyMcpBaseUrl), scoped to this run's workspace.
-        firstPartyMcpBaseUrl(settings).replaceAll("{workspaceId}", workspaceId);
+  const rawBase = firstPartyMcpInternalWorkspaceUrl(settings, workspaceId);
   const url = new URL(rawBase);
-  if (config.id === "docs") {
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
+  if (config.id === "docs" || config.id === "files") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/${config.id}`;
   }
-  return url.toString();
-}
-
-function scopedMcpUrlFromConfiguredBase(raw: string, workspaceId: string): string {
-  const url = new URL(raw);
-  url.pathname = `/v1/workspaces/${workspaceId}/mcp`;
-  url.search = "";
-  url.hash = "";
   return url.toString();
 }
 
 function firstPartyMcpUrls(settings: Settings): string[] {
-  // Route the unset case through the shared loopback default so the literal
-  // lives in exactly one place (@opengeni/config's firstPartyMcpBaseUrl).
-  const base = normalizeUrl(settings.opengeniMcpUrl ?? firstPartyMcpBaseUrl(settings));
-  if (!base) {
-    return [];
+  const candidates = [settings.opengeniMcpUrl, firstPartyMcpInternalBaseUrl(settings)].filter(
+    (value): value is string => Boolean(value),
+  );
+  const urls = new Set<string>();
+  for (const candidate of candidates) {
+    const base = normalizeUrl(candidate);
+    if (!base) continue;
+    urls.add(base);
+    for (const suffix of ["docs", "files"] as const) {
+      const scoped = new URL(base);
+      scoped.pathname = `${scoped.pathname.replace(/\/+$/, "")}/${suffix}`;
+      const normalizedScoped = normalizeUrl(scoped.toString());
+      if (normalizedScoped) urls.add(normalizedScoped);
+    }
   }
-  const docs = new URL(base);
-  docs.pathname = `${docs.pathname.replace(/\/+$/, "")}/docs`;
-  return [base, normalizeUrl(docs.toString())].filter((value): value is string => Boolean(value));
+  return [...urls];
 }
 
 function normalizeUrl(raw: string): string | null {
@@ -5130,7 +5391,11 @@ function logPublicMcpLifecycleFailure(error: Error): void {
  * owns no authority and cannot execute until bound to that exact environment.
  */
 class AttemptDefinitionMcpServer implements MCPServer {
-  readonly cacheToolsList = true;
+  // The SDK cache is process-global and keyed by this stable server name, but
+  // definitions are immutable only within one attempt. This server already
+  // owns the exact in-memory list, so cross-attempt SDK caching is both
+  // unnecessary and capable of exposing a predecessor attempt's catalog.
+  readonly cacheToolsList = false;
   private readonly resultCustomDataBridge = new McpResultCustomDataBridge();
   readonly customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
   readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
@@ -5235,7 +5500,6 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
-  private modelToolSchemaAccountingDeferred = false;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
@@ -5251,6 +5515,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly aggregateSourceId = registryId,
     private readonly recoverySafeSetup = false,
     private readonly connectorAttachmentAuthority?: PrefixedMcpConnectorAttachmentAuthority,
+    private modelToolSchemaAccountingDeferred = false,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -5258,7 +5523,12 @@ export class PrefixedMcpServer implements MCPServer {
     // headers, provider bodies, or other credential-bearing data.
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
-    this.cacheToolsList = inner.cacheToolsList;
+    // This wrapper already freezes one exact tools/list promise per prepared
+    // attempt. The Agents SDK process-global cache is keyed by this stable
+    // registry name and therefore cannot represent attempt-scoped allowlists.
+    // Keep the inner transport's own connection cache; repeated reads on this
+    // wrapper still reuse frozenTools without another remote list request.
+    this.cacheToolsList = false;
     this.resultCustomDataBridge = new McpResultCustomDataBridge({
       innerServer: inner,
       unprefixToolName: (toolName) => this.unprefixToolName(toolName),
@@ -5415,6 +5685,10 @@ export class PrefixedMcpServer implements MCPServer {
    */
   deferModelToolSchemaAccounting(): void {
     this.modelToolSchemaAccountingDeferred = true;
+  }
+
+  modelToolSchemasAreDeferred(): boolean {
+    return this.modelToolSchemaAccountingDeferred;
   }
 
   async callTool(
@@ -5633,8 +5907,15 @@ export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
+  const lazyRuntime = lazyToolRuntimeForAgent(agent);
+  if (lazyRuntime) {
+    await lazyRuntime.ensurePrepared();
+  }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
+    ...(lazyRuntime
+      ? { resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime) }
+      : {}),
   });
 }
 
@@ -5701,6 +5982,11 @@ export async function prepareRunInput(
       "Cannot resume an interrupted tool: the session context was cleared, so the awaiting run state no longer exists.",
     );
   }
+  if (isOpenSuffixRunStateBlob(input.serializedRunState)) {
+    throw new Error(
+      "Cannot resume an interrupted tool from leftover SDK run state; the open suffix is the resume authority.",
+    );
+  }
   const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
   if (compatibleRunState.repairs.length > 0) {
     console.warn("[runtime] repaired incompatible RunState exposedPorts", {
@@ -5735,6 +6021,8 @@ export type RunAgentStreamOptions = {
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
   onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
+  /** Awaited at the generic provider's literal pre-fetch boundary. */
+  onModelTransportStarted?: () => Promise<void> | void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -6075,6 +6363,7 @@ export async function runAgentStream(
       historyOwnership: "external",
       modelResponseRetention: "last",
       toolExecution: { preApprovalInputGuardrails: true },
+      ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -6083,17 +6372,19 @@ export async function runAgentStream(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
-      recordModelPreparationManifestInventory(
-        "sandbox_agent_manifest_inventory",
-        (agent as { defaultManifest?: Manifest }).defaultManifest,
-      );
-      recordModelPreparationManifestInventory(
-        "sandbox_session_manifest_inventory",
-        (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-      );
-      return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
-    });
+    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+        recordModelPreparationManifestInventory(
+          "sandbox_agent_manifest_inventory",
+          (agent as { defaultManifest?: Manifest }).defaultManifest,
+        );
+        recordModelPreparationManifestInventory(
+          "sandbox_session_manifest_inventory",
+          (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+        );
+        return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
+      }),
+    );
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -6211,6 +6502,7 @@ export async function runAgentStream(
     historyOwnership: "external",
     modelResponseRetention: "last",
     toolExecution: { preApprovalInputGuardrails: true },
+    ...lazyToolRunBindings(agent),
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
@@ -6224,13 +6516,15 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
-    recordModelPreparationManifestInventory(
-      "sandbox_agent_manifest_inventory",
-      (agent as { defaultManifest?: Manifest }).defaultManifest,
-    );
-    return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
-  });
+  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+    withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+      recordModelPreparationManifestInventory(
+        "sandbox_agent_manifest_inventory",
+        (agent as { defaultManifest?: Manifest }).defaultManifest,
+      );
+      return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
+    }),
+  );
 }
 
 function appendSandboxFileDownloadFailureNote(
@@ -6271,6 +6565,18 @@ function appendSandboxFileDownloadFailureNote(
  * Runner inherits the SDK's default config for everything else, identical to the
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
+function lazyToolRunBindings(agent: Agent<any, any>): {
+  toolNotFoundBehavior?: "return_error_to_model";
+  resolveMissingFunctionTool?: ReturnType<typeof createResolveMissingFunctionTool>;
+} {
+  const runtime = lazyToolRuntimeForAgent(agent);
+  if (!runtime) return {};
+  return {
+    toolNotFoundBehavior: "return_error_to_model",
+    resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+  };
+}
+
 function runScopedRunner(settings: Settings, agent: Agent<any, any>): Runner {
   const baseProvider = new MultiProviderModelProvider(settings);
   const lazyRuntime = lazyToolRuntimeForAgent(agent);
@@ -7365,6 +7671,9 @@ export type RigSetupDescriptor = {
   script: string;
   timeoutMs: number;
   contentHash?: string;
+  /** Exact provider image selected only after the existing content, source,
+   * provider-binding, and independent cold-boot checks all pass. */
+  verifiedProviderImageId?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -7384,12 +7693,18 @@ const builtInSandboxLifecycleHooks: Record<string, SandboxLifecycleHook> = {
 };
 
 export function sandboxLifecycleHooksForIds(ids: string[]): SandboxLifecycleHook[] {
-  return ids.map((id) => {
+  const resolved = ids.map((id) => {
     const hook = builtInSandboxLifecycleHooks[id];
     if (!hook) {
       throw new Error(`Unknown sandbox lifecycle hook ${id}`);
     }
     return hook;
+  });
+  const seen = new Set<string>();
+  return resolved.filter((hook) => {
+    if (seen.has(hook.id)) return false;
+    seen.add(hook.id);
+    return true;
   });
 }
 
@@ -8504,6 +8819,7 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
 ): string {
+  const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
   const commands = [
     "set +x",
@@ -8596,18 +8912,38 @@ export function repositoryCloneCommand(
     "  fi",
     '  echo "Repository resource ready at $target"',
     "}",
+    "clone_pids=''",
+    "clone_failed=0",
+    "start_repository_clone() {",
+    '  clone_repository "$@" &',
+    '  clone_pids="$clone_pids $!"',
+    "}",
+    "wait_repository_clone_batch() {",
+    "  for clone_pid in $clone_pids; do",
+    '    if ! wait "$clone_pid"; then',
+    "      clone_failed=1",
+    "    fi",
+    "  done",
+    "  clone_pids=''",
+    '  if [ "$clone_failed" -ne 0 ]; then',
+    "    return 1",
+    "  fi",
+    "}",
   ];
-  for (const resource of resources) {
+  for (const [index, resource] of resources.entries()) {
     const mountPath = resourceMountPath(resource);
     commands.push(
       [
-        "clone_repository",
+        "start_repository_clone",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
       ].join(" "),
     );
+    if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
+      commands.push("wait_repository_clone_batch");
+    }
   }
   return commands.join("\n");
 }
@@ -8710,7 +9046,10 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+// The cancellation fence embeds a lifecycle command twice, then the current
+// runAs wrapper repeats it across several execution branches. Keep each base64
+// chunk below Modal's 64-KiB aggregate argument ceiling after both wrappers.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 7 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
@@ -8920,6 +9259,21 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+  const sessionImageId =
+    session.state &&
+    typeof session.state === "object" &&
+    "imageId" in session.state &&
+    typeof session.state.imageId === "string"
+      ? session.state.imageId
+      : null;
+  if (
+    rigSetup.contentHash &&
+    rigSetup.verifiedProviderImageId &&
+    sessionImageId === rigSetup.verifiedProviderImageId
+  ) {
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+    return;
+  }
   const commandOptions = {
     timeoutMs: rigSetup.timeoutMs,
     markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,

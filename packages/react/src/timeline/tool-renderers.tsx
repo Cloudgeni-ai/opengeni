@@ -1,10 +1,15 @@
-import type { GitFileDiff, RetainedArtifactReference } from "@opengeni/sdk";
+import {
+  parseSandboxFileArtifactReceipt,
+  type GitFileDiff,
+  type RetainedArtifactReference,
+} from "@opengeni/sdk";
 import {
   BoxIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
   CameraIcon,
   CameraOffIcon,
+  DownloadIcon,
   FileDiffIcon,
   FileSearchIcon,
   FolderGitIcon,
@@ -30,7 +35,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { stringifyPayload, tryParseJson } from "../lib/format";
+import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
   applyPatchOpsFromToolItem,
@@ -874,6 +879,7 @@ function RetainedSessionImageDisclosure({
   cancelled: boolean;
 }) {
   const state = useRetainedImageObjectUrl(artifact, load);
+  const downloadFilename = retainedImageFilename(artifact);
 
   return (
     <ActivityDisclosure
@@ -899,6 +905,7 @@ function RetainedSessionImageDisclosure({
             alt={caption}
             expandLabel={`Expand ${noun}`}
             lightboxLabel={lightboxLabel}
+            downloadFilename={downloadFilename}
           />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
@@ -914,6 +921,7 @@ function RetainedSessionImageDisclosure({
           alt={caption}
           expandLabel={`Expand ${noun}`}
           lightboxLabel={lightboxLabel}
+          downloadFilename={downloadFilename}
         />
       ) : state.kind === "loading" ? (
         <BodyNote>Loading the retained {noun}…</BodyNote>
@@ -1001,6 +1009,82 @@ function GeneratedVideoRenderer({ item }: ToolRendererProps) {
     </ActivityDisclosure>
   );
 }
+function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
+  const { text: output, isError } = unwrapMcpOutput(item.output);
+  const receipt = parseSandboxFileArtifactReceipt(output);
+  const [downloadState, setDownloadState] = useState<"idle" | "loading" | "error">("idle");
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<DownloadIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title="Publishing file"
+        running
+        preview={<RunningPreview>retaining workspace bytes…</RunningPreview>}
+      />
+    );
+  }
+  if (!receipt || isError || item.status === "failed") {
+    return <GenericRenderer item={item} />;
+  }
+
+  const download = async () => {
+    if (!loadRetainedArtifact) {
+      setDownloadState("error");
+      return;
+    }
+    setDownloadState("loading");
+    let objectUrl: string | null = null;
+    try {
+      const source = await loadRetainedArtifact(receipt.artifact, new AbortController().signal);
+      if (!source) throw new Error("artifact unavailable");
+      const url =
+        source instanceof Uint8Array
+          ? (objectUrl = URL.createObjectURL(
+              new Blob([source as unknown as BlobPart], {
+                type: receipt.artifact.contentType,
+              }),
+            ))
+          : source.url;
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = receipt.filename;
+      anchor.rel = "noopener";
+      anchor.click();
+      setDownloadState("idle");
+    } catch {
+      setDownloadState("error");
+    } finally {
+      const urlToRevoke = objectUrl;
+      if (urlToRevoke) setTimeout(() => URL.revokeObjectURL(urlToRevoke), 0);
+    }
+  };
+
+  return (
+    <ActivityDisclosure
+      icon={<DownloadIcon className={ICON_SIZE} />}
+      iconTone="accent"
+      title={`Published ${receipt.filename}`}
+      defaultOpen
+      preview={formatBytes(receipt.artifact.originalBytes)}
+    >
+      <button
+        type="button"
+        onClick={() => void download()}
+        disabled={downloadState === "loading"}
+        className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:border-og-border-strong hover:bg-og-surface-2 disabled:cursor-wait disabled:opacity-60"
+      >
+        <DownloadIcon className="size-3.5" />
+        {downloadState === "loading"
+          ? "Preparing…"
+          : downloadState === "error"
+            ? "Retry download"
+            : "Download"}
+      </button>
+    </ActivityDisclosure>
+  );
+}
+
 function GeneratedImageDisclosure({
   receipt,
   load,
@@ -1071,6 +1155,16 @@ function GeneratedImageDisclosure({
       </BodyNote>
     </ActivityDisclosure>
   );
+}
+
+function retainedImageFilename(artifact: RetainedArtifactReference): string {
+  const extension =
+    artifact.contentType === "image/jpeg"
+      ? "jpg"
+      : artifact.contentType === "image/webp"
+        ? "webp"
+        : "png";
+  return `${artifact.kind}-${artifact.artifactId}.${extension}`;
 }
 
 /* ---- web_search ------------------------------------------------------------ */
@@ -2210,6 +2304,7 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "generate_video", render: GeneratedVideoRenderer },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
+  { match: "name", name: "sandbox_file_publish", render: SandboxFilePublishRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
   { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },
   { match: "name", name: "search_documents", render: DocsSearchRenderer },

@@ -372,6 +372,106 @@ describe("catalog import persistence", () => {
     expect(matching[0]?.requireApproval).toEqual(["create_draft"]);
   }, 180_000);
 
+  test("a workspace's requireApproval override can only ADD to a global row's mandated floor, never remove it", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-08-18T00:00:00.000Z"),
+      snapshotRef: "approval-floor",
+      attributionNote: "MIT attribution",
+    });
+    const capabilityId = "mcp:integrations-sh:approval-floor";
+    await upsertRegistryCapabilityCatalogItem(db, {
+      id: capabilityId,
+      importBatchId: batch.id,
+      providerDomain: "approval-floor.example",
+      mcpUrl: "https://global.approval-floor.example/mcp",
+      name: "Approval Floor Fixture",
+      transport: "streamable-http",
+      authKind: "none",
+      credentialFacts: [],
+      tier: "community",
+      provenance: "discovered",
+      metadata: {
+        allowedTools: ["search", "send_it"],
+        requireApproval: ["send_it"],
+      },
+    });
+
+    // A caller attempts to strip the mandated tool from the approval policy
+    // with an explicit false - the classic "turn approval off" payload.
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      config: { requireApproval: false },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    const stripped = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
+      (server) => server.capabilityId === capabilityId,
+    );
+    expect(stripped?.requireApproval).toEqual(["send_it"]);
+
+    // A narrower array that omits the mandated tool is unioned back in, not
+    // silently accepted as a replacement.
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      config: { requireApproval: ["search"] },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    const narrowed = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
+      (server) => server.capabilityId === capabilityId,
+    );
+    expect(narrowed?.requireApproval).toEqual(["search", "send_it"]);
+
+    // A workspace can still ADD approval requirements beyond the floor.
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      config: { requireApproval: ["search", "send_it", "extra_caution"] },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    const widened = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
+      (server) => server.capabilityId === capabilityId,
+    );
+    expect(widened?.requireApproval).toEqual(["extra_caution", "search", "send_it"]);
+
+    // A workspace's OWN custom row has no OpenGeni-mandated floor to protect:
+    // its config fully controls the policy, including turning it off.
+    const customCapabilityId = "mcp:custom:approval-floor-workspace-owned";
+    await upsertCapabilityCatalogItem(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      id: customCapabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Workspace Owned Approval",
+      endpointUrl: "https://workspace.approval-floor.example/mcp",
+      category: "custom",
+      tags: ["mcp", "workspace"],
+      metadata: { requireApproval: ["send_it"] },
+    });
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId: customCapabilityId,
+      kind: "mcp",
+      config: { requireApproval: false },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    const ownRowStripped = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
+      (server) => server.capabilityId === customCapabilityId,
+    );
+    expect(ownRowStripped?.requireApproval).toBe(false);
+  }, 180_000);
+
   test("listEnabledMcpCapabilityServers excludes stale registry entries", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

@@ -1,14 +1,105 @@
-import type { WorkspaceStateResponse } from "@opengeni/sdk";
+import type { WorkspaceStateGapCode, WorkspaceStateResponse } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowRightIcon,
   BookOpenIcon,
   BrainCircuitIcon,
   Building2Icon,
+  CheckCircle2Icon,
+  CircleAlertIcon,
+  Clock3Icon,
   FileSearchIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
+
+export type BrainProposalReview = {
+  status: "loading" | "unavailable" | "ready";
+  pendingCount: number;
+  staleCount: number;
+  partial: boolean;
+};
+
+export type BrainAttentionInput = {
+  companyProfileStatus: { label: string; tone?: "default" | "warning" };
+  workspaceInstructionsMissing: boolean;
+  policyRevisionPending: boolean;
+  policyInventoryPartial: boolean;
+  preferenceInventoryPartial: boolean;
+  preferenceConflictCount: number;
+  inventoryRefreshFailed: boolean;
+  knowledge:
+    | { availability: "unavailable" }
+    | {
+        availability: "available";
+        gaps: Array<{ code: WorkspaceStateGapCode; relatedCount: number | null }>;
+      };
+  proposals: BrainProposalReview;
+};
+
+const GAP_ATTENTION_LABELS: Record<WorkspaceStateGapCode, string> = {
+  no_document_bases: "No document sources are configured",
+  no_visible_documents: "No documents are visible",
+  failed_documents: "Some documents failed indexing",
+  processing_documents: "Some documents are still processing",
+  missing_topic_coverage: "Some ready documents have no topics",
+  no_memory_records: "No learned memory is visible",
+  pending_memory_review: "Some learned memories await review",
+  partial_inventory: "Knowledge review is partial",
+};
+
+function counted(label: string, count: number | null): string {
+  return count && count > 0 ? `${label} (${count})` : label;
+}
+
+export function deriveBrainAttention(input: BrainAttentionInput): string[] {
+  const attention: string[] = [];
+  if (input.inventoryRefreshFailed) attention.push("Company Brain refresh failed");
+  if (input.companyProfileStatus.tone === "warning") {
+    attention.push("Company profile review is unavailable");
+  } else if (input.companyProfileStatus.label === "Loading…") {
+    attention.push("Company profile review is still loading");
+  } else if (input.companyProfileStatus.label === "Not configured") {
+    attention.push("Company profile is not set");
+  }
+  if (input.workspaceInstructionsMissing) attention.push("Workspace instructions are not set");
+  if (input.policyRevisionPending) attention.push("An inactive policy revision needs review");
+  if (input.policyInventoryPartial) attention.push("Policy review is partial");
+  if (input.preferenceInventoryPartial) attention.push("Preference summaries are partially shown");
+  if (input.preferenceConflictCount > 0) {
+    attention.push(
+      `${input.preferenceConflictCount} active preference conflict${input.preferenceConflictCount === 1 ? " needs" : "s need"} review`,
+    );
+  }
+  if (input.knowledge.availability === "unavailable") {
+    attention.push("Knowledge review is unavailable");
+  } else {
+    attention.push(
+      ...input.knowledge.gaps.map((gap) =>
+        counted(GAP_ATTENTION_LABELS[gap.code], gap.relatedCount),
+      ),
+    );
+  }
+  if (input.proposals.status === "unavailable") {
+    attention.push("Proposal review is unavailable");
+  } else if (input.proposals.status === "loading") {
+    attention.push("Proposal review is still loading");
+  } else {
+    if (input.proposals.pendingCount > 0) {
+      attention.push(
+        `${input.proposals.pendingCount} proposal${input.proposals.pendingCount === 1 ? "" : "s"} await review`,
+      );
+    }
+    if (input.proposals.staleCount > 0) {
+      attention.push(
+        `${input.proposals.staleCount} proposal${input.proposals.staleCount === 1 ? " has" : "s have"} a stale baseline`,
+      );
+    }
+    if (input.proposals.partial) attention.push("Proposal review is partial");
+  }
+  return [...new Set(attention)];
+}
 
 function SummaryGroup(props: { title: string; children: ReactNode }) {
   return (
@@ -65,7 +156,7 @@ function FocusAction({
   workspaceId,
 }: {
   children: ReactNode;
-  view: "company" | "instructions" | "preferences";
+  view: "company" | "instructions" | "preferences" | "learning";
   workspaceId: string;
 }) {
   return (
@@ -154,17 +245,47 @@ export function BrainOverview({
   state,
   workspaceId,
   companyProfileStatus,
+  proposalReview,
+  preferenceConflictCount,
+  inventoryRefreshFailed = false,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   companyProfileStatus: { label: string; tone?: "default" | "warning" };
+  proposalReview: BrainProposalReview;
+  preferenceConflictCount: number;
+  inventoryRefreshFailed?: boolean;
 }) {
   const documents = documentStatus(state);
   const memory = memoryStatus(state);
+  const attention = deriveBrainAttention({
+    companyProfileStatus,
+    workspaceInstructionsMissing: workspaceInstructionStatus(state) === "Not set",
+    policyRevisionPending: state.policy.latestRevision?.state === "inactive",
+    policyInventoryPartial: state.policy.activeHeadsTruncated,
+    preferenceInventoryPartial: state.preferences.truncated,
+    preferenceConflictCount,
+    inventoryRefreshFailed,
+    knowledge:
+      state.knowledge.availability === "unavailable"
+        ? { availability: "unavailable" }
+        : { availability: "available", gaps: state.knowledge.gaps },
+    proposals: proposalReview,
+  });
+  const recentChanges = [
+    ...state.policy.activeHeads.map((head) => ({ label: "Rules", at: head.activatedAt })),
+    ...(state.knowledge.availability === "available" && state.knowledge.latestDocumentUpdatedAt
+      ? [{ label: "Knowledge", at: state.knowledge.latestDocumentUpdatedAt }]
+      : []),
+    ...(state.knowledge.availability === "available" && state.knowledge.memorySample.latestUpdatedAt
+      ? [{ label: "Memory", at: state.knowledge.memorySample.latestUpdatedAt }]
+      : []),
+  ];
+  recentChanges.sort((left, right) => right.at.localeCompare(left.at));
 
   return (
     <div className="grid gap-6">
-      <SummaryGroup title="Included automatically">
+      <SummaryGroup title="Always followed">
         <SummaryRow
           icon={<Building2Icon className="size-4" />}
           title="Company profile & goals"
@@ -188,9 +309,23 @@ export function BrainOverview({
             </FocusAction>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Available when needed">
+        <SummaryRow
+          icon={<SparklesIcon className="size-4" />}
+          title="Learning & autonomy"
+          status="Governed"
+          description="Choose whether source-backed changes stay off, wait for review, or apply automatically."
+          action={
+            <FocusAction view="learning" workspaceId={workspaceId}>
+              Manage
+            </FocusAction>
+          }
+        />
         <SummaryRow
           icon={<SlidersHorizontalIcon className="size-4" />}
-          title="Preferences"
+          title="Guides & preferences"
           status={`${state.preferences.activeDescriptorCount} active`}
           description="Short summaries are always known; full instructions are fetched when needed."
           tone={state.preferences.truncated ? "warning" : "default"}
@@ -200,9 +335,6 @@ export function BrainOverview({
             </FocusAction>
           }
         />
-      </SummaryGroup>
-
-      <SummaryGroup title="Available when needed">
         <SummaryRow
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
@@ -227,6 +359,51 @@ export function BrainOverview({
             </RouteAction>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="Needs attention">
+        {attention.length === 0 ? (
+          <SummaryRow
+            icon={<CheckCircle2Icon className="size-4" />}
+            title="No visible review signals"
+            status="Up to date"
+            description="The loaded review authorities show no proposals, gaps, stale baselines, or partial projections."
+          />
+        ) : (
+          attention.map((item) => (
+            <SummaryRow
+              key={item}
+              icon={<CircleAlertIcon className="size-4" />}
+              title={item}
+              status="Review"
+              tone="warning"
+              description="Open the relevant Company Brain section to inspect the current authority."
+            />
+          ))
+        )}
+      </SummaryGroup>
+
+      <SummaryGroup title="Recent changes">
+        {recentChanges.length === 0 ? (
+          <SummaryRow
+            icon={<Clock3Icon className="size-4" />}
+            title="No recent changes"
+            status="Empty"
+            description="No visible Company Brain change timestamps are available yet."
+          />
+        ) : (
+          recentChanges
+            .slice(0, 3)
+            .map((change) => (
+              <SummaryRow
+                key={`${change.label}:${change.at}`}
+                icon={<Clock3Icon className="size-4" />}
+                title={change.label}
+                status={new Date(change.at).toLocaleString()}
+                description="Visible authority changed at this time. Open the relevant section for history."
+              />
+            ))
+        )}
       </SummaryGroup>
     </div>
   );

@@ -53,6 +53,13 @@ describe("defaultToolRegistry leaf resolution", () => {
     expect(renderer.name).toBe("DocsSearchRenderer");
   });
 
+  test("resolves durable sandbox file publication for prefixed MCP names", () => {
+    const direct = registry.resolve(tool({ name: "sandbox_file_publish" }));
+    const prefixed = registry.resolve(tool({ name: "opengeni__sandbox_file_publish" }));
+    expect(direct).toBe(prefixed);
+    expect(direct.name).toBe("SandboxFilePublishRenderer");
+  });
+
   test("resolves ToolSearch by name and tool_search_call raw type", () => {
     const byName = registry.resolve(tool({ name: "tool_search" }));
     const byRaw = registry.resolve(

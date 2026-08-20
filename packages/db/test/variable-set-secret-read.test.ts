@@ -10,6 +10,7 @@ import {
   decryptVariableSetValue,
   encryptVariableSetValue,
   initializeSessionStartAtomically,
+  nestedPostgresSqlState,
   readVariableSetSecretAtomically,
   VariableSetSecretReadAuthorityError,
   type DbClient,
@@ -96,14 +97,14 @@ describe("permissioned variable-set plaintext reads", () => {
         action: string;
         actorKind: string | null;
         name: string | null;
-        version: number | null;
+        generation: number | null;
         serialized: string;
       }>
     >`
       select action,
              metadata ->> 'actorKind' as "actorKind",
              metadata ->> 'name' as name,
-             (metadata ->> 'version')::int as version,
+             (metadata ->> 'generation')::int as generation,
              metadata::text as serialized
       from audit_events
       where workspace_id = ${grant.workspaceId}
@@ -115,7 +116,7 @@ describe("permissioned variable-set plaintext reads", () => {
       action: "variable_set.variable.read",
       actorKind: "subject",
       name: "EXACT_VALUE",
-      version: 1,
+      generation: 1,
     });
     expect(audit?.serialized).not.toContain(exact);
     expect(audit?.serialized).not.toContain("valueEncrypted");
@@ -169,7 +170,7 @@ describe("permissioned variable-set plaintext reads", () => {
       }
       expect(returned).toBeUndefined();
       expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).message).toContain('insert into "audit_events"');
+      expect(nestedPostgresSqlState(failure)).toBe("P0001");
       expect((failure as Error).message).not.toContain("must-not-return");
     } finally {
       await shared.admin.unsafe(`
@@ -230,6 +231,8 @@ describe("permissioned variable-set plaintext reads", () => {
       tools: [],
       metadata: {},
       model: "secret-read-test",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       subjectId,
     });

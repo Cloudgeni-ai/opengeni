@@ -9,31 +9,22 @@ import {
   type EditableArtifactLiveSession,
   type EditableArtifactLiveSinkPort,
 } from "@opengeni/core";
+import type {
+  ApiWebSocketConnection,
+  ApiWebSocketLike,
+  ApiWebSocketUpgradeServer,
+} from "./api-websocket";
 
 export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PATH = "/v1/editable-artifacts/live";
-export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PROTOCOL = "opengeni-artifact-v1";
+export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_PROTOCOL = "opengeni-artifact-v2";
 export const EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES = 8 * 1024 * 1024 + 64 * 1024;
 
 const MAX_QUEUED_MESSAGES = 64;
 const MAX_QUEUED_BYTES = 12 * 1024 * 1024;
 
-export type EditableArtifactWebSocketLike = Readonly<{
-  data: EditableArtifactWebSocketConnection;
-  send(data: Uint8Array, compress?: boolean): number;
-  close(code?: number, reason?: string): void;
-  readonly bufferedAmount?: number;
-  getBufferedAmount?(): number;
-}>;
+export type EditableArtifactWebSocketLike = ApiWebSocketLike;
 
-export type EditableArtifactWebSocketUpgradeServer = Readonly<{
-  upgrade(
-    request: Request,
-    options: Readonly<{
-      data: EditableArtifactWebSocketConnection;
-      headers: HeadersInit;
-    }>,
-  ): boolean;
-}>;
+export type EditableArtifactWebSocketUpgradeServer = ApiWebSocketUpgradeServer;
 
 export type EditableArtifactWebSocketHandler = Readonly<{
   open(socket: EditableArtifactWebSocketLike): void;
@@ -81,7 +72,9 @@ export class EditableArtifactWebSocketTransport {
 }
 
 /** One socket, one consumed ticket, one stream epoch. */
-export class EditableArtifactWebSocketConnection implements EditableArtifactLiveSinkPort {
+export class EditableArtifactWebSocketConnection
+  implements EditableArtifactLiveSinkPort, ApiWebSocketConnection
+{
   private socket: EditableArtifactWebSocketLike | null = null;
   private session: EditableArtifactLiveSession | null = null;
   private work: Promise<void> = Promise.resolve();

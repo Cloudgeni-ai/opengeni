@@ -8,7 +8,8 @@
 //! id, which is its exact CRDT generation.
 
 use opengeni_artifact_kernel::{
-    Cell, CellCoord, CellRange, CellValue, DateValue, FormulaError, Number, StableId, Workbook,
+    Cell, CellCoord, CellRange, CellValue, DateValue, FormulaError, Number, StableId, ValueError,
+    Workbook,
 };
 
 use super::{checksum, read_u16, read_u32, read_u64, BindingError, MAX_STRING_BYTES};
@@ -68,7 +69,8 @@ enum ArtifactQuery {
 pub struct ViewportCell {
     pub relative_row: u32,
     pub relative_column: u32,
-    pub cell: Cell,
+    pub formula_source: Option<String>,
+    pub value: CellValue,
 }
 
 /// A complete, non-truncated viewport response.
@@ -465,7 +467,8 @@ fn push_viewport_cell(
     cells.push(ViewportCell {
         relative_row,
         relative_column,
-        cell: cell.clone(),
+        formula_source: cell.formula_source().map(str::to_owned),
+        value: cell.value().clone(),
     });
     Ok(())
 }
@@ -492,7 +495,7 @@ fn encode_response(
             for cell in &response.cells {
                 writer.u32(cell.relative_row)?;
                 writer.u32(cell.relative_column)?;
-                writer.cell(&cell.cell)?;
+                writer.cell(cell.formula_source.as_deref(), &cell.value)?;
             }
             let count = u32::try_from(response.cells.len())
                 .map_err(|_| BindingError::Limit("viewport cell count"))?;
@@ -677,8 +680,8 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                     ));
                 }
                 previous = Some(position);
-                let cell = reader.cell()?;
-                if cell.is_empty() {
+                let (formula_source, value) = reader.cell()?;
+                if formula_source.is_none() && matches!(value, CellValue::Empty) {
                     return Err(BindingError::NonCanonical(
                         "sparse viewport contains an empty cell",
                     ));
@@ -686,7 +689,8 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                 cells.push(ViewportCell {
                     relative_row,
                     relative_column,
-                    cell,
+                    formula_source,
+                    value,
                 });
             }
             ArtifactQueryResponse::Viewport(ViewportResponse {
@@ -877,15 +881,19 @@ impl Writer {
         self.bytes(value.as_bytes())
     }
 
-    fn cell(&mut self, cell: &Cell) -> Result<(), BindingError> {
-        match cell.formula_source() {
+    fn cell(
+        &mut self,
+        formula_source: Option<&str>,
+        value: &CellValue,
+    ) -> Result<(), BindingError> {
+        match formula_source {
             Some(formula) => {
                 self.u8(1)?;
                 self.string(formula)?;
             }
             None => self.u8(0)?,
         }
-        self.value(cell.value())
+        self.value(value)
     }
 
     fn value(&mut self, value: &CellValue) -> Result<(), BindingError> {
@@ -1002,17 +1010,17 @@ impl<'a> Reader<'a> {
         Ok(value.to_owned())
     }
 
-    fn cell(&mut self) -> Result<Cell, BindingError> {
-        let formula = match self.u8()? {
+    fn cell(&mut self) -> Result<(Option<String>, CellValue), BindingError> {
+        let formula_source = match self.u8()? {
             0 => None,
             1 => Some(self.string()?),
             tag => return Err(BindingError::InvalidTag(tag)),
         };
         let value = self.value()?;
-        match formula {
-            Some(source) => Cell::formula(source, value).map_err(BindingError::InvalidCellValue),
-            None => Ok(Cell::from_value(value)),
+        if formula_source.as_ref().is_some_and(String::is_empty) {
+            return Err(BindingError::InvalidCellValue(ValueError::EmptyFormula));
         }
+        Ok((formula_source, value))
     }
 
     fn value(&mut self) -> Result<CellValue, BindingError> {
@@ -1097,7 +1105,7 @@ mod tests {
                             Cell::empty(),
                             Cell::from(true),
                             Cell::from_value(CellValue::Number(Number::new(2.5).unwrap())),
-                            Cell::formula("=A1", CellValue::Text("cached".into())).unwrap(),
+                            Cell::formula("=A1").unwrap(),
                             Cell::from_value(CellValue::Date(
                                 DateValue::new(1_754_739_296_789).unwrap(),
                             )),
@@ -1139,7 +1147,7 @@ mod tests {
             vec![(0, 0), (0, 2), (1, 0), (1, 1), (1, 2)]
         );
         assert_eq!(
-            response.cells.last().map(|cell| cell.cell.value()),
+            response.cells.last().map(|cell| &cell.value),
             Some(&CellValue::Date(DateValue::new(1_754_739_296_789).unwrap()))
         );
     }

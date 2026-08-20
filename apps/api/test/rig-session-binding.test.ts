@@ -11,11 +11,12 @@ import {
   createRig,
   createRigVersion,
   createSession,
+  createVariableSet,
   getSession,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
@@ -55,13 +56,14 @@ async function seedRig(
   accountId: string,
   workspaceId: string,
   name: string,
+  defaultVariableSetIds: string[] = [],
 ): Promise<{ rigId: string; activeVersionId: string }> {
   const rig = await createRig(db, {
     accountId,
     workspaceId,
     name,
     createdBy: "user:test",
-    initialVersion: { changelog: "v1" },
+    initialVersion: { changelog: "v1", defaultVariableSetIds },
   });
   return { rigId: rig.id, activeVersionId: rig.activeVersion!.id };
 }
@@ -96,12 +98,17 @@ function deps(bus: MemoryEventBus): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-function grant(accountId: string, workspaceId: string, fromSessionId?: string): AccessGrant {
+function grant(
+  accountId: string,
+  workspaceId: string,
+  fromSessionId?: string,
+  extraPermissions: Permission[] = [],
+): AccessGrant {
   return {
     accountId,
     workspaceId,
     subjectId: "subject",
-    permissions: ["sessions:create", "sessions:read"],
+    permissions: ["sessions:create", "sessions:read", ...extraPermissions],
     ...(fromSessionId
       ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
       : {}),
@@ -131,6 +138,41 @@ afterAll(async () => {
 }, 180_000);
 
 describe("M3 rig binding: freeze at create", () => {
+  test("rig defaults require independent Variable Set attach and use permissions", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const variableSet = await createVariableSet(db, {
+      accountId,
+      workspaceId,
+      name: "rig-default-secret",
+    });
+    const { rigId } = await seedRig(accountId, workspaceId, "secret-rig", [variableSet.id]);
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "missing attach",
+        rigId,
+      }),
+    ).rejects.toThrow(/variable-sets:attach/);
+    await expect(
+      createSessionForRequest(
+        deps(bus),
+        grant(accountId, workspaceId, undefined, ["variable-sets:attach"]),
+        workspaceId,
+        { initialMessage: "missing use", rigId },
+      ),
+    ).rejects.toThrow(/variable-sets:use/);
+
+    const authorized = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, undefined, ["variable-sets:attach", "variable-sets:use"]),
+      workspaceId,
+      { initialMessage: "authorized", rigId },
+    );
+    expect(authorized.rigId).toBe(rigId);
+  }, 60_000);
+
   test("binds the rig's active version and freezes it — a later promote never moves an existing session", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();
@@ -366,6 +408,8 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
       resources: [],
       metadata: {},
       model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       rigId: rigB.rigId,
       rigVersionId: rigB.activeVersionId,

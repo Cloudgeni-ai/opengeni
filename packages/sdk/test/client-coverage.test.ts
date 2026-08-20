@@ -188,6 +188,44 @@ describe("OpenGeniClient Channel-A batches", () => {
       },
     ]);
   });
+
+  test("publishes a sandbox file through the session-scoped artifact route", async () => {
+    const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const receipt = {
+      type: "sandbox_file" as const,
+      sandboxPath: "/workspace/reports/summary.pdf",
+      filename: "summary.pdf",
+      artifact: {
+        available: true as const,
+        artifactId,
+        kind: "file" as const,
+        contentType: "application/pdf",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-08-17T00:00:00.000Z",
+        retention: { policy: "workspace_file" as const, expiresAt: null },
+        retrieval: {
+          method: "GET" as const,
+          path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes" as const,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(receipt));
+
+    expect(
+      await client.publishSandboxFileArtifact(WORKSPACE_ID, SESSION_ID, {
+        path: "reports/summary.pdf",
+      }),
+    ).toEqual(receipt);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/publish`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ path: "reports/summary.pdf" });
+  });
 });
 
 describe("OpenGeniClient turn queue", () => {
@@ -281,6 +319,49 @@ describe("OpenGeniClient goals", () => {
     expect(JSON.parse(requests[1]!.body!)).toEqual({ status: "active" });
   });
 
+  test("preserves the raw revision list and pages through the separately named route", async () => {
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    const { client, requests } = makeClient((request) => {
+      if (request.method !== "GET") return jsonResponse({ id: "goal-1", status: "active" });
+      return new URL(request.url).pathname.endsWith("/page")
+        ? jsonResponse({ revisions: [], hasMore: false, nextCursor: null })
+        : jsonResponse([]);
+    });
+    const revisions = await client.listGoalRevisions(WORKSPACE_ID, SESSION_ID);
+    expect(revisions).toEqual([]);
+    await client.listGoalRevisionPage(WORKSPACE_ID, SESSION_ID, {
+      limit: 25,
+      before: revisionId,
+    });
+    await client.applyGoalRevision(WORKSPACE_ID, SESSION_ID, revisionId, {
+      expectedObjectiveRevision: 3,
+    });
+    await client.rejectGoalRevision(WORKSPACE_ID, SESSION_ID, revisionId, {
+      expectedObjectiveRevision: 3,
+      rationale: "keep current intent",
+    });
+    await client.rollbackGoalRevision(WORKSPACE_ID, SESSION_ID, revisionId, {
+      expectedObjectiveRevision: 4,
+      rationale: "restore prior intent",
+    });
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/page`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/apply`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/reject`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal/revisions/${revisionId}/rollback`,
+      ],
+    );
+    expect(new URL(requests[0]!.url).searchParams.toString()).toBe("");
+    expect(new URL(requests[1]!.url).searchParams.toString()).toBe(`limit=25&before=${revisionId}`);
+    expect(requests.slice(2).map((request) => JSON.parse(request.body!))).toEqual([
+      { expectedObjectiveRevision: 3 },
+      { expectedObjectiveRevision: 3, rationale: "keep current intent" },
+      { expectedObjectiveRevision: 4, rationale: "restore prior intent" },
+    ]);
+  });
+
   test("deleteGoal DELETEs the session goal route", async () => {
     const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
     await client.deleteGoal(WORKSPACE_ID, SESSION_ID);
@@ -292,6 +373,71 @@ describe("OpenGeniClient goals", () => {
 });
 
 describe("OpenGeniClient access + workspaces", () => {
+  test("organization lifecycle methods use the managed-human endpoints and exact bodies", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const invitationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const membershipId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await client.listOrganizationInvitations({
+      cursor: invitationId,
+      limit: 25,
+    });
+    await client.listOrganizationInvitationsForOrganization(organizationId, {
+      cursor: invitationId,
+      limit: 25,
+    });
+    await client.createOrganizationInvitation(organizationId, {
+      email: "person@example.test",
+      role: "member",
+      expiresAt: "2026-08-17T00:00:00.000Z",
+      operationId,
+    });
+    await client.acceptOrganizationInvitation(invitationId, {
+      expectedRevision: 1,
+      operationId,
+    });
+    await client.revokeOrganizationInvitation(organizationId, invitationId, {
+      expectedRevision: 1,
+      operationId,
+    });
+    await client.listOrganizationMembers(organizationId);
+    await client.updateOrganizationMember(organizationId, membershipId, {
+      kind: "suspend",
+      expectedAuthorizationRevision: 2,
+      operationId,
+    });
+    await client.getOrganizationRetentionPolicy(organizationId);
+    await client.updateOrganizationRetentionPolicy(organizationId, {
+      mode: "delete_after",
+      retentionDays: 30,
+      expectedVersion: 1,
+      operationId,
+    });
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        "GET /v1/organization-invitations",
+        `GET /v1/organizations/${organizationId}/invitations`,
+        `POST /v1/organizations/${organizationId}/invitations`,
+        `POST /v1/organization-invitations/${invitationId}/accept`,
+        `POST /v1/organizations/${organizationId}/invitations/${invitationId}/revoke`,
+        `GET /v1/organizations/${organizationId}/members`,
+        `PATCH /v1/organizations/${organizationId}/members/${membershipId}`,
+        `GET /v1/organizations/${organizationId}/retention-policy`,
+        `PATCH /v1/organizations/${organizationId}/retention-policy`,
+      ],
+    );
+    expect(new URL(requests[1]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[1]!.url).searchParams.get("limit")).toBe("25");
+    expect(new URL(requests[0]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[0]!.url).searchParams.get("limit")).toBe("25");
+    expect(JSON.parse(requests[6]!.body!)).toEqual({
+      kind: "suspend",
+      expectedAuthorizationRevision: 2,
+      operationId,
+    });
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {
@@ -1140,6 +1286,9 @@ describe("OpenGeniClient documents", () => {
     await client.getDocumentBase(WORKSPACE_ID, BASE_ID);
     await client.addDocument(WORKSPACE_ID, BASE_ID, { fileId: FILE_ID });
     await client.listDocuments(WORKSPACE_ID, BASE_ID);
+    await client.listAccessibleDocuments(WORKSPACE_ID);
+    await client.getDocumentOriginalFile(WORKSPACE_ID, DOCUMENT_ID);
+    await client.createDocumentOriginalFileDownloadUrl(WORKSPACE_ID, DOCUMENT_ID);
     await client.reindexDocument(WORKSPACE_ID, BASE_ID, DOCUMENT_ID);
     const search = await client.searchDocuments(WORKSPACE_ID, BASE_ID, {
       query: "rollback steps",
@@ -1178,6 +1327,9 @@ describe("OpenGeniClient documents", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents`,
         `GET /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/documents`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/original-file/download-url`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}/reindex`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/search`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/search`,
@@ -1189,27 +1341,27 @@ describe("OpenGeniClient documents", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
       ],
     );
-    expect(JSON.parse(requests[6]!.body!)).toEqual({
+    expect(JSON.parse(requests[9]!.body!)).toEqual({
       query: "rollback steps",
       limit: 3,
     });
-    expect(JSON.parse(requests[7]!.body!)).toEqual({
+    expect(JSON.parse(requests[10]!.body!)).toEqual({
       query: "decision",
       mode: "keyword",
       limit: 2,
     });
-    expect(new URL(requests[8]!.url).searchParams.get("status")).toBe("approved");
-    expect(JSON.parse(requests[10]!.body!)).toEqual({
+    expect(new URL(requests[11]!.url).searchParams.get("status")).toBe("approved");
+    expect(JSON.parse(requests[13]!.body!)).toEqual({
       text: "Prefer reviewed memory.",
       kind: "decision",
     });
-    expect(JSON.parse(requests[11]!.body!)).toEqual({ status: "approved" });
-    expect(JSON.parse(requests[12]!.body!)).toEqual({
+    expect(JSON.parse(requests[14]!.body!)).toEqual({ status: "approved" });
+    expect(JSON.parse(requests[15]!.body!)).toEqual({
       text: "meeting notes",
       visibility: "private",
       agentAccess: false,
     });
-    expect(JSON.parse(requests[13]!.body!)).toEqual({});
+    expect(JSON.parse(requests[16]!.body!)).toEqual({});
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {

@@ -22,8 +22,24 @@ const budgets = {
   // session graph includes the small shared interaction-invalidation chunk;
   // live media renderers and browser/computer controls remain lazy. Workspace
   // channels and the "For you" rail entry add always-loaded rail code and one
-  // more shared-chunk boundary in both graphs. Keep tight headroom above the
-  // measured production graph.
+  // more shared-chunk boundary in both graphs. Revision-fenced Connected Machine
+  // command policy adds its memory/CPU fields to the shared session contract;
+  // governed goal revision paging, rejection, and rollback add the matching SDK
+  // methods to that same direct-session graph. Browser acceptance builds also
+  // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
+  // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
+  // envelope above that configured graph instead of a platform/config-specific
+  // one-byte margin. Canonical Bun 1.3.14 Linux/x64 measured the combined
+  // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
+  // default/4-digit/5-digit API URLs; that integration already exceeded the old
+  // cap. The lazy residual inspector adds 769 raw bytes in every case. The
+  // reconciled 0262 stack adds another 270 bytes. The current-main organization
+  // membership and connection-authority integration brings the combined default/4-digit/5-digit
+  // graph to a worst observed 2,042,520 raw bytes. Truthful zero-step lifecycle
+  // copy, the shared large-history disclosure scheduler, and durable sandbox-file
+  // receipt/download controls bring the configured graph to 2,052,836 raw bytes
+  // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The 2,006/559 KiB
+  // envelopes retain 1,308/829 bytes of headroom.
   initialRaw: 1448 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
@@ -31,8 +47,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 1990 * kib,
-  directSessionGzip: 552 * kib,
+  directSessionRaw: 2006 * kib,
+  directSessionGzip: 559 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

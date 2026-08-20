@@ -418,6 +418,7 @@ describe("connector attachment MCP projection", () => {
   test("revalidates exact workspace and subject authority after the provider call", async () => {
     const resolverCalls: ResolveConnectionCredentialInput[] = [];
     const materialized: ConnectorAttachmentMaterializationRequest[] = [];
+    let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -454,9 +455,25 @@ describe("connector attachment MCP projection", () => {
         ],
         resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
           resolverCalls.push(input);
-          return { status: "ok", connectionId, headers: { authorization: "Bearer hidden" } };
+          return {
+            status: "ok",
+            connectionId,
+            headers: { authorization: "Bearer hidden" },
+            authorizeProviderRequest: async () => {
+              providerAuthorizations += 1;
+              return true;
+            },
+          };
         },
         materializeConnectorAttachments: async (request) => {
+          if (!request.authorizeProviderRequest) {
+            throw new Error("missing provider authorization hook");
+          }
+          for (let index = 0; index < request.attachments.length; index += 1) {
+            if (!(await request.authorizeProviderRequest())) {
+              throw new Error("provider request denied");
+            }
+          }
           materialized.push(request);
           return matchingReceipt(request);
         },
@@ -481,6 +498,7 @@ describe("connector attachment MCP projection", () => {
       );
       expect(materialized[1]).toMatchObject({ connectionId, operationId, serverId: "connector" });
       expect(resolverCalls).toHaveLength(2);
+      expect(providerAuthorizations).toBe(2);
       for (const call of resolverCalls) {
         expect(call).toMatchObject({
           workspaceId: "33333333-3333-4333-8333-333333333333",

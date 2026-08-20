@@ -72,12 +72,67 @@ description: Prepare a safe release.
     });
   });
 
+  test("unique skill names do not hash helper files", async () => {
+    const skill = `---
+name: release
+description: Prepare a safe release.
+---
+`;
+    const session = fakeSession({
+      ".agents/skills/release/SKILL.md": skill,
+      ".agents/skills/release/references/checklist.md": "verify\n",
+      ".agents/skills/deploy/SKILL.md":
+        "---\nname: deploy\ndescription: Deploy the service.\n---\n",
+      ".agents/skills/deploy/scripts/run.sh": "echo deploy\n",
+    });
+    const reads: string[] = [];
+    const listed: string[] = [];
+    const originalRead = session.readFile!;
+    const originalList = session.listDir!;
+    session.readFile = async (args) => {
+      reads.push(normalize(args.path));
+      return await originalRead(args);
+    };
+    session.listDir = async (args) => {
+      listed.push(normalize(args.path));
+      return await originalList(args);
+    };
+    const skills = await discoverWorkspaceSkills(session, [
+      { path: ".agents/skills", source: ".agents/skills" },
+    ]);
+    expect(skills.map((entry) => entry.name)).toEqual(["deploy", "release"]);
+    expect(listed).toEqual([".agents/skills"]);
+    expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
+  });
+
   test("fails when the same skill name has different contents", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: First definition.\n---\n",
       ".claude/skills/release/SKILL.md":
         "---\nname: release\ndescription: Different definition.\n---\n",
+    });
+    await expect(
+      discoverWorkspaceSkills(session, [
+        { path: ".agents/skills", source: ".agents/skills" },
+        { path: ".claude/skills", source: ".claude/skills" },
+      ]),
+    ).rejects.toThrow(
+      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
+    );
+  });
+
+  test("same name with identical SKILL.md but different helpers still conflicts", async () => {
+    const skill = `---
+name: release
+description: Prepare a safe release.
+---
+`;
+    const session = fakeSession({
+      ".agents/skills/release/SKILL.md": skill,
+      ".agents/skills/release/helper.sh": "echo a\n",
+      ".claude/skills/release/SKILL.md": skill,
+      ".claude/skills/release/helper.sh": "echo b\n",
     });
     await expect(
       discoverWorkspaceSkills(session, [

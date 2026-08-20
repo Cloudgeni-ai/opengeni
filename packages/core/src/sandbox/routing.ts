@@ -149,15 +149,11 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
 
 async function resolveSelfhostedConnection(
   services: ChannelARoutingServices,
-  workspaceId: string,
+  access: string | { accountId: string; workspaceId: string; subjectId: string },
   sandbox: RoutableSandbox,
 ): Promise<SelfhostedConnectionBinding | null> {
   if (!sandbox.enrollmentId) return null;
-  const enrollment = await getLiveEnrollmentConnection(
-    services.db,
-    workspaceId,
-    sandbox.enrollmentId,
-  );
+  const enrollment = await getLiveEnrollmentConnection(services.db, access, sandbox.enrollmentId);
   if (!enrollment?.connectionInstanceId) return null;
   const opStream: SelfhostedOpStreamDeps | undefined =
     services.settings.agentOpStreamEnabled === true &&
@@ -172,6 +168,9 @@ async function resolveSelfhostedConnection(
   return {
     connectionInstanceId: enrollment.connectionInstanceId,
     ...(opStream ? { opStream } : {}),
+    operationResourcePolicy: enrollment.operationPolicy,
+    operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
   };
 }
 
@@ -193,6 +192,7 @@ export function wrapChannelABoxWithRouting(
     accountId: string;
     workspaceId: string;
     sessionId: string;
+    resourceSubjectId: string;
     homeLease?: {
       sandboxGroupId: string;
       leaseEpoch: number;
@@ -245,6 +245,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           requestId: ids.directRequest.requestId,
           holderId: ids.directRequest.holderId,
+          initiatorSubjectId: ids.resourceSubjectId,
           sandboxGroupId: homeLease.sandboxGroupId,
           expectedEpoch: backend.leaseEpoch,
           expectedInstanceId: backend.providerInstanceId,
@@ -307,6 +308,7 @@ export function wrapChannelABoxWithRouting(
               kind: "direct",
               requestId: ids.directRequest.requestId,
               holderId: ids.directRequest.holderId,
+              initiatorSubjectId: ids.resourceSubjectId,
               sandboxGroupId: homeLease.sandboxGroupId,
               expectedEpoch: backend.leaseEpoch,
               expectedInstanceId: backend.providerInstanceId,
@@ -322,6 +324,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           requestId: ids.directRequest.requestId,
           holderId: ids.directRequest.holderId,
+          initiatorSubjectId: ids.resourceSubjectId,
           sandboxGroupId: homeLease.sandboxGroupId,
           expectedEpoch: backend.leaseEpoch,
           expectedInstanceId: backend.providerInstanceId,
@@ -432,10 +435,19 @@ export function wrapChannelABoxWithRouting(
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
+      const sandbox = await getSandbox(
+        db,
+        {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          subjectId: ids.resourceSubjectId,
+        },
+        sandboxId,
+      );
       return sandbox
         ? {
             id: sandbox.id,
+            workspaceId: sandbox.workspaceId,
             kind: sandbox.kind,
             name: sandbox.name,
             enrollmentId: sandbox.enrollmentId,
@@ -444,7 +456,15 @@ export function wrapChannelABoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     resolveSelfhostedConnection: (sandbox) =>
-      resolveSelfhostedConnection(services, ids.workspaceId, sandbox),
+      resolveSelfhostedConnection(
+        services,
+        {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          subjectId: ids.resourceSubjectId,
+        },
+        sandbox,
+      ),
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,

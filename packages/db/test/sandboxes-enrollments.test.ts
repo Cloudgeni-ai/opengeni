@@ -28,6 +28,7 @@ import {
   setActiveSandbox,
   setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
+  updateEnrollmentOperationPolicy,
   upsertMachineMetricsLatest,
   type Database,
   type DbClient,
@@ -83,6 +84,62 @@ afterAll(async () => {
 }, 180_000);
 
 describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer", () => {
+  test("operation policy migration defaults to unrestricted and enforces revision-fenced updates", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:OPERATION-POLICY",
+    });
+    expect(enrollment.operationPolicy).toEqual({
+      memoryMaxBytes: null,
+      memoryHighBytes: null,
+      cpuMaxMillicores: null,
+      revision: 0,
+      updatedAt: null,
+    });
+
+    const updated = await updateEnrollmentOperationPolicy(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      subjectId: "human:test-operator",
+      expectedRevision: 0,
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: 805_306_368,
+      cpuMaxMillicores: 1_500,
+    });
+    expect(updated?.operationPolicy).toMatchObject({
+      memoryMaxBytes: 1_073_741_824,
+      memoryHighBytes: 805_306_368,
+      cpuMaxMillicores: 1_500,
+      revision: 1,
+    });
+    expect(updated?.operationPolicy.updatedAt).not.toBeNull();
+
+    const stale = await updateEnrollmentOperationPolicy(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      expectedRevision: 0,
+      memoryMaxBytes: null,
+      memoryHighBytes: null,
+      cpuMaxMillicores: null,
+    });
+    expect(stale).toBeNull();
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.operationPolicy.revision).toBe(1);
+
+    const receipts = await admin<{ subject_id: string | null; metadata: unknown }[]>`
+      select subject_id, metadata
+      from audit_events
+      where workspace_id = ${workspaceId}
+        and action = 'connected_machine.operation_policy.updated'`;
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.subject_id).toBe("human:test-operator");
+    expect(receipts[0]?.metadata).toMatchObject({ revision: 1 });
+  }, 60_000);
+
   test("migration adds sessions.active_sandbox_id (nullable) + active_epoch (NOT NULL default 0, integer)", async () => {
     if (!available) return;
     const cols = await admin<
@@ -464,6 +521,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
         resources: [],
         metadata: {},
         model: "gpt",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "modal",
       });
     const point = async (sessionId: string, sandboxId: string) =>
@@ -583,6 +642,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     expect(session.activeSandboxId).toBeNull();
@@ -671,6 +732,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       resources: [],
       metadata: {},
       model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
     const target = await createSandbox(db, {

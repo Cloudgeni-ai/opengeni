@@ -17,7 +17,7 @@ import postgres from "postgres";
 
 const sessionCount = integerArgument("--sessions", 10_000);
 const sampleCount = integerArgument("--samples", 100);
-const expectedLateral = stringArgument("--expect-lateral") ?? "denied";
+const expectedLateral = stringArgument("--expect-lateral") ?? "allowed";
 if (sessionCount < 1_000 || sessionCount > 50_000) {
   throw new Error("--sessions must be between 1000 and 50000");
 }
@@ -62,6 +62,8 @@ try {
       resources: [],
       metadata: {},
       model: "benchmark-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: grant.subjectId },
       createdByContext: {},
@@ -76,7 +78,8 @@ try {
       scopedDb.execute(sql`
         insert into sessions (
           id, account_id, workspace_id, status, initial_message, title,
-          resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
+          resources, tools, metadata, model, reasoning_effort, latency_mode,
+          sandbox_backend, sandbox_group_id,
           parent_session_id, temporal_workflow_id, tool_policy
         )
         select
@@ -90,6 +93,8 @@ try {
           '[]'::jsonb,
           jsonb_build_object('bench_index', generated.i),
           'benchmark-model',
+          'medium',
+          'standard',
           'none',
           md5(${grant.workspaceId} || ':agent-authority:' || generated.i::text)::uuid,
           ${root.id}::uuid,

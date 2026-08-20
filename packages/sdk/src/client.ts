@@ -202,6 +202,7 @@ import type {
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
+  DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
@@ -227,6 +228,17 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
+  ListOrganizationInvitationsPageResponse,
+  ListOrganizationMembersResponse,
+  AcceptOrganizationInvitationRequest,
+  AcceptOrganizationInvitationResponse,
+  CreateOrganizationInvitationRequest,
+  OrganizationInvitation,
+  OrganizationMember,
+  OrganizationRetentionPolicy,
+  RevokeOrganizationInvitationRequest,
+  UpdateOrganizationMemberRequest,
+  UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
@@ -234,6 +246,8 @@ import type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  MachineOperationPolicy,
+  UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
@@ -249,6 +263,7 @@ import type {
   PackInstallation,
   PackUninstallPreview,
   LatencyMode,
+  McpConnectionAuthoritySelection,
   ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
@@ -283,6 +298,11 @@ import type {
   SessionEventPage,
   SessionGoal,
   SessionGoalRevision,
+  ListSessionGoalRevisionsOptions,
+  ListSessionGoalRevisionsResponse,
+  RejectSessionGoalRevisionRequest,
+  RejectSessionGoalRevisionResponse,
+  RollbackSessionGoalRevisionRequest,
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
@@ -301,6 +321,8 @@ import type {
   MoveSessionQueueItemRequest,
   NewSessionDraft,
   SaveComposerDraftRequest,
+  SubmitComposerDraftRequest,
+  SubmitComposerDraftResponse,
   SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
@@ -323,6 +345,8 @@ import type {
   FsListBatchResponse,
   FsReadRequest,
   FsReadResponse,
+  PublishSandboxFileArtifactRequest,
+  SandboxFileArtifactReceipt,
   FsWriteRequest,
   FsWriteResponse,
   FsDeleteRequest,
@@ -400,7 +424,10 @@ import type {
   UninstallSkillResult,
 } from "./types";
 import { GENERATED_VIDEO_MAX_BYTES } from "./types";
-import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
+import {
+  parseRetainedGeneratedImageReference,
+  parseRetainedWorkspaceFileReference,
+} from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
@@ -418,6 +445,16 @@ import type {
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
 import type {
+  ActivateWorkspaceLearningPolicyRevisionRequest,
+  CreateWorkspaceLearningPolicyRevisionRequest,
+  GovernedLearningActivationUndoReceipt,
+  RollbackWorkspaceLearningPolicyRevisionRequest,
+  WorkspaceLearningHistoryOptions,
+  WorkspaceLearningHistoryResponse,
+  WorkspaceLearningPolicyMutationResponse,
+  WorkspaceLearningPolicyRevision,
+} from "./workspace-learning";
+import type {
   ActivateCompanyProfileRevisionRequest,
   CompanyProfileDiffRequest,
   CompanyProfileDiffResponse,
@@ -433,6 +470,7 @@ import type {
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
 } from "./workspace-state";
+import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -507,6 +545,7 @@ export type SendMessageInput = {
   controlEtag?: string;
   expectedDraftRevision?: number;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
+  connectionAuthorities?: McpConnectionAuthoritySelection[];
 };
 
 export type SteerMessageResult = {
@@ -1212,6 +1251,20 @@ export class OpenGeniClient {
     );
   }
 
+  /** Revision-fenced update of a Connected Machine's optional command memory
+   * policy. Null byte limits preserve unrestricted machine access. */
+  async updateMachineOperationPolicy(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateMachineOperationPolicyRequest,
+  ): Promise<MachineOperationPolicy> {
+    return await this.requestJson<MachineOperationPolicy>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/operation-policy`,
+      request,
+    );
+  }
+
   /**
    * Read the downsampled (~1/min) metrics series for ONE machine over a time
    * window (default 1h). The samples are oldest-first (a left-to-right chart).
@@ -1275,7 +1328,7 @@ export class OpenGeniClient {
    */
   async approveDeviceEnrollment(
     workspaceId: string,
-    request: { userCode: string; allowScreenControl?: boolean },
+    request: DeviceEnrollmentApproveRequest,
   ): Promise<DeviceEnrollmentApproveResponse> {
     return await this.requestJson<DeviceEnrollmentApproveResponse>(
       "POST",
@@ -1283,6 +1336,7 @@ export class OpenGeniClient {
       {
         userCode: request.userCode,
         allowScreenControl: request.allowScreenControl ?? false,
+        ...(request.scope ? { scope: request.scope } : {}),
       },
     );
   }
@@ -1748,6 +1802,18 @@ export class OpenGeniClient {
     );
   }
 
+  async submitComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    request: SubmitComposerDraftRequest,
+  ): Promise<SubmitComposerDraftResponse> {
+    return await this.requestJson<SubmitComposerDraftResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      request,
+    );
+  }
+
   async controlSession(
     workspaceId: string,
     sessionId: string,
@@ -2017,6 +2083,47 @@ export class OpenGeniClient {
     );
   }
 
+  async listGoalRevisionPage(
+    workspaceId: string,
+    sessionId: string,
+    options: ListSessionGoalRevisionsOptions = {},
+  ): Promise<ListSessionGoalRevisionsResponse> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.before !== undefined) query.set("before", options.before);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListSessionGoalRevisionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/page${suffix}`,
+    );
+  }
+
+  async rejectGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RejectSessionGoalRevisionRequest,
+  ): Promise<RejectSessionGoalRevisionResponse> {
+    return await this.requestJson<RejectSessionGoalRevisionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/reject`,
+      request,
+    );
+  }
+
+  async rollbackGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: RollbackSessionGoalRevisionRequest,
+  ): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/rollback`,
+      request,
+    );
+  }
+
   async applyGoalRevision(
     workspaceId: string,
     sessionId: string,
@@ -2127,6 +2234,22 @@ export class OpenGeniClient {
     return await this.requestJson<FsReadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Publish one exact sandbox file into permanent workspace artifact storage. */
+  async publishSandboxFileArtifact(
+    workspaceId: string,
+    sessionId: string,
+    request: PublishSandboxFileArtifactRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SandboxFileArtifactReceipt> {
+    return await this.requestJson<SandboxFileArtifactReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/publish`,
       request,
       {},
       options,
@@ -3444,6 +3567,108 @@ export class OpenGeniClient {
     );
   }
 
+  /** Pending and historical invitations addressed to the current managed human. */
+  async listOrganizationInvitations(
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListOrganizationInvitationsPageResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListOrganizationInvitationsPageResponse>(
+      "GET",
+      `/v1/organization-invitations${suffix}`,
+    );
+  }
+
+  /** Admin-only deterministic page of invitations for one organization. */
+  async listOrganizationInvitationsForOrganization(
+    organizationId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListOrganizationInvitationsPageResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListOrganizationInvitationsPageResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/invitations${suffix}`,
+    );
+  }
+
+  async createOrganizationInvitation(
+    organizationId: string,
+    request: CreateOrganizationInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    return await this.requestJson<OrganizationInvitation>(
+      "POST",
+      `/v1/organizations/${organizationId}/invitations`,
+      request,
+    );
+  }
+
+  async acceptOrganizationInvitation(
+    invitationId: string,
+    request: AcceptOrganizationInvitationRequest,
+  ): Promise<AcceptOrganizationInvitationResponse> {
+    return await this.requestJson<AcceptOrganizationInvitationResponse>(
+      "POST",
+      `/v1/organization-invitations/${invitationId}/accept`,
+      request,
+    );
+  }
+
+  async revokeOrganizationInvitation(
+    organizationId: string,
+    invitationId: string,
+    request: RevokeOrganizationInvitationRequest,
+  ): Promise<OrganizationInvitation> {
+    return await this.requestJson<OrganizationInvitation>(
+      "POST",
+      `/v1/organizations/${organizationId}/invitations/${invitationId}/revoke`,
+      request,
+    );
+  }
+
+  async listOrganizationMembers(organizationId: string): Promise<ListOrganizationMembersResponse> {
+    return await this.requestJson<ListOrganizationMembersResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/members`,
+    );
+  }
+
+  async updateOrganizationMember(
+    organizationId: string,
+    membershipId: string,
+    request: UpdateOrganizationMemberRequest,
+  ): Promise<OrganizationMember> {
+    return await this.requestJson<OrganizationMember>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/members/${membershipId}`,
+      request,
+    );
+  }
+
+  async getOrganizationRetentionPolicy(
+    organizationId: string,
+  ): Promise<OrganizationRetentionPolicy> {
+    return await this.requestJson<OrganizationRetentionPolicy>(
+      "GET",
+      `/v1/organizations/${organizationId}/retention-policy`,
+    );
+  }
+
+  async updateOrganizationRetentionPolicy(
+    organizationId: string,
+    request: UpdateOrganizationRetentionPolicyRequest,
+  ): Promise<OrganizationRetentionPolicy> {
+    return await this.requestJson<OrganizationRetentionPolicy>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/retention-policy`,
+      request,
+    );
+  }
+
   async listWorkspaces(): Promise<Workspace[]> {
     return await this.requestJson<Workspace[]>("GET", "/v1/workspaces");
   }
@@ -3484,6 +3709,28 @@ export class OpenGeniClient {
     );
   }
 
+  /** Permission-filtered Company Brain package with authorized guidance bodies. */
+  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
+    return this.requestJson<CompanyBrainOkfPackage>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain`,
+    );
+  }
+
+  /** Download the deterministic Markdown/YAML Company Brain package. */
+  async exportCompanyBrainOkf(workspaceId: string): Promise<CompanyBrainOkfDownload> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-brain/export`,
+    );
+    const headers = response.headers;
+    return {
+      content: await response.text(),
+      contentType: headers.get("content-type") ?? "text/markdown",
+      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
+    };
+  }
+
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
   }
@@ -3505,6 +3752,66 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceInstructionPolicyListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/instruction-policies${query ? `?${query}` : ""}`,
+    );
+  }
+
+  /** Inspect the bounded, permission-filtered governed-learning timeline. */
+  async getWorkspaceLearningHistory(
+    workspaceId: string,
+    options: WorkspaceLearningHistoryOptions = {},
+  ): Promise<WorkspaceLearningHistoryResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<WorkspaceLearningHistoryResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/learning${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async createWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    request: CreateWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyRevision> {
+    return await this.requestJson<WorkspaceLearningPolicyRevision>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/revisions`,
+      request,
+    );
+  }
+
+  async activateWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    revisionId: string,
+    request: ActivateWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyMutationResponse> {
+    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/revisions/${encodeURIComponent(revisionId)}/activate`,
+      request,
+    );
+  }
+
+  async rollbackWorkspaceLearningPolicyRevision(
+    workspaceId: string,
+    request: RollbackWorkspaceLearningPolicyRevisionRequest,
+  ): Promise<WorkspaceLearningPolicyMutationResponse> {
+    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/rollback`,
+      request,
+    );
+  }
+
+  async undoGovernedLearningActivation(
+    workspaceId: string,
+    activationReceiptId: string,
+    request: { operationId?: string } = {},
+  ): Promise<GovernedLearningActivationUndoReceipt> {
+    return await this.requestJson<GovernedLearningActivationUndoReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/learning/activations/${encodeURIComponent(activationReceiptId)}/undo`,
+      request,
     );
   }
 
@@ -4497,24 +4804,24 @@ export class OpenGeniClient {
     );
   }
 
-  /** Assemble one permanent generated-image receipt from bounded authenticated ranges. */
+  /** Assemble one permanent image or file artifact from bounded authenticated ranges. */
   async downloadRetainedArtifact(
     workspaceId: string,
     artifact: RetainedArtifactReference,
     options: RetainedArtifactDownloadOptions = {},
   ): Promise<RetainedArtifactDownload> {
-    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    assertRetainedWorkspaceArtifactReceipt(workspaceId, artifact);
     const bytes = await this.downloadRetainedArtifactBytes(artifact, options);
     return { artifact, bytes };
   }
 
-  /** Mint a short-lived, zero-copy browser source for a validated generated image. */
+  /** Mint a short-lived, zero-copy browser source for a validated workspace artifact. */
   async createRetainedArtifactDownloadUrl(
     workspaceId: string,
     artifact: RetainedArtifactReference,
     options: OpenGeniRequestOptions = {},
   ): Promise<FileDownloadUrlResponse> {
-    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    assertRetainedWorkspaceArtifactReceipt(workspaceId, artifact);
     const download = await this.createFileDownloadUrl(workspaceId, artifact.artifactId, options);
     assertSafeArtifactDownloadUrl(download);
     return download;
@@ -4775,6 +5082,34 @@ export class OpenGeniClient {
     return await this.requestJson<Document[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`,
+    );
+  }
+
+  /**
+   * List every Document the current human can manage from this workspace,
+   * including portable personal and organization-scoped Documents whose
+   * immutable ingestion workspace is different.
+   */
+  async listAccessibleDocuments(workspaceId: string): Promise<Document[]> {
+    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/documents`);
+  }
+
+  /** Read the immutable source file through the Document's effective authority. */
+  async getDocumentOriginalFile(workspaceId: string, documentId: string): Promise<FileAsset> {
+    return await this.requestJson<FileAsset>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file`,
+    );
+  }
+
+  /** Mint a source-file URL through the Document's effective authority. */
+  async createDocumentOriginalFileDownloadUrl(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file/download-url`,
     );
   }
 
@@ -6335,12 +6670,15 @@ async function cancelResponseBody(response: Response, reason: string): Promise<v
   await response.body?.cancel(reason).catch(() => undefined);
 }
 
-function assertRetainedGeneratedImageReceipt(
+function assertRetainedWorkspaceArtifactReceipt(
   workspaceId: string,
   artifact: RetainedArtifactReference,
 ): void {
-  if (!parseRetainedGeneratedImageReference(artifact, workspaceId)) {
-    throw new OpenGeniApiError(502, "retained generated image receipt is invalid");
+  if (
+    !parseRetainedGeneratedImageReference(artifact, workspaceId) &&
+    !parseRetainedWorkspaceFileReference(artifact, workspaceId)
+  ) {
+    throw new OpenGeniApiError(502, "retained workspace artifact receipt is invalid");
   }
 }
 

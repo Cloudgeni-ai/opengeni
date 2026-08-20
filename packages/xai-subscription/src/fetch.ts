@@ -6,7 +6,11 @@ import {
   XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
-import { XaiSubscriptionStreamIdleTimeoutError } from "./errors";
+import {
+  isXaiSubscriptionRateLimitDiagnostic,
+  XaiSubscriptionStreamIdleTimeoutError,
+  XaiSubscriptionStreamingTerminalError,
+} from "./errors";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
 import {
   type XaiFinalContextUsage,
@@ -31,6 +35,16 @@ export const XAI_SUBSCRIPTION_REQUEST_ID_HEADER = "x-opengeni-xai-subscription-r
 
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_STREAM_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
+const MAX_TERMINAL_ERROR_FIELD_BYTES = 256;
+const MAX_TERMINAL_ERROR_MESSAGE_BYTES = 4 * 1024;
+const TERMINAL_ERROR_TRUNCATION_MARKER = "… [truncated]";
+const NON_RETRYABLE_SSE_ERROR_CODES = new Set([
+  "context_length_exceeded",
+  "invalid_prompt",
+  "invalid_request",
+  "insufficient_quota",
+  "usage_limit_reached",
+]);
 
 type RequestAudit = {
   ctx: XaiSubscriptionRequestContext;
@@ -50,6 +64,7 @@ type SseProgress = {
   valid: boolean;
   eventType: string | null;
   terminal: "completed" | "failed" | null;
+  payload: Record<string, unknown> | null;
 };
 
 export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
@@ -322,11 +337,13 @@ async function normalizeResponse(
           let enqueued = false;
           for (const part of parts) {
             const progress = sseProgress(part);
-            controller.enqueue(
-              encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`),
-            );
-            enqueued = true;
-            if (!progress.valid) continue;
+            if (!progress.valid) {
+              controller.enqueue(
+                encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`),
+              );
+              enqueued = true;
+              continue;
+            }
             clearIdleTimer();
             const now = performance.now();
             const interEventGapMs = Math.max(0, now - (audit.lastProgressAt ?? audit.startedAt));
@@ -350,12 +367,29 @@ async function normalizeResponse(
                 ...providerRequestIdFields(response.headers),
               });
             }
-            if (progress.terminal) {
+            if (progress.terminal === "failed") {
               audit.terminal = true;
               clearIdleTimer();
               await reader.cancel().catch(() => undefined);
               await emitRequestEvent(audit, {
-                phase: progress.terminal,
+                phase: "failed",
+                responseObserved: true,
+                status: response.status,
+                ...providerRequestIdFields(response.headers),
+              });
+              errorStream(xaiSseTerminalError(response, audit, progress));
+              return;
+            }
+            controller.enqueue(
+              encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`),
+            );
+            enqueued = true;
+            if (progress.terminal === "completed") {
+              audit.terminal = true;
+              clearIdleTimer();
+              await reader.cancel().catch(() => undefined);
+              await emitRequestEvent(audit, {
+                phase: "completed",
                 responseObserved: true,
                 status: response.status,
                 ...providerRequestIdFields(response.headers),
@@ -424,34 +458,136 @@ function sseProgress(block: string): SseProgress {
     const data = line.slice(5).trim();
     if (!data) continue;
     if (data === "[DONE]") {
-      return { valid: true, eventType: "done", terminal: "completed" };
+      return { valid: true, eventType: "done", terminal: "completed", payload: null };
     }
     try {
       const parsed = JSON.parse(data) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { valid: false, eventType: null, terminal: null };
+        return { valid: false, eventType: null, terminal: null, payload: null };
       }
-      const rawType = (parsed as Record<string, unknown>).type;
+      const payload = parsed as Record<string, unknown>;
+      const rawType = payload.type;
       if (typeof rawType !== "string" || !/^[a-z0-9_.-]{1,96}$/i.test(rawType)) {
-        return { valid: false, eventType: null, terminal: null };
+        return { valid: false, eventType: null, terminal: null, payload: null };
       }
       const type = rawType;
       if (type === "response.completed") {
-        return { valid: true, eventType: type, terminal: "completed" };
+        return { valid: true, eventType: type, terminal: "completed", payload };
       }
       if (
+        type === "error" ||
         type === "response.incomplete" ||
         type === "response.failed" ||
         type === "response.error"
       ) {
-        return { valid: true, eventType: type, terminal: "failed" };
+        return { valid: true, eventType: type, terminal: "failed", payload };
       }
-      return { valid: true, eventType: type, terminal: null };
+      return { valid: true, eventType: type, terminal: null, payload };
     } catch {
-      return { valid: false, eventType: null, terminal: null };
+      return { valid: false, eventType: null, terminal: null, payload: null };
     }
   }
-  return { valid: false, eventType: null, terminal: null };
+  return { valid: false, eventType: null, terminal: null, payload: null };
+}
+
+function boundedTerminalErrorField(
+  value: unknown,
+  maxBytes: number,
+): { value?: string; truncated: boolean } {
+  if (typeof value !== "string") return { truncated: false };
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(value);
+  if (encoded.byteLength <= maxBytes) return { value, truncated: false };
+  const markerBytes = encoder.encode(TERMINAL_ERROR_TRUNCATION_MARKER).byteLength;
+  let prefixEnd = Math.max(0, maxBytes - markerBytes);
+  while (prefixEnd > 0 && (encoded[prefixEnd]! & 0xc0) === 0x80) {
+    prefixEnd -= 1;
+  }
+  return {
+    value: `${new TextDecoder().decode(encoded.subarray(0, prefixEnd))}${TERMINAL_ERROR_TRUNCATION_MARKER}`,
+    truncated: true,
+  };
+}
+
+function terminalErrorSource(
+  payload: Record<string, unknown> | null,
+  eventType: string | null,
+): unknown {
+  if (!payload) return null;
+  if (eventType === "error" || eventType === "response.error") {
+    return payload.error ?? payload;
+  }
+  const response = payload.response;
+  if (response && typeof response === "object" && !Array.isArray(response)) {
+    const nested = (response as Record<string, unknown>).error;
+    if (nested !== undefined && nested !== null) return nested;
+  }
+  return payload.error ?? payload;
+}
+
+function xaiSseTerminalError(
+  source: Response,
+  audit: RequestAudit,
+  progress: SseProgress,
+): XaiSubscriptionStreamingTerminalError {
+  const rawError = terminalErrorSource(progress.payload, progress.eventType);
+  const record =
+    rawError && typeof rawError === "object" && !Array.isArray(rawError)
+      ? (rawError as Record<string, unknown>)
+      : {};
+  const eventTypeField = boundedTerminalErrorField(
+    progress.eventType,
+    MAX_TERMINAL_ERROR_FIELD_BYTES,
+  );
+  const rawCode =
+    record.code ??
+    (typeof record.type === "string" &&
+    record.type !== eventTypeField.value &&
+    record.type !== "error"
+      ? record.type
+      : undefined);
+  const codeField = boundedTerminalErrorField(rawCode, MAX_TERMINAL_ERROR_FIELD_BYTES);
+  const messageField = boundedTerminalErrorField(
+    record.message ?? (typeof rawError === "string" ? rawError : undefined),
+    MAX_TERMINAL_ERROR_MESSAGE_BYTES,
+  );
+  const eventType = eventTypeField.value ?? "error";
+  const fallbackCode =
+    eventType === "response.failed"
+      ? "response_failed"
+      : eventType === "response.incomplete"
+        ? "response_incomplete"
+        : "response_error";
+  const fallbackMessage =
+    eventType === "response.incomplete"
+      ? "The SuperGrok response was incomplete"
+      : eventType === "response.failed"
+        ? "The SuperGrok response failed"
+        : "The SuperGrok response stream reported an error";
+  const message = messageField.value?.length ? messageField.value : fallbackMessage;
+  let code = codeField.value?.length ? codeField.value : fallbackCode;
+  const rateLimited =
+    !NON_RETRYABLE_SSE_ERROR_CODES.has(code) &&
+    isXaiSubscriptionRateLimitDiagnostic({ code, message });
+  if (rateLimited && (code === fallbackCode || code === "response_error")) {
+    code = "rate_limit_exceeded";
+  }
+  const status = rateLimited ? 429 : NON_RETRYABLE_SSE_ERROR_CODES.has(code) ? 400 : 502;
+  const headers = new Headers(source.headers);
+  headers.set("content-type", "application/json");
+  headers.set(XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER, "1");
+  headers.set("x-should-retry", "false");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return new XaiSubscriptionStreamingTerminalError({
+    message,
+    code,
+    eventType,
+    requestId: audit.requestId,
+    status,
+    diagnosticTruncated: eventTypeField.truncated || codeField.truncated || messageField.truncated,
+    headers,
+  });
 }
 
 function boundedStreamIdleTimeout(value: number | undefined): number {
@@ -581,6 +717,7 @@ function emitContextUsage(
 export function isXaiSubscriptionTransportError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof XaiSubscriptionStreamingTerminalError) return true;
     const value = current as Record<string, unknown>;
     const headers = value.headers;
     if (

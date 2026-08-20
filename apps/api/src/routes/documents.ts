@@ -7,6 +7,8 @@ import {
   DocumentBase,
   DocumentSearchRequest,
   DocumentSearchResponse,
+  FileAsset,
+  FileDownloadUrlResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   MoveDocumentRequest,
@@ -15,6 +17,7 @@ import {
   WorkspaceMemorySearchResponse,
 } from "@opengeni/contracts";
 import {
+  recordAuditEvent,
   completeFileUpload,
   createFileUpload,
   createKnowledgeMemory,
@@ -29,7 +32,9 @@ import {
   deleteDocumentFromBase,
   ensureDefaultBase,
   getDocument,
+  getDocumentOriginalFile,
   getDocumentBase,
+  listAccessibleDocuments,
   listDocumentBasesEnsuringDefault,
   listDocuments,
   moveDocumentToBase,
@@ -161,6 +166,78 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/documents", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    return c.json(
+      (
+        await listAccessibleDocuments(db, workspaceId, {
+          viewerSubjectId: grant.subjectId,
+        })
+      ).map((document) => Document.parse(document)),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/documents/:documentId/original-file", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const file = await getDocumentOriginalFile(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      documentId: c.req.param("documentId"),
+      access: { viewerSubjectId: grant.subjectId },
+    });
+    if (!file) {
+      throw new HTTPException(404, { message: "document file not found" });
+    }
+    return c.json(FileAsset.parse(file));
+  });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/documents/:documentId/original-file/download-url",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+      await requireAccessGrant(c, deps, workspaceId, "files:read");
+      if (!objectStorage) {
+        throw new HTTPException(503, { message: "object storage is not configured" });
+      }
+      const file = await getDocumentOriginalFile(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        documentId: c.req.param("documentId"),
+        access: { viewerSubjectId: grant.subjectId },
+      });
+      if (!file) {
+        throw new HTTPException(404, { message: "document file not found" });
+      }
+      if (file.status !== "ready") {
+        throw new HTTPException(409, { message: `file is ${file.status}` });
+      }
+      const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+      await recordAuditEvent(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        action: "file.signed_url.issued",
+        targetType: "workspace_document",
+        targetId: c.req.param("documentId"),
+        metadata: {
+          fileId: file.id,
+          kind: "document_original",
+          expiresAt: signed.expiresAt.toISOString(),
+        },
+      });
+      return c.json(
+        FileDownloadUrlResponse.parse({
+          url: signed.url,
+          expiresAt: signed.expiresAt.toISOString(),
+        }),
+      );
+    },
+  );
+
   app.delete(
     "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
     async (c) => {
@@ -212,7 +289,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const { grant } = authorization;
       const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
       if (!objectStorage) {
-        throw new HTTPException(503, { message: "object storage is not configured" });
+        throw new HTTPException(503, {
+          message: "object storage is not configured",
+        });
       }
       await requireLimit(deps, {
         accountId: grant.accountId,
@@ -246,7 +325,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         const indexed =
           (await documentIndexer.indexDocument({
             accountId: grant.accountId,
-            workspaceId,
+            // The requested workspace authorizes the human operation; the
+            // immutable ingestion workspace remains the indexing authority.
+            workspaceId: queued.workspaceId,
             documentId: document.id,
             authorityKind: document.authorityKind,
             authorityWorkspaceId: document.authorityWorkspaceId,
@@ -651,13 +732,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const sessionId =
       typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
+    const attemptId =
+      typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const server = buildDocumentsMcpServer(
       db,
       grant.accountId,
       workspaceId,
       getDocumentServices(),
-      { createdBySessionId: sessionId, initiatingSubjectId: grant.subjectId },
+      {
+        createdBySessionId: sessionId,
+        attemptId,
+        initiatingSubjectId: grant.subjectId,
+      },
     );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);

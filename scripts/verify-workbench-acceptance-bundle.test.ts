@@ -184,6 +184,23 @@ describe("workbench acceptance bundle", () => {
     expect(validate(bundle)).toBe(bundle);
   });
 
+  test("accepts a bundle that omits the optional production canary soak", () => {
+    const bundle = validBundle();
+    delete (bundle as { productionCanary?: unknown }).productionCanary;
+    expect(
+      validateWorkbenchAcceptanceBundle(bundle, {
+        sourceSha,
+        candidateReceipt,
+        candidateProducer,
+        acceptanceProducer,
+        candidateReceiptUrl,
+        candidateReceiptSha256,
+        stagingEvidenceUrl,
+        productionEvidenceUrl,
+      }),
+    ).toBe(bundle);
+  });
+
   test("fails closed on a missing row, retry, or known defect", () => {
     const missing = validBundle();
     missing.results.shift();
@@ -204,7 +221,7 @@ describe("workbench acceptance bundle", () => {
     expect(() => validate(drift)).toThrow("image digests differ");
 
     const short = validBundle();
-    short.productionCanary.endedAt = "2026-07-03T23:59:59.000Z";
+    short.productionCanary!.endedAt = "2026-07-03T23:59:59.000Z";
     expect(() => validate(short)).toThrow("at least 72 hours");
 
     const chartDrift = validBundle();

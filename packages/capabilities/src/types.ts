@@ -37,6 +37,8 @@ export interface IntegrationCredentialAudience {
 export interface ResolvedIntegrationCredential {
   readonly audience: IntegrationCredentialAudience;
   readonly placements: readonly IntegrationCredentialPlacement[];
+  /** Exact accepted-attempt fence invoked immediately before one HTTP request. */
+  readonly authorizeProviderRequest?: () => Promise<boolean>;
   readonly expiresAt?: string;
   readonly scope?: readonly string[];
 }

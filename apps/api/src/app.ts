@@ -28,7 +28,6 @@ import {
   type DocumentServices,
 } from "@opengeni/documents";
 import {
-  CodemodeCallBudgetExceededError,
   CodemodeOperationConflictError,
   CodemodeOperationNotExecutableError,
   CodemodePayloadTooLargeError,
@@ -109,7 +108,9 @@ import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
+import { registerWorkspaceLearningRoutes } from "./routes/workspace-learning";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
+import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
@@ -120,6 +121,8 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
+import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -597,7 +600,7 @@ export function createAppComposition(deps: AppDependencies): {
       }
       const workspace = await getWorkspace(routeDeps.db, workspaceId);
       const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
@@ -677,7 +680,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
+  registerWorkspaceLearningRoutes(app, routeDeps);
   registerCompanyProfileRoutes(app, routeDeps);
+  registerCompanyBrainRoutes(app, routeDeps);
   registerSlackTaskPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
@@ -706,6 +711,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerUserResourceAuthorityRoutes(app, routeDeps);
+  registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -911,9 +918,6 @@ function codemodeHttpError(error: unknown): HTTPException {
   }
   if (error instanceof CodemodeOperationConflictError) {
     return new HTTPException(409, { message: error.message, cause: error });
-  }
-  if (error instanceof CodemodeCallBudgetExceededError) {
-    return new HTTPException(429, { message: error.message, cause: error });
   }
   if (error instanceof CodemodeToolNotInCatalogError) {
     return new HTTPException(404, { message: error.message, cause: error });
@@ -1391,6 +1395,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/queue",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft\/submit$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft/submit",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/composer-draft$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
   },
@@ -1780,6 +1788,14 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/metrics\/series$/,
     label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/operation-policy$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/update$/,
+    label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/update",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/machines$/,

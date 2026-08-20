@@ -1,5 +1,157 @@
 # @opengeni/runtime
 
+## 1.1.3
+
+### Patch Changes
+
+- 3d451bf: Put session-coordination doctrine in the non-bypassable operational prompt: use session tools for user-requested session management, and spawn a child worker for a subtask instead of hijacking an unrelated existing session.
+- Updated dependencies [81d2da0]
+- Updated dependencies [6f61d6e]
+  - @opengeni/config@0.17.1
+  - @opengeni/sdk@2.0.1
+
+## 1.1.2
+
+### Patch Changes
+
+- f4afa19: Expose computer-use as ordinary `computer_*` function tools on every proven visual route. Stop advertising OpenAI's hosted computer tool.
+- f4afa19: Resume requires_action only from the open suffix plus paired history. Pause stores the sentinel instead of a leftover SDK RunState heap.
+- 994a743: Stage connected-machine browser-control request files inside the placement-private path accepted by the self-hosted agent, restoring browser and computer-use session creation without weakening the private filesystem boundary.
+- 51123b4: Bind a remembered authorized tool name through one Agents SDK `resolveMissingFunctionTool` hook instead of a fake client `tool_search` inject. Codex/OpenAI native raw calls and generic `tool_invoke` share that path; unknown or revoked names return a typed model error instead of killing the turn.
+- 8583779: Resume `requires_action` from paired history plus a bounded open suffix instead of materializing an oversized SDK RunState blob.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/sdk@2.0.0
+  - @opengeni/config@0.17.0
+  - @opengeni/codemode@0.4.9
+
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [0a6c577]
+- Updated dependencies [f804057]
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/contracts@1.4.0
+  - @opengeni/sdk@1.2.0
+  - @opengeni/codemode@0.4.8
+
+## 1.1.0
+
+### Minor Changes
+
+- 4c2d958: Scoped stream tokens (`ogs_`, 120 s TTL unchanged) now carry the authenticated viewer subject and the session's live authority epoch (migration 0281). The viewer lease holder records the same pair monotonically, the API re-verifies a human viewer's current workspace membership at every mint and degrades the stream to `transport:null` when membership is gone, and the selfhosted relay fences an attach whose authority claim is below the channel's recorded floor. Pre-0281 tokens keep working during the rolling window and enforce nothing new.
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@0.4.7
+  - @opengeni/config@0.16.7
+  - @opengeni/sdk@1.1.1
+
+## 1.0.3
+
+### Patch Changes
+
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 987742d: Skip the redundant in-box rig marker probe when a live Modal session reports
+  the exact immutable image that already passed the rig's content, source,
+  provider-binding, and independent cold-boot verification. Missing or mismatched
+  image identity retains the existing fail-closed marker and setup path.
+- 987742d: Reduce turn-start overhead without reducing admitted history, rig variables, or
+  user-visible content. Active history loads in one admitted query, automatic
+  compaction skips duplicate history work below threshold, unchanged Codex
+  credential pointers avoid redundant session-activity writes, rig defaults
+  load at bounded concurrency for admitted worker attempts, and the attempt-scoped
+  MCP wrapper no longer reuses a broader process-global tool list.
+
+  Improve large-session interaction by measuring rich-message disclosure without
+  a second React commit, showing truthful pending queue actions immediately, and
+  replacing the false zero-step placeholder with the session's real lifecycle.
+
+- c297fc0: Complete governed goal rewrites with strict agent change metadata, immutable
+  proposal rejection and CAS-fenced rollback, bounded revision pagination, and
+  accepted-turn root constraints that child agents may inherit or narrow. The
+  original raw-array goal-revision list remains unchanged; bounded pagination is
+  available through a separately named API and SDK surface.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+  - @opengeni/sdk@1.1.0
+  - @opengeni/codemode@0.4.6
+
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- 4d1ed07: Preserve complete bounded lazy-search tool schemas across durable model history, expose Linux desktop application launch when the image supports it, suppress the managed Chrome sandbox warning, label Computer sessions as Desktops in the UI, and keep AnyDoc available in headed desktop sandboxes.
+- ce3b370: Restore the MPL-2.0 license and notice for the curated HashiCorp Terraform Skills in the published runtime package, and forward-repair the persisted Terraform Stacks provenance URL.
+- e98daf6: Measure physical MCP tool calls by bounded structural outcome and lock the existing provider-declared error path with an HTTP-200 SDK/durability regression.
+- e9e1016: Allow agent `goal_set` to replace completed goals while continuing to protect
+  active and paused goal intent.
+- d34dd9a: Add revision-fenced per-command memory and CPU policies for Connected Machines, exact live runner capability gating, and lifecycle-safe Linux operation accounting without introducing default resource limits.
+- c3f0598: Materialize authorized connector attachments as exact, hash-verified sandbox files while keeping provider bytes and private download URLs out of model, Codemode, and durable event output.
+- 79f57b5: Keep interaction discovery scoped to the current agent session by default, with explicit workspace inventory opt-in, so stale peer resources, reusable identities, and attached profiles cannot flood model context.
+- Updated dependencies [79f57b5]
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/codemode@0.4.5
+  - @opengeni/contracts@1.1.0
+  - @opengeni/sdk@1.0.2
+  - @opengeni/agent-proto@0.5.1
+  - @opengeni/config@0.16.5
+  - @opengeni/xai-subscription@0.1.1
+
 ## 1.0.1
 
 ### Patch Changes

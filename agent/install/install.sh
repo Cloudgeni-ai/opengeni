@@ -45,9 +45,10 @@
 #                              background service (use `opengeni-agent run`).
 #   OPENGENI_API_URL           Control-plane API base URL for connection. Carried
 #                              into both non-interactive and device-flow `connect`
-#                              calls (the agent also reads it via clap). Set it
-#                              to target a specific deployment instead of the
-#                              api.opengeni.ai default.
+#                              calls (the agent also reads it via clap). A script
+#                              served by a deployment defaults this to that same
+#                              origin; the committed managed-cloud default is
+#                              https://app.opengeni.ai.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
 #                              connection binds to (the approver must hold a grant
 #                              in it). Honored by the agent's `connect`/`run`
@@ -104,6 +105,12 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
+# Default connection origin. A deployed control plane rewrites this marker next
+# to the asset marker above, so fetching its installer also pins enrollment to
+# that exact deployment without requiring a caller-supplied environment variable.
+# Keep the line shape stable for apps/api/src/routes/install.ts.
+OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"
+OPENGENI_API_URL="${OPENGENI_API_URL:-$OPENGENI_API_DEFAULT_URL}"
 
 # --- macOS app-bundle identity (constants) -----------------------------------
 # The bundle id is the STABLE anchor for macOS TCC (Screen Recording /
@@ -115,8 +122,12 @@ OPENGENI_APP_BUNDLE_ID="ai.opengeni.agent"
 OPENGENI_APP_NAME="OpenGeni Agent"
 # The optional prebuilt bundle asset the release serves once Apple secrets are set
 # (a Developer-ID-signed + notarized .app zipped with its .app dir as the archive
-# root). Absent today → the installer assembles an ad-hoc bundle locally instead.
+# root). When unavailable, the installer assembles an ad-hoc bundle locally instead.
 OPENGENI_APP_BUNDLE_ASSET="OpenGeni-Agent.app.zip"
+# Branded macOS bundle icon. The control plane serves this committed resource
+# directly for local/per-SHA installs; new immutable agent releases carry the
+# same bytes for public-archive installs.
+OPENGENI_APP_ICON_ASSET="OpenGeni-Agent.icns"
 # Set to 1 only when this invocation replaces an existing agent executable with
 # different verified bytes. Per-SHA control-plane builds can intentionally share
 # one release semver, so version text alone cannot decide whether the running
@@ -494,6 +505,7 @@ write_info_plist() {
     <key>CFBundleDisplayName</key><string>$OPENGENI_APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$OPENGENI_APP_BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>opengeni-agent</string>
+    <key>CFBundleIconFile</key><string>$OPENGENI_APP_ICON_ASSET</string>
     <key>CFBundleShortVersionString</key><string>$_ver</string>
     <key>CFBundleVersion</key><string>$_ver</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -667,7 +679,7 @@ macos_swap_bundle_into_place() {
 # place (see macos_sign_bundle for why). Echoes the CLI path on stdout (logs go to
 # stderr via log()).
 install_macos_local_bundle() {
-  _bin="$1"; _install_dir="$2"; _runtime_source="${3:-}"
+  _bin="$1"; _install_dir="$2"; _runtime_source="${3:-}"; _icon_source="$4"
   _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
   _existing_bin="$_app/Contents/MacOS/opengeni-agent"
 
@@ -691,8 +703,11 @@ install_macos_local_bundle() {
   _stage="$TMPDIR_OG/local-bundle-stage"
   rm -rf "$_stage"
   _staged_app="$_stage/$OPENGENI_APP_NAME.app"
-  mkdir -p "$_staged_app/Contents/MacOS" || die 2 "cannot create the staging bundle"
+  mkdir -p "$_staged_app/Contents/MacOS" "$_staged_app/Contents/Resources" \
+    || die 2 "cannot create the staging bundle"
   cp "$_bin" "$_staged_app/Contents/MacOS/opengeni-agent" || die 2 "cannot populate the staging bundle"
+  cp "$_icon_source" "$_staged_app/Contents/Resources/$OPENGENI_APP_ICON_ASSET" \
+    || die 2 "cannot populate the app icon"
   chmod 0755 "$_staged_app/Contents/MacOS/opengeni-agent"
   if [ -n "$_runtime_source" ]; then
     mkdir -p "$_staged_app/Contents/Helpers" || die 2 "cannot create the helper directory"
@@ -707,6 +722,17 @@ install_macos_local_bundle() {
   macos_swap_bundle_into_place "$_staged_app" "$_app"
   log "installed app bundle at $_app"
   link_macos_cli "$_app" "$_install_dir"
+}
+
+# Fetch and minimally validate the non-executable app icon before local bundle
+# assembly. The completed bundle is then sealed by the local code signature.
+stage_macos_app_icon() {
+  _icon_url="$(asset_url "$OPENGENI_APP_ICON_ASSET")"
+  _icon="$TMPDIR_OG/$OPENGENI_APP_ICON_ASSET"
+  fetch "$_icon_url" "$_icon" || die 3 "failed to download $_icon_url"
+  _icon_header="$(LC_ALL=C dd if="$_icon" bs=4 count=1 2>/dev/null)"
+  [ "$_icon_header" = "icns" ] || die 3 "downloaded macOS app icon is not an icns file"
+  printf '%s' "$_icon"
 }
 
 # Non-fatal probe: does the release serve the prebuilt bundle asset? A successful
@@ -797,7 +823,8 @@ main() {
   os="$(uname -s)"
 
   # macOS: prefer a prebuilt Developer-ID + notarized bundle when the release serves
-  # one — its TCC grants survive updates. Absent today (Apple secrets unset) → fall
+  # one — its TCC grants survive updates. When unavailable (for example, Apple
+  # secrets unset) → fall
   # through to the bare-binary download + local ad-hoc bundle assembly below.
   if [ "$os" = "Darwin" ] && bundle_asset_available; then
     log "prebuilt macOS bundle available; installing it (version: $VERSION) from $BASE_URL"
@@ -854,7 +881,8 @@ main() {
     # the CLI a symlink into it, so CLI + background app share ONE code-signing
     # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
     _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
-    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime")"
+    app_icon="$(stage_macos_app_icon)"
+    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime" "$app_icon")"
     mark_upgrade_if_changed "$_old_mac_version" "$dest"
   else
     # Linux: atomic install — chmod then rename into place so a re-install never
@@ -913,7 +941,7 @@ finish() {
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not the api.opengeni.ai default) even when the agent's env-inherit path is
+    # even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path. A supplied token

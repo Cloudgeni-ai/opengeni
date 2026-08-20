@@ -49,6 +49,7 @@ const expectedManagedPersonalWorkspacePermissions: Permission[] = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",

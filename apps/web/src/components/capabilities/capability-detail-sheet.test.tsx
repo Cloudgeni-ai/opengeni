@@ -242,6 +242,71 @@ describe("connection ownership UI", () => {
     }
   });
 
+  test("curated presentation renders consent copy; an uncurated connector stays generic", async () => {
+    const base = {
+      id: "registry:copy",
+      kind: "mcp",
+      source: "registry",
+      name: "Copy",
+      category: "integrations",
+      providerDomain: "copy.example",
+      mcpUrl: "https://mcp.copy.example/mcp",
+      endpointUrl: "https://mcp.copy.example/mcp",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "copy-runtime", notes: null },
+    };
+    const curated = CapabilityCatalogItemSchema.parse({
+      ...base,
+      metadata: {
+        scopesHint: ["copy:read"],
+        presentation: {
+          introduction: "Let agents work with your Copy content.",
+          capabilities: [{ title: "Find things", description: "Search your Copy content." }],
+          permissionSummary: "Copy asks only for the access you approve.",
+          scopeLabels: {
+            "copy:read": { label: "Read Copy", description: "Read content you can access." },
+          },
+        },
+      },
+    });
+    const uncurated = CapabilityCatalogItemSchema.parse({ ...base, metadata: {} });
+    const body = (target: CapabilityCatalogItem) => (
+      <Sheet open>
+        <DetailBody
+          item={target}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={mock((_action: unknown) => {})}
+        />
+      </Sheet>
+    );
+
+    const withCopy = await render(body(curated));
+    try {
+      expect(withCopy.container.textContent).toContain("Let agents work with your Copy content.");
+      expect(withCopy.container.textContent).toContain("Find things");
+      expect(withCopy.container.textContent).toContain("Read Copy");
+      expect(withCopy.container.textContent).toContain(
+        "Copy asks only for the access you approve.",
+      );
+      // Raw scope strings never become UX copy.
+      expect(withCopy.container.textContent).not.toContain("copy:read");
+    } finally {
+      await withCopy.unmount();
+    }
+
+    const generic = await render(body(uncurated));
+    try {
+      expect(generic.container.textContent).not.toContain("Let agents work with");
+      expect(generic.container.textContent).toContain("Connect for workspace");
+    } finally {
+      await generic.unmount();
+    }
+  });
+
   test("an installed MCP exposes only the authoritative disconnect action", async () => {
     const mcp = CapabilityCatalogItemSchema.parse({
       id: "mcp:internal-tools",
@@ -369,7 +434,10 @@ describe("Skill installation authority UI", () => {
     }
   });
 
-  test("keeps read access while disabling the enabled-strip removal shortcut", async () => {
+  // The enabled Connectors strip can no longer contain a Skill at all: Skills
+  // are Bundles and their authority, their remove affordance, and their
+  // administrator guidance all live in the Bundles section instead.
+  test("the enabled Connectors strip offers no Skill removal shortcut", async () => {
     const skill = installedCuratedSkill();
     const onOpen = mock((_item: CapabilityCatalogItem) => {});
     const onDisable = mock((_item: CapabilityCatalogItem) => {});
@@ -379,7 +447,6 @@ describe("Skill installation authority UI", () => {
         busyId={null}
         connectionHealth={() => ({ state: "none" })}
         logoUrl={() => null}
-        canManageSkills={false}
         onOpen={onOpen}
         onDisable={onDisable}
       />,
@@ -388,14 +455,13 @@ describe("Skill installation authority UI", () => {
       const inspect = rendered.container.querySelector<HTMLButtonElement>(
         '[data-capability-id="skill:terraform-style-guide"]',
       );
-      const remove = [...rendered.container.querySelectorAll("button")].find(
-        (button) => button.textContent?.trim() === "Remove",
-      );
       expect(inspect?.disabled).toBe(false);
-      expect(remove?.disabled).toBe(true);
-      expect(remove?.title).toContain("Workspace administrator permission is required");
+      expect(
+        [...rendered.container.querySelectorAll("button")].map((button) =>
+          button.textContent?.trim(),
+        ),
+      ).not.toContain("Remove");
       await act(async () => inspect!.click());
-      await act(async () => remove!.click());
       expect(onOpen).toHaveBeenCalledWith(skill);
       expect(onDisable).not.toHaveBeenCalled();
     } finally {

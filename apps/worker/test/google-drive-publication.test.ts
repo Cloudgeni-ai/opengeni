@@ -55,6 +55,7 @@ const destination = {
 const target: GoogleDrivePublicationTarget = {
   ownerSubjectId: "subject-a",
   connectionId,
+  originWorkspaceId: workspaceId,
   destination,
   credentialScope: GOOGLE_DRIVE_FILE_SCOPE,
 };
@@ -139,12 +140,13 @@ function connection(
     grantedScopes?: string[];
     accessMode?: "file_only" | "readonly";
     version?: number;
+    workspaceId?: string;
   } = {},
 ) {
   return {
     id: connectionId,
     accountId,
-    workspaceId,
+    workspaceId: overrides.workspaceId ?? workspaceId,
     subjectId: "subject-a",
     providerDomain: "googleapis.com",
     kind: "oauth2",
@@ -203,6 +205,9 @@ function objectStorage(): ObjectStorage {
     async getFileBytes() {
       return sourceBytes.slice();
     },
+    async getObjectBytes() {
+      return { bytes: sourceBytes.slice() };
+    },
   } as ObjectStorage;
 }
 
@@ -256,6 +261,46 @@ describe("Google Drive editable artifact publication", () => {
         },
       ),
     ).toBeNull();
+  });
+
+  test("routes an activated same-organization publication through its frozen physical origin", async () => {
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
+    let membershipReads = 0;
+    const resolved = await resolveGoogleDrivePublicationTarget(
+      {} as Database,
+      workspaceId,
+      [
+        {
+          ...publicationDelegation,
+          originWorkspaceId,
+          userDelegation: {
+            organizationId: accountId,
+            authorityId: "88888888-8888-4888-8888-888888888888",
+            authorityGeneration: 1,
+            workspaceId,
+            sessionId: null,
+            action: "connection.use",
+            mode: "always",
+            context: "workspace_shared",
+            authorityEpoch: null,
+            grantId: "99999999-9999-4999-8999-999999999999",
+            grantGeneration: 1,
+          },
+        },
+      ],
+      {
+        getMembership: async () => {
+          membershipReads += 1;
+          return null;
+        },
+        getConnection: async (_db, requestedWorkspaceId) => {
+          expect(requestedWorkspaceId).toBe(originWorkspaceId);
+          return connection({ workspaceId: originWorkspaceId }) as never;
+        },
+      },
+    );
+    expect(resolved).toEqual({ ...target, originWorkspaceId });
+    expect(membershipReads).toBe(0);
   });
 
   test("binds approval to the private connector target and hashes the idempotency key", () => {
@@ -361,6 +406,7 @@ describe("Google Drive editable artifact publication", () => {
   test("creates once and a retry converges through the provider idempotency marker", async () => {
     let providerFile: Record<string, unknown> | null = null;
     let createCalls = 0;
+    let providerAuthorizations = 0;
     const credentialScopes: Array<string[] | undefined> = [];
     const fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -418,6 +464,10 @@ describe("Google Drive editable artifact publication", () => {
               connectionId,
               connectionVersion: 3,
               expiresAt: null,
+              authorizeProviderRequest: async () => {
+                providerAuthorizations += 1;
+                return true;
+              },
             } as never;
           },
         },
@@ -439,9 +489,14 @@ describe("Google Drive editable artifact publication", () => {
     expect(replayed).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(fullDriveReplay).toMatchObject({ providerFileId: "drive-file-1", replayed: true });
     expect(createCalls).toBe(1);
+    expect(providerAuthorizations).toBe(credentialScopes.length);
     expect(credentialScopes).toEqual([
       [GOOGLE_DRIVE_FILE_SCOPE],
       [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FILE_SCOPE],
+      [GOOGLE_DRIVE_FULL_SCOPE],
       [GOOGLE_DRIVE_FULL_SCOPE],
     ]);
   });
@@ -509,7 +564,62 @@ describe("Google Drive editable artifact publication", () => {
       },
     );
     expect(receipt).toMatchObject({ providerFileId: "drive-file-refreshed", replayed: false });
-    expect(connectionReads).toBe(2);
+    expect(connectionReads).toBe(4);
+  });
+
+  test("reauthorizes before every physical request and stops after mid-publication revocation", async () => {
+    let credentialCalls = 0;
+    let providerCalls = 0;
+    const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
+    await expect(
+      executeGoogleDrivePublication(
+        {
+          db: {} as Database,
+          objectStorage: objectStorage(),
+          identity,
+          subjectId: "subject-a",
+          target: { ...target, originWorkspaceId },
+          request,
+          resolveCredential: async () => {
+            credentialCalls += 1;
+            if (credentialCalls === 2) {
+              return {
+                status: "auth_needed",
+                reason: "personal_authority_unavailable",
+                providerDomain: "googleapis.com",
+              };
+            }
+            return {
+              status: "ok",
+              headers: { authorization: "Bearer exact-use" },
+              connectionId,
+              connectionVersion: 3,
+              expiresAt: null,
+            } as never;
+          },
+        },
+        {
+          ...executionPorts(async (url) => {
+            providerCalls += 1;
+            expect(new URL(url.toString()).pathname).toBe("/drive/v3/files/folder-1");
+            return Response.json({
+              id: destination.folderId,
+              name: destination.folderName,
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+              trashed: false,
+              capabilities: { canAddChildren: true },
+            });
+          }),
+          getConnection: async (_db, requestedWorkspaceId) => {
+            expect(requestedWorkspaceId).toBe(originWorkspaceId);
+            return connection({ workspaceId: originWorkspaceId }) as never;
+          },
+        },
+      ),
+    ).rejects.toThrow("credential is unavailable");
+    expect(credentialCalls).toBe(2);
+    expect(providerCalls).toBe(1);
   });
 
   test("rejects a local authority change after credential resolution before provider access", async () => {
@@ -585,5 +695,171 @@ describe("Google Drive editable artifact publication", () => {
       }),
     ).rejects.toThrow("was not executed: blocked");
     expect(completions).toEqual([]);
+  });
+
+  test("a frozen delegation destination overrides live metadata and fail-closes on drift", async () => {
+    const frozenDelegation = { ...publicationDelegation, outputDestination: destination };
+    // Frozen matches live: resolves to the frozen destination.
+    expect(
+      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
+        getMembership: async () => ({}) as never,
+        getConnection: async () => connection() as never,
+      }),
+    ).toEqual(target);
+    // The owner re-pointed the connection at a different folder after
+    // acceptance: the already-accepted turn must not publish anywhere.
+    const moved = connection();
+    (moved.metadata as { outputDestination: typeof destination }).outputDestination = {
+      ...destination,
+      folderId: "folder-moved",
+      folderName: "Elsewhere",
+      selectedAt: "2026-08-16T00:00:00.000Z",
+    };
+    expect(
+      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, [frozenDelegation], {
+        getMembership: async () => ({}) as never,
+        getConnection: async () => moved as never,
+      }),
+    ).toBeNull();
+    // A pre-freeze delegation keeps the bounded legacy live resolution.
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        workspaceId,
+        [publicationDelegation],
+        {
+          getMembership: async () => ({}) as never,
+          getConnection: async () => moved as never,
+        },
+      ),
+    ).toEqual({
+      ...target,
+      destination: (moved.metadata as { outputDestination: typeof destination }).outputDestination,
+    });
+  });
+
+  test("model callers never double-register the fence the wrapper already owns", async () => {
+    let begins = 0;
+    const completions: string[] = [];
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () => ({ status: "auth_needed" }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => {
+          begins += 1;
+          return { allowed: true, managed: true, requestId: "must-not-exist" };
+        },
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
+        },
+        fetch: async () => new Response("must not call provider", { status: 500 }),
+      },
+    });
+    // The attempt connector-action wrapper already registered this model call
+    // under its durable SDK call id; a second inner begin would mint a second
+    // ledger row and deadlock the default ask policy.
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "model", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("was not executed: no request reached Google Drive");
+    expect(begins).toBe(0);
+    expect(completions).toEqual([]);
+  });
+
+  test("a failure before any provider request completes not_executed with a retry-safe message", async () => {
+    const completions: string[] = [];
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () => ({ status: "auth_needed" }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "req-1" }),
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
+        },
+        fetch: async () => new Response("must not call provider", { status: 500 }),
+      },
+    });
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("was not executed: no request reached Google Drive");
+    expect(completions).toEqual(["not_executed"]);
+  });
+
+  test("a failure after the provider request started completes uncertain with an unknown-outcome message", async () => {
+    const completions: string[] = [];
+    const tool = createGoogleDrivePublicationAttemptTool({
+      db: {} as Database,
+      objectStorage: objectStorage(),
+      identity,
+      subjectId: "subject-a",
+      target,
+      resolveCredential: async () =>
+        ({
+          status: "ok",
+          headers: { authorization: "Bearer token" },
+          connectionId,
+          connectionVersion: 3,
+          expiresAt: null,
+        }) as never,
+      ports: {
+        getConnection: async () => connection() as never,
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
+        requireFile: async () => sourceFile,
+        prepare: async () => ({ managed: true, decision: "allow" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "req-2" }),
+        complete: async (_db, completion) => {
+          completions.push(completion.outcome);
+        },
+        // Read-only verify and idempotency-lookup GETs succeed; the first
+        // mutating request (the multipart create POST) dies mid-upload.
+        fetch: async (url, init) => {
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (method === "GET") {
+            const href = url instanceof Request ? url.url : url.toString();
+            return href.includes("/files/")
+              ? Response.json({
+                  id: destination.folderId,
+                  name: destination.folderName,
+                  mimeType: "application/vnd.google-apps.folder",
+                  trashed: false,
+                  capabilities: { canAddChildren: true },
+                })
+              : Response.json({ files: [] });
+          }
+          throw new Error("socket reset mid-upload");
+        },
+      },
+    });
+    await expect(
+      tool.execute(request, {
+        operationId: "99999999-9999-4999-8999-999999999999",
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("outcome is unknown");
+    expect(completions).toEqual(["uncertain"]);
   });
 });

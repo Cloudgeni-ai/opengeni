@@ -37,6 +37,7 @@ trap 'rm -rf "$work"' EXIT
 mock="$work/mock/agent/latest"
 mkdir -p "$mock"
 cp "$built" "$mock/$asset"
+cp install/OpenGeni-Agent.icns "$mock/OpenGeni-Agent.icns"
 
 # Throwaway key + sign + checksum.
 minisign -G -W -p "$work/k.pub" -s "$work/k.key" >/dev/null 2>&1
@@ -48,7 +49,9 @@ pub="$(sed -n '2p' "$work/k.pub")"
 sed "s#^OPENGENI_MINISIGN_PUBKEY=.*#OPENGENI_MINISIGN_PUBKEY='$pub'#" install/install.sh > "$work/install.sh"
 
 # Run the REAL (key-swapped) install in CI mode.
-OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
+install_home="$work/install-home"
+mkdir -p "$install_home"
+HOME="$install_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
 OPENGENI_INSTALL_DIR="$work/bin" \
 OPENGENI_NO_SERVICE=1 \
   sh "$work/install.sh" </dev/null
@@ -61,7 +64,7 @@ OPENGENI_NO_SERVICE=1 \
 # instead.
 test -x "$work/bin/opengeni-agent"
 if [ "$os" = "Darwin" ]; then
-  app="$HOME/Applications/OpenGeni Agent.app"
+  app="$install_home/Applications/OpenGeni Agent.app"
   test -d "$app"
   codesign --verify --strict "$app"
   want_version="$("$built" --version)"
@@ -80,9 +83,12 @@ echo "install-smoke OK: verified + installed $asset"
 # verified artifact without appending /agent/v<version> a second time.
 release_version="$("$built" --version | awk 'NR == 1 { print $NF }')"
 direct="$work/github/releases/download/agent-v$release_version"
+direct_home="$work/direct-home"
 mkdir -p "$direct"
-cp "$mock/$asset" "$mock/$asset.sha256" "$mock/$asset.minisig" "$direct/"
-OPENGENI_INSTALL_BASE_URL="file://$direct" \
+mkdir -p "$direct_home"
+cp "$mock/$asset" "$mock/$asset.sha256" "$mock/$asset.minisig" \
+  "$mock/OpenGeni-Agent.icns" "$direct/"
+HOME="$direct_home" OPENGENI_INSTALL_BASE_URL="file://$direct" \
 OPENGENI_AGENT_VERSION="$release_version" \
 OPENGENI_INSTALL_DIR="$work/direct-bin" \
 OPENGENI_NO_SERVICE=1 \

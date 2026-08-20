@@ -615,6 +615,8 @@ describe("Slack interaction migration and durable database boundary", () => {
       metadata: {},
       createdBy: { kind: "subject", subjectId: owner },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const child = await createSession(db, {
@@ -624,6 +626,8 @@ describe("Slack interaction migration and durable database boundary", () => {
       metadata: {},
       createdBy: { kind: "subject", subjectId: owner },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -682,6 +686,8 @@ describe("Slack interaction migration and durable database boundary", () => {
       metadata: {},
       createdBy: { kind: "subject", subjectId: owner },
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const interaction = await bindSlackInteractionSession(db, {
@@ -781,6 +787,8 @@ describe("Slack interaction migration and durable database boundary", () => {
       metadata: {},
       createdBy: { kind: "subject" as const, subjectId: owner },
       model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none" as const,
     };
     const created = await createSessionWithIdempotencyKeyResult(db, createInput);

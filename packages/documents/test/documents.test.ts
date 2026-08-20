@@ -58,8 +58,9 @@ describe("documents", () => {
       decodeKnowledgeBrowseCursor(cursor, {
         ...scope,
         parentId: "document:33333333-3333-4333-8333-333333333333",
+        parentRevision: "7",
       }),
-    ).toThrow("different scope");
+    ).toThrow("invalid knowledge browse cursor");
     expect(() => decodeKnowledgeBrowseCursor(cursor, { ...scope, topic: "finance" })).toThrow(
       "different scope",
     );
@@ -73,6 +74,17 @@ describe("documents", () => {
     expect(() => decodeKnowledgeBrowseCursor(oversized, scope)).toThrow(
       "invalid knowledge browse cursor",
     );
+
+    const parentScope = {
+      ...scope,
+      parentId: "document:33333333-3333-4333-8333-333333333333",
+      parentRevision: "7",
+    };
+    const parentCursor = encodeKnowledgeBrowseCursor(parentScope, 2n);
+    expect(decodeKnowledgeBrowseCursor(parentCursor, parentScope)).toBe(2n);
+    expect(() =>
+      decodeKnowledgeBrowseCursor(parentCursor, { ...parentScope, parentRevision: "8" }),
+    ).toThrow("different scope");
   });
 
   test("round-trips document index checkpoints only within their frozen authority scope", () => {
@@ -198,6 +210,21 @@ describe("documents", () => {
         workspaceId,
       ),
     ).toBe(false);
+  });
+
+  test("lets activated personal authority follow only its exact owner across workspaces", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const siblingWorkspaceId = "22222222-2222-4222-8222-222222222222";
+    const document = {
+      authorityKind: "personal",
+      authorityWorkspaceId: null,
+      authoritySubjectId: "subject:owner",
+    } as const;
+
+    expect(canViewDocument(document, "subject:owner", workspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:owner", siblingWorkspaceId)).toBe(true);
+    expect(canViewDocument(document, "subject:other", siblingWorkspaceId)).toBe(false);
+    expect(canViewDocument(document, null, siblingWorkspaceId)).toBe(false);
   });
 
   test("resolves fixed authority tuples and deterministic legacy compatibility", () => {

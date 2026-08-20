@@ -48,6 +48,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
           githubRepositoryId: 456,
         },
       ]),
+      null,
     );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }),
@@ -59,7 +60,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
   });
 
   test("a session with NO GitHub-App repo keeps the plain stable base (no pointers)", async () => {
-    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([]));
+    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([]), null);
     expect(attachEnv).toEqual(stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }));
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
   });
@@ -77,6 +78,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
           repositoryId: "gl-123",
         },
       ]),
+      null,
     );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }),
@@ -135,6 +137,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
           ref: "main",
         },
       ]),
+      null,
     );
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
   });

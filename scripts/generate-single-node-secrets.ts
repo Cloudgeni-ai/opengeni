@@ -9,6 +9,8 @@ export interface SingleNodeSecretFiles {
   directory: string;
   postgres: string;
   minio: string;
+  garage: string;
+  garageToml: string;
   runtime: string;
   migrations: string;
 }
@@ -23,6 +25,36 @@ export interface GenerateSingleNodeSecretsOptions {
 
 function secret(): string {
   return randomBytes(32).toString("base64url");
+}
+
+function garageAccessKey(): string {
+  return `GK${randomBytes(16).toString("hex")}`;
+}
+
+function garageToml(rpcSecret: string): string {
+  return `metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "${rpcSecret}"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.localhost"
+index = "index.html"
+
+[admin]
+api_bind_addr = "127.0.0.1:3903"
+`;
 }
 
 function envFile(values: Record<string, string>): string {
@@ -54,6 +86,9 @@ export async function generateSingleNodeSecretFiles(
   const ownerPassword = secret();
   const runtimePassword = secret();
   const minioPassword = secret();
+  const garageKeyId = garageAccessKey();
+  const garageSecretKey = randomBytes(32).toString("hex");
+  const garageRpcSecret = randomBytes(32).toString("hex");
   const environmentsEncryptionKey = randomBytes(32).toString("base64");
   const enrollmentSigningSecret = secret();
   const streamTokenSecret = secret();
@@ -71,6 +106,8 @@ export async function generateSingleNodeSecretFiles(
     directory,
     postgres: join(directory, "postgres.env"),
     minio: join(directory, "minio.env"),
+    garage: join(directory, "garage.env"),
+    garageToml: join(directory, "garage.toml"),
     runtime: join(directory, "runtime.env"),
     migrations: join(directory, "migrations.env"),
   };
@@ -79,6 +116,8 @@ export async function generateSingleNodeSecretFiles(
     const temporaryFiles = {
       postgres: join(temporaryDirectory, "postgres.env"),
       minio: join(temporaryDirectory, "minio.env"),
+      garage: join(temporaryDirectory, "garage.env"),
+      garageToml: join(temporaryDirectory, "garage.toml"),
       runtime: join(temporaryDirectory, "runtime.env"),
       migrations: join(temporaryDirectory, "migrations.env"),
     };
@@ -98,6 +137,19 @@ export async function generateSingleNodeSecretFiles(
         }),
         { mode: 0o600, flag: "wx" },
       ),
+      writeFile(
+        temporaryFiles.garage,
+        envFile({
+          GARAGE_ACCESS_KEY_ID: garageKeyId,
+          GARAGE_SECRET_ACCESS_KEY: garageSecretKey,
+          GARAGE_RPC_SECRET: garageRpcSecret,
+        }),
+        { mode: 0o600, flag: "wx" },
+      ),
+      writeFile(temporaryFiles.garageToml, garageToml(garageRpcSecret), {
+        mode: 0o600,
+        flag: "wx",
+      }),
       writeFile(
         temporaryFiles.runtime,
         envFile({
@@ -128,6 +180,7 @@ export async function generateSingleNodeSecretFiles(
             host: databaseHost,
             database: databaseName,
           }),
+          OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES: runtimeDatabaseUser,
           OPENGENI_APP_DATABASE_USER: runtimeDatabaseUser,
           OPENGENI_APP_DATABASE_PASSWORD: runtimePassword,
         }),

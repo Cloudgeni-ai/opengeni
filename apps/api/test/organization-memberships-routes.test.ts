@@ -101,6 +101,190 @@ describe("organization membership routes", () => {
     ).toBe(401);
   });
 
+  test("supports registered-user invite, subject-bound acceptance, listing and suspension", async () => {
+    if (!shared || !client || !app) return;
+    const ownerMembershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const ownerMembershipBody = (await ownerMembershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = ownerMembershipBody.memberships[0]!.organizationId;
+
+    const targetUserId = `organization-invite-target-${crypto.randomUUID()}`;
+    const targetEmail = `${targetUserId}@example.test`;
+    const targetSessionId = `session-${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${targetUserId}, 'Invitation target', ${targetEmail}, true)`;
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${targetUserId}, 'credential', ${targetUserId})`;
+    const targetIdentity = await synchronizeCanonicalHumanLoginBindings(client.db, targetUserId);
+    await shared.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${targetSessionId}, ${targetUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${targetIdentity.identityId}, ${targetIdentity.identityRevision}, ${targetIdentity.authRevision}
+      )`;
+    const targetApp = new Hono();
+    registerOrganizationMembershipRoutes(targetApp, {
+      db: client.db,
+      settings: testSettings({ productAccessMode: "managed" }),
+      managedAuth: {
+        api: {
+          getSession: async () => ({
+            headers: new Headers(),
+            response: {
+              session: { id: targetSessionId },
+              user: {
+                id: targetUserId,
+                email: targetEmail,
+                name: "Invitation target",
+              },
+            },
+          }),
+        },
+      } as never,
+    } as ApiRouteDeps);
+
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const inviteResponse = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+      method: "POST",
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        email: targetEmail,
+        role: "member",
+        expiresAt,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(inviteResponse.status).toBe(201);
+    const invitation = (await inviteResponse.json()) as {
+      id: string;
+      revision: number;
+    };
+    const targetInvitations = await targetApp.request("http://x/v1/organization-invitations", {
+      headers: { cookie: "session=present" },
+    });
+    expect(targetInvitations.status).toBe(200);
+    expect(await targetInvitations.json()).toMatchObject({
+      invitations: [expect.objectContaining({ id: invitation.id })],
+      nextCursor: null,
+    });
+    expect(
+      (
+        await targetApp.request("http://x/v1/organization-invitations?limit=101", {
+          headers: { cookie: "session=present" },
+        })
+      ).status,
+    ).toBe(422);
+
+    const acceptResponse = await targetApp.request(
+      `http://x/v1/organization-invitations/${invitation.id}/accept`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          expectedRevision: invitation.revision,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(acceptResponse.status).toBe(200);
+    const accepted = (await acceptResponse.json()) as {
+      membership: {
+        id: string;
+        authorizationRevision: number;
+        subjectId: string;
+      };
+    };
+    expect(accepted.membership.subjectId).toBe(`user:${targetUserId}`);
+
+    const memberList = await app.request(`http://x/v1/organizations/${accountId}/members`, {
+      headers: { cookie: "session=present" },
+    });
+    expect(memberList.status).toBe(200);
+    expect(((await memberList.json()) as { members: unknown[] }).members).toHaveLength(2);
+    const organizationInvitations = await app.request(
+      `http://x/v1/organizations/${accountId}/invitations?limit=1`,
+      { headers: { cookie: "session=present" } },
+    );
+    expect(organizationInvitations.status).toBe(200);
+    expect(
+      ((await organizationInvitations.json()) as { invitations: unknown[] }).invitations,
+    ).toHaveLength(1);
+    const memberEnumeration = await targetApp.request(
+      `http://x/v1/organizations/${accountId}/invitations`,
+      { headers: { cookie: "session=present" } },
+    );
+    expect(memberEnumeration.status).toBe(403);
+    const memberEmailProbe = await targetApp.request(
+      `http://x/v1/organizations/${accountId}/invitations`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          email: `${crypto.randomUUID()}@example.test`,
+          role: "member",
+          expiresAt,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(memberEmailProbe.status).toBe(403);
+    const suspendResponse = await app.request(
+      `http://x/v1/organizations/${accountId}/members/${accepted.membership.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "suspend",
+          expectedAuthorizationRevision: accepted.membership.authorizationRevision,
+          operationId: crypto.randomUUID(),
+          reason: "temporary leave",
+        }),
+      },
+    );
+    expect(suspendResponse.status).toBe(200);
+    expect((await suspendResponse.json()) as { status: string }).toMatchObject({
+      status: "suspended",
+    });
+    for (const retentionDays of [29, 91]) {
+      const rejectedRetention = await app.request(
+        `http://x/v1/organizations/${accountId}/retention-policy`,
+        {
+          method: "PATCH",
+          headers: {
+            cookie: "session=present",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            mode: "delete_after",
+            retentionDays,
+            expectedVersion: 1,
+            operationId: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(rejectedRetention.status).toBe(422);
+    }
+  });
+
   test("returns only the current active membership and denies terminal membership state", async () => {
     if (!shared || !app) return;
 

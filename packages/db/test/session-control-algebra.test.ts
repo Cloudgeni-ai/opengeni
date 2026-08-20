@@ -52,6 +52,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   const child = await createSession(client.db, {
@@ -62,6 +64,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return { grant, root, child };
@@ -162,6 +166,10 @@ describe("recursive session control algebra", () => {
         .from(schema.sessions)
         .where(eq(schema.sessions.id, value.child.id));
       if (!sessionAuthority) throw new Error("Algebra test session authority snapshot missing");
+      await db
+        .update(schema.sessions)
+        .set({ activeTurnId: turn!.id, status: "running" })
+        .where(eq(schema.sessions.id, value.child.id));
       await db.insert(schema.sessionTurnAttempts).values({
         id: attemptId,
         accountId: value.grant.accountId,

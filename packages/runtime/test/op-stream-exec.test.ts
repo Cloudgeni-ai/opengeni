@@ -7,7 +7,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { ErrorCode } from "@opengeni/agent-proto";
+import { ErrorCode, type ControlRequest } from "@opengeni/agent-proto";
+import type { ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
@@ -18,20 +19,37 @@ const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
 
 function buildRig(
-  opts: { journal?: OpStreamJournal; execTimeoutMs?: number; windowBytes?: number } = {},
+  opts: {
+    journal?: OpStreamJournal;
+    execTimeoutMs?: number;
+    windowBytes?: number;
+    memoryMaxBytes?: number;
+  } = {},
 ) {
   const transport = new InMemoryOpStreamTransport();
   const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
   const observations: SelfhostedOpObservation[] = [];
+  const requests: ControlRequest[] = [];
   const session = new SelfhostedSession({
     workspaceId: WORKSPACE,
     agentId: AGENT,
-    controlRpc: runner,
+    controlRpc: {
+      request: async (subject, request, requestOpts) => {
+        requests.push(request);
+        return await runner.request(subject, request, requestOpts);
+      },
+    },
     relay: { host: "relay.test" },
     timeoutMs: 2_000,
     execTimeoutMs: opts.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
     onOp: (observation) => observations.push(observation),
+    ...(opts.memoryMaxBytes !== undefined
+      ? {
+          operationResourcePolicy: { memoryMaxBytes: opts.memoryMaxBytes },
+          operationResourcePolicySupported: true,
+        }
+      : {}),
     opStream: {
       transport,
       ...(opts.journal ? { journal: opts.journal } : {}),
@@ -41,7 +59,7 @@ function buildRig(
       reconnectHoldMs: 600,
     },
   });
-  return { transport, runner, session, observations };
+  return { transport, runner, session, observations, requests };
 }
 
 describe("op-stream exec (fake runner)", () => {
@@ -67,6 +85,23 @@ describe("op-stream exec (fake runner)", () => {
     const ok = observations.find((o) => o.outcome === "ok");
     expect(ok?.op).toBe("exec");
     expect(ok?.replyBytes).toBe("hello world".length + "warn\n".length);
+  });
+
+  test("OpStart carries the configured command policy", async () => {
+    const { runner, session, requests } = buildRig({ memoryMaxBytes: 134_217_728 });
+    runner.script("call_policy:0", { frames: [{ channel: "stdout", bytes: "ok" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await runWithToolCallCorrelation("call_policy", () => session.exec({ cmd: "true" }));
+
+    const start = requests.find((request) => request.op?.$case === "opStart");
+    expect(start?.resourcePolicy?.memoryMaxBytes).toBe("134217728");
+    expect(start?.resourcePolicy?.memoryHighBytes).toBeUndefined();
+    expect(
+      requests
+        .filter((request) => request.op?.$case !== "opStart")
+        .every((request) => request.resourcePolicy === undefined),
+    ).toBe(true);
   });
 
   test("deadline 0 runs over op-stream with no duration wall", async () => {
@@ -100,6 +135,76 @@ describe("op-stream exec (fake runner)", () => {
     expect(performance.now() - cancelledAt).toBeLessThan(2_000);
     expect(result.exitCode).toBe(-1);
     expect(runner.runs.get("call_cancel:0")?.exit.cancelled).toBe(true);
+  });
+
+  test("reconnect cancellation stays bound to the admitted connection", async () => {
+    const staleTransport = new InMemoryOpStreamTransport();
+    const liveTransport = new InMemoryOpStreamTransport();
+    const staleRunner = new FakeOpRunner({
+      transport: staleTransport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-instance",
+    });
+    const liveRunner = new FakeOpRunner({
+      transport: liveTransport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "live-instance",
+    });
+    const requests: Array<{ subject: string; request: ControlRequest }> = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-instance",
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          requests.push({ subject, request });
+          return subject.includes("connection.live-instance.rpc")
+            ? await liveRunner.request(subject, request, opts)
+            : await staleRunner.request(subject, request, opts);
+        },
+      },
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      opStream: { transport: staleTransport },
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: "live-instance",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 2,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+        opStream: { transport: liveTransport },
+      }),
+    });
+    liveRunner.script("call_reconnect_cancel:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const executing = runWithToolCallCorrelation("call_reconnect_cancel", () =>
+      session.exec({ cmd: "sleep 60" }),
+    );
+    while (!liveRunner.runs.has("call_reconnect_cancel:0")) await Bun.sleep(1);
+
+    expect(await session.cancelExecCommand("unknown-after-reconnect")).toBe(false);
+    expect(await session.cancelExecCommand("call_reconnect_cancel:0")).toBe(true);
+    const result = await executing;
+
+    expect(result.exitCode).toBe(-1);
+    expect(liveRunner.runs.get("call_reconnect_cancel:0")?.exit.cancelled).toBe(true);
+    expect(staleRunner.runs.size).toBe(0);
+    expect(
+      requests
+        .filter(({ request }) => request.op?.$case === "opCancel")
+        .map(({ subject }) => subject),
+    ).toEqual([expect.stringContaining("connection.live-instance.rpc")]);
   });
 
   test("the SDK shell capability and turn fence cancel a connected-machine process end to end", async () => {
@@ -403,6 +508,231 @@ describe("op-stream exec (fake runner)", () => {
     });
     const result = await session.exec({ cmd: "echo legacy" });
     expect(result.exitCode).toBe(0);
+  });
+
+  test("op-stream fallback takes a fresh authoritative command admission", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    transport.available = false;
+    const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
+    const responder = new MockAgentResponder();
+    let admissionReads = 0;
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "stale-constructor-instance",
+      controlRpc: responder,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => {
+        admissionReads += 1;
+        return {
+          connectionInstanceId: "admitted-instance",
+          operationResourcePolicy: {
+            memoryMaxBytes: 134_217_728,
+            memoryHighBytes: null,
+            cpuMaxMillicores: null,
+            revision: 4,
+          },
+          operationResourcePolicySupported: true,
+          operationCpuQuotaSupported: false,
+          opStream: {
+            transport,
+            ackIntervalMs: 20,
+            silenceTimeoutMs: 120,
+            reconnectHoldMs: 600,
+          },
+        };
+      },
+    });
+
+    const result = await session.exec({ cmd: "echo legacy" });
+
+    expect(result.exitCode).toBe(0);
+    expect(admissionReads).toBe(2);
+    expect(responder.requests).toHaveLength(1);
+    expect(responder.requests[0]?.subject).toContain("connection.admitted-instance.rpc");
+    expect(responder.requests[0]?.req.resourcePolicy).toEqual({
+      memoryMaxBytes: "134217728",
+    });
+  });
+
+  test("revocation after a refused OpStart fences the proven-unstarted retry", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    runner.script("call_retry_revoke:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+      drainingStarts: 1,
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        const response = await runner.request(subject, request, opts);
+        if (request.op?.$case === "opStart") {
+          startDispatches += 1;
+          if (response.error?.code === ErrorCode.ERROR_CODE_DRAINING) authorized = false;
+        }
+        return response;
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_retry_revoke", () => session.exec({ cmd: "must-not-run" })),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(1);
+    expect(runner.runs.has("call_retry_revoke:0")).toBe(false);
+  });
+
+  test("revocation while the frame subscription is opening fences the initial OpStart", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    runner.script("call_subscribe_revoke:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const subscribe = transport.subscribe.bind(transport);
+    transport.subscribe = async (subject, onMessage) => {
+      // Model a broker subscription that yields long enough for the exact
+      // personal-machine authority to be revoked after initial admission.
+      await Promise.resolve();
+      authorized = false;
+      return await subscribe(subject, onMessage);
+    };
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        if (request.op?.$case === "opStart") startDispatches += 1;
+        return await runner.request(subject, request, opts);
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_subscribe_revoke", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(0);
+    expect(runner.runs.has("call_subscribe_revoke:0")).toBe(false);
+  });
+
+  test("revocation after an OpStart downgrade fences legacy fallback dispatch", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
+    const fallback = new MockAgentResponder();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      fallback,
+    });
+    runner.script("call_fallback_revoke:0", {
+      frames: [],
+      startError: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "old runner",
+        retryable: false,
+        detail: {},
+      },
+    });
+    let authorized = true;
+    let startDispatches = 0;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        const response = await runner.request(subject, request, opts);
+        if (request.op?.$case === "opStart") {
+          startDispatches += 1;
+          authorized = false;
+        }
+        return response;
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+      controlRpc: rpc,
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      execTimeoutMs: 5_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () =>
+        authorized
+          ? {
+              connectionInstanceId: "connection-1",
+              operationResourcePolicy: {
+                memoryMaxBytes: null,
+                memoryHighBytes: null,
+                cpuMaxMillicores: null,
+                revision: 1,
+              },
+              operationResourcePolicySupported: true,
+              operationCpuQuotaSupported: true,
+              opStream: { transport },
+            }
+          : null,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_fallback_revoke", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ),
+    ).rejects.toThrow(/authoritative live runner connection/iu);
+    expect(startDispatches).toBe(1);
+    expect(fallback.requests).toHaveLength(0);
   });
 
   test("unbounded exec never degrades to legacy when the stream is unavailable", async () => {

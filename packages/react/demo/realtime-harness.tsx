@@ -194,7 +194,14 @@ function ExistingSession(props: {
 }
 
 function NewSessionComposer(props: { onStart(model: SessionRealtimeModel): Promise<boolean> }) {
-  const composer = useComposer(null, { draftPersistence: "disabled" });
+  const composer = useComposer(null, {
+    draftPersistence: "disabled",
+    initialPolicy: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    },
+  });
   return (
     <section
       data-realtime-new-composer=""

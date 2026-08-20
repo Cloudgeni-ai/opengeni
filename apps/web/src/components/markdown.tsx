@@ -10,14 +10,17 @@ export function MarkdownText({
   text,
   compact = false,
   streaming = false,
+  onSandboxFile,
 }: {
   text: string;
   compact?: boolean;
   streaming?: boolean;
+  onSandboxFile?: ((path: string) => void | Promise<void>) | undefined;
 }) {
   return (
     <Markdown
       streaming={streaming}
+      onSandboxFile={onSandboxFile}
       className={cn("markdown-stream", compact && "markdown-stream-compact")}
     >
       {text}

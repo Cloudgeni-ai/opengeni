@@ -40,6 +40,25 @@ describe("@opengeni/runtime/sandbox stream-token mint/verify", () => {
     const token = await mintStreamToken(SECRET, baseInput);
     expect(await verifyStreamToken("other-secret", token)).toBeNull();
   });
+
+  test("mint -> verify round-trip with the viewer authority claims (0281)", async () => {
+    const token = await mintStreamToken(SECRET, {
+      ...baseInput,
+      subjectId: "user:44444444-4444-4444-8444-444444444444",
+      authorityEpoch: 7,
+    });
+    const verified = await verifyStreamToken(SECRET, token);
+    expect(verified?.subjectId).toBe("user:44444444-4444-4444-8444-444444444444");
+    expect(verified?.authorityEpoch).toBe(7);
+  });
+
+  test("a token minted WITHOUT authority claims still verifies (rolling compatibility)", async () => {
+    const token = await mintStreamToken(SECRET, baseInput);
+    const verified = await verifyStreamToken(SECRET, token);
+    expect(verified).not.toBeNull();
+    expect(verified?.subjectId).toBeUndefined();
+    expect(verified?.authorityEpoch).toBeUndefined();
+  });
 });
 
 describe("negotiateCapabilities — desktop graceful degrade (stream-token availability contract)", () => {

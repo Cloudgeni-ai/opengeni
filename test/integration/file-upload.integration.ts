@@ -21,6 +21,8 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
+  GARAGE_FIXTURE_ACCESS_KEY_ID,
+  GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   MemoryEventBus,
   startTestServices,
   testSettings,
@@ -116,7 +118,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     const app = fileApp(fixture.settings);
     const image = pngBytes();
 
-    // Both requests complete their real MinIO HEAD, enter completeFileUpload,
+    // Both requests complete their real object-storage HEAD, enter completeFileUpload,
     // and then WAIT on this independently held file_uploads row lock.
     const checksum = await sha256Hex(image);
     const concurrent = await beginAndPut(app, fixture, image, "locked-finalize.png", {
@@ -209,6 +211,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       toolsProvided: false,
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
+      latencyMode: "standard",
       options: {},
     };
     const savedDraftResponse = await app.request(
@@ -878,8 +881,8 @@ function uploadSettings(databaseUrl: string, endpoint: string) {
     objectStorageEndpoint: endpoint,
     objectStorageSandboxEndpoint: endpoint,
     objectStorageBucket: "opengeni-files",
-    objectStorageAccessKeyId: "minioadmin",
-    objectStorageSecretAccessKey: "minioadmin",
+    objectStorageAccessKeyId: GARAGE_FIXTURE_ACCESS_KEY_ID,
+    objectStorageSecretAccessKey: GARAGE_FIXTURE_SECRET_ACCESS_KEY,
     objectStorageForcePathStyle: true,
   });
 }

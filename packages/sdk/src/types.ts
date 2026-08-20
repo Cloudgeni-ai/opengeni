@@ -172,7 +172,11 @@ export type WorkspaceRealtimeModelCatalogResponse = {
   models: WorkspaceRealtimeModelCatalogItem[];
 };
 export type SessionRealtimeState = "active" | "ended";
-export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
+export type SessionRealtimeEndReason =
+  | "user_stop"
+  | "browser_unload"
+  | "lease_expired"
+  | "authority_revoked";
 
 export type SessionRealtimeMode = {
   id: string;
@@ -484,6 +488,7 @@ export type ToolRef = {
   kind: "mcp";
   id: string;
   optional?: boolean | undefined;
+  eager?: boolean | undefined;
 };
 
 export type SessionToolPolicy = {
@@ -529,6 +534,7 @@ export type SessionEffectiveToolPolicy = {
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
+  rootConstraints?: string[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -574,6 +580,27 @@ export type UpdateSessionMcpApprovalPolicyResponse = {
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
 export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
+
+export type UserResourceDelegation = {
+  authorityId: string;
+  grantId: string;
+  organizationId: string;
+  workspaceId: string;
+  sessionId: string | null;
+  action: string;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  authorityGeneration: number;
+  grantGeneration: number;
+  resourceVersionId?: string | null | undefined;
+};
+
+export type McpConnectionAuthoritySelection = {
+  serverId: string;
+  connectionId: string;
+  userDelegation: UserResourceDelegation;
+};
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
@@ -1051,6 +1078,8 @@ export type Session = {
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;
   model: string;
+  reasoningEffort: ReasoningEffort;
+  latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs;
   sandboxGroupId: string;
@@ -1369,6 +1398,9 @@ export const SESSION_EVENT_TYPES = [
   "turn.superseded",
   "turn.recovery.requested",
   "turn.capacity_waiting",
+  "turn.startup.phase.started",
+  "turn.startup.phase.completed",
+  "turn.startup.phase.failed",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",
@@ -1873,6 +1905,14 @@ export type FsReadResponse = {
   isBinary: boolean;
   revision: number;
 };
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export type PublishSandboxFileArtifactRequest = { path: string };
+export type SandboxFileArtifactReceipt = {
+  type: "sandbox_file";
+  sandboxPath: string;
+  filename: string;
+  artifact: RetainedArtifactReference;
+};
 export type FsWriteRequest = {
   path: string;
   encoding?: FsEncoding;
@@ -2313,6 +2353,8 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  authorityRevision: number;
+  executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
@@ -2338,7 +2380,7 @@ export type CreateSessionRequest = {
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
-  // user-visible timeline. Trimmed, non-empty, max 32768 chars.
+  // user-visible timeline. Trimmed, non-empty, max 65536 chars.
   instructions?: string | undefined;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole?: string | undefined;
@@ -2425,6 +2467,7 @@ export const KNOWN_PERMISSIONS = [
   "variable-sets:read",
   "variable-sets:write",
   "variable-sets:manage",
+  "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
   "secrets:read",
@@ -2463,6 +2506,16 @@ export type FirstPartyMcpToolName =
   | "task_notes_list"
   | "task_note_save"
   | "task_note_archive"
+  | "task_note_replace"
+  | "knowledge_propose"
+  | "knowledge_correct"
+  | "task_note_promote_knowledge"
+  | "task_note_promote_instruction_policy"
+  | "task_note_promote_preference"
+  | "instruction_policy_propose"
+  | "preference_propose"
+  | "remember"
+  | "remember_confirm"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2540,6 +2593,7 @@ export type FirstPartyMcpToolName =
   | "scheduled_tasks_delete"
   | "scheduled_task_runs_list"
   | "slack_bot_list_channels"
+  | "slack_bot_search"
   | "slack_bot_channel_history"
   | "slack_bot_thread_replies"
   | "slack_bot_list_users"
@@ -2561,6 +2615,7 @@ export type FirstPartyMcpToolName =
   | "atlassian_sources_list"
   | "atlassian_search"
   | "atlassian_get"
+  | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
   | "artifacts_create"
@@ -3064,7 +3119,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3272,6 +3327,73 @@ export type ManagedOrganizationMembership = {
 
 export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
+};
+
+export type OrganizationMembershipRole = "owner" | "admin" | "member";
+export type OrganizationInvitation = {
+  id: string;
+  organizationId: string;
+  targetEmail: string;
+  role: OrganizationMembershipRole;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  revision: number;
+  expiresAt: string;
+  acceptedMembershipId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationMember = {
+  id: string;
+  organizationId: string;
+  subjectId: string;
+  role: OrganizationMembershipRole;
+  status: "provisioning" | "active" | "suspended" | "revoked";
+  authorizationRevision: number;
+  personalWorkspaceId: string | null;
+  revokedAt: string | null;
+  personalRetentionUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRetentionPolicy = {
+  organizationId: string;
+  mode: "retain" | "delete_after";
+  retentionDays: number | null;
+  version: number;
+  updatedAt: string;
+};
+export type CreateOrganizationInvitationRequest = {
+  email: string;
+  role?: OrganizationMembershipRole;
+  expiresAt: string;
+  operationId: string;
+};
+export type AcceptOrganizationInvitationRequest = {
+  expectedRevision: number;
+  operationId: string;
+};
+export type RevokeOrganizationInvitationRequest = AcceptOrganizationInvitationRequest;
+export type UpdateOrganizationMemberRequest = {
+  kind: "change_role" | "suspend" | "reactivate" | "offboard";
+  role?: OrganizationMembershipRole;
+  expectedAuthorizationRevision: number;
+  operationId: string;
+  reason?: string;
+};
+export type UpdateOrganizationRetentionPolicyRequest = {
+  mode: "retain" | "delete_after";
+  retentionDays: number | null;
+  expectedVersion: number;
+  operationId: string;
+};
+export type ListOrganizationInvitationsPageResponse = {
+  invitations: OrganizationInvitation[];
+  nextCursor: string | null;
+};
+export type ListOrganizationMembersResponse = { members: OrganizationMember[] };
+export type AcceptOrganizationInvitationResponse = {
+  invitation: OrganizationInvitation;
+  membership: OrganizationMember;
 };
 
 export type Workspace = {
@@ -3485,18 +3607,46 @@ export type SessionGoalRevision = {
   resultObjectiveRevision: number | null;
   text: string;
   successCriteria: string | null;
+  rootConstraints: string[];
   mutationPolicy: SessionGoalMutationPolicy;
   rationale: string;
   actor: "agent" | "api" | "scheduled_task";
   actorTurnId: string | null;
   actorAttemptId: string | null;
   proposalId: string | null;
+  rollbackOfRevisionId: string | null;
   createdAt: string;
 };
 
 export type ApplySessionGoalRevisionRequest = {
   expectedObjectiveRevision: number;
   rationale?: string | undefined;
+};
+
+export type ListSessionGoalRevisionsOptions = {
+  limit?: number | undefined;
+  before?: string | undefined;
+};
+
+export type ListSessionGoalRevisionsResponse = {
+  revisions: SessionGoalRevision[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type RejectSessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale: string;
+};
+
+export type RejectSessionGoalRevisionResponse = {
+  revision: SessionGoalRevision;
+  replay: boolean;
+};
+
+export type RollbackSessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale: string;
 };
 
 export type SessionGoalContinuationState =
@@ -3537,6 +3687,7 @@ export type SessionGoal = {
   status: SessionGoalStatus;
   text: string;
   successCriteria: string | null;
+  rootConstraints: string[];
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;
@@ -3562,6 +3713,7 @@ export type UpdateSessionGoalRequest =
   | {
       text: string;
       successCriteria?: string | null | undefined;
+      rootConstraints?: string[] | undefined;
       mutationPolicy?: SessionGoalMutationPolicy | undefined;
       rationale: string;
       expectedObjectiveRevision: number;
@@ -3638,7 +3790,7 @@ export type ComposerDraft = {
   resources: ResourceRef[];
   model: string;
   reasoningEffort: ReasoningEffort;
-  latencyMode?: LatencyMode | undefined;
+  latencyMode: LatencyMode;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -3664,7 +3816,7 @@ export type NewSessionDraft = {
   toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
-  latencyMode?: LatencyMode | undefined;
+  latencyMode: LatencyMode;
   options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
@@ -3814,6 +3966,24 @@ export type SaveComposerDraftRequest = Omit<
   "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
 > & { expectedRevision: number };
 
+export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
+  expectedDraftRevision: number;
+  clientEventId: string;
+  delivery: "send" | "steer";
+  controlEtag?: string;
+  modelContext?: string;
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
+  connectionAuthorities?: McpConnectionAuthoritySelection[];
+};
+
+export type SubmitComposerDraftResponse = {
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  draft: ComposerDraft;
+  interruptionCount: number;
+  replay: boolean;
+};
+
 export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
   expectedRevision: number;
 };
@@ -3842,6 +4012,7 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
+  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -3871,6 +4042,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
+  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -3933,6 +4105,8 @@ export type ScheduledTaskRun = {
   accountId: string;
   workspaceId: string;
   taskId: string;
+  taskAuthorityRevision: number | null;
+  taskExecutionDigest: string | null;
   status: ScheduledTaskRunStatus;
   triggerType: ScheduledTaskTriggerType;
   scheduledAt: string | null;
@@ -3970,6 +4144,9 @@ export type VariableSet = {
   id: string;
   accountId: string;
   workspaceId: string;
+  scope: "organization" | "workspace" | "user";
+  generation: number;
+  status: "active" | "revoked";
   name: string;
   description: string | null;
   variables: VariableSetVariableMetadata[];
@@ -3984,6 +4161,8 @@ export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 export type WorkspaceEnvironment = VariableSet;
 
 export type CreateVariableSetRequest = {
+  /** Omitted remains the legacy workspace-owned path. */
+  scope?: "organization" | "workspace" | "user" | undefined;
   name: string;
   description?: string | undefined;
   /** Initial variables. Values are write-only: they never come back on reads. */
@@ -4106,6 +4285,9 @@ export type Rig = {
   id: string;
   accountId: string;
   workspaceId: string;
+  scope: ResourceAuthorityScope;
+  generation: number;
+  status: "active" | "revoked";
   name: string;
   description: string | null;
   createdBy: string | null;
@@ -4150,6 +4332,7 @@ export type RigChange = {
 };
 
 export type CreateRigRequest = {
+  scope?: ResourceAuthorityScope;
   name: string;
   description?: string | undefined;
   image?: string | undefined;
@@ -4546,6 +4729,7 @@ export type Document = {
   authorityKind: DocumentAuthorityKind;
   authorityWorkspaceId: string | null;
   authoritySubjectId: string | null;
+  authorityId?: string | null | undefined;
   visibility: DocumentVisibility;
   createdBy: string | null;
   agentAccess: boolean;
@@ -5440,6 +5624,20 @@ export type IntegrationFacetRemovalResult = {
   remainingOwners: CapabilityComponentOwner[];
 };
 
+/**
+ * Presentation-only consent copy served with an integration or connector.
+ * Never grants a scope or replaces server-side authorization; the UI keeps a
+ * generic fallback for any omitted field.
+ */
+export type IntegrationPresentation = {
+  providerName?: string | undefined;
+  icon?: "calendar" | "cloud" | "contacts" | "files" | "mail" | undefined;
+  introduction?: string | undefined;
+  capabilities?: { title: string; description: string }[] | undefined;
+  permissionSummary?: string | undefined;
+  scopeLabels?: Record<string, { label: string; description: string }> | undefined;
+};
+
 export type IntegrationDefinitionSummary = {
   id: string;
   name: string;
@@ -5453,6 +5651,7 @@ export type IntegrationDefinitionSummary = {
     kind: "oauth2";
     scopes: string[];
   };
+  presentation?: IntegrationPresentation | undefined;
   facets: IntegrationFacetDefinitionSummary[];
 };
 
@@ -6201,6 +6400,8 @@ export type MachineRuntimeCapabilities = {
   desktop: boolean;
   opStream: boolean;
   browserBridge: boolean;
+  operationResourcePolicy: boolean;
+  operationCpuQuota: boolean;
 };
 
 export type MachineUpdateStatus =
@@ -6243,11 +6444,29 @@ export type UpdateMachineAgentResponse = {
   targetVersion: string;
 };
 
+export type MachineOperationPolicy = {
+  memoryMaxBytes: number | null;
+  memoryHighBytes: number | null;
+  cpuMaxMillicores: number | null;
+  revision: number;
+  updatedAt: string | null;
+};
+
+export type UpdateMachineOperationPolicyRequest = {
+  memoryMaxBytes: number | null;
+  memoryHighBytes: number | null;
+  /** Omitted preserves the current CPU limit for older/partial clients; null clears. */
+  cpuMaxMillicores?: number | null;
+  expectedRevision: number;
+};
+
 /** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
  *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
 export type MachineView = {
   sandboxId: string;
   enrollmentId: string | null;
+  scope: ResourceAuthorityScope;
+  generation: number;
   name: string;
   kind: MachineKind;
   state: MachineState;
@@ -6271,6 +6490,9 @@ export type MachineView = {
   /** Exact build/update truth. Null means the runner predates runtime Hello
    * reporting or this is a managed-session group without a connected agent. */
   runtime: MachineRuntime | null;
+  /** Explicit per-enrollment command memory policy. Null only for managed
+   * session boxes; null limits on a real machine mean unrestricted. */
+  operationPolicy: MachineOperationPolicy | null;
   metrics: MetricSample | null;
 };
 
@@ -6352,6 +6574,7 @@ export type SwapActiveSandboxResponse = {
 
 /** Mirror of `@opengeni/contracts` EnrollmentOs. */
 export type EnrollmentOs = "linux" | "macos" | "windows";
+export type ResourceAuthorityScope = "organization" | "workspace" | "user";
 
 /** POST /v1/enrollments/device/lookup body. */
 export type DeviceEnrollmentLookupRequest = {
@@ -6379,6 +6602,7 @@ export type DeviceEnrollmentLookupResponse = {
 export type DeviceEnrollmentApproveRequest = {
   userCode: string;
   allowScreenControl?: boolean;
+  scope?: ResourceAuthorityScope;
 };
 
 /** POST /v1/workspaces/:ws/enrollments/device/approve response. */

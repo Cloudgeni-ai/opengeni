@@ -119,6 +119,8 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       desktop: capability("desktop"),
       opStream: capability("opStream"),
       browserBridge: capability("browserBridge"),
+      operationResourcePolicy: capability("operationResourcePolicy"),
+      operationCpuQuota: capability("operationCpuQuota"),
     },
     update,
   };
@@ -229,7 +231,11 @@ async function probeEnrollment(
     },
     probeResponded,
   });
-  return { state: derived.state, consented: derived.consented, hasDisplay: derived.hasDisplay };
+  return {
+    state: derived.state,
+    consented: derived.consented,
+    hasDisplay: derived.hasDisplay,
+  };
 }
 
 /**
@@ -268,7 +274,12 @@ function machineStateFor(
  */
 export async function listMachines(
   services: MachinesServices,
-  input: { workspaceId: string; sessionId?: string | null },
+  input: {
+    accountId?: string;
+    workspaceId: string;
+    subjectId?: string;
+    sessionId?: string | null;
+  },
 ): Promise<MachinesResponse> {
   const { db } = services;
   const { workspaceId } = input;
@@ -317,6 +328,7 @@ export async function listMachines(
         lastSeenAt: null,
         connectionAuthority: connectionAuthorityFor(null, null),
         runtime: null,
+        operationPolicy: null,
         metrics: null,
       }),
     );
@@ -324,11 +336,49 @@ export async function listMachines(
 
   // The workspace's enrolled selfhosted machines. One bulk metrics read joined
   // onto the machines (no N+1). Each machine is probed for liveness.
-  const [sandboxes, enrollments, metricsByEnrollment] = await Promise.all([
+  const [legacySandboxes, enrollments] = await Promise.all([
     listSandboxes(db, workspaceId),
-    listEnrollments(db, workspaceId, { status: "active" }),
-    readMachineMetricsLatestForWorkspace(db, workspaceId),
+    listEnrollments(
+      db,
+      input.accountId && input.subjectId
+        ? {
+            accountId: input.accountId,
+            workspaceId,
+            subjectId: input.subjectId,
+          }
+        : workspaceId,
+      { status: "active" },
+    ),
   ]);
+  const metricsByEnrollment = new Map<string, MachineMetricsRow>();
+  for (const originWorkspaceId of new Set(enrollments.map((entry) => entry.workspaceId))) {
+    const originMetrics = await readMachineMetricsLatestForWorkspace(db, originWorkspaceId);
+    for (const [enrollmentId, metrics] of originMetrics) {
+      metricsByEnrollment.set(enrollmentId, metrics);
+    }
+  }
+  const scopedSandboxes = enrollments.flatMap((enrollment) =>
+    enrollment.sandboxId
+      ? [
+          {
+            id: enrollment.sandboxId,
+            accountId: enrollment.accountId,
+            workspaceId: enrollment.workspaceId,
+            kind: "selfhosted" as const,
+            name: enrollment.sandboxName ?? `${enrollment.os} machine`,
+            enrollmentId: enrollment.id,
+            createdAt: enrollment.createdAt,
+            updatedAt: enrollment.updatedAt,
+          },
+        ]
+      : [],
+  );
+  const sandboxes = [
+    ...legacySandboxes.filter(
+      (sandbox) => !scopedSandboxes.some((scoped) => scoped.id === sandbox.id),
+    ),
+    ...scopedSandboxes,
+  ];
   const enrollmentById = new Map(enrollments.map((e) => [e.id, e]));
 
   const machineViews = await Promise.all(
@@ -341,10 +391,29 @@ export async function listMachines(
         return null;
       }
       const [liveConnection, lease] = await Promise.all([
-        getLiveEnrollmentConnection(db, workspaceId, enrollment.id),
-        readLease(db, workspaceId, sandbox.id),
+        enrollment.connectionInstanceId &&
+        enrollment.connectionLeaseExpiresAt &&
+        Date.parse(enrollment.connectionLeaseExpiresAt) > Date.now()
+          ? Promise.resolve(enrollment)
+          : getLiveEnrollmentConnection(
+              db,
+              input.accountId && input.subjectId
+                ? {
+                    accountId: input.accountId,
+                    workspaceId,
+                    subjectId: input.subjectId,
+                  }
+                : enrollment.workspaceId,
+              enrollment.id,
+            ),
+        readLease(db, enrollment.workspaceId, sandbox.id),
       ]);
-      const probe = await probeEnrollment(services, workspaceId, enrollment, liveConnection);
+      const probe = await probeEnrollment(
+        services,
+        enrollment.workspaceId,
+        enrollment,
+        liveConnection,
+      );
       const state = machineStateFor(probe.state, probe.hasDisplay);
 
       // sharedSessionCount = the lease refcount for this machine's group. The
@@ -356,6 +425,8 @@ export async function listMachines(
       return MachineView.parse({
         sandboxId: sandbox.id,
         enrollmentId: enrollment.id,
+        scope: enrollment.scope,
+        generation: enrollment.generation,
         name: sandbox.name,
         kind: "selfhosted",
         state,
@@ -373,6 +444,7 @@ export async function listMachines(
         lastSeenAt: enrollment.lastSeenAt,
         connectionAuthority: connectionAuthorityFor(enrollment, liveConnection),
         runtime: runtimeFor(services.settings, enrollment),
+        operationPolicy: enrollment.operationPolicy,
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
       });
     }),

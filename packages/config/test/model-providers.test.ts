@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+} from "@opengeni/codex/constants";
+import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
@@ -696,6 +701,7 @@ describe("configuredModels", () => {
     expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.imageGeneration.runnable).toBe(true);
+    expect(resolved.model.capabilities.inputModalities).toEqual(["text", "image"]);
     expect(resolved.model.capabilities.reasoning).toMatchObject({
       efforts: ["low", "medium", "high", "xhigh"],
       defaultEffort: "high",
@@ -765,11 +771,42 @@ describe("configuredModels", () => {
       providerId: "openai",
       providerLabel: "OpenAI",
       api: "responses",
-      contextWindowTokens: settings.contextWindowTokens,
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
       reasoningEffort: true,
       hostedWebSearch: settings.webSearchEnabled,
     });
     expect(models.map((model) => model.label)).toEqual(["GPT-5.6 Sol", "GPT-5.4", "GPT-5.4 Mini"]);
+    expect(models.find((model) => model.id === "gpt-5.4")?.contextWindowTokens).toBe(
+      settings.contextWindowTokens,
+    );
+  });
+
+  test("billed GPT-5.6 pins the Codex 272k context catalog", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
+        OPENGENI_CONTEXT_WINDOW_TOKENS: "1050000",
+      },
+      () => getSettings(),
+    );
+    const models = configuredModels(settings);
+    for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const) {
+      const model = models.find((candidate) => candidate.id === id);
+      expect(model).toMatchObject({
+        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      });
+      expect(model?.executionLimits).toMatchObject({
+        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      });
+    }
   });
 
   test("unions built-in models first, then registry models in declaration order", () => {

@@ -45,6 +45,10 @@ export type MintStreamTokenInput = {
   ttlSeconds?: number;
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** The authenticated viewer subject the token is minted for (0281). */
+  subjectId?: string;
+  /** The session authority epoch observed at mint (0281). */
+  authorityEpoch?: number;
 };
 
 /**
@@ -68,6 +72,8 @@ export async function mintStreamToken(
     mode: input.mode ?? "view",
     port: input.port ?? DESKTOP_STREAM_PORT,
     exp: nowSeconds + ttlSeconds,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
+    ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
   });
   return signStreamToken(secret, payload);
 }

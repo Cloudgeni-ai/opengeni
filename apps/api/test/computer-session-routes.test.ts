@@ -36,13 +36,17 @@ describe("ComputerSession route discipline", () => {
         '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
       ),
     );
-    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
     expect(attachment).toContain("sessionClient.listTargets()");
     expect(attachment).toContain('target.kind === "screen"');
     expect(attachment).toContain('record.session.platform === "linux"');
     expect(attachment).toContain("client.computerRfbStreamUrl");
     expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
+    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("createInteractionFrameProxyAttachment");
+    expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
+    expect(attachment).toContain('context.req.header("x-forwarded-proto")');
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );
@@ -94,10 +98,9 @@ describe("ComputerSession route discipline", () => {
     expect(placement).toContain("enrollment.connectionInstanceId");
     expect(placement).toContain("buildSelfhostedBackendSession({");
     expect(placement).toContain("new NatsControlRpc(");
-    expect(placement).toContain(
-      "assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration)",
-    );
-    expect(placement).toContain("placementInstanceId: device.connectionGeneration");
+    expect(placement).toContain("attachedEndPlacementInstanceId(");
+    expect(placement).toContain("device.connectionGeneration");
+    expect(source).toContain('operation === "computer.end" && expectedPlacementInstanceId');
   });
 
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {
@@ -113,6 +116,12 @@ describe("ComputerSession route discipline", () => {
       create.indexOf("client.createComputerSession"),
     );
     expect(create).toContain('state: "outcome_unknown" as const');
+    expect(create).toContain("const rethrowAfterFailure =");
+    expect(create).toContain("error instanceof BrowserControlTransportError");
+    expect(create).toContain("isAbort(error)");
+    expect(create.indexOf("failComputerSessionOperation")).toBeLessThan(
+      create.indexOf("if (rethrowAfterFailure) throw error"),
+    );
 
     const end = source.slice(
       source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"'),

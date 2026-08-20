@@ -159,6 +159,7 @@ impl OpDriver {
         let control = ControlRequest {
             request_id: request_id.to_string(),
             epoch: 0,
+            resource_policy: None,
             op: Some(op),
         };
         let request = async_nats::Request::new()

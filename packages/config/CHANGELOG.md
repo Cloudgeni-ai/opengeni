@@ -1,5 +1,104 @@
 # @opengeni/config
 
+## 0.17.1
+
+### Patch Changes
+
+- 81d2da0: Pin billed GPT-5.6 Sol/Terra/Luna to Codex's 272k/258.4k/244.8k context catalog instead of the 1.05M deployment default.
+
+## 0.17.0
+
+### Minor Changes
+
+- 4541ab2: Named pre-activation opt-out for canonical organization-tenancy authority: `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` (`organizationTenancyCanonicalActivationEnabled`) defaults to `false`, the reversible pre-activation posture, and is parsed with `EnvBoolean` so an explicit `false` cannot be coerced into activation. Leaving it unset or false is the supported way to decline or defer the one-way tenancy cutover; it is not a kill switch, and setting it back to false after an activation migration commits restores nothing. The chart's `config` map and `.env.example` pin the same safe default. The rollback boundary, activation preconditions, and operator procedure are documented in `docs/organization-tenancy.md` and `docs/deployment.md`.
+
+### Patch Changes
+
+- f4afa19: Advertise SuperGrok image input so Grok and Gateway Kimi receive attachments, `view_image`, and `computer_*` screenshots. DeepSeek stays text-only.
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+
+## 0.16.8
+
+### Patch Changes
+
+- 0a6c577: Keep periodic workspace snapshots off the first provider-request critical path, clarify the overlapping runtime/model-preparation timing in the session timeline, and promote the complete signed Agent 0.1.16 bundle as the default stable installer target.
+- f804057: Remove the arbitrary per-turn Codemode call cap. One turn may journal as many Codemode calls as the work needs; recovery still reuses that same journal rather than minting a new budget.
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/contracts@1.4.0
+
+## 0.16.7
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+
+## 0.16.6
+
+### Patch Changes
+
+- 1aa02d4: Ship the branded macOS Connected Machine icon from every control plane and
+  promote the existing signed agent 0.1.15 release as the default stable channel.
+- 91d5caf: Add a provider-neutral operational instruction contract for consistent agent collaboration, execution safety, file editing, and skill usage across every OpenGeni persona. Keep persistent system instructions prompt-cache stable, project goal continuations once as canonical user messages, let authoritative human input supersede a pending continuation, and remove the unreliable inferred-progress pause.
+- 6c45ceb: Start fresh progressive-disclosure turns with only local tools, `tool_search`,
+  and MCP servers explicitly marked eager by the session. Prepare every other
+  strict or optional MCP concurrently, join the exact catalog only when searched
+  or invoked, and keep worker first-party MCP traffic on an internal endpoint
+  instead of a sandbox-facing public route while preserving the distinct root,
+  documents, and files MCP paths.
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/contracts@1.2.0
+
+## 0.16.5
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- ec00479: Add provider-free Google Drive release-readiness receipts, configurable persisted sync budgets, bounded request retry and timeout handling, and scoped sync health telemetry, dashboards, and alerts.
+- 79f57b5: Close terminal SuperGrok SSE streams deterministically; abort any accepted stream after a configurable interval without a complete valid event; and expose metadata-only durable lifecycle audits, bounded metrics, dashboard panels, and timeout alerting without replaying partial work.
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/xai-subscription@0.1.1
+
 ## 0.16.4
 
 ### Patch Changes

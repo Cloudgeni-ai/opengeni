@@ -38,18 +38,22 @@ import {
   readActiveSandbox,
   readLease,
   releaseLeaseHolder,
+  SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
+  SandboxRigConflictError,
   withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 
 import {
   buildSelfhostedBackendSession,
@@ -96,6 +100,7 @@ export type ChannelAOperation =
   | "fs.list"
   | "fs.list-batch"
   | "fs.read"
+  | "artifact.publish"
   | "fs.write"
   | "fs.delete"
   | "fs.move"
@@ -531,12 +536,12 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-    db,
-    settings,
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
+    accountId,
     workspaceId,
-    session.environmentId,
-  );
+    variableSetId: session.environmentId,
+    authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
+  });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
@@ -580,7 +585,13 @@ async function withChannelAOperation<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    const result = await fn({ service, lease, homeSession, routingSession, requestId });
+    const result = await fn({
+      service,
+      lease,
+      homeSession,
+      routingSession,
+      requestId,
+    });
     // The direct request has accepted the result in memory. Finalize every
     // Connected Machine backend the routing proxy reached so a mid-request
     // route transition cannot leave completed output retained until TTL.
@@ -619,13 +630,22 @@ async function withChannelAOperation<T>(
           message: "machine-home session has no active Connected Machine",
         });
       }
-      const sandbox = await getSandbox(db, workspaceId, pointer.activeSandboxId);
+      const sandbox = await getSandbox(
+        db,
+        { accountId: ctx.accountId, workspaceId, subjectId: ctx.subjectId },
+        pointer.activeSandboxId,
+      );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
         throw new HTTPException(409, {
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
-      const enrollment = await getLiveEnrollmentConnection(db, workspaceId, sandbox.enrollmentId);
+      const originWorkspaceId = sandbox.workspaceId;
+      const enrollment = await getLiveEnrollmentConnection(
+        db,
+        { accountId, workspaceId, subjectId: ctx.subjectId },
+        sandbox.enrollmentId,
+      );
       if (!enrollment?.connectionInstanceId) {
         // Preserve causal machine liveness through Channel-A. Generic callers
         // retain the established 409 mapping below; Browser/Computer callers can
@@ -635,7 +655,7 @@ async function withChannelAOperation<T>(
         );
       }
       const built = await buildSelfhostedBackendSession({
-        workspaceId,
+        workspaceId: originWorkspaceId,
         agentId: sandbox.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(settings),
@@ -645,6 +665,10 @@ async function withChannelAOperation<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        operationResourcePolicy: enrollment.operationPolicy,
+        operationResourcePolicySupported:
+          enrollment.agentCapabilities.operationResourcePolicy === true,
+        operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection
@@ -676,6 +700,7 @@ async function withChannelAOperation<T>(
           accountId,
           workspaceId,
           sessionId: session.id,
+          resourceSubjectId: ctx.subjectId,
           pinnedSelfhosted: {
             sandboxId: sandbox.id,
             epoch: pointer.activeEpoch,
@@ -760,6 +785,56 @@ async function withChannelAOperation<T>(
       });
     }
   } catch (error) {
+    let mappedError: unknown = error;
+    if (error instanceof SandboxImageConflictError) {
+      // A durable Browser/Computer holder can outlive its provider container.
+      // Runtime drift is checked before a new direct holder is admitted, so a
+      // dead old container would otherwise strand the lease behind a permanent
+      // conflict. Probe the exact old identity without replacement; only an
+      // authoritative provider-missing result may retire it and unblock the
+      // next request's cold successor election.
+      const live = await readLease(db, workspaceId, sandboxGroupId).catch(() => null);
+      if (live?.liveness === "warm" && live.instanceId !== null && live.resumeState !== null) {
+        let probe: EstablishedSandboxSession | undefined;
+        try {
+          probe = await establishSandboxSessionFromEnvelope(
+            sandboxRuntime.settings,
+            live.resumeState,
+            {
+              sessionId: session.id,
+              recovery: "resume-only",
+              backendOverride: session.sandboxBackend,
+              environment,
+            },
+          );
+        } catch (probeError) {
+          if (isProviderSandboxNotFoundError(session.sandboxBackend, probeError)) {
+            const marked = await markWarmLeaseInstanceLost(db, {
+              accountId,
+              workspaceId,
+              sandboxGroupId,
+              expectedEpoch: live.leaseEpoch,
+              expectedInstanceId: live.instanceId,
+            }).catch(() => null);
+            if (marked?.status === "marked") {
+              await appendAndPublishEvents(db, bus, workspaceId, session.id, [
+                {
+                  type: "sandbox.box.lost",
+                  payload: { sandboxId: live.instanceId },
+                },
+              ]).catch(() => undefined);
+              mappedError = new ApiHttpError(409, {
+                code: "conflict",
+                message: "sandbox instance was lost; retry to restore it",
+                retryable: true,
+              });
+            }
+          }
+        } finally {
+          await dropEstablishedHandle(probe);
+        }
+      }
+    }
     // Release is idempotent. If acquisition committed before the request was
     // cancelled, this removes that exact direct holder; a transient DB failure
     // must not overwrite the original structural error (holder TTL is the final
@@ -771,10 +846,10 @@ async function withChannelAOperation<T>(
       backend: session.sandboxBackend,
       operation,
       durationMs: performance.now() - operationStartedAt,
-      error,
+      error: mappedError,
       waitSignal: ctx.waitSignal,
     });
-    throw mapChannelAError(error, ctx.waitSignal);
+    throw mapChannelAError(mappedError, ctx.waitSignal);
   }
 
   // Keep the exact direct-request owner visible for the full operation. A
@@ -841,8 +916,10 @@ async function withChannelAOperation<T>(
           },
         ]);
       }
-      throw new HTTPException(409, {
+      throw new ApiHttpError(409, {
+        code: "conflict",
         message: `sandbox instance was lost; retry to restore it`,
+        retryable: true,
       });
     }
   };
@@ -927,6 +1004,7 @@ async function withChannelAOperation<T>(
           accountId,
           workspaceId,
           sessionId: session.id,
+          resourceSubjectId: ctx.subjectId,
           homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
@@ -1076,6 +1154,12 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   if (error instanceof SandboxProviderReadLockUnavailableError)
     return new HTTPException(503, { message: error.message });
+  if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError)
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: "sandbox runtime changed while this session still has active operations; retry",
+      retryable: true,
+    });
   if (error instanceof SelfhostedControlError && error.agentOffline)
     return new HTTPException(409, { message: error.message, cause: error });
   if (error instanceof ChannelAUnavailableError)
@@ -1088,7 +1172,29 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   if (error instanceof ChannelAUnsupportedError)
     return new HTTPException(409, { message: error.message });
+  const authorityFence = workspaceMutationAuthorityFenceCode(error);
+  // A revoked grant is an authorization outcome, not a server fault; an
+  // unattributed pre-0277 writer is a conflict the caller resolves by starting
+  // fresh work. Both must be visible instead of surfacing as a 500.
+  if (authorityFence === "authority_revoked")
+    return new HTTPException(403, { message: (error as Error).message });
+  if (authorityFence === "authority_unattributed")
+    return new HTTPException(409, { message: (error as Error).message });
   return error;
+}
+
+/** Structural check: the fence type lives in `@opengeni/db` and is raised deep
+ * inside admission, so match it the same way the worker does. */
+function workspaceMutationAuthorityFenceCode(error: unknown): string | null {
+  if (
+    !(error instanceof Error) ||
+    (error.name !== "SandboxWorkspaceMutationFencedError" &&
+      error.name !== "SandboxRetainedProcessPromotionFencedError")
+  ) {
+    return null;
+  }
+  const code = (error as Error & { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
 }
 
 export function isChannelARequestCancellation(error: unknown, waitSignal?: AbortSignal): boolean {
@@ -1118,6 +1224,13 @@ export function channelAOperationFailureDiagnostic(
       reason: "provider_read_busy",
       status: 503,
       errorCode: "sandbox_channel_a_provider_busy",
+    };
+  }
+  if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError) {
+    return {
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
     };
   }
   if (error instanceof ChannelAUnavailableError) {
@@ -1158,6 +1271,16 @@ export function channelAOperationFailureDiagnostic(
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }
+  // An authority fence is a deliberate rejection, not a fault: keep it out of
+  // the unexpected-failure signal that operators page on.
+  const authorityFence = workspaceMutationAuthorityFenceCode(error);
+  if (authorityFence === "authority_revoked" || authorityFence === "authority_unattributed") {
+    return {
+      reason: "request_rejected",
+      status: authorityFence === "authority_revoked" ? 403 : 409,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
   return {
     reason: "unexpected",
     status: 500,
@@ -1165,7 +1288,8 @@ export function channelAOperationFailureDiagnostic(
   };
 }
 
-function observeChannelAOperationFailure(
+/** Exported for the telemetry contract tests; not a route surface. */
+export function observeChannelAOperationFailure(
   services: ChannelAServices,
   input: {
     workspaceId: string;
@@ -1178,6 +1302,13 @@ function observeChannelAOperationFailure(
   },
 ): void {
   if (!services.observability) return;
+  // A writer with no recorded authority is a compatibility lane, not a fault:
+  // count the lane itself so an operator can see whether it is still live,
+  // separately from the structural failure signal operators page on below.
+  // Lane name only - never the workspace, sandbox group, backend, or operation.
+  if (workspaceMutationAuthorityFenceCode(input.error) === "authority_unattributed") {
+    recordTenancyCompatibilityLaneUse(services.observability, "workspace_writer_unattributed");
+  }
   const diagnostic = channelAOperationFailureDiagnostic(input.error, input.waitSignal);
   const attributes = {
     sandboxLeaseKey: sandboxLeaseTelemetryKey(input.workspaceId, input.sandboxGroupId),

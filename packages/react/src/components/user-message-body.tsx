@@ -109,6 +109,87 @@ function isFullyInsideVisiblePreview(rect: DOMRect, clipRect: DOMRect): boolean 
 
 type RestoreDisclosureAnchor = (() => void) | null;
 
+type SharedResizeObserverState = {
+  callbacks: Map<Element, () => void>;
+  observer: ResizeObserver;
+  handleWindowResize: () => void;
+};
+
+type DisclosureMeasurementJob = {
+  read: () => boolean;
+  write: (collapsible: boolean) => void;
+};
+
+const sharedResizeObservers = new WeakMap<Window, SharedResizeObserverState>();
+const disclosureMeasurementJobs = new Map<object, DisclosureMeasurementJob>();
+let disclosureMeasurementQueued = false;
+
+/**
+ * Coalesce a commit's disclosure reads before applying any presentation writes.
+ * Reading and writing one message at a time forced a fresh layout for every
+ * newly mounted row in large history prepends.
+ */
+function scheduleDisclosureMeasurement(
+  view: Window,
+  key: object,
+  job: DisclosureMeasurementJob,
+): () => void {
+  disclosureMeasurementJobs.set(key, job);
+  if (!disclosureMeasurementQueued) {
+    disclosureMeasurementQueued = true;
+    view.queueMicrotask(() => {
+      disclosureMeasurementQueued = false;
+      const pending = [...disclosureMeasurementJobs.values()];
+      disclosureMeasurementJobs.clear();
+      const decisions = pending.map(({ read }) => read());
+      for (let index = 0; index < pending.length; index += 1) {
+        pending[index]!.write(decisions[index]!);
+      }
+    });
+  }
+  return () => disclosureMeasurementJobs.delete(key);
+}
+
+function observeSharedResize(element: Element, callback: () => void): (() => void) | null {
+  const view = element.ownerDocument.defaultView;
+  if (!view || typeof ResizeObserver === "undefined") {
+    return null;
+  }
+  let state = sharedResizeObservers.get(view);
+  if (!state) {
+    const callbacks = new Map<Element, () => void>();
+    const handleWindowResize = () => {
+      for (const registered of new Set(callbacks.values())) registered();
+    };
+    const observer = new ResizeObserver((entries) => {
+      if (entries.length === 0) {
+        handleWindowResize();
+      } else {
+        for (const entry of entries) {
+          callbacks.get(entry.target)?.();
+        }
+      }
+    });
+    view.addEventListener("resize", handleWindowResize);
+    state = { callbacks, observer, handleWindowResize };
+    sharedResizeObservers.set(view, state);
+  }
+  state.callbacks.set(element, callback);
+  state.observer.observe(element);
+  return () => {
+    if (state.callbacks.get(element) !== callback) {
+      return;
+    }
+    state.callbacks.delete(element);
+    state.observer.unobserve(element);
+    if (state.callbacks.size === 0) {
+      state.observer.disconnect();
+      view.removeEventListener("resize", state.handleWindowResize);
+      sharedResizeObservers.delete(view);
+    }
+  };
+}
+
 export type UserMessageDisclosureContextValue = {
   expandedByMessageId: Map<string, boolean>;
   beginChange: (
@@ -171,15 +252,32 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
   const [expanded, setExpanded] = useState(
     () => disclosure?.expandedByMessageId.get(messageId) ?? false,
   );
-  const [collapsible, setCollapsible] = useState(() => userMessageLikelyNeedsDisclosure(text));
+  const collapsibleRef = useRef(userMessageLikelyNeedsDisclosure(text));
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const clipRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const thresholdRef = useRef<HTMLSpanElement | null>(null);
+  const fadeRef = useRef<HTMLSpanElement | null>(null);
+  const disclosureControlRef = useRef<HTMLButtonElement | null>(null);
   const pendingRestoreRef = useRef<RestoreDisclosureAnchor>(null);
   const managedInertDescendantsRef = useRef(new Set<HTMLElement>());
+  const measurementKeyRef = useRef({});
   const contentId = `og-user-message-${useId().replace(/:/g, "")}`;
+  const collapsible = collapsibleRef.current;
   const collapsed = collapsible && !expanded;
+
+  const syncDisclosurePresentation = useCallback((nextCollapsible: boolean) => {
+    collapsibleRef.current = nextCollapsible;
+    const nextCollapsed = nextCollapsible && !expandedRef.current;
+    const clip = clipRef.current;
+    clip?.classList.toggle("max-h-56", nextCollapsed);
+    clip?.classList.toggle("overflow-hidden", nextCollapsed);
+    clip?.classList.toggle("sm:max-h-72", nextCollapsed);
+    if (fadeRef.current) fadeRef.current.hidden = !nextCollapsed;
+    if (disclosureControlRef.current) disclosureControlRef.current.hidden = !nextCollapsible;
+  }, []);
 
   const restoreManagedInertDescendants = useCallback(() => {
     for (const descendant of managedInertDescendantsRef.current) {
@@ -193,7 +291,7 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
 
   const syncCollapsedInteractivity = useCallback(() => {
     restoreManagedInertDescendants();
-    if (!collapsed) {
+    if (!collapsibleRef.current || expandedRef.current) {
       return;
     }
 
@@ -220,58 +318,80 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
       descendant.setAttribute("data-og-user-message-managed-inert", "");
       managedInertDescendantsRef.current.add(descendant);
     }
-  }, [collapsed, restoreManagedInertDescendants]);
+  }, [restoreManagedInertDescendants]);
 
-  const measure = useCallback(() => {
+  const readCollapsible = useCallback(() => {
     const content = contentRef.current;
     const threshold = thresholdRef.current;
     if (!content || !threshold) {
-      return;
+      return userMessageLikelyNeedsDisclosure(text);
     }
     const renderedHeight = Math.max(content.scrollHeight, content.getBoundingClientRect().height);
     const collapseHeight = Math.max(
       threshold.offsetHeight,
       threshold.getBoundingClientRect().height,
     );
-    setCollapsible(
-      renderedHeight > 0 && collapseHeight > 0
-        ? renderedHeight > collapseHeight + 1
-        : userMessageLikelyNeedsDisclosure(text),
-    );
+    return renderedHeight > 0 && collapseHeight > 0
+      ? renderedHeight > collapseHeight + 1
+      : userMessageLikelyNeedsDisclosure(text);
   }, [text]);
 
+  const measure = useCallback(() => {
+    const view = rootRef.current?.ownerDocument.defaultView;
+    if (!view) {
+      syncDisclosurePresentation(readCollapsible());
+      syncCollapsedInteractivity();
+      return () => undefined;
+    }
+    return scheduleDisclosureMeasurement(view, measurementKeyRef.current, {
+      read: readCollapsible,
+      write: (nextCollapsible) => {
+        syncDisclosurePresentation(nextCollapsible);
+        syncCollapsedInteractivity();
+      },
+    });
+  }, [readCollapsible, syncCollapsedInteractivity, syncDisclosurePresentation]);
+
   useLayoutEffect(() => {
-    measure();
+    const cancelPendingMeasurement = measure();
     const content = contentRef.current;
     const threshold = thresholdRef.current;
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(() => {
-            measure();
-            syncCollapsedInteractivity();
-          });
-    if (content) {
-      observer?.observe(content);
-    }
-    if (threshold) {
-      observer?.observe(threshold);
-    }
+    const onResize = () => {
+      measure();
+    };
+    const stopObservingContent = content ? observeSharedResize(content, onResize) : null;
+    const stopObservingThreshold = threshold ? observeSharedResize(threshold, onResize) : null;
+    const observerAvailable = stopObservingContent !== null || stopObservingThreshold !== null;
     const handleResize = () => {
       measure();
-      syncCollapsedInteractivity();
     };
-    window.addEventListener("resize", handleResize);
+    // ResizeObserver already reports viewport-driven wrapping/height changes
+    // for both measured elements. The window listener is only the fallback for
+    // runtimes without ResizeObserver; installing both created one redundant
+    // global listener per durable user message in large timelines.
+    if (!observerAvailable) {
+      window.addEventListener("resize", handleResize);
+    }
     return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", handleResize);
+      cancelPendingMeasurement();
+      stopObservingContent?.();
+      stopObservingThreshold?.();
+      if (!observerAvailable) {
+        window.removeEventListener("resize", handleResize);
+      }
     };
   }, [measure, syncCollapsedInteractivity]);
 
   useLayoutEffect(() => {
+    syncDisclosurePresentation(collapsibleRef.current);
     syncCollapsedInteractivity();
     return restoreManagedInertDescendants;
-  });
+  }, [
+    expanded,
+    restoreManagedInertDescendants,
+    syncCollapsedInteractivity,
+    syncDisclosurePresentation,
+  ]);
 
   useLayoutEffect(() => {
     const restore = pendingRestoreRef.current;
@@ -316,26 +436,26 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
         >
           {children}
         </div>
-        {collapsed ? (
-          <span
-            aria-hidden="true"
-            data-og-user-message-fade=""
-            className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-og-surface-2 via-og-surface-2/90 to-transparent"
-          />
-        ) : null}
+        <span
+          ref={fadeRef}
+          aria-hidden="true"
+          hidden={!collapsed}
+          data-og-user-message-fade=""
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-og-surface-2 via-og-surface-2/90 to-transparent"
+        />
       </div>
-      {collapsible ? (
-        <button
-          type="button"
-          aria-controls={contentId}
-          aria-expanded={expanded}
-          data-og-user-message-disclosure=""
-          className="mt-1.5 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11"
-          onClick={(event) => toggle(event.currentTarget)}
-        >
-          {expanded ? "Show less" : "Show more"}
-        </button>
-      ) : null}
+      <button
+        ref={disclosureControlRef}
+        type="button"
+        hidden={!collapsible}
+        aria-controls={contentId}
+        aria-expanded={expanded}
+        data-og-user-message-disclosure=""
+        className="mt-1.5 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11"
+        onClick={(event) => toggle(event.currentTarget)}
+      >
+        {expanded ? "Show less" : "Show more"}
+      </button>
     </div>
   );
 }

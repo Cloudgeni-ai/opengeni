@@ -16,18 +16,20 @@ import {
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
+  attachOpenSuffixToPendingToolCalls,
   claimSessionWorkForAttempt,
   createDb,
   createFileUpload,
   createScheduledTask,
   createSession,
   createSessionGoal,
-  createWorkspaceEnvironment,
+  createVariableSet,
   dbSql,
   encryptEnvironmentValue,
   enablePackInstallation,
+  loadVariableSetForRun,
   registerWorkspacePack,
-  setWorkspaceEnvironmentVariable,
+  setVariableSetVariable,
   getSession,
   getSessionGoal,
   getBillingBalance,
@@ -41,6 +43,7 @@ import {
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
+  registerPendingSessionToolCall,
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
@@ -55,6 +58,7 @@ import {
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   type AccessGrant,
   type SessionStatus,
@@ -75,10 +79,7 @@ import {
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../../apps/worker/src/activities/types";
-import {
-  loadWorkspaceEnvironmentForRun,
-  sandboxEnvironmentForRun,
-} from "../../apps/worker/src/activities/environment";
+import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import {
   ScriptedModel,
@@ -514,6 +515,7 @@ describe("worker activities integration", () => {
     try {
       const settings = {
         ...apiSettings,
+        opengeniMcpInternalUrl: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
         mcpServers: [
           {
             id: "opengeni",
@@ -628,6 +630,7 @@ describe("worker activities integration", () => {
         timeoutMs: undefined,
         cacheToolsList: false,
       });
+      apiSettings.opengeniMcpInternalUrl = `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`;
       const settings = apiSettings;
       const model = new ScriptedModel([
         {
@@ -1771,6 +1774,35 @@ describe("worker activities integration", () => {
       throw new Error(`approval fixture was not claimed: ${initialClaim.reason}`);
     }
     const turn = initialClaim.turn;
+    expect(
+      await registerPendingSessionToolCall(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId: initialAttemptId,
+        callId: "approval-1",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "approval-1",
+          name: "needs_approval",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    expect(
+      await attachOpenSuffixToPendingToolCalls(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId: initialAttemptId,
+        members: [{ callId: "approval-1", interruptionKind: "approval", reasoningItems: [] }],
+      }),
+    ).toEqual({ accepted: true, attached: 1 });
     await saveRunState(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1778,7 +1810,7 @@ describe("worker activities integration", () => {
       turnId: turn.id,
       expectedExecutionGeneration: turn.executionGeneration,
       expectedAttemptId: initialAttemptId,
-      serializedRunState: '{"schemaVersion":"test","history":[]}',
+      serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
       pendingApprovals: [{ id: "approval-1" }],
     });
     expect(
@@ -1813,7 +1845,7 @@ describe("worker activities integration", () => {
         close: async () => {},
       }),
       prepareInput: async (_agent, input) => {
-        expect(input.kind).toBe("approval");
+        expect(input.kind).toBe("message");
         return { input: "approved", persistedHistoryCount: 0 };
       },
       runStream: async () => {
@@ -1993,7 +2025,7 @@ describe("worker activities integration", () => {
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
+      "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
@@ -2974,6 +3006,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
 
     expect(result.action).toBe("start");
@@ -2994,11 +3027,10 @@ describe("worker activities integration", () => {
     });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
-    expect(events.map((event) => event.type)).toEqual([
-      "session.created",
-      "session.status.changed",
-      "system.update.pending",
-    ]);
+    // session.created carries the public "queued" status directly, so no
+    // separate session.status.changed event is emitted before the wake.
+    expect(events.map((event) => event.type)).toEqual(["session.created", "system.update.pending"]);
+    expect(events[0]?.payload).toMatchObject({ status: "queued" });
     const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,
@@ -3096,12 +3128,12 @@ describe("worker activities integration", () => {
       effectiveControl: { state: "paused" },
     });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
+    // session.created carries the public "queued" status directly; there is no
+    // separate session.status.changed event before the (withheld) wake.
     expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
       status: "queued",
     });
-    expect(events.find((event) => event.type === "session.status.changed")?.payload).toMatchObject({
-      status: "queued",
-    });
+    expect(events.filter((event) => event.type === "session.status.changed")).toHaveLength(0);
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
@@ -3152,6 +3184,7 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
     ).resolves.toEqual({ action: "blocked", reason: "monthly_model_cost_limit" });
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
@@ -3257,6 +3290,7 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
     ).resolves.toMatchObject({
       action: "start",
@@ -3315,6 +3349,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
     const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
     const manualUsageKey = `test:scheduled-reusable-manual:${task.id}`;
@@ -3490,13 +3525,17 @@ describe("worker activities integration", () => {
     });
 
     await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled");
+    // A cancelled target is a deterministic terminal outcome: the run settles
+    // (skipped, session_cancelled) and the dispatch resolves blocked rather than
+    // throwing into a Temporal retry loop.
     await expect(
       activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("reusable session is cancelled; refusing to revive on scheduled fire");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     expect(await getSession(dbClient.db, grant.workspaceId, target.id)).toMatchObject({
       status: "cancelled",
     });
@@ -3506,7 +3545,7 @@ describe("worker activities integration", () => {
     expect(await listSessionTurns(dbClient.db, grant.workspaceId, target.id, 10)).toHaveLength(0);
     const cancelledRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(cancelledRuns).toHaveLength(1);
-    expect(cancelledRuns[0]?.status).toBe("failed");
+    expect(cancelledRuns[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
     expect(
       await sumUsageQuantity(dbClient.db, {
         accountId: grant.accountId,
@@ -3527,11 +3566,18 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("scheduled task target session is unavailable");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     const deletedRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(deletedRuns).toHaveLength(2);
-    expect(deletedRuns.every((run) => run.status === "failed")).toBe(true);
+    expect(deletedRuns.every((run) => run.status === "skipped" || run.status === "failed")).toBe(
+      true,
+    );
+    expect(deletedRuns.some((run) => run.error === "scheduled_target_session_unavailable")).toBe(
+      true,
+    );
+    expect(deletedRuns.some((run) => run.status === "dispatched")).toBe(false);
     expect(
       await sumUsageQuantity(dbClient.db, {
         accountId: grant.accountId,
@@ -3557,16 +3603,57 @@ describe("worker activities integration", () => {
       },
       "Operator notes: API_TOKEN authenticates the worker against the test API.",
     );
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "load attached variable set",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      variableSetId: environment.id,
+      subjectId: grant.subjectId,
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "load attached variable set" } },
+    ]);
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `environment-fixture-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") {
+      throw new Error(`environment fixture was not claimed: ${claimed.reason}`);
+    }
+    const initiatingHumanSubjectId = claimed.turn.initiatingHumanSubjectId;
+    if (!initiatingHumanSubjectId) {
+      throw new Error("environment fixture has no initiating human");
+    }
+    const authority = {
+      kind: "agent_attempt" as const,
+      subjectId: initiatingHumanSubjectId,
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
 
     expect(
-      await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null),
+      await loadVariableSetForRun(dbClient.db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: null,
+        authority,
+      }),
     ).toBeNull();
-    const loaded = await loadWorkspaceEnvironmentForRun(
-      dbClient.db,
-      settings,
-      grant.workspaceId,
-      environment.id,
-    );
+    const loaded = await loadVariableSetForRun(dbClient.db, settings, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      variableSetId: environment.id,
+      authority,
+    });
     expect(loaded).toMatchObject({
       id: environment.id,
       name: environment.name,
@@ -3578,16 +3665,21 @@ describe("worker activities integration", () => {
     });
 
     await expect(
-      loadWorkspaceEnvironmentForRun(
-        dbClient.db,
-        testSettings({ databaseUrl: services.databaseUrl }),
-        grant.workspaceId,
-        environment.id,
-      ),
+      loadVariableSetForRun(dbClient.db, testSettings({ databaseUrl: services.databaseUrl }), {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: environment.id,
+        authority,
+      }),
     ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     await expect(
-      loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()),
-    ).rejects.toThrow("variable set not found");
+      loadVariableSetForRun(dbClient.db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        variableSetId: crypto.randomUUID(),
+        authority,
+      }),
+    ).rejects.toThrow();
   });
 
   test("layers workspace environment values between deployment env and GitHub run auth", async () => {
@@ -3715,7 +3807,7 @@ describe("worker activities integration", () => {
     expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
   });
 
-  test("propagates scheduled task environment attachments into dispatched sessions", async () => {
+  test("materializes scheduled task workspace Variable Sets for pure service turns", async () => {
     const grant = await testGrant(dbClient.db);
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
       TASK_TOKEN: "task-secret-123456",
@@ -3747,6 +3839,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
     expect(dispatched.action).toBe("start");
     const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
@@ -3764,6 +3857,71 @@ describe("worker activities integration", () => {
       variableSetName: environment.name,
     });
     expect(JSON.stringify(events)).not.toContain("task-secret-123456");
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      attemptId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: dispatched.sessionId,
+      trigger: { kind: "next" },
+      workflowId: `session-${dispatched.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("idle");
+    const [scheduledTurn] = await listSessionTurns(
+      dbClient.db,
+      grant.workspaceId,
+      dispatched.sessionId,
+      10,
+    );
+    expect(scheduledTurn?.initiator).toEqual({
+      kind: "service",
+      subjectId: "scheduler",
+      label: "OpenGeni scheduler",
+    });
+    const [storedAuthority] = await withWorkspaceRls(
+      dbClient.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.execute<{
+          initiatorKind: string;
+          initiatorSubjectId: string;
+          initiatingHumanSubjectId: string | null;
+        }>(dbSql`
+          select initiator_kind as "initiatorKind",
+            initiator_subject_id as "initiatorSubjectId",
+            initiating_human_subject_id as "initiatingHumanSubjectId"
+          from session_turns where id = ${scheduledTurn!.id}
+        `),
+    );
+    expect(storedAuthority).toEqual({
+      initiatorKind: "service",
+      initiatorSubjectId: "scheduler",
+      initiatingHumanSubjectId: null,
+    });
+    const [materializationAudit] = await withWorkspaceRls(
+      dbClient.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.execute<{ subjectId: string; actorKind: string }>(dbSql`
+          select subject_id as "subjectId", metadata->>'actorKind' as "actorKind"
+          from audit_events
+          where workspace_id = ${grant.workspaceId}
+            and action = 'variable_set.materialized'
+            and metadata->>'attemptId' = ${attemptId}
+        `),
+    );
+    expect(materializationAudit).toEqual({ subjectId: "scheduler", actorKind: "service" });
+    const completedEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      dispatched.sessionId,
+      0,
+      100,
+    );
+    expect(completedEvents.some((event) => event.type === "turn.completed")).toBe(true);
+    expect(completedEvents.some((event) => event.type === "turn.failed")).toBe(false);
   });
 
   test("fails reusable dispatch when the task attachment diverges from its session", async () => {
@@ -3804,15 +3962,26 @@ describe("worker activities integration", () => {
         model: new ScriptedModel([{ outputText: "ok" }]),
       }),
     });
+    // Binding divergence is deterministic: the run settles failed with a stable
+    // error code and the dispatch resolves blocked instead of throwing.
     await expect(
       activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("scheduled task variableSet attachment does not match its reusable session");
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs[0]?.status).toBe("failed");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      error: "scheduled_reusable_binding_changed",
+    });
+    // Nothing was delivered into the diverged session.
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
+    ).toHaveLength(0);
   });
 
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
@@ -3863,8 +4032,9 @@ describe("worker activities integration", () => {
         workspaceId: grant.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow(/cancelled/i);
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
 
     // Nothing was appended to the cancelled session: no new user.message, no
     // turn queued, and the session stays cancelled (not revived to queued).
@@ -3876,9 +4046,10 @@ describe("worker activities integration", () => {
     expect(revived?.status).toBe("cancelled");
     const queuedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 50);
     expect(queuedTurns.filter((turn) => turn.status === "queued")).toHaveLength(0);
-    // The run is recorded as failed, not dispatched.
+    // The run settles terminally (skipped, session_cancelled), not dispatched.
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs[0]?.status).toBe("failed");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
   });
 });
 
@@ -3893,16 +4064,18 @@ async function seedWorkspaceEnvironment(
   description?: string,
 ): Promise<{ id: string; name: string }> {
   const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
-  const environment = await createWorkspaceEnvironment(db, {
+  const environment = await createVariableSet(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
     name: `worker-env-${crypto.randomUUID()}`,
     ...(description !== undefined ? { description } : {}),
   });
   for (const [name, value] of Object.entries(values)) {
-    await setWorkspaceEnvironmentVariable(db, {
+    await setVariableSetVariable(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
       variableSetId: environment.id,
       name,
       valueEncrypted: encryptEnvironmentValue(key, value),
@@ -3938,6 +4111,8 @@ async function createOwnedSession(
   return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     ...input,
   });
 }
@@ -4057,6 +4232,7 @@ function fakeObjectStorage(body: string): ObjectStorage {
     }),
     fileExists: async () => true,
     getFileBytes: async () => new TextEncoder().encode(body),
+    getObjectBytes: async () => ({ bytes: new TextEncoder().encode(body) }),
   };
 }
 

@@ -109,15 +109,12 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const configuredIds = effectiveIds.filter((id) => availableIds.has(id));
   const configuredIdSet = new Set(configuredIds);
   const droppedIds = effectiveIds.filter((id) => !configuredIdSet.has(id));
-  // Lazy discovery is scoped to the effective MCP allow-list, not only to
-  // workspace-default capability refs. An explicitly selected connector is
-  // directly callable from this same materialized list, so excluding it from
-  // the existing router creates a false "no connected sources" result. The
-  // mandatory first-party OpenGeni server stays eager; every other configured
-  // effective server is eligible for bounded schema disclosure.
+  // Lazy discovery is scoped to the effective MCP allow-list. Mandatory means
+  // selected/fail-loud, not eager: only an exact session ref with eager:true
+  // belongs on the first model request's critical path.
   const deferredIds = sortedIds(
     toolRefs
-      .filter((tool) => configuredIdSet.has(tool.id) && !mandatoryIdSet.has(tool.id))
+      .filter((tool) => configuredIdSet.has(tool.id) && tool.eager !== true)
       .map((tool) => tool.id),
   );
   const selectedIds = sortedIds(

@@ -23,9 +23,11 @@ describe("single-node secret bootstrap", () => {
     const outDir = join(root, "secrets");
     try {
       const files = await generateSingleNodeSecretFiles({ outDir });
-      const [postgres, minio, runtime, migrations] = await Promise.all([
+      const [postgres, minio, garage, garageToml, runtime, migrations] = await Promise.all([
         readFile(files.postgres, "utf8").then(parseEnv),
         readFile(files.minio, "utf8").then(parseEnv),
+        readFile(files.garage, "utf8").then(parseEnv),
+        readFile(files.garageToml, "utf8"),
         readFile(files.runtime, "utf8").then(parseEnv),
         readFile(files.migrations, "utf8").then(parseEnv),
       ]);
@@ -39,7 +41,14 @@ describe("single-node secret bootstrap", () => {
       expect(migrations.OPENGENI_MIGRATIONS_DATABASE_URL).toContain(
         encodeURIComponent(postgres.POSTGRES_PASSWORD ?? ""),
       );
+      expect(migrations.OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES).toBe("opengeni_app");
       expect(minio.MINIO_ROOT_PASSWORD?.length).toBeGreaterThanOrEqual(32);
+      expect(garage.GARAGE_ACCESS_KEY_ID).toMatch(/^GK[0-9a-f]{32}$/);
+      expect(garage.GARAGE_SECRET_ACCESS_KEY).toMatch(/^[0-9a-f]{64}$/);
+      expect(garage.GARAGE_RPC_SECRET).toMatch(/^[0-9a-f]{64}$/);
+      expect(garageToml).toContain(`rpc_secret = "${garage.GARAGE_RPC_SECRET}"`);
+      expect(garageToml).toContain('s3_region = "us-east-1"');
+      expect(garageToml).toContain('api_bind_addr = "[::]:3900"');
 
       const accountSeed = runtime.OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED;
       expect(accountSeed).toBeDefined();
@@ -48,7 +57,14 @@ describe("single-node secret bootstrap", () => {
       );
 
       expect((await stat(files.directory)).mode & 0o777).toBe(0o700);
-      for (const path of [files.postgres, files.minio, files.runtime, files.migrations]) {
+      for (const path of [
+        files.postgres,
+        files.minio,
+        files.garage,
+        files.garageToml,
+        files.runtime,
+        files.migrations,
+      ]) {
         expect((await stat(path)).mode & 0o777).toBe(0o600);
       }
 

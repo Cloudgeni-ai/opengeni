@@ -8,7 +8,10 @@ import {
   createRigVersionForChangePromotion,
   createScheduledTask,
   createSession,
+  getRig,
   getSession,
+  issueSelfUserResourceGrant,
+  listSelfUserResourceAuthorities,
   listEnabledMcpCapabilityServerIds,
   listSessionEvents,
   listScheduledTaskRuns,
@@ -239,7 +242,14 @@ async function workspaceFixture() {
   await admin!`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
-  return { accountId: account!.id, workspaceId: workspace!.id };
+  const subjectId = `scheduled-alert-subject-${crypto.randomUUID()}`;
+  await admin!`
+    insert into organization_memberships (
+      account_id, subject_id, status, personal_workspace_id
+    ) values (
+      ${account!.id}, ${subjectId}, 'active', ${workspace!.id}
+    )`;
+  return { accountId: account!.id, workspaceId: workspace!.id, subjectId };
 }
 
 async function taskFixture(
@@ -261,6 +271,7 @@ async function taskFixture(
     : (options.requiredMcpServerId ?? null);
   const created = await createScheduledTask(client!.db, {
     ...workspace,
+    createdBy: { kind: "subject", subjectId: workspace.subjectId },
     name: `scheduled alert ${crypto.randomUUID()}`,
     status: "active",
     schedule: { type: "manual" },
@@ -587,6 +598,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         tools: [{ kind: "mcp", id: "opengeni" }],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
     const existing = await existingResponder("existing incident responder");
@@ -645,6 +658,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
         sandboxBackend: "none",
       });
     const existing = await workspaceDefaultResponder("existing workspace-default responder");
@@ -692,6 +707,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const reusable = await createSession(client.db, {
@@ -701,6 +718,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
     });
     const tasks = [
@@ -748,7 +767,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     expect(after).toEqual(before);
   });
 
-  test("rolls back every durable dispatch mutation when authority narrows at final settlement", async () => {
+  test("retains one terminal occurrence when authority narrows at final settlement", async () => {
     if (!shared || !client || !admin) return;
     const snapshot = async (workspaceId: string) => {
       const [row] = await admin!<
@@ -798,6 +817,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
             tools: [{ kind: "mcp", id: "opengeni" }],
             metadata: {},
             model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
             sandboxBackend: "none",
           })
         : null;
@@ -840,19 +861,37 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       );
       try {
         const before = await snapshot(workspace.workspaceId);
-        expect(
-          await activities().dispatchScheduledTaskRun({
-            workspaceId: workspace.workspaceId,
-            taskId: task.id,
-            triggerType: "scheduled",
-            producerKey: `late-authority-${mode}-${crypto.randomUUID()}`,
-          }),
-          mode,
-        ).toEqual({
+        const dispatch = activities().dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey: `late-authority-${mode}-${crypto.randomUUID()}`,
+        });
+        if (existing) {
+          await expect(dispatch, mode).rejects.toMatchObject({ cause: { code: "40001" } });
+          expect(await snapshot(workspace.workspaceId), mode).toEqual(before);
+          continue;
+        }
+        expect(await dispatch, mode).toEqual({
           action: "blocked",
           reason: "incident_responder_under_capable",
         });
-        expect(await snapshot(workspace.workspaceId), mode).toEqual(before);
+        const after = await snapshot(workspace.workspaceId);
+        expect(after.sessions, mode).toEqual(before.sessions);
+        expect(after.events, mode).toEqual(before.events);
+        expect(after.updates, mode).toEqual(before.updates);
+        expect(after.goals, mode).toEqual(before.goals);
+        expect(after.tasks, mode).toEqual(before.tasks);
+        expect(after.runs, mode).toEqual([
+          expect.objectContaining({
+            status: "failed",
+            error: "scheduled_incident_incident_responder_under_capable",
+            session_id: null,
+          }),
+        ]);
+        expect(after.usage, mode).toEqual([
+          expect.objectContaining({ event_type: "scheduled_task.fired" }),
+        ]);
       } finally {
         await admin.unsafe(`drop trigger if exists ${triggerName} on ${triggerTable}`);
         await admin.unsafe(`drop function if exists ${functionName}()`);
@@ -967,7 +1006,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     expect(state).toEqual({ state: "failed", turns: 0 });
   });
 
-  test("rejects source-frozen work when task policy or exact selector values change", async () => {
+  test("claims source-frozen work after later task policy or selector changes", async () => {
     if (!shared || !client) return;
     for (const change of ["policy", "selector"] as const) {
       const workspace = await workspaceFixture();
@@ -1022,9 +1061,9 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
             update,
           }),
       });
-      expect(claim, change).toEqual({ action: "unclaimed", reason: "no-work" });
+      expect(claim.action, change).toBe("claimed");
       const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
-      expect(run?.status, change).toBe("failed");
+      expect(run?.status, change).toBe("dispatched");
     }
   });
 
@@ -1129,6 +1168,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
       rigVersionId: promoted.version.id,
@@ -1156,6 +1197,166 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         })
       ).action,
     ).toBe("signal");
+  });
+
+  test("keeps an exact cross-workspace personal Rig version for target claim", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const [personalWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}, ${`personal-rig-${crypto.randomUUID()}`})
+      returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${personalWorkspace!.id}, ${workspace.accountId})
+    `;
+    await admin`
+      update organization_memberships
+      set personal_workspace_id = ${personalWorkspace!.id}
+      where account_id = ${workspace.accountId} and subject_id = ${workspace.subjectId}
+    `;
+    await admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
+        'owner', '[]'::jsonb
+      )
+    `;
+    const rig = await createRig(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: personalWorkspace!.id,
+      subjectId: workspace.subjectId,
+      scope: "user",
+      name: `personal-frozen-incident-${crypto.randomUUID()}`,
+      initialVersion: { credentialHooks: ["azure-monitor"] },
+    });
+    const authority = (
+      await listSelfUserResourceAuthorities(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: personalWorkspace!.id,
+        subjectId: workspace.subjectId,
+      })
+    ).find((candidate) => candidate.resourceKind === "rig");
+    if (!authority) throw new Error("personal Rig authority missing");
+    await issueSelfUserResourceGrant(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      authorityId: authority.authorityId,
+      action: "rig.use",
+      mode: "always",
+      context: "workspace_shared",
+      workspaceSharedAcknowledged: true,
+    });
+    const change = await createRigChange(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: personalWorkspace!.id,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "definition_edit",
+      payload: { credentialHooks: ["azure-monitor"] },
+    });
+    await updateRigChangeStatus(client.db, personalWorkspace!.id, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-08-16T20:00:00.000Z",
+        finishedAt: "2026-08-16T20:01:00.000Z",
+        passed: true,
+        checkResults: [],
+      },
+    });
+    const frozen = await createRigVersionForChangePromotion(
+      client.db,
+      personalWorkspace!.id,
+      rig.id,
+      change.id,
+      {
+        expectedActiveVersionId: rig.activeVersion!.id,
+        credentialHooks: ["azure-monitor"],
+      },
+    );
+    const responder = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "cross-workspace personal Rig responder",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      rigId: rig.id,
+      rigVersionId: frozen.version.id,
+    });
+    await createRigVersion(
+      client.db,
+      personalWorkspace!.id,
+      rig.id,
+      { credentialHooks: ["azure-monitor"] },
+      { activate: true },
+    );
+    const task = await taskFixture(workspace, alertMetadata(), {
+      runMode: "existing_session",
+      responderSessionId: responder.id,
+      rig: { id: rig.id, name: rig.name, credentialHookId: "azure-monitor" },
+    });
+    const dispatch = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `personal-frozen-rig-${crypto.randomUUID()}`,
+    });
+    expect(dispatch.action).toBe("signal");
+    if (dispatch.action !== "signal") return;
+    const [frozenAuthority] = await admin<
+      { resourceVersionId: string; sessionAuthorityEpoch: number | null; grantMode: string }[]
+    >`
+      select resource_version_id as "resourceVersionId",
+        session_authority_epoch::int as "sessionAuthorityEpoch",
+        grant_mode as "grantMode"
+      from scheduled_task_personal_resource_snapshots
+      where task_id = ${task.id} and resource_kind = 'rig'
+    `;
+    const [targetRig] = await admin<{ rigVersionId: string | null }[]>`
+      select rig_version_id as "rigVersionId" from sessions where id = ${responder.id}
+    `;
+    expect(targetRig?.rigVersionId).toBe(frozen.version.id);
+    expect(frozenAuthority).toEqual({
+      resourceVersionId: frozen.version.id,
+      sessionAuthorityEpoch: 1,
+      grantMode: "always",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: responder.id,
+      workflowId: dispatch.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      validatePendingSystemUpdateAuthority: async (tx, update) =>
+        await validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: testSettings({ databaseUrl: shared.appUrl, sandboxBackend: "none" }),
+          workspaceId: workspace.workspaceId,
+          sessionId: responder.id,
+          update,
+        }),
+    });
+    expect(claim.action).toBe("claimed");
+    expect(
+      (
+        await getRig(
+          client.db,
+          {
+            accountId: workspace.accountId,
+            workspaceId: workspace.workspaceId,
+            subjectId: workspace.subjectId,
+          },
+          rig.id,
+        )
+      )?.activeVersion?.id,
+    ).not.toBe(frozen.version.id);
   });
 
   test("redelivery reuses one canonical session and preserves the exact prompt", async () => {
@@ -1188,6 +1389,70 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         (run) => run.sessionId,
       ),
     ).toEqual([first.sessionId, first.sessionId]);
+  });
+
+  test("a changed task execution definition creates a new canonical responder root", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const worker = activities();
+    const first = await worker.dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `definition-first-${crypto.randomUUID()}`,
+    });
+    expect(first.action).toBe("start");
+
+    const nextPrompt = `${task.agentConfig.prompt} Use the revised incident playbook.`;
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+      agentConfig: { ...task.agentConfig, prompt: nextPrompt },
+    });
+    const second = await worker.dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `definition-second-${crypto.randomUUID()}`,
+    });
+    const replay = await worker.dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `definition-third-${crypto.randomUUID()}`,
+    });
+
+    expect(second.action).toBe("start");
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(replay.action).toBe("signal");
+    expect(replay.sessionId).toBe(second.sessionId);
+    expect(
+      (await getSession(client.db, workspace.workspaceId, second.sessionId))?.initialMessage,
+    ).toBe(nextPrompt);
+  });
+
+  test("an administrative rename preserves the canonical responder root", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const worker = activities();
+    const first = await worker.dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `rename-first-${crypto.randomUUID()}`,
+    });
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+      name: `${task.name} renamed`,
+    });
+    const second = await worker.dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `rename-second-${crypto.randomUUID()}`,
+    });
+    expect(first.action).toBe("start");
+    expect(second.action).toBe("signal");
+    expect(second.sessionId).toBe(first.sessionId);
   });
 
   test("simultaneous delivery for one task converges with exact run provenance", async () => {

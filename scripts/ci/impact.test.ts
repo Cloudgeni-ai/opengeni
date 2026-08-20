@@ -59,6 +59,7 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests.length).toBeGreaterThan(100);
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.guards).toContain("public-hygiene");
+    expect(plan.guards).toContain("migration-ordinals");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
   });
 
@@ -373,6 +374,7 @@ function requiredResult(
     browser: number;
     artifactRuntime: boolean;
     build: number;
+    bakeImages?: boolean;
   },
 ): boolean {
   const result = spawnSync(
@@ -400,6 +402,9 @@ function requiredResult(
       "--argjson",
       "artifactRuntime",
       String(options.artifactRuntime),
+      "--argjson",
+      "bakeImages",
+      String(options.bakeImages ?? options.mode === "full"),
       "--argjson",
       "build",
       String(options.build),
@@ -514,6 +519,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("bun-version-file: .bun-version");
     expect(ci).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(ci).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
+    expect(ci).toContain('bun scripts/ci/impact.ts --base "$BEFORE" --head "$HEAD"');
+    expect(ci).toContain("bake_images");
     expect(ci).not.toContain("jq . impact-plan.json");
     expect(ci).toContain("changedCount:(.changedFiles|length)");
 
@@ -543,7 +550,7 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("web_digest: ${{ steps.web_image.outputs.digest }}");
     expect(ci).toContain("relay_digest: ${{ steps.relay_image.outputs.digest }}");
     expect(ci).toContain("sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}");
-    expect(ci).toContain("dogfood-images-${{ github.sha }}");
+    expect(ci).toContain("canary-images-${{ github.sha }}");
   });
 
   test("selected CI work is profiled and memory bounded", () => {

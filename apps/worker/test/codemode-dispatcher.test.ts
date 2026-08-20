@@ -61,6 +61,8 @@ async function fixture(execute: (signal: AbortSignal | undefined) => Promise<str
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "none",
   });
   const started = await initializeSessionStartAtomically(client.db, {
@@ -164,7 +166,6 @@ describe("CodemodeAttemptDispatcher", () => {
         arguments: { query: "hello" },
         caller: { kind: "codemode", subjectId: "sandbox:test" },
       },
-      callLimit: 10,
     });
     const bus = new MemoryEventBus();
     const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
@@ -243,7 +244,6 @@ describe("CodemodeAttemptDispatcher", () => {
         arguments: {},
         caller: { kind: "codemode", subjectId: "sandbox:test" },
       },
-      callLimit: 10,
     });
     const bus = new MemoryEventBus();
     const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
@@ -304,7 +304,6 @@ describe("CodemodeAttemptDispatcher", () => {
           arguments: {},
           caller: { kind: "codemode", subjectId: "sandbox:test" },
         },
-        callLimit: 10,
       });
     }
     const bus = new MemoryEventBus();

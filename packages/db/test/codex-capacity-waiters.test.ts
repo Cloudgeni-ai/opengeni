@@ -138,10 +138,11 @@ async function seedScenario(
       await tx.execute(sql`
         insert into sessions (
           id, account_id, workspace_id, initial_message, model,
-          sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
+          reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, status,
+          temporal_workflow_id, tool_policy
         ) values (
           ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'capacity test',
-          'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${workflowId},
+          'codex/gpt-5.6-sol', 'medium', 'standard', 'modal', ${sessionId}, 'running', ${workflowId},
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
       `);
@@ -158,6 +159,7 @@ async function seedScenario(
         1, ${attemptId}
       )
       `);
+      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
       await tx.execute(sql`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id,
@@ -170,7 +172,6 @@ async function seedScenario(
           '{}'::jsonb
         )
       `);
-      await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     },
   );
   if (options.withGoal !== false) {

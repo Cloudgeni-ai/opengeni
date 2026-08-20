@@ -14,13 +14,16 @@
 // session (the turn box `resumeBoxForTurn` produced, or the Channel-A established
 // handle) — the proxy does NOT re-establish it (the lease owns its lifecycle). A
 // NON-DEFAULT selfhosted target builds a `SelfhostedSession` bound to the target's
-// enrollment agentId, fenced under the swap's active_epoch. A non-default MODAL
+// enrollment agentId, fenced under the swap's active_epoch. That cached session
+// re-resolves caller-owned authority and connection identity at the last boundary
+// before every provider operation. A non-default MODAL
 // target is established via the injected `establishModalTarget` resolver (the
 // API/worker pass a resume-by-id closure for the sibling box's lease).
 
 import {
   buildSelfhostedBackendSession,
   type SelfhostedOpStreamDeps,
+  type SelfhostedOperationAdmission,
   type SelfhostedRelayConfig,
 } from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
@@ -35,8 +38,12 @@ import type {
  *  `@opengeni/db`'s `SandboxRecord`; structural so the leaf does not import DB). */
 export interface RoutableSandbox {
   id: string;
+  workspaceId: string;
   kind: "modal" | "selfhosted" | string;
   name: string;
+  /** Authority scope projected by the DB resolver. Worker routes use this to
+   * reassert an exact attempt's personal-machine grant immediately before use. */
+  scope?: "organization" | "workspace" | "user";
   /** For a selfhosted sandbox this is its enrollment id (== the agent id the
    *  exact generation-fenced control-plane subject addresses). Null for modal. */
   enrollmentId: string | null;
@@ -47,8 +54,13 @@ export interface RoutableSandbox {
  * build can never combine a successor's RPC subject with a predecessor's
  * capability state. */
 export interface SelfhostedConnectionBinding {
+  /** Physical machine-origin workspace used in the control-plane subject. */
+  workspaceId?: string;
   connectionInstanceId: string;
   opStream?: SelfhostedOpStreamDeps;
+  operationResourcePolicy: SelfhostedOperationAdmission["operationResourcePolicy"];
+  operationResourcePolicySupported: boolean;
+  operationCpuQuotaSupported: boolean;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -126,7 +138,11 @@ export interface ActiveBackendResolverDeps {
    * falls through to a fresh build under the new epoch. Omitted for the API/live-swap
    * path (which always builds fresh — it has no pre-established turn session).
    */
-  pinnedSelfhosted?: { sandboxId: string; epoch: number; session: RoutableBackendSession };
+  pinnedSelfhosted?: {
+    sandboxId: string;
+    epoch: number;
+    session: RoutableBackendSession;
+  };
   /**
    * Whether `defaultBackend` IS the session's home box — i.e. whether the null pointer
    * (== home) may resolve to it. Defaults to TRUE (omitted): a genuine machine-HOME turn
@@ -271,7 +287,11 @@ export function makeActiveBackendResolver(
       if (deps.resolveDefaultBackend) {
         return await deps.resolveDefaultBackend(pointer);
       }
-      return { session: deps.defaultBackend, sandboxId: null, kind: deps.defaultKind };
+      return {
+        session: deps.defaultBackend,
+        sandboxId: null,
+        kind: deps.defaultKind,
+      };
     }
 
     // INSTANCE PIN (Stage D machine-primary): the steady-state machine pointer
@@ -322,6 +342,9 @@ export function makeActiveBackendResolver(
       }
       const { session } = await buildSelfhostedBackendSession({
         workspaceId: deps.workspaceId,
+        ...(connection.workspaceId !== undefined
+          ? { controlWorkspaceId: connection.workspaceId }
+          : {}),
         relay: deps.relay,
         controlRpcFactory: deps.controlRpcFactory,
         agentId: sandbox.enrollmentId,
@@ -333,6 +356,13 @@ export function makeActiveBackendResolver(
           : {}),
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
         ...(connection.opStream !== undefined ? { opStream: connection.opStream } : {}),
+        operationResourcePolicy: connection.operationResourcePolicy,
+        operationResourcePolicySupported: connection.operationResourcePolicySupported,
+        operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
+        // The routing proxy caches this session by sandbox+epoch, but command
+        // policy and runner authority are mutable. Re-read one coherent DB
+        // snapshot only when a new exec/Git is admitted.
+        resolveOperationAdmission: () => deps.resolveSelfhostedConnection(sandbox),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).

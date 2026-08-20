@@ -17,6 +17,7 @@ import {
   TranscriptionServiceError,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import {
   claimNextTranscriptionRecordingSegment,
   claimTranscriptionRecordingAssembly,
@@ -394,7 +395,10 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           );
         }
         segmentNumber = claim.segment.segmentNumber;
-        const stored = await deps.objectStorage?.getObjectBytes(claim.segment.objectKey);
+        const segmentKey = claim.segment.objectKey;
+        const stored = deps.objectStorage
+          ? await retryWhileMissing(async () => deps.objectStorage!.getObjectBytes(segmentKey))
+          : null;
         if (!stored) {
           throw new RecordingProcessingError("Provider segment is missing", "invalid_audio", false);
         }
@@ -578,7 +582,9 @@ async function* verifiedChunkBytes(
     }
     let stored: Awaited<ReturnType<NonNullable<ApiRouteDeps["objectStorage"]>["getObjectBytes"]>>;
     try {
-      stored = await deps.objectStorage!.getObjectBytes(chunk.objectKey);
+      stored = await retryWhileMissing(async () =>
+        deps.objectStorage!.getObjectBytes(chunk.objectKey),
+      );
     } catch {
       throw new RecordingProcessingError("Chunk download failed", "network", true);
     }

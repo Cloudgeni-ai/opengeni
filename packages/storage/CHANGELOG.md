@@ -1,5 +1,98 @@
 # @opengeni/storage
 
+## 0.2.102
+
+### Patch Changes
+
+- f275cc7: Treat a resolved object PUT as the write. Expected-present reads retry not-found. Screenshot history re-resolves from the artifact row instead of a sticky unavailable receipt.
+- Updated dependencies [81d2da0]
+  - @opengeni/config@0.17.1
+
+## 0.2.101
+
+### Patch Changes
+
+- Updated dependencies [1c78ed0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [8583779]
+- Updated dependencies [79ee99b]
+- Updated dependencies [2cb04e0]
+- Updated dependencies [f4afa19]
+- Updated dependencies [4541ab2]
+- Updated dependencies [6d22ab5]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/config@0.17.0
+
+## 0.2.100
+
+### Patch Changes
+
+- e6c2fee: Every principal-facing signed object-storage URL issuance (file download/upload mints, video playback sources, document originals, the files-MCP download tool, workspace-capture manifest/file serves) now records a metadata-only audit fact - subject, target, expiry; never the URL or object key - before the bearer URL leaves the platform. The short default TTLs (download 300 s, upload 900 s) are pinned as the deliberate post-revocation residual window; worker- and provider-internal signed URLs keep their attempt/session-scoped authority unchanged.
+- Updated dependencies [0a6c577]
+- Updated dependencies [f804057]
+- Updated dependencies [b05130a]
+- Updated dependencies [55e0417]
+  - @opengeni/config@0.16.8
+  - @opengeni/contracts@1.4.0
+
+## 0.2.99
+
+### Patch Changes
+
+- Updated dependencies [4c2d958]
+- Updated dependencies [4c2d958]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/config@0.16.7
+
+## 0.2.98
+
+### Patch Changes
+
+- Updated dependencies [1aa02d4]
+- Updated dependencies [ca75ed9]
+- Updated dependencies [c297fc0]
+- Updated dependencies [91d5caf]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [e9aabaa]
+- Updated dependencies [1f860f0]
+- Updated dependencies [c297fc0]
+- Updated dependencies [22c0c21]
+- Updated dependencies [4eb7abd]
+- Updated dependencies [89d4ab3]
+- Updated dependencies [7454580]
+- Updated dependencies [16cbd7b]
+- Updated dependencies [30ba620]
+- Updated dependencies [d168b8f]
+- Updated dependencies [6860c5f]
+- Updated dependencies [f72563d]
+- Updated dependencies [c297fc0]
+- Updated dependencies [6c45ceb]
+- Updated dependencies [c297fc0]
+  - @opengeni/config@0.16.6
+  - @opengeni/contracts@1.2.0
+
+## 0.2.97
+
+### Patch Changes
+
+- Updated dependencies [90c0c3e]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [d7dfc01]
+- Updated dependencies [ec00479]
+- Updated dependencies [ffbbf4c]
+- Updated dependencies [d34dd9a]
+- Updated dependencies [79f57b5]
+- Updated dependencies [eeb7cb6]
+- Updated dependencies [c3f0598]
+- Updated dependencies [d2f172c]
+- Updated dependencies [04b1a1f]
+- Updated dependencies [c056063]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+
 ## 0.2.96
 
 ### Patch Changes

@@ -3,9 +3,10 @@
 OpenGeni runs **long-lived agent sessions** on Temporal + Postgres. The longer a
 session lives — a weeks-long "manager" goal is the headline workload — the more a
 slow, unbounded, or off-by-K failure has time to accumulate into a hard brick or
-a silent double-charge. This document records five confirmed reliability bugs and
-the fixes shipped for them, each with **how it is verified**, honestly, including
-what was and was not re-confirmed live.
+a silent double-charge. This document records the original five confirmed
+reliability bugs and the later scheduled-occurrence authority protocol, with
+**how each is verified**, honestly, including what was and was not re-confirmed
+live.
 
 This is a historical release record. Later clean-cutover work replaced the
 preemption/control mechanics described by the 2026-06 implementation; current
@@ -23,7 +24,7 @@ over this summary. Canonical sources:
 - `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
   helpers and `assertReusableSessionRevivable`.
 
-## The five fixes
+## The original five fixes
 
 | # | Severity | Failure mode | Symptom if unfixed | Shipped |
 | - | -------- | ------------ | ------------------ | ------- |
@@ -293,6 +294,69 @@ then distinct (no dropped charge) while a same-execution retry still dedupes.
 - Integration (`worker-activity.integration`): `records and debits model usage
   once per streamed provider response` (the `responseId` dedupe path).
 - Deployed live (`/healthz` = `5601713…`, staging + prod).
+
+---
+
+## 6. Scheduled occurrence authority survives crash, retry, and task edits
+
+**The failure mode.** A retryable scheduled activity could combine a newer
+mutable task prompt/policy with an older Connection or Variable Set/Rig grant,
+consume a `once` grant twice, lose a concurrent cold-reusable occurrence, or
+retry a permanent revocation forever. Pre-change Temporal histories also lack a
+recorded producer key, and historical agent runs used `dispatched` as a terminal
+delivery state.
+
+**The protocol.** Migration 0275 and the scheduled worker make one durable run
+the accepted occurrence:
+
+- create/update freezes explicit credential-free `connectionAuthorities` on an
+  immutable task authority revision; omitted preserves, `[]` clears, and an
+  explicit array replaces;
+- stable producer identity inserts or reuses one run and one complete accepted
+  execution snapshot before session or provider work; legacy Temporal input
+  derives that identity from the namespace-qualified logical workflow id;
+- admission locks and revalidates task, target session, memberships, resources,
+  authorities, generations, grants, and causal-human equality before consuming
+  `once` against the run id;
+- the exact run binds once to one session, one scheduled system update, one
+  logical turn, and its attempts; retry reads the run snapshot instead of the
+  current task head;
+- warm/existing targets freeze the newest durable `turn.started` execution
+  policy, while cold reusable runs use a revision-bound deterministic session
+  key and materialization receipt so concurrent runs adopt rather than orphan;
+- deterministic authority, target, spawn, or materialization rejection settles
+  the run terminally with no model/tool/sandbox/provider I/O; terminal producer
+  replay is a stable zero-I/O result;
+- task deletion is a one-way paused tombstone that detaches reclaimable live
+  attachments while retaining run/update/turn/authority evidence until the
+  outer tenant-retention boundary.
+
+The migration is maintenance-only. All API/control/turn database sessions must
+be stopped. It promotes only an exact historical delivered update with one
+terminal turn (or one explicit terminal undelivered update), rejects every
+remaining queued/dispatched agent run, every active activated-Connection
+task, and every active personal-resource agent task whose creator is no longer
+an active organization member (pause or re-authorize those before the
+cutover), installs schema/ACL/posture changes, and forbids restarting an older
+writer. It never synthesizes accepted execution from current task state.
+
+Two boundaries are deliberately permissive so the cutover cannot brick
+existing automation: agent tasks written by service, API-key, or delegated
+principals keep running without a human revision authorizer as long as they
+delegate no personal authority (user-scoped Variable Set or Rig,
+personal-resource ledger, Connection, or user-scoped xAI); workspace and
+organization Variable Sets and Rigs keep using ordinary workspace authority; and byte caps apply only to create/update ingress and to newly
+accepted execution snapshots, never to reading a stored row. A stored task that
+cannot be represented as an accepted execution settles its occurrence as a
+visible `scheduled_execution_unrepresentable` block rather than a retrying
+activity failure.
+
+The replacement `organization_membership_command` wrapper also re-defers the
+session activity commit guards before delegating to the 0263 body: the
+application settles the target's pending protocol state first and leaves those
+guards `IMMEDIATE`, which previously made offboarding fail at its first gated
+session write whenever the target still had live turns in a workspace-shared
+session.
 
 ---
 

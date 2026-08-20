@@ -6,7 +6,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { act as reactAct } from "react";
-import { startTransition, Suspense, useState } from "react";
+import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
@@ -553,6 +553,7 @@ describe("useTurnQueue", () => {
           toolsProvided: false,
           model: second.model,
           reasoningEffort: second.reasoningEffort,
+          latencyMode: "standard" as const,
           sourceTurnId: second.id,
           sourceTurnVersion: second.version,
           updatedAt: new Date().toISOString(),
@@ -1952,6 +1953,11 @@ describe("useComposer queue-vs-steer", () => {
           client,
           workspaceId: WORKSPACE_ID,
           draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard" as const,
+          },
         }),
       undefined,
     );
@@ -2000,6 +2006,7 @@ describe("useComposer durable draft and control binding", () => {
           resources: [],
           model: "model-x",
           reasoningEffort: "medium",
+          latencyMode: "standard" as const,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -2047,6 +2054,7 @@ describe("useComposer durable draft and control binding", () => {
           resources: [],
           model: "model-x",
           reasoningEffort: "medium",
+          latencyMode: "standard" as const,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -2097,6 +2105,7 @@ describe("useComposer durable draft and control binding", () => {
           resources: [],
           model: "model-x",
           reasoningEffort: "medium",
+          latencyMode: "standard" as const,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -2127,7 +2136,7 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("draft hydration cannot overwrite a latency selection made while the read is in flight", async () => {
+  test("policy stays unavailable until the exact durable draft hydrates", async () => {
     let resolveDraft!: (draft: ComposerDraft) => void;
     const client = fakeClient({
       getComposerDraft: async () =>
@@ -2135,24 +2144,16 @@ describe("useComposer durable draft and control binding", () => {
           resolveDraft = resolve;
         }),
     });
-    const applied: ComposerDraft[] = [];
-    const hook = await renderHook<ReturnType<typeof useComposer>, "standard" | "fast">(
-      (latencyMode: "standard" | "fast") =>
-        useComposer(SESSION_ID, {
-          client,
-          workspaceId: WORKSPACE_ID,
-          sendExtras: {
-            model: "model-x",
-            reasoningEffort: "medium",
-            latencyMode,
-          },
-          onDraftApplied: (draft) => applied.push(draft),
-        }),
-      "standard",
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
     );
 
     await flush();
-    await hook.rerender("fast");
+    expect(hook.result.current.policy).toBeNull();
+    expect(hook.result.current.canSend).toBe(false);
+    await flushing(() => hook.result.current.setLatencyMode("fast"));
+    expect(hook.result.current.policy).toBeNull();
     await flushing(async () => {
       resolveDraft({
         revision: 1,
@@ -2160,7 +2161,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [],
         model: "model-x",
         reasoningEffort: "medium",
-        latencyMode: "standard",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -2169,7 +2170,130 @@ describe("useComposer durable draft and control binding", () => {
     });
 
     expect(hook.result.current.value).toBe("restored text");
-    expect(applied).toEqual([]);
+    expect(hook.result.current.policy).toEqual({
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+    });
+    await hook.unmount();
+  });
+
+  test("durable policy hydration does not trigger a write-back", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const saved: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saved.push(request);
+        return {
+          revision: request.expectedRevision + 1,
+          text: request.text,
+          resources: request.resources,
+          annotations: request.annotations ?? [],
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          latencyMode: request.latencyMode,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const remoteDraft: ComposerDraft = {
+      revision: 7,
+      text: "durable draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flush();
+    await flushing(async () => {
+      resolveDraft(remoteDraft);
+      await Promise.resolve();
+    });
+    await flush(600);
+
+    expect(hook.result.current.value).toBe("durable draft");
+    expect(hook.result.current.policy?.latencyMode).toBe("standard");
+    expect(saved).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("typing before first hydrate still autosaves against the fetched OCC base", async () => {
+    let resolveDraft!: (draft: ComposerDraft) => void;
+    const saved: Array<{ text: string; model: string; expectedRevision: number }> = [];
+    const client = fakeClient({
+      getComposerDraft: async () =>
+        await new Promise<ComposerDraft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        saved.push({
+          text: request.text,
+          model: request.model,
+          expectedRevision: request.expectedRevision,
+        });
+        return {
+          revision: request.expectedRevision + 1,
+          text: request.text,
+          resources: request.resources,
+          annotations: request.annotations ?? [],
+          model: request.model,
+          reasoningEffort: request.reasoningEffort,
+          latencyMode: request.latencyMode,
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.draftLoading).toBe(true);
+    await flushing(() => hook.result.current.setValue("Typed before the draft read returned"));
+    await flushing(async () => {
+      resolveDraft({
+        revision: 0,
+        text: "",
+        resources: [],
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: null,
+      });
+      await Promise.resolve();
+    });
+    await flush(600);
+    expect(hook.result.current.value).toBe("Typed before the draft read returned");
+    expect(hook.result.current.policy).toEqual({
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    });
+    expect(saved).toEqual([
+      {
+        text: "Typed before the draft read returned",
+        model: "scripted-model",
+        expectedRevision: 0,
+      },
+    ]);
     await hook.unmount();
   });
 
@@ -2184,6 +2308,7 @@ describe("useComposer durable draft and control binding", () => {
           resources: [],
           model: "model-x",
           reasoningEffort: "medium",
+          latencyMode: "standard" as const,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -2203,10 +2328,9 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
+  test("rerenders do not reload drafts outside target, explicit, or event triggers", async () => {
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const reads: string[] = [];
-    const applied: string[] = [];
     const client = fakeClient({
       getComposerDraft: async (_workspaceId, sessionId) => {
         reads.push(sessionId);
@@ -2216,6 +2340,7 @@ describe("useComposer durable draft and control binding", () => {
           resources: [],
           model: "model-x",
           reasoningEffort: "medium",
+          latencyMode: "standard" as const,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: new Date().toISOString(),
@@ -2233,15 +2358,12 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           events: props.events,
-          onDraftApplied: (draft) => {
-            applied.push(`${props.policyVersion}:${draft.text}`);
-          },
         }),
       { sessionId: SESSION_ID, policyVersion: 0, events: noEvents },
     );
     await flush();
     expect(reads).toEqual([SESSION_ID]);
-    expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
+    expect(hook.result.current.value).toBe(`${SESSION_ID}:read-1`);
 
     await hook.rerender({
       sessionId: SESSION_ID,
@@ -2258,7 +2380,7 @@ describe("useComposer durable draft and control binding", () => {
 
     await flushing(async () => await hook.result.current.reloadDraft());
     expect(reads).toEqual([SESSION_ID, SESSION_ID]);
-    expect(applied.at(-1)).toBe(`2:${SESSION_ID}:read-2`);
+    expect(hook.result.current.value).toBe(`${SESSION_ID}:read-2`);
 
     await hook.rerender({
       sessionId: SESSION_ID,
@@ -2267,7 +2389,7 @@ describe("useComposer durable draft and control binding", () => {
     });
     await flush();
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
-    expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
+    expect(hook.result.current.value).toBe(`${SESSION_ID}:read-3`);
 
     await hook.rerender({
       sessionId: sessionB,
@@ -2276,7 +2398,7 @@ describe("useComposer durable draft and control binding", () => {
     });
     await flush();
     expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
-    expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
+    expect(hook.result.current.value).toBe(`${sessionB}:read-4`);
     await hook.unmount();
   });
 
@@ -2287,6 +2409,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -2360,11 +2483,6 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           effectiveControl: queueSnapshot([]).effectiveControl,
-          sendExtras: {
-            model: "model-x",
-            reasoningEffort: "medium",
-            latencyMode: "fast",
-          },
         }),
       undefined,
     );
@@ -2400,6 +2518,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: null,
@@ -2467,8 +2586,6 @@ describe("useComposer durable draft and control binding", () => {
           workspaceId: WORKSPACE_ID,
           sendExtras: () => ({
             resources: [{ kind: "file", fileId }],
-            model: "model-x",
-            reasoningEffort: "medium",
           }),
         }),
       undefined,
@@ -2508,6 +2625,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [],
         model: "model-x",
         reasoningEffort: "medium",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -2536,7 +2654,6 @@ describe("useComposer durable draft and control binding", () => {
           useComposer(SESSION_ID, {
             client,
             workspaceId: WORKSPACE_ID,
-            sendExtras: { model: "model-x", reasoningEffort: "medium" },
           }),
         undefined,
       );
@@ -2563,6 +2680,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -2591,8 +2709,6 @@ describe("useComposer durable draft and control binding", () => {
           client,
           workspaceId: WORKSPACE_ID,
           sendExtras: {
-            model: "model-x",
-            reasoningEffort: "medium",
             resources: [resource],
           },
         }),
@@ -2617,6 +2733,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [resource],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -2660,6 +2777,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [resource],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -2699,6 +2817,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [resource],
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -2730,13 +2849,8 @@ describe("useComposer durable draft and control binding", () => {
         }),
       });
       const hook = await renderHook(
-        (model: string) =>
-          useComposer(SESSION_ID, {
-            client,
-            workspaceId: WORKSPACE_ID,
-            sendExtras: { model, reasoningEffort: "xhigh" },
-          }),
-        "gpt-5.6-sol" as string,
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
       );
       await flush();
 
@@ -2775,7 +2889,7 @@ describe("useComposer durable draft and control binding", () => {
         model: "gpt-5.6-sol",
       });
 
-      await hook.rerender("codex/gpt-5.6-sol");
+      await flushing(() => hook.result.current.setModel("codex/gpt-5.6-sol"));
       if (delivery === "send") {
         const failed = hook.result.current.optimisticMessages?.find(
           (message) =>
@@ -2793,7 +2907,9 @@ describe("useComposer durable draft and control binding", () => {
       expect(attempts[1]).toMatchObject({
         text: "read the exact attached bytes",
         resources: [resource],
-        model: "codex/gpt-5.6-sol",
+        // Send retries the frozen failed operation; a rejected Steer restores
+        // the composer, so the next explicit Steer uses its newly selected policy.
+        model: delivery === "send" ? "gpt-5.6-sol" : "codex/gpt-5.6-sol",
       });
       expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
       expect(accepted).toBe(1);
@@ -2815,6 +2931,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [resource],
         model: "model-x",
         reasoningEffort: "medium",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -2876,6 +2993,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [],
         model: "model-x",
         reasoningEffort: "medium",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -2942,6 +3060,7 @@ describe("useComposer durable draft and control binding", () => {
         resources: [originalResource],
         model: "model-x",
         reasoningEffort: "medium",
+        latencyMode: "standard" as const,
         sourceTurnId: null,
         sourceTurnVersion: null,
         updatedAt: new Date().toISOString(),
@@ -3022,6 +3141,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -3029,8 +3149,8 @@ describe("useComposer durable draft and control binding", () => {
     const client = fakeClient({
       getComposerDraft: async () => initial,
       saveComposerDraft: async () => {
-        // Persistently conflict even after the stale-revision retry adopts
-        // the server revision — surfaces the keep_mine / use_remote banner.
+        // A stale revision is surfaced directly; the hook never silently
+        // adopts another tab's revision and overwrites its content.
         throw new OpenGeniApiError(
           409,
           JSON.stringify({
@@ -3052,13 +3172,14 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("autosave recovers a stale revision after tab-sleep OCC without surfacing a conflict", async () => {
+  test("autosave never overwrites another tab after a stale-revision conflict", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
       resources: [],
       model: "model-x",
       reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -3099,9 +3220,9 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict).toBeNull();
-    expect(hook.result.current.draft?.revision).toBe(3);
-    expect(saves).toBe(2);
+    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
+    expect(hook.result.current.draft?.revision).toBe(1);
+    expect(saves).toBe(1);
     await hook.unmount();
   });
 
@@ -3114,6 +3235,7 @@ describe("useComposer durable draft and control binding", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -3259,6 +3381,7 @@ describe("session hook concurrent target ownership", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -3359,6 +3482,7 @@ describe("session hook concurrent target ownership", () => {
       resources: [],
       model: "model-a",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: new Date().toISOString(),
@@ -3380,12 +3504,14 @@ describe("session hook concurrent target ownership", () => {
     function Harness() {
       const [target, setTargetState] = useState(sessionA);
       setTarget = setTargetState;
-      useComposer(target, {
+      const composer = useComposer(target, {
         client,
         workspaceId: WORKSPACE_ID,
         events: noEvents,
-        onDraftApplied: (draft) => applied.push(`${target}:${draft.text}`),
       });
+      useEffect(() => {
+        if (composer.policy) applied.push(`${target}:${composer.value}`);
+      }, [composer.policy, composer.value, target]);
       if (target === sessionB) {
         renderedB = true;
         throw suspended;
@@ -3605,6 +3731,7 @@ describe("useComposer file-only send", () => {
       resources: [],
       model: "model-x",
       reasoningEffort: "medium",
+      latencyMode: "standard" as const,
       sourceTurnId: null,
       sourceTurnVersion: null,
       updatedAt: null,
@@ -3664,6 +3791,9 @@ describe("useEnvironments", () => {
           id: "env-1",
           accountId: "acc",
           workspaceId: WORKSPACE_ID,
+          scope: "workspace",
+          generation: 1,
+          status: "active",
           name: request.name,
           description: null,
           variables: [],

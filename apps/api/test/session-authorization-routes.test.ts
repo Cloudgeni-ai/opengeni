@@ -145,6 +145,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
@@ -158,6 +160,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
@@ -169,6 +173,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
     sandboxBackend: "modal",
     createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
     createdByContext: {},
@@ -185,6 +191,68 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("keeps the legacy raw revision array and exposes pagination separately", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    await shared.admin`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'API revision compatibility goal'
+      )`;
+
+    const rawResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(rawResponse.status).toBe(200);
+    const raw = (await rawResponse.json()) as unknown;
+    expect(Array.isArray(raw)).toBe(true);
+    expect(raw).toHaveLength(1);
+
+    const pageResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions/page?limit=1`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(pageResponse.status).toBe(200);
+    expect(await pageResponse.json()).toMatchObject({
+      revisions: expect.any(Array),
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    const malformedPageResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions/page?limit=not-a-number`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(malformedPageResponse.status).toBe(400);
+    expect(await malformedPageResponse.text()).toBe("invalid goal revision page query");
+
+    await shared.admin`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.root.id},
+        'Foreign cursor anchor goal'
+      )`;
+    const [foreignRevision] = await shared.admin<{ id: string }[]>`
+      select id
+      from session_goal_revisions
+      where account_id = ${value.grant.accountId}
+        and workspace_id = ${value.grant.workspaceId}
+        and session_id = ${value.root.id}
+      order by created_at desc, id desc
+      limit 1`;
+    if (!foreignRevision) throw new Error("foreign goal revision fixture was not created");
+    const foreignCursorResponse = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal/revisions/page?limit=1&before=${foreignRevision.id}`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(foreignCursorResponse.status).toBe(409);
+    expect(await foreignCursorResponse.text()).toBe(
+      "goal revision cursor is not visible in this session",
+    );
+  });
+
   test("GET goal ignores a malformed legacy continuation instead of returning 500", async () => {
     if (!available || !shared) return;
     const value = await fixture();
@@ -628,6 +696,8 @@ describe("embedding host session authorization routes", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       sandboxGroupId: value.child.sandboxGroupId,
     });
@@ -948,7 +1018,7 @@ describe("embedding host session authorization routes", () => {
     ]);
   });
 
-  test("enforces vertical agent authority before an optional host policy can widen it", async () => {
+  test("lets a live agent address peer sessions while host policy can only narrow", async () => {
     if (!available) return;
     const value = await fixture();
     const sibling = await createSession(client.db, {
@@ -959,6 +1029,8 @@ describe("embedding host session authorization routes", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       createdBy: {
         kind: "subject",
@@ -975,6 +1047,8 @@ describe("embedding host session authorization routes", () => {
       resources: [],
       metadata: {},
       model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       sandboxBackend: "modal",
       createdBy: {
         kind: "subject",
@@ -1043,15 +1117,14 @@ describe("embedding host session authorization routes", () => {
     await expect(authorize(grandchild.id, "session.control")).resolves.toMatchObject({
       relatedSessionAccess: "target",
     });
-
-    await expect(authorize(value.root.id, "session.control")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(value.root.id, "session.control")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
-    await expect(authorize(sibling.id, "session.read")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(sibling.id, "session.read")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
-    await expect(authorize(value.hidden.id, "session.append")).rejects.toMatchObject({
-      reason: "forbidden",
+    await expect(authorize(value.hidden.id, "session.append")).resolves.toMatchObject({
+      relatedSessionAccess: "target",
     });
 
     let hostCalls = 0;
@@ -1062,10 +1135,23 @@ describe("embedding host session authorization routes", () => {
       },
       resolveListScope: async () => ({ kind: "all" }),
     };
-    await expect(authorize(sibling.id, "session.append", allowEverything)).rejects.toMatchObject({
+    await expect(authorize(sibling.id, "session.append", allowEverything)).resolves.toMatchObject({
+      relatedSessionAccess: "target",
+    });
+    expect(hostCalls).toBe(1);
+
+    let deniedCalls = 0;
+    const denyPeer: SessionAuthorizationPort = {
+      authorizeSession: async () => {
+        deniedCalls += 1;
+        return { allowed: false, reason: "forbidden" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    await expect(authorize(sibling.id, "session.append", denyPeer)).rejects.toMatchObject({
       reason: "forbidden",
     });
-    expect(hostCalls).toBe(0);
+    expect(deniedCalls).toBe(1);
 
     const grandchildGrant = await claimGrant(grandchild.id);
     await expect(
@@ -1074,7 +1160,7 @@ describe("embedding host session authorization routes", () => {
         operation: "session.append",
         surface: "first_party_mcp",
       }),
-    ).rejects.toMatchObject({ reason: "forbidden" });
+    ).resolves.toMatchObject({ relatedSessionAccess: "target" });
   });
 
   test("reconstructs live agent-attempt authority and rejects the same token after settlement", async () => {

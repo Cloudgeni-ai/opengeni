@@ -3,12 +3,7 @@ import {
   TriggerScheduledTaskRequest,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
-import {
-  deleteScheduledTask,
-  listScheduledTaskRuns,
-  listScheduledTasks,
-  updateScheduledTask,
-} from "@opengeni/db";
+import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
@@ -26,12 +21,12 @@ import {
   requireScheduledTaskForApi,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
+  updateScheduledTaskForApi,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
-import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
-import { revokeAtlassianScheduleAuthorization } from "../integrations/atlassian";
+import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, workflowClient, objectStorage } = deps;
@@ -106,7 +101,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
-    const task = await updateScheduledTask(db, workspaceId, taskId, update);
+    const task = await updateScheduledTaskForApi(db, workspaceId, taskId, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });
@@ -116,7 +111,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const task = await updateScheduledTask(db, workspaceId, existing.id, {
+    const task = await updateScheduledTaskForApi(db, workspaceId, existing.id, {
       status: "paused",
     });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
@@ -128,9 +123,17 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const task = await updateScheduledTask(db, workspaceId, existing.id, {
-      status: "active",
+    const update = await validatedScheduledTaskUpdate({
+      settings,
+      db,
+      objectStorage,
+      grant,
+      existing,
+      payload: { status: "active" },
+      sessionAuthorization: deps.sessionAuthorization,
+      authorizationSurface: "http",
     });
+    const task = await updateScheduledTaskForApi(db, workspaceId, existing.id, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });
@@ -197,16 +200,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    if (task.metadata.connectorKind === "atlassian") {
-      await revokeAtlassianScheduleAuthorization(deps, { task, subjectId: grant.subjectId });
-    } else {
-      await revokeKnowledgeSourceScheduleAuthorization(deps, { task, subjectId: grant.subjectId });
-    }
-    await workflowClient.deleteScheduledTaskSchedule({
-      temporalScheduleId: task.temporalScheduleId,
+    await deleteScheduledTaskWithDurableCleanup(deps, {
+      workspaceId,
+      taskId: c.req.param("taskId"),
+      subjectId: grant.subjectId,
     });
-    await deleteScheduledTask(db, workspaceId, task.id);
     return c.json({ ok: true });
   });
 

@@ -503,6 +503,7 @@ export async function listWorkspaceLearningPolicyHistory(
   head: WorkspaceLearningPolicyHead | null;
   revisions: WorkspaceLearningPolicyRevision[];
   events: WorkspaceLearningPolicyActivationEvent[];
+  truncated: boolean;
 }> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 100));
   return await withRlsContext(
@@ -520,7 +521,7 @@ export async function listWorkspaceLearningPolicyHistory(
           .from(schema.workspaceLearningPolicyRevisions)
           .where(eq(schema.workspaceLearningPolicyRevisions.workspaceId, input.workspaceId))
           .orderBy(desc(schema.workspaceLearningPolicyRevisions.revision))
-          .limit(limit),
+          .limit(limit + 1),
         scopedDb
           .select()
           .from(schema.workspaceLearningPolicyActivationEvents)
@@ -529,12 +530,27 @@ export async function listWorkspaceLearningPolicyHistory(
             desc(schema.workspaceLearningPolicyActivationEvents.activationVersion),
             asc(schema.workspaceLearningPolicyActivationEvents.id),
           )
-          .limit(limit),
+          .limit(limit + 1),
       ]);
+      const head = heads[0];
+      let visibleRevisions = revisions.slice(0, limit);
+      if (head && !visibleRevisions.some((revision) => revision.id === head.revisionId)) {
+        const [activeRevision] = await scopedDb
+          .select()
+          .from(schema.workspaceLearningPolicyRevisions)
+          .where(eq(schema.workspaceLearningPolicyRevisions.id, head.revisionId))
+          .limit(1);
+        if (activeRevision) {
+          visibleRevisions = [...revisions.slice(0, Math.max(0, limit - 1)), activeRevision].sort(
+            (left, right) => right.revision - left.revision,
+          );
+        }
+      }
       return {
-        head: heads[0] ? headFromRow(heads[0]) : null,
-        revisions: revisions.map(revisionFromRow),
-        events: events.map(eventFromRow),
+        head: head ? headFromRow(head) : null,
+        revisions: visibleRevisions.map(revisionFromRow),
+        events: events.slice(0, limit).map(eventFromRow),
+        truncated: revisions.length > limit || events.length > limit,
       };
     },
   );

@@ -54,7 +54,7 @@ describe("Helm database upgrade contract", () => {
 
     for (const worker of [workerDeployment, turnWorkerDeployment]) {
       expect(worker).toContain(
-        '"objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)',
+        '"objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)',
       );
       expect(worker).not.toContain("- name: OPENGENI_OBJECT_STORAGE_ENDPOINT");
     }
@@ -77,6 +77,14 @@ describe("Helm database upgrade contract", () => {
         "Later envFrom sources win duplicate keys",
       );
     }
+  });
+
+  test("routes worker first-party MCP over the private service by default", async () => {
+    const configMap = await source("deploy/helm/opengeni/templates/configmap.yaml");
+
+    expect(configMap).toContain('hasKey .Values.config "OPENGENI_MCP_INTERNAL_URL"');
+    expect(configMap).toContain("-api:%d/v1/workspaces/{workspaceId}/mcp");
+    expect(configMap).not.toContain('hasKey .Values.config "OPENGENI_MCP_URL"');
   });
 
   test("projects only dedicated credentials into the artifact materializer", async () => {
@@ -113,7 +121,7 @@ describe("Helm database upgrade contract", () => {
     expect(job).toContain("key: OPENGENI_MIGRATIONS_DATABASE_URL");
     expect(job).toContain("app.kubernetes.io/component: catalog-import");
     expect(dependencyPolicy.match(/app\.kubernetes\.io\/component: catalog-import/g)).toHaveLength(
-      2,
+      3,
     );
   });
 
@@ -149,6 +157,7 @@ describe("Helm database upgrade contract", () => {
     const natsEdge = await source(
       "deploy/helm/opengeni/templates/nats-websocket-edge-service.yaml",
     );
+    const garageEdge = await source("deploy/helm/opengeni/templates/garage-edge-service.yaml");
     const minioEdge = await source("deploy/helm/opengeni/templates/minio-edge-service.yaml");
 
     expect(values).toContain("replicaCount: 1");
@@ -171,6 +180,10 @@ describe("Helm database upgrade contract", () => {
     expect(natsEdge).toContain("targetPort: websocket");
     expect(natsEdge).not.toContain("targetPort: client");
     expect(natsEdge).not.toContain("targetPort: monitor");
+    expect(values).toContain("garage:\n  enabled: true");
+    expect(values).toContain("minio:\n  enabled: false");
+    expect(garageEdge).toContain("targetPort: api");
+    expect(garageEdge).not.toContain("targetPort: rpc");
     expect(minioEdge).toContain("targetPort: api");
     expect(minioEdge).not.toContain("targetPort: console");
   });

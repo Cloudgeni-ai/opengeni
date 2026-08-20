@@ -152,6 +152,7 @@ export class FakeOpRunner implements ControlRpc {
   private readonly fallback: ControlRpc | undefined;
   private readonly workspaceId: string;
   private readonly agentId: string;
+  private readonly connectionInstanceId: string | undefined;
   private readonly scripts = new Map<string, FakeOpScript>();
   readonly runs = new Map<string, FakeOpRun>();
   /** Op ids that answer LOST (evicted) on query/attach — bounded-retention
@@ -163,12 +164,14 @@ export class FakeOpRunner implements ControlRpc {
     transport: InMemoryOpStreamTransport;
     workspaceId: string;
     agentId: string;
+    connectionInstanceId?: string;
     /** Handles every non-op-stream ControlRequest (the legacy ops). */
     fallback?: ControlRpc;
   }) {
     this.transport = opts.transport;
     this.workspaceId = opts.workspaceId;
     this.agentId = opts.agentId;
+    this.connectionInstanceId = opts.connectionInstanceId;
     this.fallback = opts.fallback;
     this.transport.onPublish = (_subject, payload) => this.onAck(payload);
   }
@@ -298,7 +301,7 @@ export class FakeOpRunner implements ControlRpc {
     if (attachGeneration > run.highestGeneration) {
       run.highestGeneration = attachGeneration;
     }
-    const subject = opFrameSubject(this.workspaceId, this.agentId, opId);
+    const subject = opFrameSubject(this.workspaceId, this.agentId, opId, this.connectionInstanceId);
     if (run.script.live && !run.liveEmitted) {
       // First attach on a live op: nothing retained yet worth replaying — the
       // child "runs now" and the (faulty) live flow begins.
@@ -338,7 +341,12 @@ export class FakeOpRunner implements ControlRpc {
       run.exit.exitCode = -1;
       run.exit.cancelled = true;
       run.liveEmitted = true;
-      const subject = opFrameSubject(this.workspaceId, this.agentId, opId);
+      const subject = opFrameSubject(
+        this.workspaceId,
+        this.agentId,
+        opId,
+        this.connectionInstanceId,
+      );
       queueMicrotask(() => {
         for (const frame of run.frames) {
           this.transport.deliver(subject, OpFrame.encode(frame).finish());

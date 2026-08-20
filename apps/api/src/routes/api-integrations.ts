@@ -1,5 +1,6 @@
 import {
   CORE_INTEGRATION_DEFINITIONS,
+  INTEGRATION_DEFINITION_PRESENTATIONS,
   createPinnedIntegrationTransport,
   integrationFacetDefinitions,
   type IntegrationCredentialResolver,
@@ -70,6 +71,9 @@ export function registerApiIntegrationRoutes(
             kind: definition.authentication.kind,
             scopes: [...definition.authentication.scopes],
           },
+          ...(INTEGRATION_DEFINITION_PRESENTATIONS[definition.id]
+            ? { presentation: INTEGRATION_DEFINITION_PRESENTATIONS[definition.id] }
+            : {}),
           facets: definition.facets.map((facet) => ({
             facetKey: facet.facetKey,
             kind: facet.kind,

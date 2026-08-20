@@ -2,9 +2,21 @@
 
 A **Connected Machine** is one of a session's compute targets — your own
 computer (a laptop, a workstation, a CI box, even a macOS machine) connected to
-a workspace and driven by the agent directly. It is a **first-class, co-equal
+an organization, workspace, or organization user and driven by the agent directly. It is a **first-class, co-equal
 primary compute target**, not a backend variant layered on top of a managed
 box.
+
+Human device-flow approval defaults to user ownership. A user-owned machine follows
+its owner across same-organization workspaces they can currently access; workspace
+ownership limits it to the approving workspace, and organization ownership requires
+account-admin approval. Only the owner may attach a user machine. Using it from an
+exact agent attempt additionally requires an explicit `connected_machine.use` grant
+for that session visibility/context. Once/session/always grants use the common
+personal-resource lifecycle; every operation revalidates the exact attempt, owner
+membership revision, target-workspace access, authority epoch, resource/grant
+generation, interruption state, and current machine selection immediately before
+the machine transport is used. Revocation advances the machine and common authority
+generation and invalidates existing grants.
 
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
@@ -20,13 +32,13 @@ client. The matching UI ships in
 
 ## The two compute targets
 
-| | Managed Sandbox | Connected Machine |
-| --- | --- | --- |
-| Ownership | platform-owned, ephemeral | user-owned, persistent |
-| Provisioning | platform provisions + tears down | platform **attaches** to what's already there |
-| Repos | cloned into `/workspace` | **not cloned** — the machine uses its own git auth |
-| Working dir | `/workspace` (virtual root) | a real host path you pass per session |
-| Backend enum | `docker`/`modal`/`local`/… | `selfhosted` |
+|              | Managed Sandbox                  | Connected Machine                                  |
+| ------------ | -------------------------------- | -------------------------------------------------- |
+| Ownership    | platform-owned, ephemeral        | user-owned, persistent                             |
+| Provisioning | platform provisions + tears down | platform **attaches** to what's already there      |
+| Repos        | cloned into `/workspace`         | **not cloned** — the machine uses its own git auth |
+| Working dir  | `/workspace` (virtual root)      | a real host path you pass per session              |
+| Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
@@ -44,10 +56,12 @@ Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machin
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet
-`run_on` tool is a separate API-side, one-off route to a non-active machine; it
-does not impersonate the worker's exact turn/attempt and therefore does not
-inject Codemode credentials. Swap the session to that machine, or create the
-session there, before running Codemode on it.
+`run_on` tool is a separate API-side, one-off route to a non-active machine. An
+agent call still authorizes and snapshots the frozen initiating human's exact
+accepted attempt and revalidates its visibility-keyed grant immediately before
+dispatch; it does not change the active pointer or inject Codemode credentials.
+Swap the session to that machine, or create the session there, before running
+Codemode on it.
 
 For source development, build or run the complete host-native runtime with:
 
@@ -62,6 +76,20 @@ that exact closure in the Rust agent. On macOS it also enables the same real
 ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
+
+Attached Chrome profiles are a separate physical placement. Inventory reports a
+`connectionGeneration` that becomes the BrowserSession/ComputerSession
+`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+device's still-live sessions `lost` with `controller_transition_expired` and
+never rebinds the old controller token. In-flight `/end` (`ending`) is left
+to finish physical teardown instead of being rewritten to `lost`. Heartbeats
+must prove the live generation before they pulse. `/end` still talks to the
+live agent with that original fence so the Mac helper can `stopCapture` and
+exit; otherwise ScreenCaptureKit leaves `replayd` and multiple
+`opengeni-computer-native` processes running. A new shared-seat
+ComputerSession displaces the previous helper. Open a replacement through
+**Browser → New browser → Connected Chrome**; generic New desktop does not
+infer the Chrome device.
 
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
@@ -88,7 +116,9 @@ const client = new OpenGeniClient({ baseUrl, apiKey });
 
 // Pick a machine from the workspace fleet…
 const { machines } = await client.listMachines(workspaceId);
-const box = machines.find((m) => m.kind === "selfhosted" && m.state === "online");
+const box = machines.find(
+  (m) => m.kind === "selfhosted" && m.state === "online",
+);
 
 // …and run the session on it.
 const session = await client.createSession(workspaceId, {
@@ -112,8 +142,13 @@ Rules to keep in mind:
   available for context, but the platform never `git clone`s onto the user's
   real filesystem — the machine uses its own git auth.
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
-  target the backend is the machine itself, so leave it off (or `"none"`) and
-  point at the machine with `targetSandboxId`.
+  target the backend is the machine itself, so leave it off and point at the
+  machine with `targetSandboxId`.
+- **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
+  machine-primary home**, even when the parent is `backend: none`. Omitted
+  `sandbox` still shares the creator's box only when no machine is named.
+  Explicit `sandbox: "shared"` or `{ groupId }` plus a machine target is a
+  **422**.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
@@ -142,20 +177,25 @@ Each `MachineView` carries the fields a dashboard needs:
 
 ```ts
 type MachineView = {
-  sandboxId: string;            // the id you pass as targetSandboxId / swap target
-  enrollmentId: string | null;  // the enrollment id for metrics + revoke
+  sandboxId: string; // the id you pass as targetSandboxId / swap target
+  enrollmentId: string | null; // the enrollment id for metrics + revoke
   name: string;
   kind: "modal" | "selfhosted";
-  state:                        // derived liveness + consent/display/enrollment state
-    | "online" | "reconnecting" | "offline"
-    | "consent_required" | "display_unavailable" | "enrolling";
-  active: boolean;              // is this the session's active sandbox?
-  isSessionGroup: boolean;      // the synthetic Modal group box (not a real machine)
+  state:
+    // derived liveness + consent/display/enrollment state
+    | "online"
+    | "reconnecting"
+    | "offline"
+    | "consent_required"
+    | "display_unavailable"
+    | "enrolling";
+  active: boolean; // is this the session's active sandbox?
+  isSessionGroup: boolean; // the synthetic Modal group box (not a real machine)
   os: string;
   arch: string;
   hasDisplay: boolean;
   allowScreenControl: boolean;
-  sharedSessionCount: number;   // live sessions sharing this whole-machine lease
+  sharedSessionCount: number; // live sessions sharing this whole-machine lease
   lastSeenAt: string | null;
   metrics: MetricSample | null; // latest point-in-time sample
 };
@@ -180,45 +220,113 @@ answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
-puts the supervisor and each operation in separate cgroup-v2 leaves for accounting
-and systemd-oomd selection. Before moving itself, the supervisor stamps its own leaf
-with systemd-oomd's `user.oomd_avoid=1` marker; if that preference cannot be
-established, it stays in the unit cgroup. systemd-oomd honors the marker only when
+puts the supervisor and each operation in separate cgroup-v2 memory-accounting
+leaves for lifecycle ownership and systemd-oomd selection. Startup enables only
+the memory controller: CPU stays ambient until an explicit quota needs it, while
+I/O and PID controllers remain untouched. The generated unit also sets
+`DelegateSubgroup=supervisor`, so systemd starts every supervisor generation in
+that stable leaf and can restart it after the empty service root has delegated
+controllers to operation siblings. Startup verifies this topology and reports the
+exact delegated controller subset it could use. A custom or older unit without
+the supervisor subgroup degrades explicitly to ambient unrestricted execution,
+preserving crash restart; configured operation policy fails closed on that incapable
+runner. The supervisor stamps its leaf with systemd-oomd's `user.oomd_avoid=1`
+marker. systemd-oomd honors the marker only when
 the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it, and a pre-exec hook raises commands to
-`+500` before user code can fork descendants. Work delegated over a socket to an
+unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
+valid higher OOM-score bias over the live supervisor: neutral `0` when the
+supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+the kernel maximum, no relative preference is representable and both remain 1000.
+Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
 must configure such delegated workloads so they are not more protected from
-global OOM selection than the supervisor. The generated systemd
-unit explicitly clears stale aggregate resource limits and enables accounting
-without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
-throttle. Each operation leaf sets `memory.oom.group=1`, so a memcg OOM terminates
+global OOM selection than the supervisor. The generated fragment requests an
+unlimited service aggregate, but admin drop-ins and ancestor limits still win; the
+installer never resets them with runtime `set-property`. A verified self-update
+migrates only the byte-identical old generated unit after proving its live MainPID,
+canonical fragment, and exact ExecStart, and only on systemd 254+. Custom units are
+left untouched with an actionable diagnostic. The default operation leaf has no
+memory maximum or throttle. Each leaf sets `memory.oom.group=1`, so a memcg OOM terminates
 the complete operation instead of leaving sibling descendants with partial state.
-At spawn, the agent stops the command's process group, moves its direct
-roots, then repeatedly drains any same-group descendants still inherited in the
-supervisor leaf into the same operation leaf before resuming it. Correctness does
-not depend on synchronous stop-signal delivery: after a parent moves, future
-process descendants inherit its operation leaf. Daemon-mediated work remains
-subject to the external-daemon boundary above. This closes the post-spawn fork race. A
-same-group fork storm that keeps creating escaped descendants during this tiny
-pre-containment window is terminated only after crossing a PID breaker derived
-from that machine's process ceiling; it cannot wedge command admission forever.
-Commands therefore have the same machine resources and authority as commands
-launched by an unrestricted local agent; the OS scheduler owns contention,
-while a pathological breaker trip is loud and typed.
+Before user code executes, the agent creates the operation leaf, applies any
+explicit policy, pre-opens `cgroup.procs`, and uses an async-signal-safe pre-exec
+hook to migrate each direct process into that leaf. Linux cgroup inheritance then
+puts even an immediate `setsid` or double-fork descendant in the operation leaf.
+After spawn, the agent verifies both direct roots. Once the manager exists, any
+leaf creation, policy, pre-open, pre-exec placement, or live-root verification
+failure aborts the operation and recursively kills its cgroup; there is no racy
+post-spawn fork repair. Daemon-mediated work remains
+subject to the external-daemon boundary above. Commands therefore keep the same
+machine resources and authority as commands launched by an unrestricted local
+agent; the OS scheduler owns contention, while a containment degradation is loud.
+Normal completion, cancellation, timeout, and task abandonment all converge on the
+same cleanup: the process group is killed and reaped, then the runner removes its
+operation leaf. A teardown that races final descendant release waits for the
+kernel's `cgroup.events` `populated 0` notification; it does not retain an empty
+operation cgroup until service restart.
 
-Operators can opt into local per-operation limits with
-`OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
-authoritative unlimited default. This policy is intentionally local today: one
-physical installation may serve unrelated deployments, so a workspace must not
-silently impose a machine-global cap on the others. Any future control-plane
-setting must either be connection-scoped or owned explicitly by the machine
-operator, remain `unlimited` by default, and never constrain the supervisor leaf
-or install an implicit service-wide `MemoryHigh`.
+Workspace operators can opt into a per-enrollment command policy from the
+machine detail view or the revision-fenced SDK call:
+
+```ts
+await client.updateMachineOperationPolicy(workspaceId, enrollmentId, {
+  memoryMaxBytes: 1_073_741_824,
+  memoryHighBytes: 805_306_368,
+  cpuMaxMillicores: 1_500,
+  expectedRevision: machine.operationPolicy.revision,
+});
+```
+
+All three limits default to `null` (unrestricted). CPU is exact positive uint32
+millicores (`1000` = one CPU core). On update, omitting `cpuMaxMillicores`
+preserves its current value for older clients, `null` clears it, and a positive
+value sets it. Limits apply separately to each newly admitted exec or Git
+operation leaf; they are not an enrollment-wide aggregate, so N concurrent 1 GiB
+commands may use N GiB. An already-admitted command keeps its immutable policy.
+Every provider operation revalidates its exact live connection and any
+caller-owned personal-machine authority at the last boundary before dispatch,
+even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
+that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
+snapshot, current visibility-keyed grant, membership/generation fences, and the
+runner connection. One-off `run_on` exec/read/write uses the same boundary after
+creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
+Organization- and user-scoped machines used from another same-organization
+workspace retain the machine's origin workspace for their physical control and
+relay route; the session workspace remains the authorization target. A refused
+op-stream `OpStart` may be retried only after a fresh live admission proves the
+exact route and policy are still current, and a proven-unstarted downgrade to
+legacy request/reply takes another fresh admission immediately before dispatch.
+Exec and Git additionally read the policy revision and enforcement capabilities
+from that authoritative admission. Memory enforcement and CPU-quota enforcement
+are separately advertised; a configured unsupported limit fails command
+admission closed, while saving or clearing policy remains available for
+preconfiguration.
+
+The machine owner may also set a process-local ceiling with
+`OPENGENI_AGENT_OP_MEMORY_MAX`, `OPENGENI_AGENT_OP_MEMORY_HIGH`, and
+`OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`. Unset (or zero for these local environment
+variables) is unrestricted. API values use `null` for unrestricted and reject
+zero. Connection, local, and ancestor policies compose by taking the tightest
+value, so a workspace can never loosen a machine-owner or OS limit. Malformed
+values, `memory.high` above an explicit `memory.max`, an unavailable delegated
+controller, or a failed per-operation policy write fail clearly instead of
+silently running the workload without the requested policy.
+CPU is an exact positive integer-millicore ratio. The
+runner preserves the inherited `cpu.max` period when exact; otherwise it minimally
+lengthens the reduced ratio to satisfy the kernel's 1 ms minimum quota and 1 s
+maximum period, so every accepted `uint32` value is representable without rounding.
+It leases `+cpu` while limited leaves exist and removes it after the final limited
+leaf is killed, empty, and removed. During that lease, the supervisor and all op
+siblings temporarily participate in hierarchical CPU scheduling; each limited
+leaf still has its own hard quota. For an explicit policy, the runner reads kernel
+files back and reports desired/local/leaf/ancestor/combined bounds. Ancestor memory
+values are shared aggregate upper bounds, not promised per-command availability
+under sibling contention; unknown or unobservable effects remain explicit rather
+than being presented as the requested number.
 
 Exec duration is unbounded by default. `timeout_ms=0` and op-stream
 `deadline_ms=0` schedule no process kill; a positive
@@ -240,6 +348,8 @@ backpressure nor a reply-size failure changes the machine's heartbeat state.
 
 The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
 specific enrolled machine and never changes the session's active route. Its
+personal-machine path requires the same exact accepted-attempt authorization
+and current `connected_machine.use` grant as an active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
 `deadlineMs` (`0` means none). A process killed at an explicitly configured
 deadline, or a response with no terminal
@@ -307,12 +417,13 @@ workspace—even on a different OpenGeni deployment—adds an independent link a
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
-The universal Machines-page one-liner securely installs or updates the binary,
-runs `opengeni-agent connect` for that deployment, and leaves the ordinary
-background service online. A same-version connection is additive and does not
-restart the process or interrupt existing commands. A real upgrade restarts once;
-subsequent connection files load live. `opengeni-agent run` is the explicit
-foreground alternative.
+The universal Machines-page one-liner securely installs or updates the runner
+installation, including a generated background-service definition when the
+release requires it, runs `opengeni-agent connect` for that deployment, and leaves
+the ordinary background service online. A same-version connection is additive and
+does not restart the process or interrupt existing commands. A real upgrade
+restarts once when activation requires it; subsequent connection files load live.
+`opengeni-agent run` is the explicit foreground alternative.
 
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set
@@ -335,10 +446,12 @@ Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
 ```ts
-const { token, expiresAt, expiresInSeconds } =
-  await client.mintEnrollToken(workspaceId, {
+const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
+  workspaceId,
+  {
     allowScreenControl: false, // bake screen-control consent into the token
-  });
+  },
+);
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
@@ -372,6 +485,7 @@ Then approve (the loud whole-machine consent) or deny:
 const approved = await client.approveDeviceEnrollment(pending.workspaceId, {
   userCode,
   allowScreenControl: true, // the authoritative screen-control consent
+  scope: "user", // explicit personal default; "workspace" and "organization" publish wider
 });
 // approved.enrollmentId, approved.sandboxId, approved.allowScreenControl
 
@@ -381,7 +495,10 @@ await client.denyDeviceEnrollment(pending.workspaceId, { userCode });
 
 Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
-target.
+target. The managed consent page always asks for personal, workspace, or
+organization access and defaults to personal. Organization publication is
+available only to account administrators. Machines and Rigs display the
+resulting scope in their list cards so wider publication is never implicit.
 
 ## Revoke / detach
 

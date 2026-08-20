@@ -482,11 +482,36 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
+  const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "list_self_organization_memberships(text)",
+    "list_self_organization_invitations(text)",
+    "list_self_organization_invitations(text,uuid,integer)",
+    "get_self_organization_invitation(text,uuid)",
+    "list_organization_members(uuid,text)",
+    "list_organization_invitations(uuid,text,uuid,integer)",
+    "organization_membership_command(jsonb)",
+    "prepare_organization_membership_protocol_settlements(jsonb)",
+    "assert_active_managed_human_organization_membership(uuid,text)",
+    "resolve_workspace_writer_grant_identity(uuid,text)",
+    "prepare_workspace_membership_removal_settlements(jsonb)",
+    "workspace_membership_removal_command(jsonb)",
+    "get_organization_retention_policy(uuid,text)",
+    "preview_organization_retention_deletions(uuid,integer)",
+    "claim_organization_retention_deletion(uuid,uuid,uuid[])",
+    "list_organization_retention_deletion_objects(uuid,uuid,uuid,text,integer)",
+    "record_organization_retention_object_deleted(uuid,uuid,uuid,text,text,text,text)",
+    "fail_organization_retention_deletion(uuid,uuid,uuid,text)",
+    "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
+    "complete_organization_retention_deletion(uuid,uuid,uuid,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
   owner_role text := current_user;
   runtime_table text;
+  routine_signature text;
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
@@ -543,6 +568,77 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0300's tenancy backfill ledger seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not
+    -- yet exist, and these three live in the data schema rather than
+    -- opengeni_private, so the blanket sweep above never reaches them.
+    -- Re-converge them here so migrate-then-provision matches the reverse
+    -- order; without this the "only write path" seam is unreachable on a
+    -- green-field database.
+    FOR routine_signature IN
+      SELECT unnest(ARRAY[
+        'open_tenancy_backfill_receipt(uuid, text, text)',
+        'record_tenancy_backfill_unresolved(uuid, uuid, text)',
+        'complete_tenancy_backfill_receipt(uuid, bigint, bigint, text)'
+      ])
+    LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
+        IS NOT NULL
+      THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)},
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    -- Migration 0291's classification assertion seam has the same shape: its
+    -- own conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and it lives in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches it. (Its inner capability predicate
+    -- IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.verify_organization_resource_classification(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.verify_organization_resource_classification(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0297's session ownership seams have the same shape: their own
+    -- conditional GRANT block is skipped whenever opengeni_app does not yet
+    -- exist, and they live in the data schema rather than opengeni_private, so
+    -- the blanket sweep above never reaches them. (Their inner capability
+    -- predicate IS in opengeni_private and is covered by that sweep.)
+    IF to_regprocedure(
+      format(
+        '%I.classify_organization_session_ownership(uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.classify_organization_session_ownership(uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.backfill_organization_session_ownership(uuid,integer,boolean,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.backfill_organization_session_ownership(uuid, integer, boolean, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to
@@ -613,6 +709,33 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0289 creates this definer accessor before opengeni_app may
+    -- exist, so its migration-time GRANT is skipped on the supported
+    -- migrate-then-provision order. Re-converge it here.
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_activation_authority(uuid,uuid[])',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_activation_authority(uuid, uuid[]) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.preference_registry_create_knowledge_proposal_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamptz, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer)',
@@ -631,6 +754,129 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.company_brain_context_get_or_create_selection(uuid,uuid,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.company_brain_inspect_context_receipts(uuid,uuid,text,uuid,timestamptz,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.company_brain_inspect_context_receipts(uuid, uuid, text, uuid, timestamptz, uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.evaluate_governed_learning_proposal(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.activate_governed_learning_decision(uuid,uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.activate_governed_learning_decision(uuid, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.activate_human_confirmed_learning_decision(uuid,uuid,uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.confirm_remember_knowledge_claim(uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.undo_governed_learning_activation(uuid,uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.undo_governed_learning_activation(uuid, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.inspect_governed_learning_decisions(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_decisions(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.inspect_governed_learning_activations(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_activations(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.inspect_governed_learning_activation_undos(uuid,uuid,text,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.inspect_governed_learning_activation_undos(uuid, uuid, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replace_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,integer,text,text,integer,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.resolve_task_note_knowledge_promotion_source(uuid,uuid,uuid,uuid,uuid,integer,uuid,integer,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.resolve_task_note_knowledge_promotion_source(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
@@ -809,6 +1055,18 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ${organizationMembershipLifecycleRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     IF to_regprocedure(format('%I.ensure_canonical_human_identity(text,text)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.ensure_canonical_human_identity(text, text) FROM PUBLIC',
@@ -1007,6 +1265,259 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_user_resource_authorities(uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_connection_authorities(uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(format('%I.resolve_personal_connection_authority_selection(uuid,uuid,text,uuid,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      IF to_regprocedure(format('%I.resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+    END IF;
+    IF to_regprocedure(
+      format('%I.create_personal_document_authority(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_document_original_file(uuid, uuid, text, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.prepare_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.personal_document_authority_capability_active(text) FROM PUBLIC');
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.personal_document_authority_capability_active(text) TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE opengeni_private.personal_document_authority_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_admissions FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_snapshots FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.personal_document_once_consumption_receipts FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_variable_sets(uuid, uuid, uuid, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.count_scoped_variable_sets(uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mutate_scoped_variable_set(uuid, uuid, uuid, text, text, boolean, text, boolean, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.read_scoped_variable_set_secret(uuid, uuid, uuid, text, text, text, uuid, uuid, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_sets FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.workspace_variable_set_variables FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format('%I.create_scoped_rig(uuid,uuid,text,text,text,text,jsonb,boolean)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_rigs(uuid, uuid, uuid, text, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.count_scoped_rigs(uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mutate_scoped_rig(uuid, uuid, uuid, text, text, boolean, text, boolean, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.finalize_scoped_enrollment(uuid, uuid, text, text, boolean, boolean, text, text, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_enrollments(uuid, uuid, uuid, text) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_scoped_sandbox(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_scoped_sandbox_attach(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.materialize_scoped_rig_version_for_attempt(uuid, uuid, uuid, uuid, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.assert_session_attempt_personal_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_scoped_machine_dependent_sessions(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.detach_scoped_machine_dependent_sessions(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_connected_machine_authorizations FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.freeze_scheduled_task_personal_resources(uuid,uuid,uuid,bigint)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      IF to_regprocedure(
+        format(
+          '%I.refresh_scheduled_task_personal_resources_clone_connections(uuid,uuid,uuid,bigint,bigint)',
+          ${literal(schema)}
+        )
+      ) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_run_connection_authority_subject(uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_run_connection_authority_subject(uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_personal_resource_authority_subject(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_personal_resource_authority_subject(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.record_scheduled_task_revision_authority(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.record_scheduled_task_revision_authority(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_revision_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_revision_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_revision_authority_subject(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_revision_authority_subject(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_task_revision_authority_snapshot(uuid, uuid, uuid, bigint) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_task_revision_authority_snapshot(uuid, uuid, uuid, bigint) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.validate_scheduled_agent_run_live_authority(uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.validate_scheduled_agent_run_live_authority(uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_scoped_rig_version_metadata(uuid, uuid, text, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.bind_scheduled_task_run_session(uuid, uuid, uuid, uuid) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.bind_scheduled_task_run_session(uuid, uuid, uuid, uuid) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.transition_scheduled_agent_run(uuid, uuid, uuid, uuid, uuid, text, text) FROM PUBLIC',
+          ${literal(schema)}
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.transition_scheduled_agent_run(uuid, uuid, uuid, uuid, uuid, text, text) TO %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE DELETE ON TABLE %I.scheduled_tasks, %I.scheduled_task_runs FROM %I',
+          ${literal(schema)}, ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_connection_authority_snapshots FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_run_connection_authority_snapshots FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_reusable_connection_materializations FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+        EXECUTE format(
+          'REVOKE ALL PRIVILEGES ON TABLE %I.scheduled_task_revision_authorities FROM %I',
+          ${literal(schema)}, ${literal(role)}
+        );
+      END IF;
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
@@ -1072,6 +1583,39 @@ BEGIN
         FROM PUBLIC;
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.personal_resource_delegation_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.scheduled_personal_resource_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.scheduled_personal_resource_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.scheduled_personal_resource_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.variable_set_authority_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.variable_set_authority_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.variable_set_authority_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.scoped_compute_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.scoped_compute_capability_active(text) FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.scoped_compute_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.scoped_compute_capabilities FROM %I',
         ${literal(role)}
       );
     END IF;
@@ -1146,6 +1690,23 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'complete_temporal_schedule_connector_cleanup(uuid,uuid)',
+      'upgrade_temporal_schedule_connector_cleanup(uuid,uuid,text,uuid,text,jsonb,uuid)',
+      'complete_workspace_temporal_connector_cleanups(uuid,uuid)'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC',
+          routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 `);

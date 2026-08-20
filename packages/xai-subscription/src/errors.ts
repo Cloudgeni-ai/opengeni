@@ -45,6 +45,97 @@ export class XaiSubscriptionHostedToolContinuationError extends XaiSubscriptionE
   }
 }
 
+export class XaiSubscriptionStreamingTerminalError extends XaiSubscriptionError {
+  readonly code: string;
+  readonly eventType: string;
+  readonly requestId: string | null;
+  readonly diagnosticTruncated: boolean;
+  readonly headers: Headers;
+
+  constructor(input: {
+    message: string;
+    code: string;
+    eventType: string;
+    requestId?: string | null;
+    status?: number;
+    diagnosticTruncated?: boolean;
+    headers?: Headers;
+  }) {
+    super("provider_rejected", input.message, input.status);
+    this.name = "XaiSubscriptionStreamingTerminalError";
+    this.code = input.code;
+    this.eventType = input.eventType;
+    this.requestId = input.requestId ?? null;
+    this.diagnosticTruncated = input.diagnosticTruncated === true;
+    this.headers = input.headers ?? new Headers();
+  }
+}
+
+export type XaiSubscriptionStreamingTerminalInfo = {
+  message: string;
+  code: string;
+  eventType: string;
+  requestId: string | null;
+  status?: number;
+  diagnosticTruncated: boolean;
+};
+
+const XAI_SUBSCRIPTION_RATE_LIMIT_CODES = new Set([
+  "rate_limit_exceeded",
+  "too_many_requests",
+  "overloaded_error",
+  "server_overloaded",
+  "capacity_exceeded",
+  "resource_exhausted",
+]);
+
+// Message fallback is the observed Grok HTTP-200 SSE capacity sentence only.
+// Isolated "high demand" / "overloaded" / "rate limit" text is not enough: a
+// false-positive arms the durable same-turn waiter with no give-up.
+const XAI_SUBSCRIPTION_RATE_LIMIT_MESSAGE =
+  /the model is currently at capacity due to high demand/i;
+
+export function isXaiSubscriptionRateLimitDiagnostic(input: {
+  code?: string | null;
+  message?: string | null;
+  status?: number | null;
+}): boolean {
+  if (input.status === 429) return true;
+  const code = (input.code ?? "").trim().toLowerCase();
+  if (XAI_SUBSCRIPTION_RATE_LIMIT_CODES.has(code)) return true;
+  return XAI_SUBSCRIPTION_RATE_LIMIT_MESSAGE.test(input.message ?? "");
+}
+
+export function classifyXaiSubscriptionStreamingTerminalError(
+  error: unknown,
+): XaiSubscriptionStreamingTerminalInfo | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    if (
+      current instanceof XaiSubscriptionStreamingTerminalError ||
+      value.name === "XaiSubscriptionStreamingTerminalError"
+    ) {
+      const code = typeof value.code === "string" && value.code.length > 0 ? value.code : null;
+      const eventType =
+        typeof value.eventType === "string" && value.eventType.length > 0 ? value.eventType : null;
+      const message = typeof value.message === "string" ? value.message : "";
+      if (!code || !eventType || message.length === 0) return null;
+      const status = Number(value.status);
+      return {
+        message,
+        code,
+        eventType,
+        requestId: typeof value.requestId === "string" ? value.requestId : null,
+        ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}),
+        diagnosticTruncated: value.diagnosticTruncated === true,
+      };
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
 export class XaiSubscriptionStreamIdleTimeoutError extends XaiSubscriptionError {
   readonly code = "xai_response_stream_idle_timeout";
 

@@ -123,6 +123,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return { grant, session };
@@ -660,6 +662,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: { mustNeverLeak: "x".repeat(100_000) },
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const third = await createSession(client.db, {
@@ -669,6 +673,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: second.id,
     });
@@ -804,6 +810,8 @@ describe("clean session control plane", () => {
           resources: [],
           metadata: {},
           model: "scripted-model",
+          reasoningEffort: "medium" as const,
+          latencyMode: "standard" as const,
           sandboxBackend: "none",
         }),
       );
@@ -868,6 +876,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
@@ -946,6 +956,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const third = await createSession(client.db, {
@@ -955,6 +967,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     const moved = await createSession(client.db, {
@@ -964,6 +978,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
 
@@ -1018,6 +1034,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
@@ -1123,10 +1141,11 @@ describe("clean session control plane", () => {
       db.execute(sql`
         insert into sessions (
           account_id, workspace_id, initial_message, resources, tools, metadata,
-          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+          model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id,
+          tool_policy, created_at, updated_at
         )
         select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
-          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
+          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'medium', 'standard', 'none',
           gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
           statement_timestamp() - make_interval(secs => n),
           statement_timestamp() - make_interval(secs => 5001 - n)
@@ -1988,6 +2007,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -2024,6 +2045,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: root.id,
     });
@@ -3515,7 +3538,6 @@ describe("clean session control plane", () => {
     const firstDecision = await evaluateGoalContinuation(client.db, {
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      noProgressLimit: 3,
     });
     expect(firstDecision).toMatchObject({ decision: "continue", autoContinuation: 1 });
     if (firstDecision.decision !== "continue") throw new Error("goal did not continue");
@@ -3571,7 +3593,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toEqual({ decision: "none" });
     expect(await getSessionGoal(client.db, grant.workspaceId!, session.id)).toMatchObject({
@@ -3585,7 +3606,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toEqual({ decision: "queue" });
     const humanAttemptId = crypto.randomUUID();
@@ -3611,7 +3631,6 @@ describe("clean session control plane", () => {
       await evaluateGoalContinuation(client.db, {
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        noProgressLimit: 3,
       }),
     ).toMatchObject({ decision: "continue", autoContinuation: 1 });
   });
@@ -4500,6 +4519,8 @@ describe("clean session control plane", () => {
         resources: [],
         metadata: {},
         model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
         sandboxBackend: "none",
         parentSessionId: parent.id,
       });
@@ -4628,6 +4649,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: parent.id,
       createdByActor: {
@@ -4829,6 +4852,314 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("startup milestone receipts follow canonical durable events across recovery and replay", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "measure recovery startup");
+    const firstAttemptId = crypto.randomUUID();
+    const first = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: firstAttemptId },
+    );
+    if (!first) throw new Error("startup receipt test turn was not claimed");
+    const queuedAt = Date.parse(first.createdAt);
+    const started = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: first.id,
+      triggerEventId: first.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "running",
+      sessionStatus: "running",
+      activeTurnId: first.id,
+      events: [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: first.triggerEventId },
+          occurredAt: new Date(queuedAt + 100),
+        },
+      ],
+    });
+    expect(started).toMatchObject({
+      action: "settled",
+      canonicalStartupMilestones: [{ milestone: "queue", outcome: "completed", durationMs: 100 }],
+    });
+    const firstProviderAttempt = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      first.id,
+      first.executionGeneration,
+      firstAttemptId,
+      [
+        {
+          type: "agent.model.request",
+          payload: { phase: "started" },
+          occurredAt: new Date(queuedAt + 200),
+        },
+        {
+          type: "agent.model.request",
+          payload: { phase: "failed" },
+          occurredAt: new Date(queuedAt + 225),
+        },
+      ],
+    );
+    expect(firstProviderAttempt.canonicalStartupMilestones).toEqual([
+      expect.objectContaining({
+        milestone: "provider_dispatch",
+        outcome: "completed",
+        durationMs: 200,
+      }),
+    ]);
+
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const secondAttemptId = crypto.randomUUID();
+    const second = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: secondAttemptId },
+    );
+    if (!second) throw new Error("recovered startup receipt test turn was not claimed");
+
+    const recoveredMilestones = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [
+        {
+          type: "agent.model.request",
+          payload: { phase: "started" },
+          occurredAt: new Date(queuedAt + 250),
+        },
+        {
+          type: "agent.model.request",
+          payload: { phase: "first_event" },
+          occurredAt: new Date(queuedAt + 400),
+        },
+      ],
+    );
+    expect(recoveredMilestones.canonicalStartupMilestones).toEqual([
+      expect.objectContaining({
+        milestone: "first_byte",
+        outcome: "completed",
+        durationMs: 400,
+      }),
+    ]);
+
+    const replay = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [
+        { type: "agent.model.request", payload: { phase: "started" } },
+        { type: "agent.model.request", payload: { phase: "first_event" } },
+      ],
+    );
+    expect(replay.canonicalStartupMilestones).toEqual([]);
+
+    const late = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      first.id,
+      first.executionGeneration,
+      firstAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "started" } }],
+    );
+    expect(late).toMatchObject({ accepted: false, canonicalStartupMilestones: [] });
+  });
+
+  test("a terminal failed turn after provider dispatch emits bounded no-first-byte evidence", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "measure provider failure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("provider failure test turn was not claimed");
+
+    const started = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [{ type: "agent.model.request", payload: { phase: "started" } }],
+    );
+    expect(started.canonicalStartupMilestones).toEqual([
+      expect.objectContaining({ milestone: "provider_dispatch", outcome: "completed" }),
+    ]);
+    const timedOut = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [{ type: "agent.model.request", payload: { phase: "timed_out" } }],
+    );
+    expect(timedOut.canonicalStartupMilestones).toEqual([]);
+    const failed = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "provider timed out before first byte" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(failed).toMatchObject({
+      action: "settled",
+      canonicalStartupMilestones: [
+        expect.objectContaining({ milestone: "first_byte", outcome: "failed" }),
+      ],
+    });
+    const repeated = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [{ type: "turn.failed", payload: { error: "late duplicate failure" } }],
+    );
+    expect(repeated.accepted).toBe(false);
+    expect(repeated.canonicalStartupMilestones).toEqual([]);
+
+    const undispatchedFixture = await fixture();
+    await send(
+      undispatchedFixture.grant,
+      undispatchedFixture.session.id,
+      "fail before provider dispatch",
+    );
+    const undispatchedAttemptId = crypto.randomUUID();
+    const undispatchedTurn = await claimTestSessionWork(
+      client.db,
+      undispatchedFixture.grant.workspaceId!,
+      undispatchedFixture.session.id,
+      `session-${undispatchedFixture.session.id}`,
+      { attemptId: undispatchedAttemptId },
+    );
+    if (!undispatchedTurn) throw new Error("undispatched failure test turn was not claimed");
+    const undispatchedFailure = await applySessionTurnSettlement(
+      client.db,
+      undispatchedFixture.grant.workspaceId!,
+      {
+        sessionId: undispatchedFixture.session.id,
+        turnId: undispatchedTurn.id,
+        triggerEventId: undispatchedTurn.triggerEventId,
+        attemptId: undispatchedAttemptId,
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [
+          { type: "turn.failed", payload: { error: "tool preparation failed" } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+      },
+    );
+    expect(undispatchedFailure).toMatchObject({
+      action: "settled",
+      canonicalStartupMilestones: [],
+    });
+  });
+
+  test("a later request failure cannot downgrade a logical turn that produced bytes", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "measure a later provider failure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("later provider failure test turn was not claimed");
+
+    const firstByte = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [
+        {
+          type: "agent.model.request",
+          payload: { phase: "started", requestId: "request-a", transportAttempt: 1 },
+        },
+        {
+          type: "agent.model.request",
+          payload: { phase: "first_byte", requestId: "request-a", transportAttempt: 1 },
+        },
+      ],
+    );
+    expect(firstByte.canonicalStartupMilestones).toEqual([
+      expect.objectContaining({ milestone: "provider_dispatch", outcome: "completed" }),
+      expect.objectContaining({ milestone: "first_byte", outcome: "completed" }),
+    ]);
+    const laterFailure = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn.id,
+      turn.executionGeneration,
+      attemptId,
+      [
+        {
+          type: "agent.model.request",
+          payload: { phase: "started", requestId: "request-b", transportAttempt: 1 },
+        },
+        {
+          type: "agent.model.request",
+          payload: { phase: "failed", requestId: "request-b", transportAttempt: 1 },
+        },
+      ],
+    );
+    expect(laterFailure.canonicalStartupMilestones).toEqual([]);
+    const terminal = await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "later tool-loop request failed" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(terminal).toMatchObject({ action: "settled", canonicalStartupMilestones: [] });
+  });
+
   test("attempt writes run concurrently across sessions while workspace control stays exclusive", async () => {
     const { grant, session: firstSession } = await fixture();
     const secondSession = await createSession(client.db, {
@@ -4838,6 +5169,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
     });
     await send(grant, firstSession.id, "first session work");
@@ -5633,6 +5966,34 @@ describe("clean session control plane", () => {
       reason: "already_executed",
     });
 
+    // A begun action whose provider request never happened settles
+    // not_executed (terminal status failed); a same-approval replay is denied
+    // with the precise not_executed reason instead of a false unknown outcome.
+    const notExecutedCall = call("connector-not-executed", "read");
+    const notExecutedAdmission = await beginConnectorActionExecution(
+      client.db,
+      firstIdentity,
+      notExecutedCall,
+    );
+    expect(notExecutedAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!notExecutedAdmission.allowed || !notExecutedAdmission.managed) {
+      throw new Error("not-executed fixture was denied");
+    }
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: notExecutedAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "not_executed",
+    });
+    const [notExecutedRow] = await shared.admin<Array<{ status: string; outcome: string }>>`
+      select status, outcome from connector_action_requests
+      where id = ${notExecutedAdmission.requestId}`;
+    expect(notExecutedRow).toEqual({ status: "failed", outcome: "not_executed" });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, notExecutedCall),
+    ).toMatchObject({ allowed: false, reason: "not_executed" });
+
     const askCall = call("connector-ask", "write");
     const askPreparation = await prepareConnectorActionApproval(client.db, firstIdentity, askCall);
     expect(askPreparation).toMatchObject({ managed: true, decision: "ask" });
@@ -6040,6 +6401,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: session.id,
     });
@@ -6228,6 +6591,8 @@ describe("clean session control plane", () => {
       resources: [],
       metadata: {},
       model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
       sandboxBackend: "none",
       parentSessionId: session.id,
     })

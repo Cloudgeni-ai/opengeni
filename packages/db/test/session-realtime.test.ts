@@ -64,6 +64,8 @@ async function fixture() {
     resources: [],
     metadata: {},
     model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
     sandboxBackend: "none",
   });
   return {
@@ -154,12 +156,11 @@ async function addPendingUpdate(value: Fixture) {
     sourceId: updateId,
     dedupeKey: `realtime-update-${updateId}`,
     summary: "durable update during realtime",
-    kind: "scheduled_occurrence",
+    kind: "agent_message",
     payload: {
-      type: "scheduled_occurrence",
+      type: "agent_message",
       text: "durable update during realtime",
-      scheduledTaskId: crypto.randomUUID(),
-      scheduledTaskRunId: crypto.randomUUID(),
+      operationId: updateId,
     },
   });
 }
@@ -375,6 +376,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
             resources: [],
             model: "scripted-model",
             reasoningEffort: "low",
+            latencyMode: "standard",
           }),
         ),
       ),
