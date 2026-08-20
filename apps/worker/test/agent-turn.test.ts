@@ -720,16 +720,19 @@ describe("turn exact-content boundaries", () => {
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
 
-    const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
-    const terminalFailureStart = source.indexOf(
+    const failureSource = await Bun.file(
+      new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
+    ).text();
+    const failureClassifier = failureSource.indexOf("const failure = agentRunFailurePayload(error");
+    const terminalFailureStart = failureSource.indexOf(
       'control.activityStatus = "failed";',
       failureClassifier,
     );
-    const terminalFailureEnd = source.indexOf(
+    const terminalFailureEnd = failureSource.indexOf(
       'control.turnMetricOutcome = "failed";',
       terminalFailureStart,
     );
-    const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
+    const terminalFailureBlock = failureSource.slice(terminalFailureStart, terminalFailureEnd);
     expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
     expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
     expect(terminalFailureBlock).toContain('type: "turn.failed"');
