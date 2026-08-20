@@ -11,7 +11,6 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
-import { describeLocalMcpBridgeDescriptor, type LocalMcpBridgeDescriptor } from "./mcp-bridge";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -263,8 +262,6 @@ export class OpenApiMcpServer implements MCPServer {
 
   constructor(private readonly options: OpenApiServerOptions) {
     this.name = `openapi:${stableToolId(options.revision.definitionId)}`;
-    const bridge = openApiBridgeDescriptor(options);
-    if (bridge) Object.defineProperty(this, "bridge", { enumerable: true, value: bridge });
   }
 
   async connect(): Promise<void> {}
@@ -319,60 +316,6 @@ export class OpenApiMcpServer implements MCPServer {
 
 export function createOpenApiMcpServer(options: OpenApiServerOptions): MCPServer {
   return new OpenApiMcpServer(options);
-}
-
-function openApiBridgeDescriptor(options: OpenApiServerOptions): LocalMcpBridgeDescriptor | null {
-  const destinations = openApiBridgeDestinations(options.revision);
-  if (!destinations) return null;
-  return describeLocalMcpBridgeDescriptor({
-    adapterId: "openapi",
-    providerId: options.revision.source.provider ?? options.revision.definitionId,
-    catalogIdentity: `integration-definition:${options.revision.definitionId}@${options.revision.id}`,
-    authority:
-      options.authority.connectionRef && options.credentialResolver ? "connection" : "none",
-    toolSurface: "immutable_revision",
-    mutationReplay: "safe_reads_only",
-    destinations,
-  });
-}
-
-function openApiBridgeDestinations(
-  revision: OpenApiRevision,
-): { origin: string; pathPrefix: string }[] | null {
-  const destinations = new Map<string, { origin: string; pathPrefix: string }>();
-  for (const binding of Object.values(revision.bindings)) {
-    const origin = staticOperationOrigin(binding);
-    if (!origin) return null;
-    // OpenAPI paths may legally resolve `..` segments outside a server base
-    // path or name an absolute URL on another origin. Root is the narrowest
-    // truthful static prefix for the frozen operation destination; the
-    // transport remains the actual network gate.
-    destinations.set(origin, { origin, pathPrefix: "/" });
-  }
-  return [...destinations.values()].sort((left, right) =>
-    `${left.origin}${left.pathPrefix}`.localeCompare(`${right.origin}${right.pathPrefix}`),
-  );
-}
-
-const OPENAPI_ORIGIN_PROBE = "opengeni-origin-probe";
-
-function staticOperationOrigin(binding: OpenApiOperationBinding): string | null {
-  const probePath = binding.pathTemplate.replace(/\{[^}]+\}/g, OPENAPI_ORIGIN_PROBE);
-  let resolved: URL;
-  try {
-    resolved = resolveOperationPathUrl(binding, probePath);
-  } catch {
-    return null;
-  }
-  if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return null;
-  if (
-    resolved.protocol.includes(OPENAPI_ORIGIN_PROBE) ||
-    resolved.hostname.includes(OPENAPI_ORIGIN_PROBE) ||
-    resolved.port.includes(OPENAPI_ORIGIN_PROBE)
-  ) {
-    return null;
-  }
-  return resolved.origin;
 }
 
 export async function invokeOpenApiOperation(
@@ -745,18 +688,14 @@ function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string
     }
     return encodeURIComponent(scalarString(value));
   });
-  const url = resolveOperationPathUrl(binding, path);
-  const query = objectValue(args.query);
-  for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
-  return url;
-}
-
-function resolveOperationPathUrl(binding: OpenApiOperationBinding, path: string): URL {
   const base = new URL(binding.serverUrl);
-  return new URL(
+  const url = new URL(
     path.replace(/^\//, ""),
     base.toString().endsWith("/") ? base : new URL(`${base}/`),
   );
+  const query = objectValue(args.query);
+  for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
+  return url;
 }
 
 function buildOperationHeaders(

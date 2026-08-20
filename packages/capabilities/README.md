@@ -26,18 +26,14 @@ Security defaults:
 
 `src/mcp-bridge.ts` defines the shared contract for provider APIs exposed as
 in-process MCP servers. A bridge declares a secret-free catalog identity,
-actual authority class, immutable or reviewed tool-surface class, destinations,
-and the safe-read-only replay rule. Static reviewed bridges validate 1-32 exact
-HTTPS destinations. Static-origin immutable OpenAPI revisions instead expose
-conservative descriptive origin-root metadata without adding a runtime gate
-beyond the compiler and transport contracts that already accepted the
-revision. Revisions whose origin depends on runtime path parameters remain
-ordinary OpenAPI MCP adapters without this descriptor. Adapter matching is
-generic and fails closed on ambiguity. The descriptor is not authorization:
-each adapter still revalidates its Connection or host-owned authority before
-every provider request.
+actual authority class, reviewed tool-surface class, 1-32 exact HTTPS
+destinations, and the safe-read-only replay rule. Adapter matching is generic
+and fails closed on ambiguity. The descriptor is not authorization: each
+adapter still revalidates its Connection or host-owned authority before every
+provider request.
 
-The Gmail REST adapter is the static reviewed example. Qualifying static-origin
-OpenAPI Integration Definitions, including Google Drive, conform through
-`OpenApiMcpServer` and retain their existing Connection and facet authority. See
+The Gmail REST adapter is the static reviewed example. OpenAPI and GraphQL
+Integration Definitions keep their existing local MCP adapters without
+claiming this descriptor. Google Drive remains one functional Integration row
+with its existing Connection and facet authority. See
 `docs/design/first-party-mcp-bridges.md`.

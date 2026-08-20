@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { isLocalMcpBridgeServer } from "@opengeni/capabilities";
 import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@opengeni/db";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -138,16 +137,6 @@ describe("installed API Integration worker adapters", () => {
           headers: { "content-type": "application/json" },
         });
       },
-    });
-    expect(isLocalMcpBridgeServer(localMcpServers[0]!.server)).toBe(true);
-    if (!isLocalMcpBridgeServer(localMcpServers[0]!.server)) {
-      throw new Error("expected API Integration to register as a local MCP bridge");
-    }
-    expect(localMcpServers[0]!.server.bridge).toMatchObject({
-      adapterId: "openapi",
-      authority: "connection",
-      catalogIdentity: `integration-definition:inventory@${item.revision.id}`,
-      mutationReplay: "safe_reads_only",
     });
     const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: item.serverId }], {
       localMcpServers,

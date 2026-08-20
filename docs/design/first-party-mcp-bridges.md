@@ -11,21 +11,11 @@ or UI subsystem.
 
 The code contract is `packages/capabilities/src/mcp-bridge.ts`:
 
-- every conforming bridge server exposes a secret-free
-  `LocalMcpBridgeDescriptor` whose
-  `assurance` distinguishes strict static validation from descriptive immutable
-  revision metadata;
-- a static reviewed bridge declares `toolSurface: "static_reviewed"`; a
-  qualifying static-origin Integration Definition declares
-  `"immutable_revision"`;
+- every conforming bridge server exposes a validated, secret-free
+  `LocalMcpBridgeDescriptor` and declares `toolSurface: "static_reviewed"`;
 - `authority` names the existing authority spine (`connection`, `host`, or
   `none`) but never grants it;
-- a static reviewed bridge declares 1-32 exact HTTPS origins plus path
-  prefixes; a static-origin immutable OpenAPI revision is described without
-  adding a new runtime validation gate and conservatively reports each accepted
-  origin at `/`, including HTTP origins already permitted for local/test
-  definitions; a revision whose origin depends on runtime path parameters stays
-  an ordinary OpenAPI MCP adapter without claiming this descriptor;
+- every bridge declares 1-32 exact HTTPS origins plus path prefixes;
 - `mutationReplay: "safe_reads_only"` is mandatory: a safe read may refresh
   and retry after an authorization failure, while a mutation with an ambiguous
   provider outcome is never replayed; and
@@ -35,11 +25,9 @@ The code contract is `packages/capabilities/src/mcp-bridge.ts`:
 
 `packages/runtime/src/index.ts` owns the built-in adapter registry. A provider
 matcher and factory live with their adapter, not in generic catalog, OAuth, or
-UI code. Persisted API Integrations already enter through
-`LocalMcpServerRegistration`; qualifying static-origin OpenAPI servers implement
-the same bridge descriptor without changing the Integration Definition or
-Connection authority. Dynamic-origin revisions retain the existing ordinary
-OpenAPI MCP path pending separate destination-governance work.
+UI code. Existing OpenAPI and GraphQL Integration Definitions continue through
+their ordinary local MCP adapters and do not claim this reviewed static bridge
+descriptor. Compiler-wide OpenAPI destination governance remains separate work.
 
 ## Adding a bridge
 
@@ -54,8 +42,7 @@ OpenAPI MCP path pending separate destination-governance work.
 4. Pin provider destinations and bounded response/deadline behavior. Reject
    credential-bearing redirects.
 5. Prove safe-read refresh and mutation outcome-unknown behavior in tests.
-6. Register the adapter in the built-in registry or return its server through
-   the existing API Integration registration seam. No second transport or tool
+6. Register the adapter in the built-in registry. No second transport or tool
    registry is introduced.
 
 ## Current provider scope
@@ -64,10 +51,10 @@ OpenAPI MCP path pending separate destination-governance work.
   official Gmail MCP resource, while every call executes through
   `GmailRestMcpServer` and the existing personal Connection resolver.
 - **Google Drive** already uses the immutable Integration Definition compiler
-  and local OpenAPI MCP adapter. It now explicitly conforms to this contract;
-  its descriptor is descriptive metadata over the already-accepted revision,
-  while provider-specific facet/source authority and one Integration row remain
-  unchanged. A duplicate Connector row would be incorrect.
+  and local OpenAPI MCP adapter. It remains functional as one Integration row
+  with its provider-specific facet/source authority unchanged, but does not
+  claim the new static bridge descriptor. A duplicate Connector row would be
+  incorrect.
 - **Square Cash App** already has a streamable-HTTP provider endpoint in the
   committed catalog (`https://connect.squareup.com/v2/mcp/cash-app`). It needs
   no local bridge. A broader Square bridge requires a separately reviewed tool
