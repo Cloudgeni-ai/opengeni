@@ -15,6 +15,7 @@ import {
   CodemodeDispatchRequest,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  isToolResultSpilledReceipt,
   type AttemptToolCall as AttemptToolCallValue,
   type AttemptToolCaller,
   type AttemptToolCatalog as AttemptToolCatalogValue,
@@ -492,10 +493,12 @@ export class AttemptToolEnvironment {
       }),
     );
     if (!result.isError && definition.validateOutput) {
-      if (
-        result.structuredContent === undefined ||
-        !definition.validateOutput(result.structuredContent)
-      ) {
+      const outputMatchesSchema =
+        result.structuredContent !== undefined &&
+        definition.validateOutput(result.structuredContent);
+      // Model overflow replaces the exact tool payload with a compact File
+      // receipt after execute. That handle is not the catalog output schema.
+      if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
         throw new AttemptToolOutputValidationError();
       }
     }

@@ -91,6 +91,7 @@ function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boo
 export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
+  const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const navigate = useNavigate();
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -158,16 +159,23 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       setApiKeysLoaded(true);
       return;
     }
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     try {
-      setApiKeys(await client.listApiKeys(workspaceId));
+      const nextApiKeys = await client.listApiKeys(workspaceId);
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+      setApiKeys(nextApiKeys);
       setApiKeysError(null);
     } catch (error) {
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setApiKeys([]);
       setApiKeysError(error instanceof Error ? error : new Error(String(error)));
     } finally {
-      setApiKeysLoaded(true);
+      if (ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        setApiKeysLoaded(true);
+      }
     }
-  }, [canManageApiKeys, client, workspaceId]);
+  }, [canManageApiKeys, captureWorkspaceInvocation, client, ownsWorkspaceInvocation, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -181,10 +189,12 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     if (!name || name === activeWorkspace?.name) {
       return;
     }
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     setRenaming(true);
     try {
       const renamed = await context.renameWorkspace(workspaceId, name);
-      if (renamed) {
+      if (renamed && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success("Workspace renamed");
       }
     } finally {
@@ -197,17 +207,21 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       toast.error("API key name and permissions are required");
       return;
     }
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     setBusy(true);
     try {
       const result = await client.createApiKey(workspaceId, {
         name: apiKeyName.trim(),
         permissions: requestedPermissions,
       });
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
       setApiKeysOpen(true);
       toast.success("API key created");
     } catch (error) {
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       toast.error("Failed to create API key", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -226,13 +240,17 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   }
 
   async function revokeKey(apiKeyId: string) {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
     setBusy(true);
     try {
       const revoked = await client.deleteApiKey(workspaceId, apiKeyId);
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
       setApiKeys((current) => current.map((key) => (key.id === revoked.id ? revoked : key)));
       toast.success("API key revoked");
       return true;
     } catch (error) {
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
       toast.error("Failed to revoke API key", {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -255,6 +273,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   }
 
   async function deleteWorkspace(): Promise<boolean> {
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
     // Pick where to land BEFORE the cache drops this workspace.
     const remaining = context.workspaces.filter((workspace) => workspace.id !== workspaceId);
     const next =
@@ -263,6 +283,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     if (!deleted) {
       return false;
     }
+    if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
     context.resetSessionView();
     if (next) {
       await navigate({
@@ -1087,10 +1108,12 @@ function MemoryPreferenceRow({
   const [saving, setSaving] = useState(false);
 
   async function toggle(next: boolean) {
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     setSaving(true);
     try {
       const updated = await context.updateWorkspaceSettings(workspaceId, { memoryEnabled: next });
-      if (updated) {
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success(next ? "Workspace memory enabled" : "Workspace memory disabled");
       }
     } finally {
@@ -1128,12 +1151,14 @@ function CodexCompactionPreferenceRow({
   const [saving, setSaving] = useState(false);
 
   async function toggle(nextPortable: boolean) {
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
     setSaving(true);
     try {
       const updated = await context.updateWorkspaceSettings(workspaceId, {
         codexCompactionDefault: nextPortable ? "portable" : "remote_v2",
       });
-      if (updated) {
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success(
           nextPortable
             ? "New Codex sessions can switch to other providers"

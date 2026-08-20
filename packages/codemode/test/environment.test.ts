@@ -306,4 +306,40 @@ describe("AttemptToolEnvironment", () => {
       count: 1,
     });
   });
+
+  test("accepts a spilled model overflow receipt instead of the catalog output schema", async () => {
+    const receipt = {
+      type: "tool_result_spilled" as const,
+      sandboxPath: "/workspace/tool-results/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json",
+      fileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      byteSize: 2_000_000,
+      mediaType: "application/json" as const,
+    };
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        {
+          ...definition("docs", "typed", async () => ({
+            isError: false,
+            content: [{ type: "text", text: JSON.stringify(receipt) }],
+            structuredContent: receipt,
+          })),
+          outputSchema: {
+            type: "object",
+            properties: { count: { type: "integer" } },
+            required: ["count"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+    const result = await environment.callModel({
+      modelName: "docs__typed",
+      arguments: {},
+      subjectId: "worker:mcp-model",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual(receipt);
+  });
 });
