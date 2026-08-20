@@ -87,11 +87,15 @@ export function SwitcherBlock() {
 
   async function toggleWorkspaceControl() {
     if (!activeWorkspace || controlBusy) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(activeWorkspace.id);
+    if (!acceptedTransition) return;
     const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
     setControlBusy(true);
     try {
-      await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
-      toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
+      if (updated && context.ownsWorkspaceInvocation(activeWorkspace.id, acceptedTransition)) {
+        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      }
     } catch (error) {
       toast.error(`Couldn't ${action} the workspace`, {
         description: error instanceof Error ? error.message : String(error),
@@ -111,6 +115,8 @@ export function SwitcherBlock() {
     if (!name || !dialog) {
       return;
     }
+    const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+    if (!acceptedTransition) return;
     setBusy(true);
     try {
       if (dialog === "create") {
@@ -121,6 +127,7 @@ export function SwitcherBlock() {
         if (!created) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success(`Workspace ${created.name} created`);
         rail.openWorkspace(created.id);
       } else {
@@ -128,6 +135,7 @@ export function SwitcherBlock() {
         if (!renamed) {
           return;
         }
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         toast.success("Workspace renamed");
       }
       setDialog(null);

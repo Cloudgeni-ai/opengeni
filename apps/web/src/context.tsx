@@ -74,12 +74,17 @@ import { upsertWorkspace } from "@/lib/workspaces";
 import {
   beginWorkspaceOperation,
   beginWorkspaceTransition,
+  invalidatePrincipalTransition,
   invalidateWorkspaceTransition,
+  ownsPrincipalTransition,
+  ownsTransitionInvocation,
   ownsWorkspaceOperation,
   ownsWorkspaceTransition,
   runCurrentWorkspaceOperation,
   runCurrentWorkspaceRequest,
+  runCurrentTransitionInvocation,
   settleWorkspaceOperation,
+  type PrincipalTransitionIdentity,
   type WorkspaceOperationIdentity,
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
@@ -195,7 +200,10 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
-  setWorkspaceInferenceControl: (workspaceId: string, action: "pause" | "resume") => Promise<void>;
+  setWorkspaceInferenceControl: (
+    workspaceId: string,
+    action: "pause" | "resume",
+  ) => Promise<boolean>;
   refreshWorkspace: (workspaceId: string) => Promise<void>;
   updateWorkspaceSettings: (
     workspaceId: string,
@@ -253,6 +261,18 @@ export type PendingSlackLink = {
 };
 
 export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
+
+/**
+ * A signed-out Slack deep link has already been scrubbed from browser history,
+ * so its raw in-memory bearer may cross exactly the sign-in that authenticates
+ * its exchange. Every other principal transition clears it.
+ */
+export function preserveSlackLinkForManagedAuth(
+  mode: "signin" | "signup",
+  phase: SlackLinkPreparePhase,
+): boolean {
+  return mode === "signin" && phase === "raw";
+}
 
 export function createSlackLinkPrepareController<Request>(value: PendingSlackLink | null) {
   let workspaceId = value?.workspaceId ?? null;
@@ -436,6 +456,7 @@ export function RootRouteComponent() {
     workspaceId: null,
     revision: 0,
   });
+  const principalTransitionIdentity = useRef<PrincipalTransitionIdentity>({ revision: 0 });
   const workspaceOperationSequence = useRef(0);
   const activeCreateOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const githubManifestOperationSequence = useRef(0);
@@ -584,11 +605,21 @@ export function RootRouteComponent() {
     [],
   );
 
-  const invalidatePrincipalWorkspaceState = useCallback(() => {
-    authPrincipalIdRef.current = null;
-    accessPrincipalIdRef.current = null;
-    resetWorkspaceState(null, true);
-  }, [resetWorkspaceState]);
+  const invalidatePrincipalWorkspaceState = useCallback(
+    (options?: { preservePendingSlackLink?: boolean }) => {
+      principalTransitionIdentity.current = invalidatePrincipalTransition(
+        principalTransitionIdentity.current,
+      );
+      authPrincipalIdRef.current = null;
+      accessPrincipalIdRef.current = null;
+      if (options?.preservePendingSlackLink !== true) {
+        slackLinkPrepareController.clear();
+        setSlackLinkContinuationWorkspaceId(null);
+      }
+      resetWorkspaceState(null, true);
+    },
+    [resetWorkspaceState],
+  );
 
   useEffect(() => {
     if (isPublicDevHarness) return;
@@ -633,25 +664,31 @@ export function RootRouteComponent() {
       return;
     }
     let cancelled = false;
+    const acceptedPrincipal = principalTransitionIdentity.current;
     setAuthSession(undefined);
     void fetchAuthSession()
       .then((nextSession) => {
-        if (!cancelled) {
-          const nextPrincipalId = nextSession?.user.id ?? null;
-          if (
-            authPrincipalIdRef.current !== null &&
-            authPrincipalIdRef.current !== nextPrincipalId
-          ) {
-            invalidatePrincipalWorkspaceState();
-          }
-          authPrincipalIdRef.current = nextPrincipalId;
-          setAuthSession(nextSession);
+        if (
+          cancelled ||
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        ) {
+          return;
         }
+        const nextPrincipalId = nextSession?.user.id ?? null;
+        if (authPrincipalIdRef.current !== null && authPrincipalIdRef.current !== nextPrincipalId) {
+          invalidatePrincipalWorkspaceState();
+        }
+        authPrincipalIdRef.current = nextPrincipalId;
+        setAuthSession(nextSession);
       })
       .catch(() => {
-        if (!cancelled) {
-          setAuthSession(null);
+        if (
+          cancelled ||
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        ) {
+          return;
         }
+        setAuthSession(null);
       });
     return () => {
       cancelled = true;
@@ -667,11 +704,15 @@ export function RootRouteComponent() {
       return;
     }
     let cancelled = false;
+    let acceptedPrincipal = principalTransitionIdentity.current;
     setAccessLoading(true);
     setAccessError(null);
     void Promise.all([client.getAccessContext(), client.listWorkspaces()])
       .then(([context, nextWorkspaces]) => {
-        if (cancelled) {
+        if (
+          cancelled ||
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        ) {
           return;
         }
         if (
@@ -679,13 +720,17 @@ export function RootRouteComponent() {
           accessPrincipalIdRef.current !== context.subjectId
         ) {
           invalidatePrincipalWorkspaceState();
+          acceptedPrincipal = principalTransitionIdentity.current;
         }
         accessPrincipalIdRef.current = context.subjectId;
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
       })
       .catch((error) => {
-        if (cancelled) {
+        if (
+          cancelled ||
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        ) {
           return;
         }
         toast.error("Failed to load workspace access", {
@@ -696,7 +741,10 @@ export function RootRouteComponent() {
         setAccessError(error instanceof Error ? error.message : String(error));
       })
       .finally(() => {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        ) {
           setAccessLoading(false);
         }
       });
@@ -731,9 +779,17 @@ export function RootRouteComponent() {
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
   async function createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace | null> {
+    const acceptedTransition = workspaceTransitionIdentity.current;
+    const ownsInvocation = () =>
+      ownsTransitionInvocation(workspaceTransitionIdentity.current, acceptedTransition);
     let created: Workspace;
     try {
-      created = await client.createWorkspace(request);
+      const creation = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () => await client.createWorkspace(request),
+      });
+      if (creation.status === "stale") return null;
+      created = creation.value;
     } catch (error) {
       toast.error("Failed to create workspace", {
         description: error instanceof Error ? error.message : String(error),
@@ -749,22 +805,32 @@ export function RootRouteComponent() {
     // Refresh grants so the new workspace's owner permissions apply at once;
     // the workspace itself is already usable if this refresh fails — surface a
     // soft warning so a stale permission set doesn't fail silently.
-    await client
-      .getAccessContext()
-      .then(setAccessContext)
-      .catch(() => {
-        toast.warning("Permissions may be out of date", {
-          description: "Reload if something looks off.",
-        });
+    try {
+      const accessRefresh = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () => await client.getAccessContext(),
       });
+      if (accessRefresh.status === "stale") return null;
+      setAccessContext(accessRefresh.value);
+    } catch {
+      toast.warning("Permissions may be out of date", {
+        description: "Reload if something looks off.",
+      });
+    }
     return created;
   }
 
   async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace | null> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
     try {
-      const updated = await client.updateWorkspace(workspaceId, { name });
-      setWorkspaces((current) => upsertWorkspace(current, updated));
-      return updated;
+      const update = await runCurrentTransitionInvocation({
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () => await client.updateWorkspace(workspaceId, { name }),
+      });
+      if (update.status === "stale") return null;
+      setWorkspaces((current) => upsertWorkspace(current, update.value));
+      return update.value;
     } catch (error) {
       toast.error("Failed to rename workspace", {
         description: error instanceof Error ? error.message : String(error),
@@ -776,13 +842,21 @@ export function RootRouteComponent() {
   async function setWorkspaceInferenceControl(
     workspaceId: string,
     action: "pause" | "resume",
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
     const current = workspaces.find((workspace) => workspace.id === workspaceId);
-    const response = await client.setWorkspaceInferenceState(workspaceId, {
-      action,
-      clientEventId: crypto.randomUUID(),
-      ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
+    const update = await runCurrentTransitionInvocation({
+      isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+      request: async () =>
+        await client.setWorkspaceInferenceState(workspaceId, {
+          action,
+          clientEventId: crypto.randomUUID(),
+          ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
+        }),
     });
+    if (update.status === "stale") return false;
+    const response = update.value;
     setWorkspaces((all) =>
       all.map((workspace) =>
         workspace.id === workspaceId
@@ -799,15 +873,19 @@ export function RootRouteComponent() {
           : workspace,
       ),
     );
+    return true;
   }
 
   const refreshWorkspace = useCallback(
     async (workspaceId: string): Promise<void> => {
       const acceptedTransition = captureWorkspaceInvocation(workspaceId);
       if (!acceptedTransition) return;
-      const updated = await client.getWorkspace(workspaceId);
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-      setWorkspaces((current) => upsertWorkspace(current, updated));
+      const refresh = await runCurrentTransitionInvocation({
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () => await client.getWorkspace(workspaceId),
+      });
+      if (refresh.status === "stale") return;
+      setWorkspaces((current) => upsertWorkspace(current, refresh.value));
     },
     [captureWorkspaceInvocation, client, ownsWorkspaceInvocation],
   );
@@ -819,10 +897,16 @@ export function RootRouteComponent() {
     workspaceId: string,
     settings: UpdateWorkspaceSettingsRequest,
   ): Promise<Workspace | null> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
     try {
-      const updated = await client.updateWorkspaceSettings(workspaceId, settings);
-      setWorkspaces((current) => upsertWorkspace(current, updated));
-      return updated;
+      const update = await runCurrentTransitionInvocation({
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () => await client.updateWorkspaceSettings(workspaceId, settings),
+      });
+      if (update.status === "stale") return null;
+      setWorkspaces((current) => upsertWorkspace(current, update.value));
+      return update.value;
     } catch (error) {
       toast.error("Failed to update workspace settings", {
         description: error instanceof Error ? error.message : String(error),
@@ -835,12 +919,19 @@ export function RootRouteComponent() {
     workspaceId: string,
     rigId: string | null,
   ): Promise<Workspace | null> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
     try {
-      const updated = await client.setWorkspaceDefaultRig(workspaceId, {
-        rigId,
+      const update = await runCurrentTransitionInvocation({
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () =>
+          await client.setWorkspaceDefaultRig(workspaceId, {
+            rigId,
+          }),
       });
-      setWorkspaces((current) => upsertWorkspace(current, updated));
-      return updated;
+      if (update.status === "stale") return null;
+      setWorkspaces((current) => upsertWorkspace(current, update.value));
+      return update.value;
     } catch (error) {
       toast.error("Failed to update the workspace default rig", {
         description: error instanceof Error ? error.message : String(error),
@@ -858,10 +949,18 @@ export function RootRouteComponent() {
     sessionId: string,
     title: string,
   ): Promise<Session | null> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
     try {
-      const updated = await client.updateSession(workspaceId, sessionId, {
-        title,
+      const update = await runCurrentTransitionInvocation({
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () =>
+          await client.updateSession(workspaceId, sessionId, {
+            title,
+          }),
       });
+      if (update.status === "stale") return null;
+      const updated = update.value;
       setSession((current) =>
         current && current.id === updated.id
           ? {
@@ -890,6 +989,9 @@ export function RootRouteComponent() {
     pinned: boolean,
     expectedVersion?: number,
   ): Promise<Session | null> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return null;
+    const ownsInvocation = () => ownsWorkspaceInvocation(workspaceId, acceptedTransition);
     const before = session;
     const optimisticVersion = (expectedVersion ?? before?.pinVersion ?? 0) + 1;
     const optimistic: Session | null =
@@ -905,10 +1007,16 @@ export function RootRouteComponent() {
       setSession(optimistic);
     }
     try {
-      const updated = await client.updateSessionPin(workspaceId, sessionId, {
-        pinned,
-        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      const update = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () =>
+          await client.updateSessionPin(workspaceId, sessionId, {
+            pinned,
+            ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+          }),
       });
+      if (update.status === "stale") return null;
+      const updated = update.value;
       // The mutation can race a newer page poll/other-device write, and its
       // full Session projection can lag lifecycle/SSE fields. Merge only the
       // monotonic personal pin fields rather than replacing the open session.
@@ -919,9 +1027,13 @@ export function RootRouteComponent() {
       // Re-read on every failure, not only OCC conflicts. A transport failure
       // may have happened after the server committed; blindly restoring
       // `before` would temporarily lie and could overwrite a newer device.
-      const authoritative = await client
-        .getSession(workspaceId, sessionId, { fresh: true })
-        .catch(() => null);
+      const reconciliation = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () =>
+          await client.getSession(workspaceId, sessionId, { fresh: true }).catch(() => null),
+      });
+      if (reconciliation.status === "stale") return null;
+      const authoritative = reconciliation.value;
       if (authoritative) {
         setSession((current) => reconcileFailedSessionPin(current, optimistic, authoritative));
         notifySessionPinChanged(workspaceId, sessionId);
@@ -959,8 +1071,15 @@ export function RootRouteComponent() {
   // Delete drops the workspace from the cached list and refreshes grants (the
   // owner grant for the deleted workspace is gone). The caller navigates away.
   async function deleteWorkspace(workspaceId: string): Promise<boolean> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
+    const ownsInvocation = () => ownsWorkspaceInvocation(workspaceId, acceptedTransition);
     try {
-      await client.deleteWorkspace(workspaceId);
+      const deletion = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () => await client.deleteWorkspace(workspaceId),
+      });
+      if (deletion.status === "stale") return false;
     } catch (error) {
       toast.error("Failed to delete workspace", {
         description: error instanceof Error ? error.message : String(error),
@@ -968,14 +1087,18 @@ export function RootRouteComponent() {
       return false;
     }
     setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-    await client
-      .getAccessContext()
-      .then(setAccessContext)
-      .catch(() => {
-        toast.warning("Permissions may be out of date", {
-          description: "Reload if something looks off.",
-        });
+    try {
+      const accessRefresh = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () => await client.getAccessContext(),
       });
+      if (accessRefresh.status === "stale") return false;
+      setAccessContext(accessRefresh.value);
+    } catch {
+      toast.warning("Permissions may be out of date", {
+        description: "Reload if something looks off.",
+      });
+    }
     return true;
   }
 
@@ -1396,21 +1519,43 @@ export function RootRouteComponent() {
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) {
-    invalidatePrincipalWorkspaceState();
+    invalidatePrincipalWorkspaceState({
+      preservePendingSlackLink: preserveSlackLinkForManagedAuth(
+        mode,
+        slackLinkPrepareController.phase(),
+      ),
+    });
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const ownsInvocation = () =>
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
     if (mode === "signup") {
-      await signUpEmail(input);
+      const signup = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () => await signUpEmail(input),
+      });
+      if (signup.status === "stale") return;
       captureProductAnalyticsEvent("signup_submitted", {
         method: "email",
         verification_required: true,
       });
     } else {
-      await signInEmail({
-        email: input.email,
-        password: input.password,
-        rememberMe: true,
+      const signin = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: async () =>
+          await signInEmail({
+            email: input.email,
+            password: input.password,
+            rememberMe: true,
+          }),
       });
+      if (signin.status === "stale") return;
     }
-    const nextSession = await fetchAuthSession();
+    const sessionRead = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: fetchAuthSession,
+    });
+    if (sessionRead.status === "stale") return;
+    const nextSession = sessionRead.value;
     authPrincipalIdRef.current = nextSession?.user.id ?? null;
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
@@ -1421,16 +1566,25 @@ export function RootRouteComponent() {
 
   async function handleManagedSignOut() {
     invalidatePrincipalWorkspaceState();
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const ownsInvocation = () =>
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
     // Keep the authenticated tree hidden until an ambiguous response has been
     // reconciled against the authoritative cookie session.
     setAuthSession(undefined);
     setAccessContext(null);
     setWorkspaces([]);
     setAccessError(null);
-    const result = await signOutWithAuthoritativeReconciliation<AuthSession>({
-      signOut: signOutManaged,
-      readSession: fetchAuthSession,
+    const reconciliation = await runCurrentTransitionInvocation({
+      isCurrent: ownsInvocation,
+      request: async () =>
+        await signOutWithAuthoritativeReconciliation<AuthSession>({
+          signOut: signOutManaged,
+          readSession: fetchAuthSession,
+        }),
     });
+    if (reconciliation.status === "stale") return;
+    const result = reconciliation.value;
     authPrincipalIdRef.current = result.session?.user.id ?? null;
     setAuthSession(result.session);
     // A definitive failure may restore the same user id. Rotate the client

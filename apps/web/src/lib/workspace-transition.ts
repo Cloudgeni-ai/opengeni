@@ -3,6 +3,23 @@ export type WorkspaceTransitionIdentity = {
   revision: number;
 };
 
+export type PrincipalTransitionIdentity = {
+  revision: number;
+};
+
+export function invalidatePrincipalTransition(
+  current: PrincipalTransitionIdentity,
+): PrincipalTransitionIdentity {
+  return { revision: current.revision + 1 };
+}
+
+export function ownsPrincipalTransition(
+  current: PrincipalTransitionIdentity,
+  accepted: PrincipalTransitionIdentity,
+): boolean {
+  return current.revision === accepted.revision;
+}
+
 export type WorkspaceOperationIdentity = {
   id: number;
   transition: WorkspaceTransitionIdentity;
@@ -37,6 +54,13 @@ export function ownsWorkspaceTransition(
     accepted.workspaceId === workspaceId &&
     current.revision === accepted.revision
   );
+}
+
+export function ownsTransitionInvocation(
+  current: WorkspaceTransitionIdentity,
+  accepted: WorkspaceTransitionIdentity,
+): boolean {
+  return current.workspaceId === accepted.workspaceId && current.revision === accepted.revision;
 }
 
 export function beginWorkspaceOperation(
@@ -77,9 +101,29 @@ export function settleWorkspaceOperation(
   return { active: null, settledCurrent: true };
 }
 
-export type CurrentWorkspaceOperationResult<T> =
+export type CurrentTransitionInvocationResult<T> =
   | { status: "current"; value: T }
   | { status: "stale" };
+
+/**
+ * Let an already-admitted server request settle, but expose its result only
+ * while the exact browser-side principal/route generation that admitted it is
+ * still current. This never cancels or rolls back the server mutation.
+ */
+export async function runCurrentTransitionInvocation<T>(input: {
+  isCurrent: () => boolean;
+  request: () => Promise<T>;
+}): Promise<CurrentTransitionInvocationResult<T>> {
+  try {
+    const value = await input.request();
+    return input.isCurrent() ? { status: "current", value } : { status: "stale" };
+  } catch (error) {
+    if (!input.isCurrent()) {
+      return { status: "stale" };
+    }
+    throw error;
+  }
+}
 
 /**
  * Run a request owned by one exact workspace operation. Both fulfillment and
@@ -92,30 +136,17 @@ export async function runCurrentWorkspaceOperation<T>(input: {
   operation: WorkspaceOperationIdentity;
   workspaceId: string;
   request: () => Promise<T>;
-}): Promise<CurrentWorkspaceOperationResult<T>> {
-  try {
-    const value = await input.request();
-    return ownsWorkspaceOperation(
-      input.activeOperation(),
-      input.currentTransition(),
-      input.operation,
-      input.workspaceId,
-    )
-      ? { status: "current", value }
-      : { status: "stale" };
-  } catch (error) {
-    if (
-      !ownsWorkspaceOperation(
+}): Promise<CurrentTransitionInvocationResult<T>> {
+  return await runCurrentTransitionInvocation({
+    isCurrent: () =>
+      ownsWorkspaceOperation(
         input.activeOperation(),
         input.currentTransition(),
         input.operation,
         input.workspaceId,
-      )
-    ) {
-      return { status: "stale" };
-    }
-    throw error;
-  }
+      ),
+    request: input.request,
+  });
 }
 
 /**

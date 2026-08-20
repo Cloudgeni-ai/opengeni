@@ -1,12 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { createSlackLinkPrepareController, pendingSlackLinkFromUrl } from "./context";
+import {
+  createSlackLinkPrepareController,
+  pendingSlackLinkFromUrl,
+  preserveSlackLinkForManagedAuth,
+} from "./context";
 import { SlackLinkAccessRequiredDescription } from "./routes/workspace";
 
 const workspaceId = "00000000-0000-4000-8000-000000000141";
 
 describe("Slack link continuation", () => {
+  test("only a raw explicit continuation crosses managed sign-in", () => {
+    expect(preserveSlackLinkForManagedAuth("signin", "raw")).toBe(true);
+    for (const phase of ["none", "in_flight", "prepared", "failed"] as const) {
+      expect(preserveSlackLinkForManagedAuth("signin", phase)).toBe(false);
+    }
+    expect(preserveSlackLinkForManagedAuth("signup", "raw")).toBe(false);
+  });
+
   test("accepts only the log-safe fragment form on capabilities", () => {
     expect(
       pendingSlackLinkFromUrl(
@@ -112,5 +124,30 @@ describe("Slack link continuation", () => {
     controller.clear();
     expect(controller.workspaceId()).toBeNull();
     expect(controller.phase()).toBe("none");
+  });
+
+  test("an unrelated principal transition clears and fences an in-flight exchange", async () => {
+    const controller = createSlackLinkPrepareController<{ id: string }>({
+      workspaceId,
+      token: "old-principal-signed-link",
+    });
+    let resolvePrepare!: (request: { id: string }) => void;
+    const oldExchange = controller.prepare(
+      workspaceId,
+      () =>
+        new Promise((resolve) => {
+          resolvePrepare = resolve;
+        }),
+    );
+    expect(controller.phase()).toBe("in_flight");
+
+    controller.clear();
+    resolvePrepare({ id: "old-principal-request" });
+    await expect(oldExchange).resolves.toEqual({ id: "old-principal-request" });
+    expect(controller.workspaceId()).toBeNull();
+    expect(controller.phase()).toBe("none");
+    await expect(
+      controller.prepare(workspaceId, async () => ({ id: "must-not-run" })),
+    ).resolves.toBeNull();
   });
 });
