@@ -1155,14 +1155,21 @@ The drained operator command writes a forward-only per-organization activation
 receipt only after canonical inventory/parity checks; API/worker startup then
 requires the canonical activation switch. Applying 0303 itself remains safe
 with the switch off. `packages/core/src/application/session-tenancy.ts` is the
-sole product adapter caller. Its two canonical managed-human HTTP routes and
-the framework-neutral SDK expose an explicit authority-epoch/idempotency
+sole server product-adapter caller. Its two canonical managed-human HTTP routes
+and the framework-neutral SDK expose an explicit authority-epoch/idempotency
 contract only for activated organizations. Subject-authorized session reads
 carry the public tenancy projection only after activation. Core publishes the
 exact durable event returned by the adapter without another append or workflow
-wake. Worker, MCP, runtime, React, web UI, cross-workspace/public fork,
-attachment APIs, and personal-grant UI remain non-callers;
-`test/session-visibility-contract-surface.test.ts` pins that boundary.
+wake. The bounded managed web UI is the active owning-human caller through that
+SDK boundary: it mounts controls only when the public `Session.tenancy`
+projection is present, requires the managed-cookie owner for mutation, and
+reconciles authoritative state while retaining exact caller idempotency across
+ambiguous outcomes. Worker, MCP, runtime, `packages/react`, cross-workspace or
+public fork, attachment APIs, and personal-grant UI remain non-callers.
+`test/session-visibility-contract-surface.test.ts` pins those inert server
+surfaces; `apps/web/src/components/session/session-tenancy-control.test.tsx`
+and `test/e2e/personal-workspace-accessibility.browser.e2e.ts` pin the separate
+browser caller boundary.
 
 Migration 0304 is rolling. It replaces only the stable private-session read
 predicate so the exact active owner membership may prove access through either
