@@ -128,6 +128,8 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### Session ownership at the mint (migration 0302)
+
 Because that workspace has no membership row, migration 0225's session write
 fence could never attribute a session created there and minted a NULL owner
 instead. Migration
@@ -146,6 +148,63 @@ owner inside an active membership's personal workspace now raises SQLSTATE
 suspended-member sessions remain legitimately ownerless. Rows already durable
 before 0302 remain the existing `bun run db:backfill-session-ownership` seam's
 job.
+
+### Seams that fence on a `workspace_memberships` row
+
+Because the personal workspace has no membership row, any seam that re-derives
+*"does this subject still hold workspace authority here"* from a bare
+`workspace_memberships` probe denies the one human who always belongs.
+`subjectHasLiveWorkspaceAuthorityInScope` (`packages/db/src/workspace-authority.ts`)
+is the single implementation of the corrected rule: a membership row whose
+owning organization membership is active, **or** an active organization
+membership whose `personal_workspace_id` is exactly this workspace. Only the
+membership's own pointer counts as stated authority — nothing is inferred from
+`created_by`, connection attribution, a default workspace, a resource name, or
+current access.
+
+**Exactly one thing authorizes the exception**, and it is not the resolver:
+
+1. **The API layer's canonical managed-cookie stamp.** Session listing, session
+   pins, and the composer draft take an explicit `personalWorkspaceOwnerException`
+   flag that defaults to absent, and the API supplies it from
+   `AccessGrantAuthorization.canonicalManagedHumanSession`. That value is stamped
+   only inside the one branch of `resolveAccessContext` that verified a Better
+   Auth cookie, so bearer/delegated principals, API keys, service initiators, and
+   account or organization administrators fail closed — including any
+   authentication path added later, which is absent from the stamp by default
+   rather than by an exclusion list. Do not substitute a shape check on the grant
+   (`principalKind`, `metadata.delegated`, `serviceInitiator`): a delegated
+   bearer chooses all of those, and its `subjectId`, inside its own token.
+
+**The resolver is not a second guard.** `subjectHasLiveWorkspaceAuthorityInScope`
+answers "does subject X hold authority over workspace W"; it does not establish
+that the caller is X, and neither does its exported sibling. It refuses to set
+`opengeni.subject_id` and raises when the requested subject differs from the
+transaction's scope, but that scope was itself set by `withWorkspaceSubjectRls`
+from a caller-supplied argument. At all three call sites both sides come from the
+same variable, so the check is a tautology there. It is a **consistency check —
+a tripwire against a future refactor that makes the two diverge — not an
+authorization.**
+
+What the in-scope variant does buy, concretely:
+
+- it makes the arbitrary-subject oracle shape **unrepresentable** at these seams,
+  because it has no way to scope a transaction itself;
+- it keeps the authority read inside the caller's transaction, snapshot, and
+  advisory fence, so it serialises with `removeWorkspaceMember()`;
+- it keeps the corrected rule to one implementation shared with the oracle.
+
+The exported `namedSubjectHasLiveWorkspaceAuthority` sets that GUC from its own
+argument and will answer for **any** subject named, so its `42501` guard proves
+nothing about the caller — never pass it a request-derived subject.
+
+Known remaining seams with the bare-membership defect, both SECURITY DEFINER and
+therefore only fixable by migration: `transition_session_visibility` (0225) and
+`fork_session_content` (0289) require a `workspace_memberships` row for the
+actor in the target/source/destination workspace. Each needs the same disjunct
+0258 already uses — `IF actor_membership.personal_workspace_id IS DISTINCT FROM
+<workspace> THEN <require the membership row> END IF` — around its existing
+check. Neither has a production caller today.
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER

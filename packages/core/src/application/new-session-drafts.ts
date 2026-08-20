@@ -200,6 +200,13 @@ export async function saveActorNewSessionDraft(
   grant: AccessGrant,
   workspaceId: string,
   rawInput: unknown,
+  /**
+   * `AccessGrantAuthorization.canonicalManagedHumanSession` — did this request
+   * authenticate as the canonical managed cookie that owns `grant.subjectId`?
+   * Defaults to false so every caller that has not proven it fails closed onto
+   * the historical bare-membership fence.
+   */
+  canonicalManagedHumanSession = false,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
   // The pre-marker client contract required `tools` and had no
@@ -244,6 +251,11 @@ export async function saveActorNewSessionDraft(
           // worker MCP principal) legitimately have no workspace_memberships
           // row, so they must not be rejected by the human-removal fence.
           requireWorkspaceMembership: grant.subjectId.startsWith("user:"),
+          // A managed human's own personal workspace has no membership row at
+          // all, so the human-removal fence above must fall back to the
+          // organization-membership pointer for them — and only for the
+          // canonical managed-cookie session that owns it.
+          personalWorkspaceOwnerException: canonicalManagedHumanSession,
         }),
       ),
     );

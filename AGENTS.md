@@ -90,6 +90,24 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   personal-workspace pointer converge through the lifecycle SECURITY DEFINER
   seam. Bearer/delegated principals, API keys, and account or organization
   administrators receive no personal-workspace access through that exception.
+  Because that workspace has no `workspace_memberships` row, a seam that fences
+  on one denies its owner: `subjectHasLiveWorkspaceAuthorityInScope`
+  (`packages/db/src/workspace-authority.ts`) is the single implementation of the
+  corrected rule. **Neither that resolver nor its exported
+  `namedSubjectHasLiveWorkspaceAuthority` sibling is an authorization** — both answer
+  "does subject X hold authority here" and neither establishes that the caller
+  is X. The exported one sets `opengeni.subject_id` from its own argument, so it
+  is an arbitrary-subject oracle; never pass it a request-derived subject. The
+  in-scope one refuses to set that GUC and raises when the requested subject
+  differs from the transaction's scope, but that is a **consistency check, not
+  an authorization**: the scope was itself set from a caller-supplied argument,
+  so it catches only a caller naming a third party mid-transaction. The single
+  thing that authorizes the exception is the API layer's
+  `AccessGrantAuthorization.canonicalManagedHumanSession`, stamped only where a
+  Better Auth cookie was verified — never a shape check on the grant
+  (`principalKind`, `metadata.delegated`, `serviceInitiator`), all of which a
+  delegated token chooses for itself. A new caller must get that stamp right;
+  the resolvers will answer `true` for whatever subject they are given.
   The four authority/grant tables remain FORCE-RLS with zero direct app DML;
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.
