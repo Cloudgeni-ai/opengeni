@@ -16,6 +16,7 @@ import {
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
+  UserIcon,
   UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { LoadErrorState } from "@/components/common";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
@@ -53,6 +55,7 @@ import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { cn } from "@/lib/utils";
 import {
   apiKeyPermissionGroups,
@@ -96,6 +99,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const organizationLabel = accountId
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
+  const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
   const [renaming, setRenaming] = useState(false);
@@ -359,6 +363,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
                   {activeWorkspace?.name ?? "Workspace"}
                 </h1>
+                {personal ? <PersonalWorkspaceBadge /> : null}
                 {canRename ? (
                   <Button
                     type="button"
@@ -379,7 +384,27 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           <BrowseWorkspaceStrip workspaceId={workspaceId} canReadInsights={canDeleteWorkspace} />
         </header>
 
-        <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+        {personal ? (
+          <section
+            aria-labelledby="personal-workspace-heading"
+            className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
+          >
+            <h2
+              id="personal-workspace-heading"
+              className="flex items-center gap-2 text-sm font-medium"
+            >
+              <UserIcon className="size-3.5 text-brand" />
+              Personal workspace
+              <PersonalWorkspaceBadge decorative />
+            </h2>
+            <p className="text-xs text-fg-muted">
+              This workspace is your owner-only context inside {organizationLabel}. Organization
+              administrators and other members do not gain access to its sessions or content.
+            </p>
+          </section>
+        ) : (
+          <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+        )}
 
         <section
           aria-labelledby="workspace-preferences-heading"
