@@ -22,7 +22,14 @@ describe("managed self-context surfaces", () => {
     expect(switcherSource).toContain(
       "isPersonalWorkspace(activeWorkspace, context.managedSelfContext)",
     );
-    expect(switcherSource).toContain("`${workspace.name}, Personal workspace`");
+    expect(switcherSource).toContain("export function WorkspaceMenuItemContent");
+    expect(switcherSource).toContain(
+      "isPersonalWorkspace(props.workspace, props.managedSelfContext)",
+    );
+    expect(switcherSource).not.toContain(
+      "aria-label={personal ? `${workspace.name}, Personal workspace`",
+    );
+    expect(switcherSource).toContain('<span className="sr-only"> Paused</span>');
     expect(switcherSource.match(/<PersonalWorkspaceBadge/g)?.length).toBeGreaterThanOrEqual(2);
   });
 

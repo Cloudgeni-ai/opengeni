@@ -333,32 +333,19 @@ function WorkspaceMenu(props: {
         side={rail.collapsed ? "right" : "bottom"}
       >
         <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
-        {props.workspaces.map((workspace) => {
-          const personal = isPersonalWorkspace(workspace, props.managedSelfContext);
-          return (
-            <DropdownMenuItem
-              key={workspace.id}
-              aria-label={personal ? `${workspace.name}, Personal workspace` : undefined}
-              aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
-              onSelect={() => props.onSelect(workspace.id)}
-            >
-              <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
-                {workspaceInitial(workspace)}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-              {personal ? <PersonalWorkspaceBadge decorative /> : null}
-              {workspace.inferenceControl.state === "paused" ? (
-                <PauseIcon
-                  className="size-3.5 fill-current text-status-waiting"
-                  aria-label="Paused"
-                />
-              ) : null}
-              {workspace.id === props.activeWorkspaceId ? (
-                <CheckIcon className="size-4 text-brand" />
-              ) : null}
-            </DropdownMenuItem>
-          );
-        })}
+        {props.workspaces.map((workspace) => (
+          <DropdownMenuItem
+            key={workspace.id}
+            aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
+            onSelect={() => props.onSelect(workspace.id)}
+          >
+            <WorkspaceMenuItemContent
+              workspace={workspace}
+              activeWorkspaceId={props.activeWorkspaceId}
+              managedSelfContext={props.managedSelfContext}
+            />
+          </DropdownMenuItem>
+        ))}
         <DropdownMenuSeparator />
         {props.activeWorkspace && props.canControl ? (
           <>
@@ -399,5 +386,35 @@ function WorkspaceMenu(props: {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+export function WorkspaceMenuItemContent(props: {
+  workspace: Workspace;
+  activeWorkspaceId: string;
+  managedSelfContext: ManagedSelfContext | null;
+}) {
+  const personal = isPersonalWorkspace(props.workspace, props.managedSelfContext);
+  const paused = props.workspace.inferenceControl.state === "paused";
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+      >
+        {workspaceInitial(props.workspace)}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.workspace.name}</span>
+      {personal ? <PersonalWorkspaceBadge /> : null}
+      {paused ? (
+        <>
+          <PauseIcon aria-hidden="true" className="size-3.5 fill-current text-status-waiting" />
+          <span className="sr-only"> Paused</span>
+        </>
+      ) : null}
+      {props.workspace.id === props.activeWorkspaceId ? (
+        <CheckIcon aria-hidden="true" className="size-4 text-brand" />
+      ) : null}
+    </>
   );
 }
