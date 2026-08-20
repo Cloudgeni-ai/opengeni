@@ -71,6 +71,39 @@ sandbox access have been settled. Forks copy same-workspace durable content and
 references but no live turn, goal, credential, personal grant, Variable Set,
 Rig, MCP server configuration, sandbox identity, or workflow.
 
+## Personal-resource grants
+
+The same canonical managed-cookie owner can manage explicit personal-resource
+delegations after organization activation. Pages are bounded to one exact kind;
+the server derives the only valid action and returns the full credential-free
+delegation to attach through the resource's ordinary session API.
+
+```ts
+const page = await browserClient.listUserResourceAuthorities(workspaceId, {
+  resourceKind: "connection",
+  limit: 50,
+});
+const authority = page.authorities[0];
+if (!authority) throw new Error("No personal Connection is available");
+
+const issued = await browserClient.issueUserResourceGrant(workspaceId, authority.authorityId, {
+  scope: "user",
+  resourceKind: "connection",
+  mode: "session",
+  context: "workspace_shared",
+  sessionId,
+  expectedAuthorityEpoch: current.tenancy.authorityEpoch,
+  workspaceSharedAcknowledged: true,
+});
+
+await browserClient.revokeUserResourceGrant(workspaceId, issued.grant.grantId);
+```
+
+The SDK deliberately exposes only exact-session and standing (`always`) grant
+management. It does not expose standalone `once`, custom expiry, scheduled or
+cross-workspace authority, or an atomic create-session-and-attach workflow.
+Revocation prevents future reads but cannot retract output already shared.
+
 ## Scheduled connection authority
 
 Agent schedules may carry explicit personal Connection authority. The public

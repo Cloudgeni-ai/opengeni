@@ -144,6 +144,7 @@ describe("release schema contract", () => {
       "0264_connection_authority_runtime_activation.sql",
       "0273_scheduled_variable_set_materialization.sql",
       "0304_personal_workspace_private_session_reads.sql",
+      "0305_personal_resource_grant_management.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -196,6 +197,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "cdce8c6b6644b07c672918a94c3e0e01f09d771dc33a61e38ec91eec763bf0c1",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0305_personal_resource_grant_management.sql",
+      ),
+    ).toMatchObject({
+      sha256: "b6c20178b35b279314872c7cc79048f028d2b1ed070a49f5ad9e0490cb8e5b0c",
       deploymentMode: "rolling",
     });
     expect(

@@ -47,6 +47,44 @@ target workspace must belong to the same organization and remain accessible to
 the owner. `workspace_shared` requires an explicit durable shared-output
 acknowledgement. Revocation is immediate and advances grant generation.
 
+Migration `0305_personal_resource_grant_management.sql` replaces the ambient
+owner-management seam with the activated product contract. Only a canonical
+managed-cookie context for the exact subject may use it; API keys, delegated or
+service principals, agents, and account/organization administrators receive no
+ambient personal-resource authority. Lists are deterministic bounded keyset
+pages for one exact resource kind, include the opaque resource/origin identity,
+and return only grants targeting the route workspace. Resource kind derives the
+only accepted action (`connection.use`, `document.read`, `variable_set.use`,
+`rig.use`, or `connected_machine.use`) and its exact product permission gate.
+
+Public issuance supports `session` and `always`. Session grants are authorized
+through the ordinary session authorization seam after all target-free
+principal, permission, and activation gates, and require the caller's expected
+authority epoch; missing and inaccessible targets share the ordinary
+non-enumerating session denial. Always grants remain unbound and require
+session-create authority. Shared context requires the durable acknowledgement.
+The server returns the complete credential-free `UserResourceDelegation`,
+including organization, authority generation, grant generation, and session
+epoch. Revocation proves the grant's route workspace but intentionally remains
+available after a resource permission is removed because it only narrows
+authority. Expiry is not authorable on this public surface; historical active
+rows already past expiry are normalized to `expired` and no longer block exact
+reissuance, and every projected timestamp is RFC3339 UTC. Historical active
+grants whose action is arbitrary or belongs to a different resource kind are
+deterministically revoked; invalid terminal history remains durable but is
+omitted from typed management lists rather than rewritten or misrepresented.
+The migration performs those backfills as the non-bypass table owner inside one
+transactional `NO FORCE`/`FORCE` window over both the grant table and its
+authority join, then restores FORCE RLS. Runtime list/issue/revoke uses a narrow
+lifecycle policy marker inside schema-local, PUBLIC-revoked SECURITY DEFINER
+functions with `pg_catalog`, the target schema, and `pg_temp` as their exact
+search path; the app role retains zero direct table DML. The Connection-specific
+REST wrappers converge on this lifecycle, including permission-independent
+revocation after baseline route-workspace access is proved.
+Standalone `once`, custom expiry, new-session atomic attachment, cross-workspace
+grant/fork UX, schedules, MCP/agent administration, and web UI remain outside
+this backend prerequisite.
+
 For direct and scheduled personal Variable Set/Rig use, personal-workspace and
 origin-workspace columns are provenance/lifecycle facts only. Authorization is
 the active server-derived owner organization membership, same organization,

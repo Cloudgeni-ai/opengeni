@@ -27,12 +27,16 @@ export function requireConnectionAuthorityOwner(access: AccessGrantAuthorization
 }
 
 /** Removes generic resource kind and refuses non-connection grant actions. */
-export function projectSelfConnectionAuthorities(authorities: UserResourceAuthoritySummary[]) {
+export function projectSelfConnectionAuthorities(page: {
+  authorities: UserResourceAuthoritySummary[];
+  nextCursor: string | null;
+}) {
   return ListConnectionAuthoritiesResponse.parse({
     scope: "user",
-    authorities: authorities
+    authorities: page.authorities
       .filter((authority) => authority.resourceKind === "connection")
       .map(({ resourceKind: _resourceKind, ...authority }) => authority),
+    nextCursor: page.nextCursor,
   });
 }
 
@@ -42,6 +46,7 @@ export function connectionUseGrantLifecycleInput(input: unknown): {
   mode: IssueConnectionUseGrantRequestValue["mode"];
   context: IssueConnectionUseGrantRequestValue["context"];
   sessionId: string | null;
+  expectedAuthorityEpoch: number | null;
   workspaceSharedAcknowledged: boolean;
 } {
   const request = IssueConnectionUseGrantRequest.parse(input);
@@ -50,6 +55,7 @@ export function connectionUseGrantLifecycleInput(input: unknown): {
     mode: request.mode,
     context: request.context,
     sessionId: request.sessionId ?? null,
+    expectedAuthorityEpoch: request.expectedAuthorityEpoch ?? null,
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
   };
 }

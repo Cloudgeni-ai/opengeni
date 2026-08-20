@@ -1088,39 +1088,73 @@ export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceReten
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
 
 export const UserResourceAuthorityScope = z.literal("user");
+export const UserResourceKind = z.enum([
+  "connection",
+  "document",
+  "variable_set",
+  "rig",
+  "connected_machine",
+]);
+export type UserResourceKind = z.infer<typeof UserResourceKind>;
+
+export const USER_RESOURCE_ACTION_BY_KIND = {
+  connection: "connection.use",
+  document: "document.read",
+  variable_set: "variable_set.use",
+  rig: "rig.use",
+  connected_machine: "connected_machine.use",
+} as const satisfies Record<UserResourceKind, string>;
+
 export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+/** Public owner-management deliberately excludes race-prone standalone `once`. */
+export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
 export const UserResourceAuthorityGrant = z.object({
   grantId: z.string().uuid(),
   targetWorkspaceId: z.string().uuid(),
   targetSessionId: z.string().uuid().nullable(),
-  action: z.string().min(1).max(64),
+  action: z.enum([
+    "connection.use",
+    "document.read",
+    "variable_set.use",
+    "rig.use",
+    "connected_machine.use",
+  ]),
   mode: UserResourceLifecycleGrantMode,
   context: SessionTenancyVisibility,
+  authorityEpoch: z.number().int().positive().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "consumed", "revoked", "expired"]),
   expiresAt: z.string().datetime().nullable(),
+  delegation: z.lazy(() => UserResourceDelegation),
 });
 export const UserResourceAuthoritySummary = z.object({
   authorityId: z.string().uuid(),
-  resourceKind: z.string().min(1).max(64),
+  resourceKind: UserResourceKind,
+  resourceId: z.string().uuid(),
+  originWorkspaceId: z.string().uuid().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "retained", "revoked"]),
   grants: z.array(UserResourceAuthorityGrant),
 });
 export const ListUserResourceAuthoritiesQuery = z.object({
   scope: UserResourceAuthorityScope,
+  resourceKind: UserResourceKind,
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export const ListUserResourceAuthoritiesResponse = z.object({
   scope: UserResourceAuthorityScope,
   authorities: z.array(UserResourceAuthoritySummary),
+  nextCursor: z.string().uuid().nullable(),
 });
 export const IssueUserResourceGrantRequest = z
   .object({
     scope: UserResourceAuthorityScope,
-    action: z.string().min(1).max(64),
-    mode: UserResourceLifecycleGrantMode,
+    resourceKind: UserResourceKind,
+    mode: ManagedUserResourceGrantMode,
     context: SessionTenancyVisibility,
     sessionId: z.string().uuid().nullable().optional(),
+    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
     workspaceSharedAcknowledged: z.boolean().default(false),
   })
   .superRefine((value, context) => {
@@ -1131,18 +1165,18 @@ export const IssueUserResourceGrantRequest = z
         message: "workspace_shared requires durable shared-output acknowledgement",
       });
     }
-    if (value.mode === "always" && value.sessionId) {
+    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "always is unbound",
+        message: "always is unbound from session authority",
       });
     }
-    if (value.mode !== "always" && !value.sessionId) {
+    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "once/session require a target session",
+        message: "session grants require a target session and expectedAuthorityEpoch",
       });
     }
   });
@@ -1150,9 +1184,29 @@ export const UserResourceGrantMutationResponse = z.object({
   scope: UserResourceAuthorityScope,
   grant: UserResourceAuthorityGrant,
 });
+export const UserResourceGrantRevocationResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  grant: z.object({
+    grantId: z.string().uuid(),
+    generation: z.number().int().positive(),
+    status: z.literal("revoked"),
+    revokedAt: z.string().datetime(),
+  }),
+});
 export const RevokeUserResourceGrantQuery = z.object({
   scope: UserResourceAuthorityScope,
 });
+export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
+export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
+export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
+export type ListUserResourceAuthoritiesResponse = z.infer<
+  typeof ListUserResourceAuthoritiesResponse
+>;
+export type IssueUserResourceGrantRequest = z.infer<typeof IssueUserResourceGrantRequest>;
+export type UserResourceGrantMutationResponse = z.infer<typeof UserResourceGrantMutationResponse>;
+export type UserResourceGrantRevocationResponse = z.infer<
+  typeof UserResourceGrantRevocationResponse
+>;
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
@@ -5753,6 +5807,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.child.create",
   "session.visibility.write",
   "session.fork.create",
+  "session.personal_resource.grant",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 

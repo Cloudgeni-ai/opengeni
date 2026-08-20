@@ -353,7 +353,18 @@ Grant rows carry the owning membership and a canonical action; `once` and
 `session` are fenced to one exact session plus positive authority epoch, while
 `always` is a standing grant with null session and epoch. Migration 0264's
 bounded Connection activation consumes `once` atomically at accepted-turn
-admission; Slice B itself does not create any authority or grant rows. The first
+admission; Slice B itself does not create any authority or grant rows. Migration
+0305 makes owner management activation-gated and canonical-managed-cookie-only:
+one kind derives its action and permission gate, lists are route-workspace-
+filtered bounded keyset pages, session issuance passes the ordinary session
+authorization seam with an expected epoch, and revocation proves the target
+route workspace. Its SDK exposes only `session` and `always`; standalone `once`
+remains an internal atomic-consumption primitive. Its rolling backfill opens and
+closes one transactional owner-only FORCE-RLS window, expires past-due active
+rows, revokes active cross-kind/arbitrary actions, and omits invalid terminal
+history from typed lists without rewriting it. The runtime functions use one
+dedicated lifecycle marker and an exact hardened target-schema search path while
+the app role keeps zero direct authority-table DML. The first
 disjoint runtime activation
 appends the exact active membership's personal workspace only to the
 authenticated owning managed human's `AccessContext.workspaceGrants`, after the
