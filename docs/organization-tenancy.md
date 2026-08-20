@@ -1387,7 +1387,9 @@ Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
 contract described in "Session-visibility and private-fork public activation".
 The bounded API/core/SDK owner caller is now active behind the per-organization
-receipt. Remaining work includes web UI and personal-resource grant UX.
+receipt, and the bounded managed web UI is its active owning-human SDK caller.
+Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace or
+public fork, attachments, and personal-resource grant UX remain out of scope.
 
 Cache and pin stripping is delivered by migration
 `0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
@@ -1636,12 +1638,13 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
-- worker, MCP, runtime, React, or web callers for the activated
+- worker, MCP, runtime, or `packages/react` callers for the activated
   `transition_session_visibility` and `fork_session_content` lifecycle
   functions; cross-workspace/public fork, session sharing, attachment APIs, and
   personal-grant UI also remain out of scope. The bounded API/core/SDK owner
-  caller and activation-gated subject read projection are active (see
-  "Session-visibility and private-fork public activation");
+  caller, bounded managed web owning-human SDK caller, and activation-gated
+  subject read projection are active (see "Session-visibility and private-fork
+  public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
 - an always-on retention deletion worker (0263 exposes a supported bounded
