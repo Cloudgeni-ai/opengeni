@@ -11,17 +11,21 @@ or UI subsystem.
 
 The code contract is `packages/capabilities/src/mcp-bridge.ts`:
 
-- every server exposes a secret-free `LocalMcpBridgeDescriptor` whose
+- every conforming bridge server exposes a secret-free
+  `LocalMcpBridgeDescriptor` whose
   `assurance` distinguishes strict static validation from descriptive immutable
   revision metadata;
 - a static reviewed bridge declares `toolSurface: "static_reviewed"`; a
-  compiled Integration Definition declares `"immutable_revision"`;
+  qualifying static-origin Integration Definition declares
+  `"immutable_revision"`;
 - `authority` names the existing authority spine (`connection`, `host`, or
   `none`) but never grants it;
 - a static reviewed bridge declares 1-32 exact HTTPS origins plus path
-  prefixes; an immutable OpenAPI revision is described without adding a new
-  runtime validation gate and conservatively reports each accepted origin at
-  `/`, including HTTP origins already permitted for local/test definitions;
+  prefixes; a static-origin immutable OpenAPI revision is described without
+  adding a new runtime validation gate and conservatively reports each accepted
+  origin at `/`, including HTTP origins already permitted for local/test
+  definitions; a revision whose origin depends on runtime path parameters stays
+  an ordinary OpenAPI MCP adapter without claiming this descriptor;
 - `mutationReplay: "safe_reads_only"` is mandatory: a safe read may refresh
   and retry after an authorization failure, while a mutation with an ambiguous
   provider outcome is never replayed; and
@@ -32,9 +36,10 @@ The code contract is `packages/capabilities/src/mcp-bridge.ts`:
 `packages/runtime/src/index.ts` owns the built-in adapter registry. A provider
 matcher and factory live with their adapter, not in generic catalog, OAuth, or
 UI code. Persisted API Integrations already enter through
-`LocalMcpServerRegistration`; their OpenAPI server implements the same bridge
-descriptor without changing the Integration Definition or Connection
-authority.
+`LocalMcpServerRegistration`; qualifying static-origin OpenAPI servers implement
+the same bridge descriptor without changing the Integration Definition or
+Connection authority. Dynamic-origin revisions retain the existing ordinary
+OpenAPI MCP path pending separate destination-governance work.
 
 ## Adding a bridge
 

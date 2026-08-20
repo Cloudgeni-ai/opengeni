@@ -28,14 +28,16 @@ Security defaults:
 in-process MCP servers. A bridge declares a secret-free catalog identity,
 actual authority class, immutable or reviewed tool-surface class, destinations,
 and the safe-read-only replay rule. Static reviewed bridges validate 1-32 exact
-HTTPS destinations. Immutable OpenAPI revisions instead expose conservative
-descriptive origin-root metadata without adding a runtime gate beyond the
-compiler and transport contracts that already accepted the revision. Adapter
-matching is generic and fails closed on ambiguity. The descriptor is not
-authorization: each adapter still revalidates its Connection or host-owned
-authority before every provider request.
+HTTPS destinations. Static-origin immutable OpenAPI revisions instead expose
+conservative descriptive origin-root metadata without adding a runtime gate
+beyond the compiler and transport contracts that already accepted the
+revision. Revisions whose origin depends on runtime path parameters remain
+ordinary OpenAPI MCP adapters without this descriptor. Adapter matching is
+generic and fails closed on ambiguity. The descriptor is not authorization:
+each adapter still revalidates its Connection or host-owned authority before
+every provider request.
 
-The Gmail REST adapter is the static reviewed example. OpenAPI Integration
-Definitions, including Google Drive, conform through `OpenApiMcpServer` and
-retain their existing Connection and facet authority. See
+The Gmail REST adapter is the static reviewed example. Qualifying static-origin
+OpenAPI Integration Definitions, including Google Drive, conform through
+`OpenApiMcpServer` and retain their existing Connection and facet authority. See
 `docs/design/first-party-mcp-bridges.md`.

@@ -11,11 +11,7 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
-import {
-  describeLocalMcpBridgeDescriptor,
-  type LocalMcpBridgeDescriptor,
-  type LocalMcpBridgeServer,
-} from "./mcp-bridge";
+import { describeLocalMcpBridgeDescriptor, type LocalMcpBridgeDescriptor } from "./mcp-bridge";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -260,24 +256,15 @@ export function discoverOpenApiAuth(document: Record<string, unknown>): OpenApiA
   return { kind: "none" };
 }
 
-export class OpenApiMcpServer implements LocalMcpBridgeServer {
+export class OpenApiMcpServer implements MCPServer {
   readonly cacheToolsList = true;
   readonly useStructuredContent = true;
   readonly name: string;
-  readonly bridge: LocalMcpBridgeDescriptor;
 
   constructor(private readonly options: OpenApiServerOptions) {
     this.name = `openapi:${stableToolId(options.revision.definitionId)}`;
-    this.bridge = describeLocalMcpBridgeDescriptor({
-      adapterId: "openapi",
-      providerId: options.revision.source.provider ?? options.revision.definitionId,
-      catalogIdentity: `integration-definition:${options.revision.definitionId}@${options.revision.id}`,
-      authority:
-        options.authority.connectionRef && options.credentialResolver ? "connection" : "none",
-      toolSurface: "immutable_revision",
-      mutationReplay: "safe_reads_only",
-      destinations: openApiBridgeDestinations(options.revision),
-    });
+    const bridge = openApiBridgeDescriptor(options);
+    if (bridge) Object.defineProperty(this, "bridge", { enumerable: true, value: bridge });
   }
 
   async connect(): Promise<void> {}
@@ -334,27 +321,58 @@ export function createOpenApiMcpServer(options: OpenApiServerOptions): MCPServer
   return new OpenApiMcpServer(options);
 }
 
-function openApiBridgeDestinations(revision: OpenApiRevision) {
+function openApiBridgeDescriptor(options: OpenApiServerOptions): LocalMcpBridgeDescriptor | null {
+  const destinations = openApiBridgeDestinations(options.revision);
+  if (!destinations) return null;
+  return describeLocalMcpBridgeDescriptor({
+    adapterId: "openapi",
+    providerId: options.revision.source.provider ?? options.revision.definitionId,
+    catalogIdentity: `integration-definition:${options.revision.definitionId}@${options.revision.id}`,
+    authority:
+      options.authority.connectionRef && options.credentialResolver ? "connection" : "none",
+    toolSurface: "immutable_revision",
+    mutationReplay: "safe_reads_only",
+    destinations,
+  });
+}
+
+function openApiBridgeDestinations(
+  revision: OpenApiRevision,
+): { origin: string; pathPrefix: string }[] | null {
   const destinations = new Map<string, { origin: string; pathPrefix: string }>();
   for (const binding of Object.values(revision.bindings)) {
-    let url: URL;
-    try {
-      url = resolveOperationPathUrl(binding, binding.pathTemplate);
-    } catch {
-      // Descriptor creation must not become a validation boundary for a
-      // revision the existing compiler accepted. Invocation will retain its
-      // ordinary typed failure if a concrete path remains unresolvable.
-      url = new URL(binding.serverUrl);
-    }
+    const origin = staticOperationOrigin(binding);
+    if (!origin) return null;
     // OpenAPI paths may legally resolve `..` segments outside a server base
     // path or name an absolute URL on another origin. Root is the narrowest
     // truthful static prefix for the frozen operation destination; the
     // transport remains the actual network gate.
-    destinations.set(url.origin, { origin: url.origin, pathPrefix: "/" });
+    destinations.set(origin, { origin, pathPrefix: "/" });
   }
   return [...destinations.values()].sort((left, right) =>
     `${left.origin}${left.pathPrefix}`.localeCompare(`${right.origin}${right.pathPrefix}`),
   );
+}
+
+const OPENAPI_ORIGIN_PROBE = "opengeni-origin-probe";
+
+function staticOperationOrigin(binding: OpenApiOperationBinding): string | null {
+  const probePath = binding.pathTemplate.replace(/\{[^}]+\}/g, OPENAPI_ORIGIN_PROBE);
+  let resolved: URL;
+  try {
+    resolved = resolveOperationPathUrl(binding, probePath);
+  } catch {
+    return null;
+  }
+  if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return null;
+  if (
+    resolved.protocol.includes(OPENAPI_ORIGIN_PROBE) ||
+    resolved.hostname.includes(OPENAPI_ORIGIN_PROBE) ||
+    resolved.port.includes(OPENAPI_ORIGIN_PROBE)
+  ) {
+    return null;
+  }
+  return resolved.origin;
 }
 
 export async function invokeOpenApiOperation(

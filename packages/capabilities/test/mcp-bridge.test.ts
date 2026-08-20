@@ -165,6 +165,47 @@ describe("local MCP bridge kit", () => {
     ]);
   });
 
+  test("keeps a runtime-selected absolute origin on the ordinary OpenAPI MCP path", async () => {
+    const revision = compileOpenApiRevision(
+      {
+        openapi: "3.1.0",
+        info: { title: "Dynamic origin API", version: "1" },
+        servers: [{ url: "https://api.example.com/v1/" }],
+        paths: {
+          "https://{host}/admin": {
+            get: {
+              operationId: "dynamic-admin",
+              parameters: [
+                {
+                  name: "host",
+                  in: "path",
+                  required: true,
+                  schema: { type: "string" },
+                },
+              ],
+              responses: { "200": { description: "OK" } },
+            },
+          },
+        },
+      },
+      { definitionId: "dynamic-origin-api" },
+    );
+    let requestedUrl = "";
+    const server = createOpenApiMcpServer({
+      revision,
+      authority: { accountId: "account-1", workspaceId: "workspace-1" },
+      transport: directIntegrationTransport(async (request) => {
+        requestedUrl = request.toString();
+        return Response.json({ ok: true });
+      }),
+    });
+
+    await server.callTool(revision.tools[0]!.id, { path: { host: "other.example" } });
+    expect(requestedUrl).toBe("https://other.example/admin");
+    expect(isLocalMcpBridgeServer(server)).toBe(false);
+    expect(Object.hasOwn(server, "bridge")).toBe(false);
+  });
+
   test("does not advertise Connection authority without the credential resolver pair", () => {
     const revision = compileOpenApiRevision(
       {

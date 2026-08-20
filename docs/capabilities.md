@@ -73,11 +73,14 @@ one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
-Reviewed first-party local bridges and immutable OpenAPI Integration adapters
-implement the shared contract in `packages/capabilities/src/mcp-bridge.ts`.
-Static bridges expose a strictly validated HTTPS descriptor; OpenAPI adapters
-expose conservative descriptive metadata over the already-accepted immutable
-revision without adding another URL, destination-count, or authority gate.
+Reviewed first-party local bridges and static-origin immutable OpenAPI
+Integration adapters implement the shared contract in
+`packages/capabilities/src/mcp-bridge.ts`. Static bridges expose a strictly
+validated HTTPS descriptor; qualifying OpenAPI adapters expose conservative
+descriptive metadata over the already-accepted immutable revision without
+adding another URL, destination-count, or authority gate. A revision whose
+origin depends on runtime path parameters remains an ordinary OpenAPI MCP
+adapter without claiming the descriptor.
 The descriptor identifies catalog identity, actual complete Connection/host/no
 credential authority, tool-surface class, destinations, and safe-read-only
 replay policy, but grants no authority. Generic static-adapter selection rejects
