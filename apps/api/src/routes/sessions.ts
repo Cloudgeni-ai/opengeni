@@ -190,6 +190,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   hasPermission,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireFreshAccessGrant,
   requirePermission,
   requireSessionAuthorization,
@@ -481,7 +482,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:create",
+    );
+    const grant = authorization.grant;
     let payload: unknown;
     try {
       payload = await c.req.json();
@@ -501,6 +508,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           workspaceId,
           payload,
+          authorization.canonicalManagedHumanSession,
         ),
       );
     } catch (error) {
@@ -529,7 +537,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     let authorizationScope;
     try {
       authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
@@ -549,6 +563,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
+        // A managed human's own personal workspace has no membership row, so
+        // the list's removal fence must fall back to the organization-membership
+        // pointer — for the canonical managed-cookie session that owns it only.
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
       });
     } catch (error) {
       if (error instanceof SessionListAccessError) {
@@ -1327,7 +1345,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // (not session control) and returns 404 for a foreign/inaccessible session.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/pin", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
@@ -1341,6 +1365,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
+        // Same owner-only personal-workspace fallback as the list above.
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
         ...parsed.data,
       });
       if (!session) {

@@ -1,0 +1,31 @@
+name: Production PR heads
+
+# PRs into production may only come from live main (promote) or hotfix/*.
+on:
+  pull_request:
+    branches:
+      - production
+
+jobs:
+  admit-head:
+    name: Admit production PR head
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require main or hotfix/* head
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REF" = "main" ]; then
+            echo "Promote PR from main."
+            exit 0
+          fi
+          case "$HEAD_REF" in
+            hotfix/*)
+              echo "Hotfix PR."
+              exit 0
+              ;;
+          esac
+          echo "::error::PRs into production must use head main (promote) or hotfix/*."
+          exit 1

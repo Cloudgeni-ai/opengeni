@@ -56,7 +56,7 @@ machine. Kubernetes is used only as the process, restart, volume, and upgrade
 supervisor. It is not an autoscaling or failover layer in this profile.
 
 The profile renders one API, web, control worker, turn worker, relay, Postgres,
-Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
+Temporal, NATS, and Garage process. It disables HPAs, disruption budgets, and
 topology spreading. Container resource requests and limits are omitted, so a
 busy role may use otherwise-idle CPU and memory on the machine.
 
@@ -113,17 +113,17 @@ one-port NodePort services are the complete private-edge surface:
 | `30081`  | API            | API, SSE, enrollment, and agent distribution |
 | `30222`  | NATS websocket | enrolled-machine command/event transport     |
 | `30443`  | relay          | live terminal/desktop byte streams           |
-| `30900`  | MinIO API      | signed browser file transfer only            |
+| `30900`  | Garage S3 API  | signed browser file transfer only            |
 
-The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
+The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
-websocket, relay, and MinIO API their own private TLS ports. Set
-`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
+websocket, relay, and Garage S3 API their own private TLS ports. Set
+`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
@@ -139,7 +139,8 @@ are not an additional user-facing gateway.
 Create the four Secrets before installation:
 
 - `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
-- `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
+- `opengeni-garage`: `GARAGE_ACCESS_KEY_ID`, `GARAGE_SECRET_ACCESS_KEY`,
+  `GARAGE_RPC_SECRET`, and the `garage.toml` file (the image has no shell);
 - `opengeni-runtime`: the restricted `opengeni_app`
   `OPENGENI_DATABASE_URL`, the environments encryption key, object-storage
   credentials, and Connected Machine signing/NATS/relay secrets;
@@ -161,8 +162,9 @@ kubectl create namespace opengeni --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n opengeni create secret generic opengeni-postgres \
   --from-env-file=.agent/generated/single-node/secrets/postgres.env
 
-kubectl -n opengeni create secret generic opengeni-minio \
-  --from-env-file=.agent/generated/single-node/secrets/minio.env
+kubectl -n opengeni create secret generic opengeni-garage \
+  --from-env-file=.agent/generated/single-node/secrets/garage.env \
+  --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml
 
 kubectl -n opengeni create secret generic opengeni-runtime \
   --from-env-file=.agent/generated/single-node/secrets/runtime.env
@@ -217,7 +219,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Future versions use the same second command with a new official chart/image
-version or digest. Postgres and MinIO PVCs remain attached. Database migrations
+version or digest. Postgres and Garage PVCs remain attached. Database migrations
 are forward-only: if the migration gate fails, the old application stays in
 place; after a migration succeeds, roll the application forward unless the
 older image is explicitly proven compatible with the new schema.
@@ -229,7 +231,7 @@ Failure behavior is intentionally uneven:
 - a turn worker can restart while queued work remains in Temporal/Postgres;
 - NATS stores no authoritative history, but losing it disconnects enrolled
   machines and pauses their command path as well as live fanout;
-- MinIO owns uploaded file bytes;
+- Garage owns uploaded file bytes;
 - Temporal owns durable orchestration state;
 - Postgres owns the durable product record and database migration ledger.
 
@@ -504,12 +506,12 @@ explicit blocking gates. The canonical configuration, retry, observability, and
 acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
 `deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
 
-For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
+For private in-cluster Garage behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
 bun run deployment:conformance -- \
   --base-url http://127.0.0.1:18080 \
-  --object-connect-to opengeni-minio:9000:127.0.0.1:19000
+  --object-connect-to opengeni-garage:3900:127.0.0.1:19000
 ```
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
@@ -633,7 +635,7 @@ Current profiles:
 ## Local Docker Compose
 
 `bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
 integrations catalog, builds the sandbox image, and starts the API, control and
 turn workers, artifact materializer, artifact outbox dispatcher, and web. The
 two artifact roles receive distinct generated least-privilege database logins
@@ -656,7 +658,7 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -689,43 +691,52 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 
 ## Verified public release
 
+`main` is the daily integration branch and remains GitHub's default branch.
+`production` is the official source pointer in this repository; it is not a
+live-cluster deploy. Staging is a manual pin of already-baked
+`canary-sha-<commit>` images from any `main` SHA
+(`.github/workflows/staging-canary-dispatch.yml`). Merging `main` does not
+auto-deploy staging. Promote with a GitHub PR base `production` / compare
+`main` and **Create a merge commit** (never squash, never GitHub
+rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
+`production` → `main`. Official cuts: dispatch `open-version-pr.yml` on `main`
+(or `VERSION_PR_ON_PUSH=true`), merge that Version PR, promote, then
+`workflow_dispatch` candidate/acceptance/publication. Official source ancestry
+is `origin/production`. The `production` pointer already exists; do not
+recreate it and do not force-push.
+
+Protect `production`: no force-push; merge commits only (disable squash and
+rebase-and-merge); required checks `Admit production PR head` and
+`Current-base source admission` (skip-success aggregate so promote PRs from
+live `main` stay mergeable). Drop `Current-base source admission` from the
+`main` ruleset; Version PRs still receive that named check from trusted
+`ci.yml` dispatch.
+
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
-Release approval is bound to GitHub's native PR author, reviewer, merge actor,
-review state, reviewed head, and submission time:
 
-- a `github-actions[bot]`-authored Version PR requires a native pre-merge
-  `APPROVED` review from a configured human release maintainer;
-- the structured `COMMENTED` admin-PASS form is valid only for a
-  single-maintainer PR whose author, exact-head reviewer, and merge actor are
-  the same configured human; it is never a substitute for approving a
-  bot-authored Version PR;
-- a candidate-head update invalidates a head-bound verdict. For the structured
-  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
-  requires replacement evidence on the same candidate head. Ordinary protected
-  `main` movement is not itself a candidate update and must not trigger a source
-  merge/rebase; and
-- a review submitted after merge is not release evidence.
+Ordinary candidate and operator admission bind the **merged associated PR**, not
+a later GitHub `APPROVE` or structured PASS body on the exact head:
 
-Candidate or operator admission must fail closed when those provider identities
-do not match; do not weaken the provenance check or recreate approval from a
-comment, commit message, or local record.
+- the source SHA must be that PR's `merge_commit_sha`;
+- reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- trees, merge provenance, `opengeni-release-head-<head>` retention, and the
+  required main CI jobs remain fail-closed;
+- GitHub branch protection may still require a review to merge into `main`;
+  that is a merge-time GitHub rule, not a second operator PASS check.
 
-GitHub account identity is authoritative by the provider's positive numeric
-account ID plus account type (`User` or `Bot`). The provider login is still
-required as a non-empty audit snapshot, but login spelling, case normalization,
-or an account rename does not replace that stable identity. A changed numeric
-ID, changed account type, or missing identity field fails closed. The legacy v3
-structured admin-PASS `reviewerLogin` field is likewise an informational login
-snapshot: the native provider review actor's configured numeric ID and account
-type provide reviewer authority, while every other v3 field and the canonical
-body continue to bind the exact base/head verdict.
+Do not recreate admission from a live review list, a review comment, a commit
+message, or a local record. The ordinary operator still records identity fields
+(`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on
+the ledger; those are identity/digest, not a re-fetched GitHub PASS.
 
-For a single-maintainer source PR, generate the exact structured review body
-before merging. Submit the result as a native `COMMENTED` pull-request review;
-the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact. Use the exact provider-retained PR base SHA
+GitHub account identity remains authoritative by the provider's positive numeric
+account ID plus account type (`User` or `Bot`) wherever merge provenance names
+an actor. The provider login is an audit snapshot only; login spelling, case
+normalization, or an account rename does not replace that stable identity.
+
+Compute the ledger identity digest with the exact provider-retained PR base SHA
 from the pull-request detail (`pull.base.sha`) as `--base`; this is the
 reviewed-base identity that the release verifier reconstructs, not the latest
 SHA currently at the tip of protected `main`:
@@ -743,15 +754,15 @@ bun scripts/release-review.ts \
   --digest
 ```
 
-Regenerate the body and verdict when the candidate head or its provider-retained
+Regenerate the digest when the candidate head or its provider-retained
 `pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
-An ordinary protected-`main` advance does not itself change that base-bound
-review artifact. Separately, let the merge authority refresh latest-current-main
+Ordinary protected
+`main` movement is not itself a candidate update and must not trigger a source
+merge/rebase. Separately, let the merge authority refresh latest-current-main
 mergeability and material-compatibility evidence on the same candidate head;
-that evidence is not `reviewedBaseSha` and does not require replacing the review
-or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
-evidence, and do not edit a submitted review after merge to manufacture
-evidence retroactively.
+that evidence is not `reviewedBaseSha` and does not require replacing the
+identity digest or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -858,8 +869,8 @@ fails closed.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
-prerelease are retention evidence, not approval: the native pre-merge review
-and every later source/acceptance gate remain mandatory. A missing, moved,
+prerelease are retention evidence, not a GitHub review PASS. Later source,
+candidate, and acceptance gates remain mandatory. A missing, moved,
 indirect, mutable, non-provider-authored, or post-hoc substitute outside the
 fenced merged-source recovery above fails release provenance. Retained-head
 prereleases and their tags intentionally accumulate for the lifetime of their
@@ -891,31 +902,25 @@ discontinuous range fails closed.
 
 The exact reviewed head must still resolve directly from its canonical
 `opengeni-release-head-<sha>` tag and have one successful GitHub Actions
-`Current-base source admission` check. The legacy context name is retained for
-the repository ruleset, but the check admits the immutable provider event head
-against the PR's provider merge-base tree; it does not require the event base
-to equal continuously moving `main`. The base-owned workflow/helper SHA must
-remain in protected `main` ancestry, and the provider base/head/repository,
+`Current-base source admission` check. Version PRs receive that named check
+from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
+hotfix-into-production only; its required-check name stays on a skip-success
+report job so promote PRs from live `main` remain mergeable. The check admits
+the immutable provider event head against the PR's provider merge-base tree; it
+does not require the event base to equal continuously moving `main`. The
+base-owned workflow/helper SHA must remain in protected `production` ancestry
+for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
-and terminal head identity remain fail-closed. Exact-head review stays bound to
-the candidate. The merge authority separately performs the fresh latest-main
+and terminal head identity remain fail-closed. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR before the
-exact-head release review is submitted. Release admission compares GitHub's
-provider-recorded review and merge timestamps and requires the decisive review
-to precede the merge. A review added after auto-merge is intentionally not
-release evidence and cannot rehabilitate that source commit; stop that train
-and use a fresh, normally reviewed release-source PR instead of retrying or
-weakening admission.
-
-Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
-`autoMergeRequest` from the PR and the exact-head review from the provider API.
-Require the PR to remain open, auto-merge to remain null, and the canonical
-review to bind the unchanged head with a strictly earlier provider timestamp;
-equal review and merge timestamps are not ordering evidence. Then merge with an
-exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
+Do not enable or leave auto-merge armed on a generated Version PR until trusted
+CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
+`headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
+remain open and auto-merge to remain null, then merge with an exact head-SHA
+fence. Never rely on an earlier UI observation for this boundary. Ordinary
+candidate/operator admission does not re-read GitHub reviews after merge.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -935,7 +940,7 @@ workflow from that retained controller tag and pass the release source only as
 data. The complete job graph, reusable admission gate, and local publication
 actions therefore come from reviewed controller bytes. Every job that checks
 out or executes candidate source depends on the read-only gate, which
-reconstructs the provider-owned merge, exact-head review, retention, and
+reconstructs the provider-owned merge, merged-source identity, retention, and
 required-check evidence. A merge composed against a different base fails before
 candidate source runs or candidate bytes exist. Acceptance, embedded
 distribution, and final publication all require that same controller SHA and
@@ -946,8 +951,8 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest.
-Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
-SHA-configured images and records that tag in the dogfood receipt. The
+Protected main CI uses the separate `canary-sha-<source>` namespace for its
+SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
 produce different digests from the same source tree.
@@ -1033,7 +1038,7 @@ application/chart/image bytes to pair with a newer coherent package publication
 without floating to registry `latest`, inventing source ownership, or attempting
 to publish superseded package versions.
 
-After staging, production, and the 72-hour canary have consumed those exact
+After staging and production have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
@@ -1048,13 +1053,14 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. The canary row is bound to the same
-source tree, exact chart bytes, and complete API/migration/worker/web/relay/
-sandbox digest map as candidate, staging, and production; a source-only canary
-claim fails closed. Acceptance requires the accepted source to remain an
-ancestor of current `main`, but does not require it to remain the current tip:
-compatible reviewed work can continue to merge during the canary window without
-freezing `main` or invalidating an otherwise unchanged proven train. No
+before validating every schema-v2 row. A 72-hour production soak row is
+optional evidence, not a publish gate; when present it is still bound to the
+same source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production. Acceptance requires
+the accepted source to remain an ancestor of current `production`, but does not
+require it to remain the current tip: compatible reviewed work can continue to
+merge to `main` during an official train without freezing daily integration or
+invalidating an otherwise unchanged proven train. No
 dispatcher can select an evidence URL, hash, repository, workflow path, or
 artifact name.
 
@@ -1227,7 +1233,7 @@ helm template opengeni deploy/helm/opengeni \
   --set postgres.enabled=true \
   --set temporal.enabled=true \
   --set nats.enabled=true \
-  --set minio.enabled=true \
+  --set garage.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
 
@@ -1254,17 +1260,17 @@ Then run conformance through port-forwards:
 
 ```bash
 kubectl -n opengeni-local port-forward svc/opengeni-local-api 28080:8000
-kubectl -n opengeni-local port-forward svc/opengeni-local-minio 29000:9000
+kubectl -n opengeni-local port-forward svc/opengeni-local-garage 29000:3900
 
 OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- \
   --base-url http://127.0.0.1:28080 \
-  --object-connect-to opengeni-local-minio:9000:127.0.0.1:29000
+  --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
-The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
 

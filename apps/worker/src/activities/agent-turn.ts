@@ -295,6 +295,7 @@ import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
+  isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
   xaiSubscriptionRequestStorage,
@@ -13154,8 +13155,9 @@ export type XaiCredentialFailure = {
 
 /**
  * Only definitive SuperGrok account refusals may move the same logical turn to
- * another credential. The marked transport response proves inference was
- * rejected before a stream began; refresh relogin is equally definitive.
+ * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
+ * that is a rate-limit/capacity diagnostic, proves inference was refused
+ * without an accepted model response; refresh relogin is equally definitive.
  */
 export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
   let relogin: unknown = error;
@@ -13181,7 +13183,14 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
     if (status === 403) {
       return { kind: "forbidden", cooldownMs: null };
     }
-    if (status === 429 || code === "rate_limit_exceeded" || code === "too_many_requests") {
+    const message = String(value.message ?? body?.message ?? "");
+    if (
+      isXaiSubscriptionRateLimitDiagnostic({
+        code,
+        message,
+        status: Number.isInteger(status) ? status : null,
+      })
+    ) {
       return {
         kind: "rate_limit",
         cooldownMs: providerRetryAfterMs(error) ?? PROVIDER_BACKPRESSURE_DELAY_MS,

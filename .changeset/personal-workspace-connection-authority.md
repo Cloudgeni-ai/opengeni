@@ -1,15 +1,12 @@
 ---
-"@opengeni/db": major
 "@opengeni/core": major
 ---
 
-Resolve a managed human's personal-workspace authority in the connection grant layer, and rename the resolver so it stops advertising a guarantee it never had.
+Resolve a managed human's personal-workspace authority in the connection grant layer on top of the session-surface prerequisite's canonical workspace-authority resolver.
 
 A managed human's personal workspace deliberately has no `workspace_memberships` row (migration 0219 raises on one); the owner's access is the `organization_memberships.personal_workspace_id` pointer. `getWorkspaceGrant` is a bare membership join, so every seam using it as a "does this subject still hold workspace authority here" predicate denied the one human who always belongs. In their own personal workspace, `freezePersonalConnectionDelegations` returned no delegations at all and Google Drive publication resolved no target. Those seams now use the pointer-aware resolver.
 
-**BREAKING (`@opengeni/db`):** `subjectHasLiveWorkspaceAuthority` is renamed to `namedSubjectHasLiveWorkspaceAuthority`, with no back-compat alias. The old name implied the function establishes who the caller is. It does not: it answers about whatever subject it is handed. Its `list_self_organization_memberships` guard compares the requested subject to `opengeni.subject_id`, but the function sets that GUC from its own argument through an ordinary `set_config` any `opengeni_app` connection may issue, so the check only verifies the caller supplied the same value twice. Proven against real Postgres as `opengeni_app` with RLS engaged: an unauthenticated caller read a victim's full organization-membership row including the private `personalWorkspaceId` and got `true` for that victim's personal workspace. Safety is caller discipline established locally at each site, and the rename exists so the next caller cannot miss that. Consumers must update the import; behaviour of the underlying query is unchanged apart from the two fixes below.
-
-`namedSubjectHasLiveWorkspaceAuthority` now also restores the caller's prior `opengeni.subject_id` before returning. Previously, calling it on a transaction handle redefined who the rest of that transaction ran as, because `withRlsContext` restores only account/workspace and `SET LOCAL` survives savepoint release. Non-`user:` subjects short-circuit to the plain membership answer instead of tripping the definer guard's `42501`.
+The landed session-surface prerequisite renamed the public database oracle to `namedSubjectHasLiveWorkspaceAuthority`, extracted the canonical in-scope authority rule, and declared the one required `@opengeni/db` major. This change consumes that landed API rather than declaring the same database break again. The named-subject wrapper continues to restore the caller's prior `opengeni.subject_id`; calling it on a transaction handle must never redefine who the rest of that transaction runs as.
 
 **BREAKING (`@opengeni/core`):** `PersonalConnectionDelegationSource`'s `subject` variant now requires `accountId` — the personal-workspace pointer lives on an organization membership, so the account is part of the question. `personalConnectionDelegationSourceForGrant` supplies it.
 
