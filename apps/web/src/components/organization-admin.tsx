@@ -21,17 +21,21 @@ import { Notice } from "@/components/ui/notice";
 import {
   beginOrganizationAdminOperation,
   canInviteOrganizationRole,
+  canRevokeOrganizationInvitation,
   isOrganizationConflict,
   maskedOrganizationSubject,
   organizationAdminIdentityKey,
+  organizationAdminOperationSlot,
   organizationMemberCapabilities,
   ownsOrganizationAdminOperation,
   retentionPolicySummary,
   sameOrganizationAdminIdentity,
   validRetentionDays,
   type OrganizationAdminIdentity,
+  type OrganizationAdminOperationLane,
   type OrganizationAdminOperation,
   type OrganizationAdminResource,
+  type OrganizationAdminOperationSlot,
 } from "@/lib/organization-admin";
 import { formatTimestamp } from "@/lib/format";
 import type {
@@ -60,17 +64,8 @@ export function OrganizationPeopleSection(props: {
   const identityKey = organizationAdminIdentityKey(props.identity);
   const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
   identityRef.current = props.identity;
-  const sequenceRef = useRef<Record<OrganizationAdminResource, number>>({
-    members: 0,
-    "admin-invitations": 0,
-    "incoming-invitations": 0,
-    retention: 0,
-    billing: 0,
-    entitlements: 0,
-  });
-  const activeRef = useRef<Partial<Record<OrganizationAdminResource, OrganizationAdminOperation>>>(
-    {},
-  );
+  const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
+  const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
   const [membersState, setMembersState] = useState<OwnedState<OrganizationMember[]>>({
     ownerKey: "",
     value: [],
@@ -99,14 +94,19 @@ export function OrganizationPeopleSection(props: {
   const canAdminister = props.actorRole === "owner" || props.actorRole === "admin";
 
   const claim = useCallback(
-    (resource: OrganizationAdminResource): OrganizationAdminOperation => {
+    (
+      resource: OrganizationAdminResource,
+      lane: OrganizationAdminOperationLane,
+    ): OrganizationAdminOperation => {
+      const slot = organizationAdminOperationSlot(resource, lane);
       const accepted = beginOrganizationAdminOperation({
         identity: props.identity,
         resource,
-        previousSequence: sequenceRef.current[resource],
+        lane,
+        previousSequence: sequenceRef.current.get(slot) ?? 0,
       });
-      sequenceRef.current[resource] = accepted.sequence;
-      activeRef.current[resource] = accepted;
+      sequenceRef.current.set(slot, accepted.sequence);
+      activeRef.current.set(slot, accepted);
       return accepted;
     },
     [props.identity],
@@ -114,7 +114,9 @@ export function OrganizationPeopleSection(props: {
   const owns = useCallback((accepted: OrganizationAdminOperation) => {
     return ownsOrganizationAdminOperation({
       currentIdentity: identityRef.current,
-      currentOperation: activeRef.current[accepted.resource] ?? null,
+      currentOperation:
+        activeRef.current.get(organizationAdminOperationSlot(accepted.resource, accepted.lane)) ??
+        null,
       accepted,
     });
   }, []);
@@ -123,12 +125,20 @@ export function OrganizationPeopleSection(props: {
     [props.identity],
   );
 
+  useEffect(
+    () => () => {
+      identityRef.current = null;
+      activeRef.current.clear();
+    },
+    [],
+  );
+
   const loadMembers = useCallback(async () => {
     if (!props.managedSession || !canAdminister) {
       setMembersState({ ownerKey: identityKey, value: [], loading: false, error: null });
       return;
     }
-    const operation = claim("members");
+    const operation = claim("members", "read");
     setMembersState({ ownerKey: identityKey, value: [], loading: true, error: null });
     try {
       const response = await props.client.listOrganizationMembers(props.identity.organizationId);
@@ -170,7 +180,7 @@ export function OrganizationPeopleSection(props: {
         });
         return;
       }
-      const operation = claim("admin-invitations");
+      const operation = claim("admin-invitations", "read");
       setAdminInvitesState((current) => ({
         ownerKey: identityKey,
         value:
@@ -233,7 +243,7 @@ export function OrganizationPeopleSection(props: {
         });
         return;
       }
-      const operation = claim("incoming-invitations");
+      const operation = claim("incoming-invitations", "read");
       setIncomingState((current) => ({
         ownerKey: identityKey,
         value:
@@ -318,7 +328,7 @@ export function OrganizationPeopleSection(props: {
     const email = inviteEmail.trim().toLowerCase();
     if (!email || !canInviteOrganizationRole(props.actorRole, inviteRole) || visibleBusyResource)
       return;
-    const operation = claim("admin-invitations");
+    const operation = claim("admin-invitations", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("admin-invitations");
     try {
@@ -370,8 +380,9 @@ export function OrganizationPeopleSection(props: {
   }
 
   async function revokeInvitation(invitation: OrganizationInvitation): Promise<boolean> {
-    if (visibleBusyResource) return false;
-    const operation = claim("admin-invitations");
+    if (visibleBusyResource || !canRevokeOrganizationInvitation(props.actorRole, invitation.role))
+      return false;
+    const operation = claim("admin-invitations", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("admin-invitations");
     try {
@@ -415,7 +426,7 @@ export function OrganizationPeopleSection(props: {
 
   async function acceptInvitation(invitation: OrganizationInvitation) {
     if (visibleBusyResource) return;
-    const operation = claim("incoming-invitations");
+    const operation = claim("incoming-invitations", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("incoming-invitations");
     try {
@@ -451,7 +462,7 @@ export function OrganizationPeopleSection(props: {
   async function changeRole(member: OrganizationMember) {
     const role = roleDrafts[member.id] ?? member.role;
     if (role === member.role || visibleBusyResource) return;
-    const operation = claim("members");
+    const operation = claim("members", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("members");
     try {
@@ -502,7 +513,7 @@ export function OrganizationPeopleSection(props: {
     action: MemberAction,
   ): Promise<boolean> {
     if (visibleBusyResource) return false;
-    const operation = claim("members");
+    const operation = claim("members", "mutation");
     setBusyOwnerKey(identityKey);
     setBusyResource("members");
     try {
@@ -565,6 +576,9 @@ export function OrganizationPeopleSection(props: {
   const pendingIncoming = incoming.value.invitations.filter(
     (invite) => invite.status === "pending",
   );
+  const activeOwnerCount = members.value.filter(
+    (member) => member.role === "owner" && member.status === "active",
+  ).length;
   return (
     <div className="grid gap-5">
       <section
@@ -592,7 +606,7 @@ export function OrganizationPeopleSection(props: {
               type="button"
               variant="ghost"
               size="sm"
-              disabled={members.loading}
+              disabled={members.loading || visibleBusyResource === "members"}
               onClick={() => void loadMembers()}
             >
               <RefreshCwIcon className={members.loading ? "size-3.5 animate-spin" : "size-3.5"} />
@@ -622,7 +636,11 @@ export function OrganizationPeopleSection(props: {
         ) : (
           <div className="grid gap-2">
             {members.value.map((member) => {
-              const capability = organizationMemberCapabilities(props.actorRole, member);
+              const capability = organizationMemberCapabilities(
+                props.actorRole,
+                member,
+                activeOwnerCount,
+              );
               const label =
                 member.subjectId === props.identity.subjectId
                   ? "You"
@@ -821,7 +839,8 @@ export function OrganizationPeopleSection(props: {
                       Expires {formatTimestamp(invite.expiresAt)}
                     </div>
                   </div>
-                  {invite.status === "pending" ? (
+                  {invite.status === "pending" &&
+                  canRevokeOrganizationInvitation(props.actorRole, invite.role) ? (
                     <Button
                       type="button"
                       variant="ghost"
@@ -844,7 +863,7 @@ export function OrganizationPeopleSection(props: {
               type="button"
               variant="ghost"
               size="sm"
-              disabled={adminInvites.loading}
+              disabled={adminInvites.loading || visibleBusyResource === "admin-invitations"}
               onClick={() =>
                 void loadAdminInvitations(adminInvites.value.nextCursor ?? undefined, true)
               }
@@ -918,7 +937,7 @@ export function OrganizationPeopleSection(props: {
             type="button"
             variant="ghost"
             size="sm"
-            disabled={incoming.loading}
+            disabled={incoming.loading || visibleBusyResource === "incoming-invitations"}
             onClick={() =>
               void loadIncomingInvitations(incoming.value.nextCursor ?? undefined, true)
             }
@@ -1002,8 +1021,10 @@ export function OrganizationRetentionSection(props: {
   const identityKey = organizationAdminIdentityKey(props.identity);
   const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
   identityRef.current = props.identity;
-  const sequenceRef = useRef(0);
-  const operationRef = useRef<OrganizationAdminOperation | null>(null);
+  const sequenceRef = useRef(new Map<OrganizationAdminOperationLane, number>());
+  const operationRef = useRef(
+    new Map<OrganizationAdminOperationLane, OrganizationAdminOperation>(),
+  );
   const [state, setState] = useState<OwnedState<OrganizationRetentionPolicy | null>>({
     ownerKey: "",
     value: null,
@@ -1022,21 +1043,25 @@ export function OrganizationRetentionSection(props: {
     props.managedSession && (props.actorRole === "owner" || props.actorRole === "admin");
   const canEdit = props.actorRole === "owner";
 
-  const claim = useCallback(() => {
-    const operation = beginOrganizationAdminOperation({
-      identity: props.identity,
-      resource: "retention",
-      previousSequence: sequenceRef.current,
-    });
-    sequenceRef.current = operation.sequence;
-    operationRef.current = operation;
-    return operation;
-  }, [props.identity]);
+  const claim = useCallback(
+    (lane: OrganizationAdminOperationLane) => {
+      const operation = beginOrganizationAdminOperation({
+        identity: props.identity,
+        resource: "retention",
+        lane,
+        previousSequence: sequenceRef.current.get(lane) ?? 0,
+      });
+      sequenceRef.current.set(lane, operation.sequence);
+      operationRef.current.set(lane, operation);
+      return operation;
+    },
+    [props.identity],
+  );
   const owns = useCallback(
     (operation: OrganizationAdminOperation) =>
       ownsOrganizationAdminOperation({
         currentIdentity: identityRef.current,
-        currentOperation: operationRef.current,
+        currentOperation: operationRef.current.get(operation.lane) ?? null,
         accepted: operation,
       }),
     [],
@@ -1045,12 +1070,19 @@ export function OrganizationRetentionSection(props: {
     () => sameOrganizationAdminIdentity(identityRef.current, props.identity),
     [props.identity],
   );
+  useEffect(
+    () => () => {
+      identityRef.current = null;
+      operationRef.current.clear();
+    },
+    [],
+  );
   const load = useCallback(async () => {
     if (!canRead) {
       setState({ ownerKey: identityKey, value: null, loading: false, error: null });
       return;
     }
-    const operation = claim();
+    const operation = claim("read");
     setState({ ownerKey: identityKey, value: null, loading: true, error: null });
     try {
       const policy = await props.client.getOrganizationRetentionPolicy(
@@ -1084,7 +1116,7 @@ export function OrganizationRetentionSection(props: {
     if (!visible.value || visibleBusy || !canEdit) return false;
     const retentionDays = mode === "retain" ? null : Number(days);
     if (mode === "delete_after" && !validRetentionDays(retentionDays ?? Number.NaN)) return false;
-    const operation = claim();
+    const operation = claim("mutation");
     setBusyOwnerKey(identityKey);
     setBusy(true);
     try {

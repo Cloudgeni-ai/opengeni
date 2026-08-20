@@ -14,6 +14,9 @@ export type OrganizationAdminResource =
   | "retention"
   | "billing"
   | "entitlements";
+export type OrganizationAdminOperationLane = "read" | "mutation";
+export type OrganizationAdminOperationSlot =
+  `${OrganizationAdminResource}:${OrganizationAdminOperationLane}`;
 
 export type OrganizationAdminIdentity = {
   principalGeneration: number;
@@ -25,8 +28,16 @@ export type OrganizationAdminIdentity = {
 export type OrganizationAdminOperation = {
   identity: OrganizationAdminIdentity;
   resource: OrganizationAdminResource;
+  lane: OrganizationAdminOperationLane;
   sequence: number;
 };
+
+export function organizationAdminOperationSlot(
+  resource: OrganizationAdminResource,
+  lane: OrganizationAdminOperationLane,
+): OrganizationAdminOperationSlot {
+  return `${resource}:${lane}`;
+}
 
 export function organizationAdminIdentityKey(identity: OrganizationAdminIdentity): string {
   return [
@@ -49,11 +60,13 @@ export function sameOrganizationAdminIdentity(
 export function beginOrganizationAdminOperation(input: {
   identity: OrganizationAdminIdentity;
   resource: OrganizationAdminResource;
+  lane: OrganizationAdminOperationLane;
   previousSequence: number;
 }): OrganizationAdminOperation {
   return {
     identity: input.identity,
     resource: input.resource,
+    lane: input.lane,
     sequence: input.previousSequence + 1,
   };
 }
@@ -66,6 +79,7 @@ export function ownsOrganizationAdminOperation(input: {
   return (
     sameOrganizationAdminIdentity(input.currentIdentity, input.accepted.identity) &&
     input.currentOperation?.resource === input.accepted.resource &&
+    input.currentOperation.lane === input.accepted.lane &&
     input.currentOperation.sequence === input.accepted.sequence &&
     sameOrganizationAdminIdentity(input.currentOperation.identity, input.accepted.identity)
   );
@@ -93,6 +107,7 @@ export type OrganizationMemberCapabilities = {
 export function organizationMemberCapabilities(
   actorRole: OrganizationMembershipRole | null,
   target: Pick<OrganizationMember, "role" | "status">,
+  activeOwnerCount: number,
 ): OrganizationMemberCapabilities {
   if (!actorRole || actorRole === "member" || target.status === "revoked") {
     return {
@@ -113,16 +128,31 @@ export function organizationMemberCapabilities(
       canOffboard: false,
     };
   }
+  const isLastActiveOwner =
+    target.role === "owner" && target.status === "active" && activeOwnerCount <= 1;
   return {
-    canChangeRole: target.status === "active",
-    allowedRoles: actorRole === "owner" ? ["owner", "admin", "member"] : ["member"],
-    canSuspend: target.status === "active",
+    canChangeRole: target.status === "active" && !isLastActiveOwner,
+    allowedRoles:
+      actorRole === "owner" && !isLastActiveOwner
+        ? ["owner", "admin", "member"]
+        : actorRole === "admin"
+          ? ["member"]
+          : [],
+    canSuspend: target.status === "active" && !isLastActiveOwner,
     canReactivate: target.status === "suspended",
-    canOffboard: target.status === "active" || target.status === "suspended",
+    canOffboard:
+      (target.status === "active" || target.status === "suspended") && !isLastActiveOwner,
   };
 }
 
 export function canInviteOrganizationRole(
+  actorRole: OrganizationMembershipRole | null,
+  invitedRole: OrganizationMembershipRole,
+): boolean {
+  return actorRole === "owner" || (actorRole === "admin" && invitedRole === "member");
+}
+
+export function canRevokeOrganizationInvitation(
   actorRole: OrganizationMembershipRole | null,
   invitedRole: OrganizationMembershipRole,
 ): boolean {

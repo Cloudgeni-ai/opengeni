@@ -36,9 +36,12 @@ import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   beginOrganizationAdminOperation,
   organizationAdminIdentityKey,
+  organizationAdminOperationSlot,
   ownsOrganizationAdminOperation,
   type OrganizationAdminIdentity,
+  type OrganizationAdminOperationLane,
   type OrganizationAdminOperation,
+  type OrganizationAdminOperationSlot,
   type OrganizationAdminSection,
 } from "@/lib/organization-admin";
 import { hasAccountPermission } from "@/lib/permissions";
@@ -100,20 +103,21 @@ export function OrgSettingsRoute({
   const identityKey = organizationAdminIdentityKey(adminIdentity);
   const identityRef = useRef<OrganizationAdminIdentity | null>(adminIdentity);
   identityRef.current = adminIdentity;
-  const billingSequenceRef = useRef({ billing: 0, entitlements: 0 });
-  const billingOperationRef = useRef<{
-    billing: OrganizationAdminOperation | null;
-    entitlements: OrganizationAdminOperation | null;
-  }>({ billing: null, entitlements: null });
+  const billingSequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
+  const billingOperationRef = useRef(
+    new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>(),
+  );
   const claimBillingOperation = useCallback(
-    (resource: "billing" | "entitlements") => {
+    (resource: "billing" | "entitlements", lane: OrganizationAdminOperationLane) => {
+      const slot = organizationAdminOperationSlot(resource, lane);
       const operation = beginOrganizationAdminOperation({
         identity: adminIdentity,
         resource,
-        previousSequence: billingSequenceRef.current[resource],
+        lane,
+        previousSequence: billingSequenceRef.current.get(slot) ?? 0,
       });
-      billingSequenceRef.current[resource] = operation.sequence;
-      billingOperationRef.current[resource] = operation;
+      billingSequenceRef.current.set(slot, operation.sequence);
+      billingOperationRef.current.set(slot, operation);
       return operation;
     },
     [adminIdentity],
@@ -123,11 +127,18 @@ export function OrgSettingsRoute({
       ownsOrganizationAdminOperation({
         currentIdentity: identityRef.current,
         currentOperation:
-          operation.resource === "billing"
-            ? billingOperationRef.current.billing
-            : billingOperationRef.current.entitlements,
+          billingOperationRef.current.get(
+            organizationAdminOperationSlot(operation.resource, operation.lane),
+          ) ?? null,
         accepted: operation,
       }),
+    [],
+  );
+  useEffect(
+    () => () => {
+      identityRef.current = null;
+      billingOperationRef.current.clear();
+    },
     [],
   );
 
@@ -138,7 +149,7 @@ export function OrgSettingsRoute({
       setBillingError(null);
       return;
     }
-    const operation = claimBillingOperation("billing");
+    const operation = claimBillingOperation("billing", "read");
     setBillingOwnerKey(identityKey);
     setBilling(null);
     setBillingLoading(true);
@@ -163,7 +174,7 @@ export function OrgSettingsRoute({
       setEntitlementsError(null);
       return;
     }
-    const operation = claimBillingOperation("entitlements");
+    const operation = claimBillingOperation("entitlements", "read");
     setEntitlementsOwnerKey(identityKey);
     setEntitlements(null);
     try {
@@ -201,7 +212,7 @@ export function OrgSettingsRoute({
   }, [checkout]);
 
   async function startCheckout(amountUsd: number) {
-    const operation = claimBillingOperation("billing");
+    const operation = claimBillingOperation("billing", "mutation");
     setBusyOwnerKey(identityKey);
     setBusy(true);
     try {

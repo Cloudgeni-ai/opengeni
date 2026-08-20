@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 const routeSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
 const adminSource = await Bun.file(`${import.meta.dir}/components/organization-admin.tsx`).text();
+const tenancyDocs = await Bun.file(
+  `${import.meta.dir}/../../../docs/organization-tenancy.md`,
+).text();
 
 describe("organization administration surface", () => {
   test("routes accessible overview, people, retention, and billing sections", () => {
@@ -50,5 +53,24 @@ describe("organization administration surface", () => {
       "The authoritative policy was refreshed. Review it and submit a new action.",
     );
     expect(adminSource).not.toContain("retryOrganization");
+  });
+
+  test("wires reads and mutations to independent lanes and invalidates on unmount", () => {
+    for (const resource of ["members", "admin-invitations", "incoming-invitations"]) {
+      expect(adminSource).toContain(`claim("${resource}", "read")`);
+      expect(adminSource).toContain(`claim("${resource}", "mutation")`);
+    }
+    expect(adminSource.match(/identityRef\.current = null/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(adminSource).toContain("activeRef.current.clear()");
+    expect(adminSource).toContain("operationRef.current.clear()");
+  });
+
+  test("documents the bounded UI without claiming provider email or unregistered invites", () => {
+    expect(tenancyDocs).toContain("bounded organization\nadministration surface");
+    expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
+    expect(tenancyDocs).toContain(
+      "Provider email\ndelivery and invitations for unregistered recipients remain non-goals",
+    );
+    expect(tenancyDocs).not.toContain("member-management\nUI remain deferred");
   });
 });

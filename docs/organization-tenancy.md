@@ -205,6 +205,29 @@ These routes require a direct managed-human cookie session; API keys and
 delegated bearer requests are rejected. Provider email delivery and invitations
 for people who have not registered remain separate integrations.
 
+The managed web console exposes this lifecycle as a bounded organization
+administration surface with separate Overview, People & invitations, Retention,
+and Billing sections. It lists the organization roster and invitation state,
+supports the role and lifecycle transitions authorized above, accepts incoming
+invitations, and gives owners a version-fenced 30–90 day retention editor while
+administrators receive the read-only policy. The browser binds every read and
+mutation result to the exact managed principal generation, organization, and
+route workspace; reads and mutations use independent operation lanes so a
+refresh cannot supersede an accepted mutation. An organization transition or
+keyed unmount invalidates both lanes before a delayed result can update state,
+navigate, announce success, or revalidate authority. A conflict refreshes
+authoritative state and requires a new human action rather than replaying the
+mutation.
+
+The roster intentionally uses a stable masked subject identifier because the
+lifecycle API does not expose a safe profile name or email. It never links or
+derives identity from another member's `personalWorkspaceId`, and organization
+administration does not grant access to that member's Personal workspace,
+private sessions, credentials, Connections, or personal resources. Workspace
+access remains a separately labelled administration surface. Provider email
+delivery and invitations for unregistered recipients remain non-goals; the web
+surface accurately requires an already-registered user.
+
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
 their nonterminal work, and cancels shared-session work whose frozen initiating
@@ -628,9 +651,9 @@ reads while leaving visibility mutation and fork without a caller.
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
-described above are active. Provider email delivery, unregistered-recipient
-invitations, automatic scheduling of the operator command, and member-management
-UI remain deferred.
+described above are active. The bounded managed web administration surface
+described above is also active. Provider email delivery, unregistered-recipient
+invitations, and automatic scheduling of the operator command remain deferred.
 
 ### D. Backfill
 
@@ -1363,7 +1386,7 @@ consult.
 
 ## Remaining non-goals
 
-- member-management UI and provider invitation email;
+- provider invitation email delivery;
 - invitations for unregistered humans;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;

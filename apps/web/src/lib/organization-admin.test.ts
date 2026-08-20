@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   beginOrganizationAdminOperation,
   canInviteOrganizationRole,
+  canRevokeOrganizationInvitation,
   maskedOrganizationSubject,
+  organizationAdminOperationSlot,
   organizationMemberCapabilities,
   ownsOrganizationAdminOperation,
   retentionPolicySummary,
@@ -20,25 +22,29 @@ const identityA: OrganizationAdminIdentity = {
 
 describe("organization administration authority", () => {
   test("mirrors the owner/admin/member action matrix", () => {
-    expect(organizationMemberCapabilities("owner", { role: "admin", status: "active" })).toEqual({
-      canChangeRole: true,
-      allowedRoles: ["owner", "admin", "member"],
-      canSuspend: true,
-      canReactivate: false,
-      canOffboard: true,
-    });
-    expect(organizationMemberCapabilities("admin", { role: "admin", status: "active" })).toEqual({
-      canChangeRole: false,
-      allowedRoles: [],
-      canSuspend: false,
-      canReactivate: false,
-      canOffboard: false,
-    });
+    expect(organizationMemberCapabilities("owner", { role: "admin", status: "active" }, 1)).toEqual(
+      {
+        canChangeRole: true,
+        allowedRoles: ["owner", "admin", "member"],
+        canSuspend: true,
+        canReactivate: false,
+        canOffboard: true,
+      },
+    );
+    expect(organizationMemberCapabilities("admin", { role: "admin", status: "active" }, 1)).toEqual(
+      {
+        canChangeRole: false,
+        allowedRoles: [],
+        canSuspend: false,
+        canReactivate: false,
+        canOffboard: false,
+      },
+    );
     expect(
-      organizationMemberCapabilities("admin", { role: "member", status: "suspended" }),
+      organizationMemberCapabilities("admin", { role: "member", status: "suspended" }, 1),
     ).toMatchObject({ canReactivate: true, canOffboard: true, canSuspend: false });
     expect(
-      organizationMemberCapabilities("member", { role: "member", status: "active" }),
+      organizationMemberCapabilities("member", { role: "member", status: "active" }, 1),
     ).toMatchObject({
       canChangeRole: false,
       canSuspend: false,
@@ -48,17 +54,44 @@ describe("organization administration authority", () => {
     expect(canInviteOrganizationRole("admin", "member")).toBe(true);
     expect(canInviteOrganizationRole("admin", "owner")).toBe(false);
     expect(canInviteOrganizationRole("owner", "admin")).toBe(true);
+    expect(canRevokeOrganizationInvitation("admin", "member")).toBe(true);
+    expect(canRevokeOrganizationInvitation("admin", "admin")).toBe(false);
+    expect(canRevokeOrganizationInvitation("admin", "owner")).toBe(false);
+    expect(canRevokeOrganizationInvitation("owner", "owner")).toBe(true);
+  });
+
+  test("protects the last active owner and enables owner actions once a second owner is active", () => {
+    expect(organizationMemberCapabilities("owner", { role: "owner", status: "active" }, 1)).toEqual(
+      {
+        canChangeRole: false,
+        allowedRoles: [],
+        canSuspend: false,
+        canReactivate: false,
+        canOffboard: false,
+      },
+    );
+    expect(organizationMemberCapabilities("owner", { role: "owner", status: "active" }, 2)).toEqual(
+      {
+        canChangeRole: true,
+        allowedRoles: ["owner", "admin", "member"],
+        canSuspend: true,
+        canReactivate: false,
+        canOffboard: true,
+      },
+    );
   });
 
   test("fences A to B transitions and overlapping operations independently", () => {
     const first = beginOrganizationAdminOperation({
       identity: identityA,
       resource: "members",
+      lane: "read",
       previousSequence: 0,
     });
     const second = beginOrganizationAdminOperation({
       identity: identityA,
       resource: "members",
+      lane: "read",
       previousSequence: first.sequence,
     });
     const identityB = { ...identityA, organizationId: "org-b", workspaceId: "workspace-b" };
@@ -79,6 +112,7 @@ describe("organization administration authority", () => {
     const invitations = beginOrganizationAdminOperation({
       identity: identityA,
       resource: "admin-invitations",
+      lane: "read",
       previousSequence: 0,
     });
     expect(
@@ -88,6 +122,60 @@ describe("organization administration authority", () => {
         accepted: invitations,
       }),
     ).toBe(true);
+  });
+
+  test("keeps same-resource reads and mutations independently owned in both settle orders", async () => {
+    for (const resource of ["members", "admin-invitations", "incoming-invitations"] as const) {
+      for (const order of ["read-first", "mutation-first"] as const) {
+        const read = beginOrganizationAdminOperation({
+          identity: identityA,
+          resource,
+          lane: "read",
+          previousSequence: 0,
+        });
+        const mutation = beginOrganizationAdminOperation({
+          identity: identityA,
+          resource,
+          lane: "mutation",
+          previousSequence: 0,
+        });
+        const active = new Map([
+          [organizationAdminOperationSlot(resource, "read"), read],
+          [organizationAdminOperationSlot(resource, "mutation"), mutation],
+        ]);
+        const readDeferred = deferred<void>();
+        const mutationDeferred = deferred<void>();
+        const settled: string[] = [];
+        const settle = async (label: string, pending: Promise<void>, operation: typeof read) => {
+          await pending;
+          const currentOperation =
+            active.get(organizationAdminOperationSlot(operation.resource, operation.lane)) ?? null;
+          if (
+            ownsOrganizationAdminOperation({
+              currentIdentity: identityA,
+              currentOperation,
+              accepted: operation,
+            })
+          )
+            settled.push(label);
+        };
+        const readResult = settle("read", readDeferred.promise, read);
+        const mutationResult = settle("mutation", mutationDeferred.promise, mutation);
+        if (order === "read-first") {
+          readDeferred.resolve();
+          await readResult;
+          mutationDeferred.resolve();
+        } else {
+          mutationDeferred.resolve();
+          await mutationResult;
+          readDeferred.resolve();
+        }
+        await Promise.all([readResult, mutationResult]);
+        expect(settled).toEqual(
+          order === "read-first" ? ["read", "mutation"] : ["mutation", "read"],
+        );
+      }
+    }
   });
 
   test("uses a stable masked identifier and validates retention bounds", () => {
@@ -106,3 +194,11 @@ describe("organization administration authority", () => {
     );
   });
 });
+
+function deferred<Value>() {
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  const promise = new Promise<Value>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
