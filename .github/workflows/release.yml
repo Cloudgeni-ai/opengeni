@@ -17,8 +17,9 @@ name: Release
 #      automation/granular token with publish rights (provenance via OIDC).
 #   3. Enable Settings -> Actions -> General -> "Allow GitHub Actions to create
 #      and approve pull requests". The scoped per-run GITHUB_TOKEN deliberately
-#      authors Version PRs as github-actions[bot], leaving exact-head approval to
-#      a distinct trusted human reviewer.
+#      authors Version PRs as github-actions[bot]. GitHub branch protection may
+#      still require a human review to merge; ordinary publication admission binds
+#      the merged associated PR, not a later GitHub APPROVE or structured PASS.
 #   4. Configure OPENGENI_RELEASE_OCI_PREFIX and
 #      OPENGENI_RELEASE_REGISTRY_AUTH when the public registry is not the
 #      default GHCR namespace. The generic Azure OIDC mode also requires the
@@ -169,7 +170,7 @@ jobs:
     permissions:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
-      pull-requests: read # verify exact-head native approval before publication
+      pull-requests: read # verify the merged associated PR before publication
       actions: read # resolve canonical producer runs and immutable artifact digests
     outputs:
       releaseReady: ${{ steps.registry.outputs.release_ready }}
