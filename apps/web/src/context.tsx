@@ -41,6 +41,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
+import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { sameSessionForContext } from "@/lib/session-context";
 import { runSingleFlight } from "@/lib/single-flight";
 import {
@@ -70,6 +71,18 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { upsertWorkspace } from "@/lib/workspaces";
+import {
+  beginWorkspaceOperation,
+  beginWorkspaceTransition,
+  invalidateWorkspaceTransition,
+  ownsWorkspaceOperation,
+  ownsWorkspaceTransition,
+  runCurrentWorkspaceOperation,
+  runCurrentWorkspaceRequest,
+  settleWorkspaceOperation,
+  type WorkspaceOperationIdentity,
+  type WorkspaceTransitionIdentity,
+} from "@/lib/workspace-transition";
 import type {
   AccessContext,
   AuthSession,
@@ -166,6 +179,17 @@ export type AppContextValue = {
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
+  /**
+   * Workspace whose mutable console state is currently safe to render.
+   * This is a display fence only; server access grants remain authoritative.
+   */
+  workspaceStateOwnerId: string | null;
+  /** Clear and rebind every workspace/session-local draft and cache before display. */
+  prepareWorkspaceTransition: (workspaceId: string) => void;
+  /** Capture the exact routed workspace/principal transition for one async invocation. */
+  captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
+  /** True only while an invocation still owns the routed workspace/principal UI. */
+  ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
@@ -407,6 +431,19 @@ export function RootRouteComponent() {
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [workspaceStateOwnerId, setWorkspaceStateOwnerId] = useState<string | null>(null);
+  const workspaceTransitionIdentity = useRef<WorkspaceTransitionIdentity>({
+    workspaceId: null,
+    revision: 0,
+  });
+  const workspaceOperationSequence = useRef(0);
+  const activeCreateOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const githubManifestOperationSequence = useRef(0);
+  const activeGitHubManifestOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const githubDisconnectOperationSequence = useRef(0);
+  const activeGitHubDisconnectOperation = useRef<WorkspaceOperationIdentity | null>(null);
+  const authPrincipalIdRef = useRef<string | null>(null);
+  const accessPrincipalIdRef = useRef<string | null>(null);
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
@@ -471,6 +508,88 @@ export function RootRouteComponent() {
     });
   }, []);
 
+  const resetSessionView = useCallback(() => {
+    setSession(null);
+    setConnectionState("idle");
+    sessionEventFeedStore.set(null);
+  }, [sessionEventFeedStore, setSession]);
+
+  const resetWorkspaceIntegrations = useCallback(() => {
+    setGithubStatus(null);
+    setGithubStatusFailed(false);
+    setGithubRepos([]);
+    setGithubCatalogReady(false);
+    setWorkspaceMcpServers([]);
+    setWorkspaceCapabilityCatalog([]);
+    setWorkspaceMcpCatalogReady(false);
+  }, []);
+
+  const resetWorkspaceState = useCallback(
+    (workspaceId: string | null, force: boolean) => {
+      const transition =
+        workspaceId === null
+          ? {
+              identity: invalidateWorkspaceTransition(workspaceTransitionIdentity.current),
+              changed: true,
+            }
+          : beginWorkspaceTransition(workspaceTransitionIdentity.current, workspaceId);
+      if (!force && !transition.changed) {
+        return;
+      }
+      workspaceTransitionIdentity.current = transition.identity;
+      activeCreateOperation.current = null;
+      activeGitHubManifestOperation.current = null;
+      activeGitHubDisconnectOperation.current = null;
+      // Fence late non-abortable catalog/status responses before clearing the
+      // projections they would otherwise be able to repopulate.
+      githubRefreshId.current += 1;
+      mcpRefreshId.current += 1;
+      pendingCreateAttempt.current = null;
+      resetSessionView();
+      setInspectorOpen(false);
+      setManualRepos([]);
+      setManualReposOpen(false);
+      setNextRepoId(1);
+      setSelectedRepoIds(new Set());
+      setSelectedRepoRefs({});
+      setSelectedCapabilityToolIds(new Set());
+      previousCapabilityToolIds.current = new Set();
+      setGithubAppOpen(false);
+      setGithubOrg("");
+      setBusy(false);
+      setRepoBusy(false);
+      setGithubAppBusy(false);
+      resetWorkspaceIntegrations();
+      setWorkspaceStateOwnerId(workspaceId);
+    },
+    [resetSessionView, resetWorkspaceIntegrations],
+  );
+
+  const prepareWorkspaceTransition = useCallback(
+    (workspaceId: string) => resetWorkspaceState(workspaceId, false),
+    [resetWorkspaceState],
+  );
+
+  const captureWorkspaceInvocation = useCallback(
+    (workspaceId: string): WorkspaceTransitionIdentity | null => {
+      const accepted = workspaceTransitionIdentity.current;
+      return ownsWorkspaceTransition(accepted, accepted, workspaceId) ? accepted : null;
+    },
+    [],
+  );
+
+  const ownsWorkspaceInvocation = useCallback(
+    (workspaceId: string, accepted: WorkspaceTransitionIdentity): boolean =>
+      ownsWorkspaceTransition(workspaceTransitionIdentity.current, accepted, workspaceId),
+    [],
+  );
+
+  const invalidatePrincipalWorkspaceState = useCallback(() => {
+    authPrincipalIdRef.current = null;
+    accessPrincipalIdRef.current = null;
+    resetWorkspaceState(null, true);
+  }, [resetWorkspaceState]);
+
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
@@ -507,6 +626,9 @@ export function RootRouteComponent() {
       return;
     }
     if (clientConfig.auth.mode !== "managedSession") {
+      if (authPrincipalIdRef.current !== null) {
+        invalidatePrincipalWorkspaceState();
+      }
       setAuthSession(null);
       return;
     }
@@ -515,6 +637,14 @@ export function RootRouteComponent() {
     void fetchAuthSession()
       .then((nextSession) => {
         if (!cancelled) {
+          const nextPrincipalId = nextSession?.user.id ?? null;
+          if (
+            authPrincipalIdRef.current !== null &&
+            authPrincipalIdRef.current !== nextPrincipalId
+          ) {
+            invalidatePrincipalWorkspaceState();
+          }
+          authPrincipalIdRef.current = nextPrincipalId;
           setAuthSession(nextSession);
         }
       })
@@ -526,7 +656,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, [clientConfig]);
+  }, [clientConfig, invalidatePrincipalWorkspaceState]);
 
   useEffect(() => {
     if (!clientConfig || !authReady) {
@@ -544,6 +674,13 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
+        if (
+          accessPrincipalIdRef.current !== null &&
+          accessPrincipalIdRef.current !== context.subjectId
+        ) {
+          invalidatePrincipalWorkspaceState();
+        }
+        accessPrincipalIdRef.current = context.subjectId;
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
       })
@@ -566,7 +703,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, [clientConfig, authReady, client]);
+  }, [clientConfig, authReady, client, invalidatePrincipalWorkspaceState]);
 
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
   const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
@@ -666,10 +803,13 @@ export function RootRouteComponent() {
 
   const refreshWorkspace = useCallback(
     async (workspaceId: string): Promise<void> => {
+      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) return;
       const updated = await client.getWorkspace(workspaceId);
+      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setWorkspaces((current) => upsertWorkspace(current, updated));
     },
-    [client],
+    [captureWorkspaceInvocation, client, ownsWorkspaceInvocation],
   );
 
   // Settings PATCH deep-merges server-side; upsert the returned workspace so the
@@ -841,12 +981,22 @@ export function RootRouteComponent() {
 
   const refreshGitHub = useCallback(
     async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => {
+      const acceptedTransition = workspaceTransitionIdentity.current;
+      if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) {
+        return;
+      }
+      const ownsRefresh = () =>
+        ownsWorkspaceTransition(
+          workspaceTransitionIdentity.current,
+          acceptedTransition,
+          workspaceId,
+        );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
       setRepoBusy(true);
       try {
         const status = await client.getGitHubApp(workspaceId);
-        if (signal?.aborted || githubRefreshId.current !== refreshId) {
+        if (signal?.aborted || githubRefreshId.current !== refreshId || !ownsRefresh()) {
           return;
         }
         setGithubStatus(status);
@@ -859,7 +1009,7 @@ export function RootRouteComponent() {
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
-          if (signal?.aborted || githubRefreshId.current !== refreshId) {
+          if (signal?.aborted || githubRefreshId.current !== refreshId || !ownsRefresh()) {
             return;
           }
           setGithubRepos(repositories);
@@ -869,7 +1019,12 @@ export function RootRouteComponent() {
           setGithubCatalogReady(true);
         }
       } catch (error) {
-        if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+        if (
+          isAbortError(error) ||
+          signal?.aborted ||
+          githubRefreshId.current !== refreshId ||
+          !ownsRefresh()
+        ) {
           return;
         }
         // A failed status/catalog request is unavailable/unknown, not proof
@@ -881,7 +1036,7 @@ export function RootRouteComponent() {
           description: String(error),
         });
       } finally {
-        if (githubRefreshId.current === refreshId) {
+        if (githubRefreshId.current === refreshId && ownsRefresh()) {
           setRepoBusy(false);
         }
       }
@@ -894,17 +1049,24 @@ export function RootRouteComponent() {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
-      const [catalog, apiIntegrations] = await Promise.all([
-        runSingleFlight(
-          mcpCatalogRequests.current,
-          requestKey,
-          async () => await client.listCapabilities(workspaceId),
-        ),
-        client.listApiIntegrations(workspaceId),
-      ]);
-      if (signal?.aborted || mcpRefreshId.current !== refreshId) {
+      const result = await runCurrentWorkspaceRequest({
+        signal,
+        requestId: refreshId,
+        currentRequestId: () => mcpRefreshId.current,
+        request: async () =>
+          await Promise.all([
+            runSingleFlight(
+              mcpCatalogRequests.current,
+              requestKey,
+              async () => await client.listCapabilities(workspaceId),
+            ),
+            client.listApiIntegrations(workspaceId),
+          ]),
+      });
+      if (!result) {
         return;
       }
+      const [catalog, apiIntegrations] = result;
       setWorkspaceMcpServers(
         mergeMcpServerOptions(
           enabledWorkspaceCapabilityMcpServers(catalog.items),
@@ -931,6 +1093,13 @@ export function RootRouteComponent() {
       startMode?: "realtime";
     },
   ): Promise<Session | null> {
+    const startedOperation = beginWorkspaceOperation(
+      workspaceOperationSequence.current,
+      workspaceTransitionIdentity.current,
+    );
+    workspaceOperationSequence.current = startedOperation.sequence;
+    const operation = startedOperation.operation;
+    activeCreateOperation.current = operation;
     setBusy(true);
     try {
       const sessionTools = options?.sessionTools;
@@ -974,6 +1143,19 @@ export function RootRouteComponent() {
       if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
         pendingCreateAttempt.current = null;
       }
+      // The create may commit after the operator has switched workspaces. The
+      // server result remains valid, but it must not repopulate or navigate the
+      // new workspace's UI with the previous tenant's session.
+      if (
+        !ownsWorkspaceOperation(
+          activeCreateOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        return null;
+      }
       setSession(created);
       setConnectionState("idle");
       captureProductAnalyticsEvent("session_started", {
@@ -988,29 +1170,84 @@ export function RootRouteComponent() {
     } catch (error) {
       // Keep the attempt on failure. An exact retry dedups against a create that
       // may have landed server-side; an edited request acquires a fresh key.
-      toast.error("Failed to start session", {
-        description: error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
-      });
+      if (
+        ownsWorkspaceOperation(
+          activeCreateOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        toast.error("Failed to start session", {
+          description:
+            error instanceof Error ? composerSubmissionErrorMessage(error) : String(error),
+        });
+      }
       return null;
     } finally {
-      setBusy(false);
+      const settlement = settleWorkspaceOperation(activeCreateOperation.current, operation);
+      activeCreateOperation.current = settlement.active;
+      if (settlement.settledCurrent) {
+        setBusy(false);
+      }
     }
   }
 
   async function startGitHubAppManifestFlow(workspaceId: string) {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    const started = beginWorkspaceOperation(
+      githubManifestOperationSequence.current,
+      acceptedTransition,
+    );
+    githubManifestOperationSequence.current = started.sequence;
+    const operation = started.operation;
+    activeGitHubManifestOperation.current = operation;
     setGithubAppBusy(true);
     try {
-      const result = await client.createGitHubAppManifest(workspaceId, {
-        ...(githubOrg.trim() ? { organization: githubOrg.trim() } : {}),
-        public: false,
-        includeCiPermissions: true,
+      const result = await runCurrentWorkspaceOperation({
+        activeOperation: () => activeGitHubManifestOperation.current,
+        currentTransition: () => workspaceTransitionIdentity.current,
+        operation,
+        workspaceId,
+        request: async () =>
+          await client.createGitHubAppManifest(workspaceId, {
+            ...(githubOrg.trim() ? { organization: githubOrg.trim() } : {}),
+            public: false,
+            includeCiPermissions: true,
+          }),
       });
-      submitGitHubManifest(result.actionUrl, result.manifest);
+      if (
+        result.status === "stale" ||
+        !ownsWorkspaceOperation(
+          activeGitHubManifestOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        return;
+      }
+      submitGitHubManifest(result.value.actionUrl, result.value.manifest);
     } catch (error) {
-      toast.error("GitHub App setup failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setGithubAppBusy(false);
+      if (
+        ownsWorkspaceOperation(
+          activeGitHubManifestOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        toast.error("GitHub App setup failed", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } finally {
+      const settlement = settleWorkspaceOperation(activeGitHubManifestOperation.current, operation);
+      activeGitHubManifestOperation.current = settlement.active;
+      if (settlement.settledCurrent) {
+        setGithubAppBusy(false);
+      }
     }
   }
 
@@ -1018,8 +1255,34 @@ export function RootRouteComponent() {
     workspaceId: string,
     installationId: number,
   ): Promise<boolean> {
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return false;
+    const started = beginWorkspaceOperation(
+      githubDisconnectOperationSequence.current,
+      acceptedTransition,
+    );
+    githubDisconnectOperationSequence.current = started.sequence;
+    const operation = started.operation;
+    activeGitHubDisconnectOperation.current = operation;
     try {
-      await client.unlinkGitHubInstallation(workspaceId, installationId);
+      const unlink = await runCurrentWorkspaceOperation({
+        activeOperation: () => activeGitHubDisconnectOperation.current,
+        currentTransition: () => workspaceTransitionIdentity.current,
+        operation,
+        workspaceId,
+        request: async () => await client.unlinkGitHubInstallation(workspaceId, installationId),
+      });
+      if (
+        unlink.status === "stale" ||
+        !ownsWorkspaceOperation(
+          activeGitHubDisconnectOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        return false;
+      }
       const removedRepositoryIds = new Set(
         githubRepos
           .filter((repository) => repository.installationId === installationId)
@@ -1037,13 +1300,38 @@ export function RootRouteComponent() {
         ),
       );
       await refreshGitHub(workspaceId, undefined, { sync: true });
+      if (
+        !ownsWorkspaceOperation(
+          activeGitHubDisconnectOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        return false;
+      }
       toast.success("GitHub installation unlinked from this workspace");
       return true;
     } catch (error) {
-      toast.error("Failed to unlink GitHub installation", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      if (
+        ownsWorkspaceOperation(
+          activeGitHubDisconnectOperation.current,
+          workspaceTransitionIdentity.current,
+          operation,
+          workspaceId,
+        )
+      ) {
+        toast.error("Failed to unlink GitHub installation", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
       return false;
+    } finally {
+      const settlement = settleWorkspaceOperation(
+        activeGitHubDisconnectOperation.current,
+        operation,
+      );
+      activeGitHubDisconnectOperation.current = settlement.active;
     }
   }
 
@@ -1085,6 +1373,7 @@ export function RootRouteComponent() {
       toast.error("Enter an access key");
       return;
     }
+    invalidatePrincipalWorkspaceState();
     setStoredAccessKey(key);
     setHasAccessKey(true);
     setAccessKeyDraft("");
@@ -1093,6 +1382,7 @@ export function RootRouteComponent() {
   }
 
   function forgetAccessKey() {
+    invalidatePrincipalWorkspaceState();
     clearStoredAccessKey();
     setHasAccessKey(false);
     setSession(null);
@@ -1106,6 +1396,7 @@ export function RootRouteComponent() {
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) {
+    invalidatePrincipalWorkspaceState();
     if (mode === "signup") {
       await signUpEmail(input);
       captureProductAnalyticsEvent("signup_submitted", {
@@ -1120,6 +1411,7 @@ export function RootRouteComponent() {
       });
     }
     const nextSession = await fetchAuthSession();
+    authPrincipalIdRef.current = nextSession?.user.id ?? null;
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
     if (!nextSession && mode === "signup") {
@@ -1128,31 +1420,28 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
-    await signOutManaged();
-    setAuthSession(null);
+    invalidatePrincipalWorkspaceState();
+    // Keep the authenticated tree hidden until an ambiguous response has been
+    // reconciled against the authoritative cookie session.
+    setAuthSession(undefined);
     setAccessContext(null);
     setWorkspaces([]);
-    setSession(null);
     setAccessError(null);
+    const result = await signOutWithAuthoritativeReconciliation<AuthSession>({
+      signOut: signOutManaged,
+      readSession: fetchAuthSession,
+    });
+    authPrincipalIdRef.current = result.session?.user.id ?? null;
+    setAuthSession(result.session);
+    // A definitive failure may restore the same user id. Rotate the client
+    // identity anyway so access is loaded from the reconciled cookie result.
     setAccessKeyVersion((version) => version + 1);
+    if (result.status === "reconciled_failure") {
+      throw result.error;
+    }
+    setSession(null);
     await navigate({ to: "/", replace: true });
   }
-
-  const resetSessionView = useCallback(() => {
-    setSession(null);
-    setConnectionState("idle");
-    sessionEventFeedStore.set(null);
-  }, [sessionEventFeedStore, setSession]);
-
-  const resetWorkspaceIntegrations = useCallback(() => {
-    setGithubStatus(null);
-    setGithubStatusFailed(false);
-    setGithubRepos([]);
-    setGithubCatalogReady(false);
-    setWorkspaceMcpServers([]);
-    setWorkspaceCapabilityCatalog([]);
-    setWorkspaceMcpCatalogReady(false);
-  }, []);
 
   // Context actions keep one identity while reading the newest committed state
   // through the callback ref. This prevents unrelated provider renders
@@ -1240,6 +1529,10 @@ export function RootRouteComponent() {
           workspaceMcpCatalogReady,
           workspaceCapabilityCatalog,
           currentResources,
+          workspaceStateOwnerId,
+          prepareWorkspaceTransition,
+          captureWorkspaceInvocation,
+          ownsWorkspaceInvocation,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
@@ -1267,6 +1560,7 @@ export function RootRouteComponent() {
     accessKeyVersion,
     authSession,
     busy,
+    captureWorkspaceInvocation,
     clearSlackLinkContinuation,
     client,
     clientConfig,
@@ -1299,7 +1593,9 @@ export function RootRouteComponent() {
     manualRepos,
     manualReposOpen,
     model,
+    ownsWorkspaceInvocation,
     preparePendingSlackLink,
+    prepareWorkspaceTransition,
     slackLinkContinuationWorkspaceId,
     latencyMode,
     reasoningEffort,
@@ -1320,6 +1616,7 @@ export function RootRouteComponent() {
     toolMcpServers,
     workspaceMcpCatalogReady,
     workspaceCapabilityCatalog,
+    workspaceStateOwnerId,
     workspaces,
   ]);
 

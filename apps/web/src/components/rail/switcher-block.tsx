@@ -189,6 +189,7 @@ export function SwitcherBlock() {
       >
         <button
           type="button"
+          aria-label={`Workspace: ${activeWorkspace?.name ?? "none"}. Switch workspace`}
           className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
         >
           <Avatar size="sm" className="rounded-md">
@@ -255,6 +256,7 @@ function OrgLine(props: {
         {props.orgs.map((org) => (
           <DropdownMenuItem
             key={org.accountId}
+            aria-current={org.accountId === props.activeAccountId ? "true" : undefined}
             onSelect={() => {
               if (org.accountId !== props.activeAccountId) {
                 rail.openOrg(org.accountId);
@@ -317,7 +319,11 @@ function WorkspaceMenu(props: {
       >
         <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
         {props.workspaces.map((workspace) => (
-          <DropdownMenuItem key={workspace.id} onSelect={() => props.onSelect(workspace.id)}>
+          <DropdownMenuItem
+            key={workspace.id}
+            aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
+            onSelect={() => props.onSelect(workspace.id)}
+          >
             <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
               {workspaceInitial(workspace)}
             </span>
