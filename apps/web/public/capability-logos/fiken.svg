@@ -1,0 +1,6 @@
+<svg role="img" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
+  <title>Fiken</title>
+  <rect width="192" height="192" rx="36" fill="#fff"/>
+  <path d="M88 157V83c0-27 18-47 42-47 8 0 15 2 22 6" fill="none" stroke="#75a7f5" stroke-linecap="round" stroke-width="25"/>
+  <path d="M46 114h84M88 82v75" fill="none" stroke="#5838c6" stroke-linecap="round" stroke-width="25"/>
+</svg>

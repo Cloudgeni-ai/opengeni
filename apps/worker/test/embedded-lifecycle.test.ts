@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   type Database,
@@ -356,6 +357,7 @@ describe("embedded worker lifecycle contract", () => {
           rolbypassrls: false,
         },
       ],
+      [{ activated: false }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -452,15 +454,24 @@ describe("embedded worker lifecycle contract", () => {
           can_delete: false,
         },
       ],
-      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
-        name,
-        owner: "opengeni_migrator",
-        can_execute: true,
-        public_execute: false,
-        security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+      [
+        ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
           name,
-        ),
-      })),
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+            name,
+          ),
+        })),
+        ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          can_execute: false,
+          public_execute: false,
+          security_definer: true,
+        })),
+      ],
       [
         {
           name: "workspace_rls_visible(uuid, uuid)",
@@ -525,14 +536,66 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_operations",
       ],
     })();
-    expect((catalogResults[7] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[8] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+      ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);
 
     await dbReadyCheck(db)();
     expect(directExecutions).toBe(1);
+  });
+
+  test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
+    const embeddedDb = (activated: boolean) => {
+      const results: unknown[] = [
+        [
+          {
+            current_user: "embedded_owner",
+            session_user: "embedded_owner",
+            database_owner: "embedded_owner",
+            can_connect_database: true,
+            can_create_in_database: true,
+            row_security: "on",
+            rolcanlogin: true,
+            rolsuper: false,
+            rolinherit: true,
+            rolcreaterole: false,
+            rolcreatedb: false,
+            rolreplication: false,
+            rolbypassrls: false,
+          },
+        ],
+        [{ activated }],
+      ];
+      let index = 0;
+      return {
+        execute: async () => [],
+        transaction: async (
+          callback: (tx: { execute: () => Promise<unknown> }) => Promise<unknown>,
+        ) =>
+          callback({
+            execute: async () => {
+              const result = results[index];
+              index += 1;
+              return result;
+            },
+          }),
+      } as unknown as Database;
+    };
+    const options = { rlsStrategy: "scoped" as const, targetSchema: "embedded" };
+
+    await expect(dbReadyCheck(embeddedDb(true), options)()).rejects.toThrow(
+      /session-tenancy product activation is durable/,
+    );
+    await expect(
+      dbReadyCheck(embeddedDb(true), {
+        ...options,
+        organizationTenancyCanonicalActivationEnabled: true,
+      })(),
+    ).resolves.toBeUndefined();
+    await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {

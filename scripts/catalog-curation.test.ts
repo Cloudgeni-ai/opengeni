@@ -31,6 +31,16 @@ describe("curated catalog overlay document", () => {
     // committed overlay and snapshot in lockstep.
     const normalized = normalizeCatalogSnapshot(await readSnapshotFile(snapshotPath));
     expect(normalized.unmatchedCurated).toEqual([]);
+    expect(normalized.rows.filter((row) => row.curated)).toHaveLength(
+      CURATED_CATALOG.entries.length,
+    );
+    for (const row of normalized.rows.filter((candidate) => candidate.curated)) {
+      expect(
+        catalogRowToDbInput(row, {
+          importBatchId: "00000000-0000-4000-8000-000000000001",
+        }).metadata,
+      ).toMatchObject({ curation: { curated: true } });
+    }
   });
 
   test("every committed entry that claims official is served from the row's own provider domain", async () => {

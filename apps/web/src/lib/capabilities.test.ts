@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import {
   apiKeyConnectionRef,
   apiKeyCredential,
@@ -1137,19 +1138,22 @@ describe("capabilityCuration", () => {
   test("reads featured and official from import curation metadata", () => {
     expect(
       capabilityCuration(item({ metadata: { curation: { featured: true, official: true } } })),
-    ).toEqual({ featured: true, official: true });
+    ).toEqual({ curated: false, featured: true, official: true });
   });
 
   test("defaults both flags to false when curation is absent or malformed", () => {
     expect(capabilityCuration(item({ metadata: {} }))).toEqual({
+      curated: false,
       featured: false,
       official: false,
     });
     expect(capabilityCuration(item({ metadata: { curation: "yes" } }))).toEqual({
+      curated: false,
       featured: false,
       official: false,
     });
     expect(capabilityCuration(item({ metadata: { curation: { featured: "true" } } }))).toEqual({
+      curated: false,
       featured: false,
       official: false,
     });
@@ -1173,6 +1177,49 @@ describe("sortFeaturedFirst", () => {
     const sorted = sortFeaturedFirst(input);
     expect(sorted).not.toBe(input);
     expect(input.map((entry) => entry.id)).toEqual(["x", "y"]);
+  });
+});
+
+describe("sortConnectorsForPresentation", () => {
+  test("puts first-party and reviewed connectors before the raw long tail", () => {
+    const raw = item({ id: "raw", name: "Access Owl" });
+    const opaque = item({ id: "opaque", name: "4ygmimr3yj.us-east-2.awsapprunner.com" });
+    const selfHostedLogo = item({
+      id: "logo",
+      name: "Recognizable",
+      logoAssetPath: "catalog-assets/recognizable.svg",
+    });
+    const curated = item({
+      id: "curated",
+      name: "PayPal",
+      metadata: { curation: { curated: true, official: true } },
+    });
+    const firstParty = item({
+      id: "api:fiken",
+      kind: "api",
+      source: "built_in",
+      surfaceType: "first_party_fiken",
+      name: "Fiken",
+    });
+
+    expect(
+      sortConnectorsForPresentation([opaque, raw, selfHostedLogo, curated, firstParty]).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual(["api:fiken", "curated", "logo", "raw", "opaque"]);
+  });
+
+  test("is stable inside each tier and leaves the complete input discoverable", () => {
+    const input = [
+      item({ id: "b", name: "Beta", metadata: { curation: { curated: true } } }),
+      item({ id: "a", name: "Alpha", metadata: { curation: { curated: true } } }),
+      item({ id: "tail", name: "Tail" }),
+    ];
+    const sorted = sortConnectorsForPresentation(input);
+    expect(sorted.map((entry) => entry.id)).toEqual(["b", "a", "tail"]);
+    expect(new Set(sorted.map((entry) => entry.id))).toEqual(
+      new Set(input.map((entry) => entry.id)),
+    );
   });
 });
 
