@@ -1149,32 +1149,63 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
-        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)',
+        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) FROM PUBLIC',
+        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer) FROM PUBLIC',
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) TO %I',
+        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
     END IF;
     IF to_regprocedure(
       format(
-        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text)',
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) FROM PUBLIC',
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer) FROM PUBLIC',
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) TO %I',
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.session_tenancy_product_activated(uuid,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_tenancy_product_activated(uuid, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_tenancy_product_activated(uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_tenancy_any_product_activation() FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_tenancy_any_product_activation() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

@@ -504,6 +504,38 @@ export const organizationMemberships = pgTable(
   }),
 );
 
+// Forward-only organization-scoped activation receipt for the product session-
+// tenancy surface. Runtime may observe this marker, but only the drained
+// migration-owner activation seam may insert it.
+export const sessionTenancyActivations = pgTable(
+  "session_tenancy_activations",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "restrict" }),
+    activationVersion: integer("activation_version").notNull(),
+    inventoryDigest: text("inventory_digest").notNull(),
+    parityDigest: text("parity_digest").notNull(),
+    activatedBy: text("activated_by").notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    versionValid: check(
+      "session_tenancy_activations_version_check",
+      sql`${table.activationVersion} = 1`,
+    ),
+    digestsValid: check(
+      "session_tenancy_activations_digests_check",
+      sql`${table.inventoryDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.parityDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    actorValid: check(
+      "session_tenancy_activations_actor_check",
+      sql`octet_length(${table.activatedBy}) between 1 and 256`,
+    ),
+  }),
+);
+
 export const organizationUserRetentionPolicies = pgTable(
   "organization_user_retention_policies",
   {

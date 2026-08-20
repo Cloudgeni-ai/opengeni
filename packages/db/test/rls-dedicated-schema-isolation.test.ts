@@ -1180,6 +1180,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       name: "Dedicated context owner",
     });
     const grant = access.workspaceGrants[0]!;
+    await admin`
+      insert into ${admin(SCHEMA)}.session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const session = await withSessionRlsActorContext({ subjectId }, async () =>
       createSession(db, {
         accountId: grant.accountId,

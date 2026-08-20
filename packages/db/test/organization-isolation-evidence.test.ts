@@ -240,6 +240,11 @@ async function seedOrganization(
     subjectId,
   });
   const grant = access.workspaceGrants[0]!;
+  await db.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   // An active organization membership must point at a same-organization
   // personal workspace (migration 0218's referential contract).
   const personalWorkspaceId = crypto.randomUUID();

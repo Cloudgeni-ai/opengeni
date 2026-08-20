@@ -223,6 +223,7 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
+    sessionTenancyProductActivationPresent: false,
     tables: [
       {
         name: "tenant_rows",
@@ -352,15 +353,15 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 263],
+            [FORCE_RLS_TABLES, 264],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 135],
-            [RUNTIME_READ_ONLY_TABLES, 18],
+            [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
             [PROTECTED_NO_DIRECT_DML_TABLES, 44],
-            [RUNTIME_DML_TABLES, 230],
+            [RUNTIME_DML_TABLES, 231],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 192],
@@ -384,7 +385,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 274 : 203;
+      const tableCount = hasCurrentMainActivityLedger ? 275 : 203;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -1086,6 +1087,20 @@ describe("runtime database posture evaluator", () => {
         rlsStrategy: "scoped",
         expectedRole: "opengeni_app",
         targetSchema: "embedded",
+      }),
+    ).toEqual([]);
+  });
+
+  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+    const posture = safePosture();
+    posture.sessionTenancyProductActivationPresent = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        organizationTenancyCanonicalActivationEnabled: true,
       }),
     ).toEqual([]);
   });

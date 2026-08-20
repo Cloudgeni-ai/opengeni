@@ -287,11 +287,18 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "workspace_learning_policy_revisions",
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
-  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
-  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
+const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
+const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
+const SESSION_TENANCY_QUIESCENCE_ROUTINE =
+  "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
@@ -328,6 +335,9 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -575,6 +585,7 @@ export const FORCE_RLS_TABLES = [
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
+  "session_tenancy_activations",
   "session_turn_attempts",
   "session_turns",
   "session_visibility_write_capabilities",
@@ -820,6 +831,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "session_tenancy_activations",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -1020,6 +1032,7 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1095,6 +1108,7 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
+  sessionTenancyProductActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1207,6 +1221,7 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
+          sessionTenancyProductActivationPresent: false,
         };
       }
 
@@ -1436,6 +1451,10 @@ export async function inspectRuntimeDatabasePosture(
         securityDefiner: row.security_definer,
       }));
 
+      const activationRows = resultRows<{ activated: boolean }>(
+        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
+      );
+
       return {
         identity: mappedIdentity,
         memberships,
@@ -1446,6 +1465,7 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
+        sessionTenancyProductActivationPresent: activationRows[0]?.activated === true,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1459,6 +1479,15 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (
+    posture.sessionTenancyProductActivationPresent &&
+    options.organizationTenancyCanonicalActivationEnabled !== true
+  ) {
+    violations.push(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+  }
 
   if (!identity.currentUser || !identity.sessionUser) {
     violations.push("database identity is empty");
