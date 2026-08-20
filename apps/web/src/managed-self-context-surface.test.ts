@@ -44,11 +44,12 @@ describe("managed self-context surfaces", () => {
 
   test("separates organization administration from Personal content", () => {
     expect(organizationSource).toContain(
-      "Organization roles govern administration and billing. They do not grant access to",
+      "Organization roles\n                    govern administration and billing; they never grant access to another",
     );
     expect(organizationSource).toContain(
-      "Organization roles control tenant administration, not personal content.",
+      "Organization administration does not expose private sessions, credentials,",
     );
-    expect(organizationSource).toContain("personalWorkspace={personal}");
+    expect(organizationSource).toContain("<OrganizationPeopleSection");
+    expect(organizationSource).toContain("<OrganizationRetentionSection");
   });
 });
