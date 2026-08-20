@@ -128,24 +128,207 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### Session ownership at the mint (migration 0302)
+
 Because that workspace has no membership row, migration 0225's session write
 fence could never attribute a session created there and minted a NULL owner
-instead. Migration
-`0302_personal_workspace_session_ownership.sql` repairs it: the fence now
-accepts an active membership's own `personal_workspace_id` pointer as an
-alternative to the `workspace_memberships` row, the same stated-authority shape
-0258 already uses for personal Documents. It is authority read from the
-authority row, not inference from `created_by`, a default workspace, or current
-access; the ordinary shared-workspace path is unchanged, and the pointer is 1:1
-through `organization_memberships_personal_workspace_idx`. The disjunct is
-restricted to `user:%` subjects, matching the lifecycle gate in 0219/0263, so
-the write path never attributes a subject 0297's classifier calls
-`external_lane_owns_row`. A subject-created session that still resolves to no
-owner inside an active membership's personal workspace now raises SQLSTATE
-`55000` instead of silently writing NULL; service, API-key, unanchored, and
-suspended-member sessions remain legitimately ownerless. Rows already durable
-before 0302 remain the existing `bun run db:backfill-session-ownership` seam's
-job.
+instead. Migration `0302_personal_workspace_session_ownership.sql` repairs it:
+the fence now accepts an active membership's own `personal_workspace_id`
+pointer as an alternative to the `workspace_memberships` row, the same
+stated-authority shape 0258 already uses for personal Documents. It is
+authority read from the authority row, not inference from `created_by`, a
+default workspace, or current access; the ordinary shared-workspace path is
+unchanged, and the pointer is 1:1 through
+`organization_memberships_personal_workspace_idx`. The disjunct is restricted
+to `user:%` subjects, matching the lifecycle gate in 0219/0263. A
+subject-created session that still resolves to no owner inside an active
+membership's personal workspace raises SQLSTATE `55000` instead of silently
+writing NULL; service, API-key, unanchored, and suspended-member sessions
+remain legitimately ownerless. Rows already durable before 0302 remain the
+existing `bun run db:backfill-session-ownership` seam's job.
+
+### `getWorkspaceGrant` is not an authority answer
+
+`getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
+`workspace_memberships` join. Because a managed personal workspace deliberately
+has no row there, it returns `null` for the one human who always belongs. Any
+seam that re-derives "does this subject still hold workspace authority here"
+from that join denies the owner inside their own private workspace.
+
+`subjectHasLiveWorkspaceAuthorityInScope`
+(`packages/db/src/workspace-authority.ts`) models both halves - the membership
+row whose owning organization membership is active, and the active
+organization membership whose `personal_workspace_id` pointer is exactly this
+workspace. `namedSubjectHasLiveWorkspaceAuthority` (`packages/db/src/index.ts`)
+is the exported scope-setting wrapper over that canonical implementation.
+Predicate-style authority probes should use the appropriate variant rather
+than re-deriving the rule.
+
+**It is an oracle, not an authorization. Its safety is caller discipline, and
+every call site must establish that discipline locally.** The name says
+"named subject" because that is exactly what it answers about: whatever subject
+the caller hands it.
+
+It is tempting to believe otherwise, and an earlier revision of this document
+claimed it. The claim was: the pointer branch reads
+`list_self_organization_memberships`, a SECURITY DEFINER seam that raises
+`42501` unless the requested subject equals `opengeni.subject_id`, so the
+function must be self-limiting. **That is false, and it is worth understanding
+why, because the shape recurs.** The seam's guard compares its argument to a GUC
+that the caller sets - `namedSubjectHasLiveWorkspaceAuthority` sets it from its
+own `subjectId` argument one statement earlier, through an ordinary `set_config`
+available to the plain `opengeni_app` role. The predicate therefore only checks
+that the caller supplied the same value twice. It constrains the caller to be
+self-consistent; it does not constrain the caller to be anyone.
+
+Proven against real Postgres as `opengeni_app` with RLS engaged, from a process
+that never authenticated as anyone: naming a victim returned that victim's full
+organization-membership row including the private `personalWorkspaceId`, and
+`namedSubjectHasLiveWorkspaceAuthority` returned `true` for the victim's personal
+workspace. The same self-set-GUC pattern makes
+`list_self_organization_memberships` a general read primitive for any
+application-role connection;
+`ensureManagedAccessForUserWithOrganizationMemberships` uses it the same way.
+The SECURITY DEFINER wrapper is not buying the isolation its name implies. Do
+not treat any `*_self_*` definer routine here as a caller check without
+re-reading its guard.
+
+So a call site is correct only if it has **independently** proven the caller is
+entitled to ask about that exact subject. The two entitled shapes in the
+codebase today:
+
+- the subject is the authenticated request principal's own subject, taken from
+  an already-authorized grant - and **not** a delegated/bearer grant, whose
+  `subjectId` and `workspaceId` are unvalidated signed-token payload built by
+  `delegatedAccessContext` with no database row behind them; or
+- the subject is the frozen `ownerSubjectId` of a delegation already persisted
+  for the workspace the caller is already authorized in.
+
+Anything else - a subject that was looked up, inferred, or supplied by a caller
+- is a vulnerability. Prefer plumbing the caller's own identity to the call site
+over widening what the oracle is asked.
+
+The in-scope variant refuses to set the subject GUC, making the
+arbitrary-subject oracle shape unrepresentable at its session-list, pin, and
+composer-draft call sites. It keeps the authority read in the caller's
+transaction and checks that the requested subject matches the applied scope.
+That check is a consistency tripwire, not an authorization: the application
+role can set the scope itself. The actual owner exception at those session
+surfaces is the positive `canonicalManagedHumanSession` provenance stamp, set
+only by the access branch that verified a Better Auth cookie. An absent stamp
+fails closed, so delegated/bearer principals, API keys, service initiators,
+same-organization co-members, and account or organization administrators do
+not receive personal-workspace access by exclusion-list inference.
+
+For the same reason, "make
+`list_self_organization_memberships` read the GUC instead of taking the subject
+as a parameter" is **not** the structural fix it appears to be: reading the GUC
+rather than a parameter changes nothing about *who may set that GUC*.
+`setSubjectRlsContext` is an ordinary `set_config` that accepts any string from
+any `opengeni_app` connection, so the caller still names whoever it likes - the
+name just arrives by a different route. Reaching for that design because it
+"feels" safer is the exact reasoning error this section exists to correct.
+
+The genuine structural fix is to stop letting the application role set
+`opengeni.subject_id` freely at all - a definer-only setter, or an attested
+subject established once at authentication and immutable thereafter. That is a
+much larger conversation than either variant, and nothing short of it converts
+this oracle into an authorization.
+
+> **Convergence note.** The session-surface prerequisite introduced the
+> scope-derived `subjectHasLiveWorkspaceAuthorityInScope` and repaired
+> `listSessionsForSubject`, `setSessionPin`, and the composer draft. The two
+> resolver variants live side by side on purpose: several connection callers
+> legitimately ask about a frozen delegation owner rather than the caller and
+> can only use the named-subject oracle.
+>
+> The naming is deliberate and worth preserving. The **dangerous** function
+> carries the qualifier (`namedSubjectHasLiveWorkspaceAuthority` - it answers
+> about a *named* subject) and the safer one reads as scoped. Do not "simplify"
+> by giving the oracle the shorter name: at the point of use the name is the
+> most visible warning either function has.
+>
+> **The subject-GUC restore under the mechanical traps below is load-bearing and
+> must survive any refactor of the wrapper.** A wrapper that sets
+> `opengeni.subject_id` and returns without restoring it reopens the leak
+> silently - no failing test, no conflict marker. Anything that rewrites the
+> wrapper must re-prove the restore with the test that pins it.
+>
+> The session surface's positive owner-exception provenance is a better shape
+> than this path's delegated blocklist. Converging connection authority on that
+> shape is a tracked follow-up and is deliberately not hidden in this merge
+> resolution.
+
+The personal-connection authority path uses the oracle at every hop -
+`freezePersonalConnectionDelegations` and the `*ForGrant` connection resolvers
+in `packages/core/src/domain/personal-connection-delegations.ts`, the per-turn
+`ownerHasWorkspaceMembership` port and
+`resolveGoogleDrivePublicationTarget` in `apps/worker/src/activities/` - and the
+stream-token mint recheck in `apps/api/src/sandbox/viewer.ts`. Do not
+reintroduce a `getWorkspaceGrant` boolean in those positions, and do not widen
+`getWorkspaceGrant` itself: it is also the fallback inside
+`accessGrantAuthorization`, where a delegated bearer or API-key principal would
+inherit any widening. `getWorkspaceGrant` and the oracle answer genuinely
+different questions - a *grant with permissions* for a request principal versus
+a *boolean about a named subject* - and are not interchangeable at an
+authorization site.
+
+Two mechanical traps on this path, both now closed and both worth not
+reopening:
+
+- The probe sets `opengeni.subject_id`, `withRlsContext` restores only
+  `account_id`/`workspace_id`, and `SET LOCAL` survives savepoint release - so
+  on a transaction handle the probed subject leaked into the rest of the
+  caller's transaction. `namedSubjectHasLiveWorkspaceAuthority` now restores the
+  prior subject itself.
+- The account and the workspace passed to a probe must come from one object.
+  Scoping RLS by a grant's account while reading memberships for a different
+  object's workspace silently filters every row out and drops authority.
+- `personalConnectionDelegationSourceForGrant` checks the `{sessionId, turnId}`
+  turn branch **above** its delegated filter, which is safe only because
+  `DelegatedAccessTokenPayload` forbids a `human_session` principal from
+  carrying attempt claims. That coupling is load-bearing; it is pinned by
+  `packages/contracts/test/delegated-access-token-attempt-claims.test.ts`.
+  Relaxing the refinement means moving the filter above the turn branch.
+
+**Delegated grants carry no personal-connection authority anywhere.** The
+delegated filter collapses the source before the workspace is consulted, so a
+delegated bearer freezes zero personal connections in ordinary **shared**
+workspaces as well as personal ones. That is a deliberate widening of the
+denial, not a side effect of the personal-workspace fix: a delegated payload's
+`subjectId` is signed token content with no row behind it, so letting it borrow
+someone's private provider credentials in a shared workspace is the same defect
+as letting it reach their personal workspace. Operator-facing consequences are
+in [`docs/embedding.md`](embedding.md).
+
+The session list, pin, and composer-draft seams are repaired by the landed
+session-surface prerequisite. Other seams still on the bare join, and therefore
+still wrong for a personal workspace, are known and deliberately out of scope
+of this connection change. They deny the owner rather than leaking to anyone
+else, so each is a broken feature, not an authority hole:
+
+- `listWorkspaceMembers` / `listWorkspacesForSubject`
+  (`packages/db/src/index.ts`) - empty roster; the workspace-list fallback is
+  latent only because `managedPersonalWorkspacePermissions` carries
+  `workspace:read`.
+- `withCodexAppsRequestAuthorization`, `designateCodexAppsCredential`,
+  `clearCodexAppsCredential` (`packages/db/src/index.ts`) and
+  `resolveCodexAppsCredentialIdForRun`
+  (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
+  execution.
+- The OAuth-callback grant rechecks over the signed `state.subjectId` in
+  `apps/api/src/integrations/{oauth-client,provider-oauth,google-drive,atlassian,fiken,social-oauth}.ts`
+  and `apps/api/src/routes/connections.ts` - connecting a provider *from* a
+  personal workspace fails at callback even though `connections:write` is in
+  the personal permission set.
+- SQL seams without the personal-workspace disjunct:
+  `transition_session_visibility` (0225), `fork_session_content` (0289), and
+  the xAI subscription authority views/functions in 0234. The two session
+  lifecycle functions have no production caller today. 0225's
+  `guard_session_authority_write` was the same defect and is already repaired
+  by migration 0302 (described above); do not add it back to this list. (Many
+  other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
+  disjunct.)
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER

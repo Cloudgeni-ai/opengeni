@@ -248,6 +248,7 @@ async function connect(
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: "operator",
+    personalOwnershipAllowed: true,
     requestUrl: "https://api.opengeni.test/v1/workspaces/x/social/oauth/start",
     payload: { provider },
   });

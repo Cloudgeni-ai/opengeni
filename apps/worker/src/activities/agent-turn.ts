@@ -43,7 +43,6 @@ import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   getCodexRotationSettings,
   getWorkspaceModelPolicy,
-  getWorkspaceGrant,
   getWorkspace,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
@@ -73,6 +72,7 @@ import {
   settleCodexCredentialFailover,
   upsertSandboxSessionEnvelope,
   setSessionLastInputTokensForTurnAttempt,
+  namedSubjectHasLiveWorkspaceAuthority,
   sumUsageQuantity,
   heartbeatLeaseHolder,
   readLease,
@@ -8109,10 +8109,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const personalConnectionDelegations = turn.personalConnectionDelegations;
       const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
+      // The canonical live-authority resolver, not a bare `workspace_memberships`
+      // join: a managed human's personal workspace deliberately has no membership
+      // row (migration 0219), so the bare join would revoke the owner's own frozen
+      // personal connections for every turn that runs in their private workspace.
       const delegatedOwnerHasMembership = async (subjectId: string): Promise<boolean> => {
         const existing = delegatedMembershipChecks.get(subjectId);
         if (existing) return await existing;
-        const check = getWorkspaceGrant(db, subjectId, input.workspaceId).then(Boolean);
+        const check = namedSubjectHasLiveWorkspaceAuthority(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+        });
         delegatedMembershipChecks.set(subjectId, check);
         return await check;
       };
@@ -8143,7 +8151,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const googleDrivePublicationTarget = objectStorage
         ? await resolveGoogleDrivePublicationTarget(
             db,
-            input.workspaceId,
+            { accountId: input.accountId, workspaceId: input.workspaceId },
             personalConnectionDelegations,
           )
         : null;

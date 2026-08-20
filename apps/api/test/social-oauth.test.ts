@@ -32,6 +32,7 @@ const startContext = {
   accountId: "11111111-1111-4111-8111-111111111111",
   workspaceId: "22222222-2222-4222-8222-222222222222",
   subjectId: "dev",
+  personalOwnershipAllowed: true,
   requestUrl: "https://api.opengeni.test/v1/workspaces/x/social/oauth/start",
 };
 
