@@ -76,6 +76,7 @@ import {
   type RepoDraft,
   type RepositoryGroup,
 } from "@/lib/session-tools";
+import { SessionTenancyOperationController } from "@/lib/session-tenancy-operation-controller";
 import { upsertWorkspace } from "@/lib/workspaces";
 import {
   beginWorkspaceOperation,
@@ -203,6 +204,8 @@ export type AppContextValue = {
   captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
   /** True only while an invocation still owns the routed workspace/principal UI. */
   ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
+  /** Retains exact outcome-unknown session-tenancy attempts for this app/principal lifetime. */
+  sessionTenancyOperationController: SessionTenancyOperationController;
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
@@ -443,6 +446,9 @@ export function RootRouteComponent() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
+  const [sessionTenancyOperationController] = useState(
+    () => new SessionTenancyOperationController(),
+  );
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -570,6 +576,7 @@ export function RootRouteComponent() {
         return;
       }
       workspaceTransitionIdentity.current = transition.identity;
+      sessionTenancyOperationController.invalidate();
       activeCreateOperation.current = null;
       activeGitHubManifestOperation.current = null;
       activeGitHubDisconnectOperation.current = null;
@@ -595,7 +602,7 @@ export function RootRouteComponent() {
       resetWorkspaceIntegrations();
       setWorkspaceStateOwnerId(workspaceId);
     },
-    [resetSessionView, resetWorkspaceIntegrations],
+    [resetSessionView, resetWorkspaceIntegrations, sessionTenancyOperationController],
   );
 
   const prepareWorkspaceTransition = useCallback(
@@ -1748,6 +1755,7 @@ export function RootRouteComponent() {
           prepareWorkspaceTransition,
           captureWorkspaceInvocation,
           ownsWorkspaceInvocation,
+          sessionTenancyOperationController,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
@@ -1830,6 +1838,7 @@ export function RootRouteComponent() {
     selectedRepoRefs,
     session,
     sessionEventFeedStore,
+    sessionTenancyOperationController,
     setSession,
     toolMcpServers,
     workspaceMcpCatalogReady,

@@ -815,9 +815,12 @@ and external non-cookie clients have no product control. The SDK requires an exp
 visibility changes additionally require the current public authority epoch.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
 only after activation. The console renders state only when that projection is
-present, retains one exact operation key across outcome-unknown/replay recovery,
-refetches epoch and quiescence conflicts, and navigates to a same-workspace
-private fork only from the authoritative create/replay receipt. Route and
+present. Its app-lifetime controller retains one exact operation key across
+same-target component reload and outcome-unknown/replay recovery, while exact
+principal, workspace-transition, and session changes retire old keys. A replay
+refetches current tenancy before presentation, so a superseding epoch or missing
+projection cannot be mistaken for the historical receipt. Same-workspace fork
+navigation additionally requires a fresh owned-private destination. Route and
 principal transitions make delayed browser outcomes inert.
 `test/session-visibility-contract-surface.test.ts` pins the server caller
 boundary; the web component and Chromium acceptance tests pin the browser

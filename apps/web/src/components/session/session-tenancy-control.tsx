@@ -14,13 +14,13 @@ import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
-  prepareSessionForkAttempt,
-  prepareSessionVisibilityAttempt,
-  visibilityAttemptReachedAuthoritativeState,
-  type PendingSessionForkAttempt,
-  type PendingSessionVisibilityAttempt,
+  retryableSessionTenancyReconciliationFailure,
   type SessionTenancyTarget,
 } from "@/lib/session-tenancy";
+import {
+  SessionTenancyOperationController,
+  type SessionTenancyOperationScope,
+} from "@/lib/session-tenancy-operation-controller";
 import {
   runCurrentTransitionInvocation,
   type WorkspaceTransitionIdentity,
@@ -38,6 +38,8 @@ export function SessionTenancyRouteControl({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const transition = context.captureWorkspaceInvocation(session.workspaceId);
+  if (!transition) return null;
   const workspace = context.workspaces.find((candidate) => candidate.id === session.workspaceId);
   const personalWorkspace = isPersonalWorkspace(workspace ?? null, context.managedSelfContext);
   const scopeLabel = personalWorkspace
@@ -46,6 +48,7 @@ export function SessionTenancyRouteControl({
 
   return (
     <SessionTenancyControl
+      key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
       session={session}
       client={context.client}
       managedSession={
@@ -54,6 +57,13 @@ export function SessionTenancyRouteControl({
       scopeLabel={scopeLabel}
       captureWorkspaceInvocation={context.captureWorkspaceInvocation}
       ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
+      operationController={context.sessionTenancyOperationController}
+      operationScope={{
+        principalId: context.accessContext.subjectId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        workspaceTransitionRevision: transition.revision,
+      }}
       onRefreshSession={onRefreshSession}
       onOpenSession={(workspaceId, sessionId) =>
         void navigate({
@@ -72,6 +82,8 @@ export function SessionTenancyControl({
   scopeLabel,
   captureWorkspaceInvocation,
   ownsWorkspaceInvocation,
+  operationController,
+  operationScope,
   onRefreshSession,
   onOpenSession,
 }: {
@@ -81,10 +93,11 @@ export function SessionTenancyControl({
   scopeLabel: string;
   captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
   ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
+  operationController: SessionTenancyOperationController;
+  operationScope: SessionTenancyOperationScope;
   onRefreshSession: () => Promise<void>;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
 }) {
-  const tenancy = session.tenancy;
   const target = useMemo<SessionTenancyTarget>(
     () => ({ workspaceId: session.workspaceId, sessionId: session.id }),
     [session.id, session.workspaceId],
@@ -93,14 +106,15 @@ export function SessionTenancyControl({
   targetRef.current = target;
   const mountedRef = useRef(false);
   const operationSequenceRef = useRef(0);
+  const operationSnapshot = operationController.snapshot(operationScope);
+  const pendingVisibility = operationSnapshot.visibility;
+  const pendingFork = operationSnapshot.fork;
   const [override, setOverride] = useState(session.tenancy);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
-  const [pendingVisibility, setPendingVisibility] =
-    useState<PendingSessionVisibilityAttempt | null>(null);
-  const [pendingFork, setPendingFork] = useState<PendingSessionForkAttempt | null>(null);
+  const [, setControllerRevision] = useState(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -114,8 +128,6 @@ export function SessionTenancyControl({
     setBusy(false);
     setFailure(null);
     setConfirmation(null);
-    setPendingVisibility(null);
-    setPendingFork(null);
   }, [session.id, session.workspaceId]);
 
   useEffect(() => {
@@ -128,14 +140,20 @@ export function SessionTenancyControl({
         ? session.tenancy
         : current,
     );
-    setPendingVisibility((current) =>
-      current && visibilityAttemptReachedAuthoritativeState(current, session.tenancy)
-        ? null
-        : current,
-    );
   }, [session.tenancy]);
 
-  const displayedTenancy = override ?? tenancy;
+  useEffect(() => {
+    if (
+      pendingVisibility &&
+      (!session.tenancy ||
+        session.tenancy.authorityEpoch > pendingVisibility.expectedAuthorityEpoch)
+    ) {
+      operationController.settleVisibility(operationScope, pendingVisibility);
+      setControllerRevision((current) => current + 1);
+    }
+  }, [operationController, operationScope, pendingVisibility, session.tenancy]);
+
+  const displayedTenancy = override;
   const mayManage = Boolean(displayedTenancy?.ownedByCurrentUser && managedSession);
   const isCurrentInvocation = useCallback(
     (
@@ -180,18 +198,14 @@ export function SessionTenancyControl({
       if (!acceptedTransition) return true;
       const operationSequence = operationSequenceRef.current + 1;
       operationSequenceRef.current = operationSequence;
-      const attempt = prepareSessionVisibilityAttempt(
-        pendingVisibility,
-        {
-          ...target,
-          visibility,
-          expectedAuthorityEpoch: displayedTenancy.authorityEpoch,
-        },
+      const attempt = operationController.prepareVisibility(
+        operationScope,
+        { visibility, expectedAuthorityEpoch: displayedTenancy.authorityEpoch },
         () => crypto.randomUUID(),
       );
-      setPendingVisibility(attempt);
       setBusy(true);
       setFailure(null);
+      let receiptConfirmed = false;
 
       try {
         const result = await runCurrentTransitionInvocation({
@@ -204,6 +218,7 @@ export function SessionTenancyControl({
             }),
         });
         if (result.status === "stale") return true;
+        receiptConfirmed = true;
 
         if (result.value.replay) {
           const authoritative = await reconcileSource(
@@ -212,6 +227,20 @@ export function SessionTenancyControl({
             operationSequence,
           );
           if (!authoritative) return true;
+          operationController.settleVisibility(operationScope, attempt);
+          if (authoritative.tenancy) {
+            const message =
+              authoritative.tenancy.visibility === "private"
+                ? "Session is private to you."
+                : `Session is visible to ${scopeLabel}.`;
+            setAnnouncement(message);
+            toast.info("Session access refreshed", { description: message });
+          } else {
+            const message = "Session access controls are no longer available.";
+            setAnnouncement(message);
+            toast.info("Session access refreshed", { description: message });
+          }
+          return true;
         } else {
           setOverride({
             ...displayedTenancy,
@@ -220,7 +249,7 @@ export function SessionTenancyControl({
           });
           await onRefreshSession().catch(() => undefined);
         }
-        setPendingVisibility(null);
+        operationController.settleVisibility(operationScope, attempt);
         const message =
           result.value.visibility === "private"
             ? "Session is private to you."
@@ -241,22 +270,34 @@ export function SessionTenancyControl({
         }
         if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
         if (
-          authoritative?.tenancy &&
-          visibilityAttemptReachedAuthoritativeState(attempt, authoritative.tenancy)
+          authoritative &&
+          (!authoritative.tenancy ||
+            authoritative.tenancy.authorityEpoch > attempt.expectedAuthorityEpoch)
         ) {
-          setPendingVisibility(null);
-          const message =
-            attempt.visibility === "private"
+          operationController.settleVisibility(operationScope, attempt);
+          if (classified.kind === "epoch_conflict") {
+            setFailure(classified.message);
+            setAnnouncement(classified.message);
+            return true;
+          }
+          const message = !authoritative.tenancy
+            ? "Session access controls are no longer available."
+            : authoritative.tenancy.visibility === "private"
               ? "Session is private to you."
               : `Session is visible to ${scopeLabel}.`;
           setAnnouncement(message);
-          toast.success("Session access reconciled", { description: message });
+          toast.info("Session access refreshed", { description: message });
           return true;
         }
-        setPendingVisibility(classified.retainAttempt ? attempt : null);
+        const retainAttempt =
+          classified.retainAttempt ||
+          (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
+        if (!retainAttempt) {
+          operationController.settleVisibility(operationScope, attempt);
+        }
         setFailure(classified.message);
         setAnnouncement(classified.message);
-        return !classified.retainAttempt;
+        return !retainAttempt;
       } finally {
         if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
       }
@@ -268,7 +309,8 @@ export function SessionTenancyControl({
       isCurrentInvocation,
       mayManage,
       onRefreshSession,
-      pendingVisibility,
+      operationController,
+      operationScope,
       reconcileSource,
       scopeLabel,
       target,
@@ -281,10 +323,10 @@ export function SessionTenancyControl({
     if (!acceptedTransition) return true;
     const operationSequence = operationSequenceRef.current + 1;
     operationSequenceRef.current = operationSequence;
-    const attempt = prepareSessionForkAttempt(pendingFork, target, () => crypto.randomUUID());
-    setPendingFork(attempt);
+    const attempt = operationController.prepareFork(operationScope, () => crypto.randomUUID());
     setBusy(true);
     setFailure(null);
+    let receiptConfirmed = false;
 
     const invoke = async () =>
       await runCurrentTransitionInvocation({
@@ -310,10 +352,24 @@ export function SessionTenancyControl({
       }
       if (result.status === "stale") return true;
       const fork = result.value;
+      receiptConfirmed = true;
       if (fork.workspaceId !== target.workspaceId) {
         throw new Error("The private fork response did not match this workspace.");
       }
-      setPendingFork(null);
+      const destination = await runCurrentTransitionInvocation({
+        isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
+        request: async () =>
+          await client.getSession(fork.workspaceId, fork.sessionId, { fresh: true }),
+      });
+      if (destination.status === "stale") return true;
+      if (
+        destination.value.workspaceId !== target.workspaceId ||
+        destination.value.tenancy?.visibility !== "private" ||
+        destination.value.tenancy.ownedByCurrentUser !== true
+      ) {
+        throw new Error("The fork is no longer an owned private session in this workspace.");
+      }
+      operationController.settleFork(operationScope, attempt);
       setAnnouncement("Private fork created in this workspace.");
       toast.success("Private fork created");
       onOpenSession(fork.workspaceId, fork.sessionId);
@@ -325,10 +381,13 @@ export function SessionTenancyControl({
         await reconcileSource(target, acceptedTransition, operationSequence).catch(() => null);
       }
       if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-      setPendingFork(classified.retainAttempt ? attempt : null);
+      const retainAttempt =
+        classified.retainAttempt ||
+        (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
+      if (!retainAttempt) operationController.settleFork(operationScope, attempt);
       setFailure(classified.message);
       setAnnouncement(classified.message);
-      return !classified.retainAttempt;
+      return !retainAttempt;
     } finally {
       if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
     }
@@ -339,7 +398,8 @@ export function SessionTenancyControl({
     isCurrentInvocation,
     mayManage,
     onOpenSession,
-    pendingFork,
+    operationController,
+    operationScope,
     reconcileSource,
     target,
   ]);

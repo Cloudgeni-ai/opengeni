@@ -418,12 +418,19 @@ the accepted [ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 The separately activated session-tenancy product surface exposes a secret-safe
 `Session.tenancy` projection plus owner-only managed-cookie visibility and
 same-workspace private-fork SDK mutations. The web console renders access state
-only when that projection is present, retains the exact idempotency key across
-ambiguous outcomes, reconciles replay/epoch/quiescence conflicts, and suppresses
-late results after a principal, workspace, or session transition. Fork
-navigation uses only the authoritative same-workspace response. It adds no
-cross-workspace fork, attachment, personal-resource-grant, worker, runtime, MCP,
-or React-package caller. Canonical: `apps/web/src/lib/session-tenancy.ts`,
+only when that projection is present. One app-provider-owned, principal +
+workspace-transition + session-fenced controller retains the exact
+outcome-unknown idempotency attempt across route component reloads and clears it
+only after authoritative settlement or an identity/target transition. Replay
+receipts are reconciled against a fresh current `Session.tenancy`; a superseding
+epoch or missing projection retires the historical attempt without presenting
+its old result as current. Private-fork navigation additionally requires a
+fresh owned-private destination in the same workspace. Late results remain
+inert after a principal, workspace, or session transition. The canonical caller
+is only `apps/web`; there is no cross-workspace fork, attachment,
+personal-resource-grant, worker, runtime, MCP, or `packages/react` caller.
+Canonical: `apps/web/src/lib/session-tenancy-operation-controller.ts`,
+`apps/web/src/lib/session-tenancy.ts`,
 `apps/web/src/components/session/session-tenancy-control.tsx`, and
 [`organization-tenancy.md`](organization-tenancy.md).
 

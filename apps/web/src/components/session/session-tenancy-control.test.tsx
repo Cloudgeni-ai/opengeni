@@ -6,7 +6,13 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
+import {
+  SessionTenancyOperationController,
+  type SessionTenancyOperationScope,
+} from "@/lib/session-tenancy-operation-controller";
+
 const toastSuccess = mock((_message: string) => undefined);
+const toastInfo = mock((_message: string) => undefined);
 
 mock.module("sonner", () => ({
   ...SonnerPackage,
@@ -14,6 +20,7 @@ mock.module("sonner", () => ({
     mock((_message: string) => undefined),
     {
       error: mock((_message: string) => undefined),
+      info: toastInfo,
       success: toastSuccess,
     },
   ),
@@ -70,6 +77,22 @@ function deferred<Value>() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+function operationAuthority(
+  controller = new SessionTenancyOperationController(),
+  scope: Partial<SessionTenancyOperationScope> = {},
+) {
+  return {
+    operationController: controller,
+    operationScope: {
+      principalId: "principal-a",
+      workspaceId: "workspace-a",
+      sessionId: "session-a",
+      workspaceTransitionRevision: 1,
+      ...scope,
+    },
+  };
 }
 
 function apiError(input: {
@@ -133,7 +156,10 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-beforeEach(() => toastSuccess.mockClear());
+beforeEach(() => {
+  toastInfo.mockClear();
+  toastSuccess.mockClear();
+});
 
 describe("SessionTenancyControl", () => {
   test("renders only activated tenancy and keeps nonowners read-only", async () => {
@@ -146,6 +172,7 @@ describe("SessionTenancyControl", () => {
       scopeLabel: "Engineering",
       captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
       ownsWorkspaceInvocation: () => true,
+      ...operationAuthority(),
       onRefreshSession: async () => undefined,
       onOpenSession: () => undefined,
     };
@@ -225,6 +252,7 @@ describe("SessionTenancyControl", () => {
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
           onRefreshSession={refresh}
           onOpenSession={() => undefined}
         />,
@@ -271,6 +299,7 @@ describe("SessionTenancyControl", () => {
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
           onRefreshSession={async () => undefined}
           onOpenSession={() => undefined}
         />,
@@ -282,9 +311,173 @@ describe("SessionTenancyControl", () => {
 
     expect(getSession).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain("Only you can open this session.");
-    expect(toastSuccess).toHaveBeenCalledWith("Session access reconciled", {
+    expect(toastInfo).toHaveBeenCalledWith("Session access refreshed", {
       description: "Session is private to you.",
     });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("renders the fresh workspace state when a visibility replay was superseded", async () => {
+    const controller = new SessionTenancyOperationController();
+    const authority = operationAuthority(controller);
+    const updateSessionVisibility = mock(async () => ({
+      operationId: crypto.randomUUID(),
+      eventId: crypto.randomUUID(),
+      eventSequence: 8,
+      visibility: "private" as const,
+      authorityEpoch: 5,
+      changed: true,
+      replay: true,
+      revokedGrantCount: 0,
+    }));
+    const getSession = mock(async () => ({
+      ...baseSession,
+      tenancy: { ...baseSession.tenancy!, visibility: "workspace" as const, authorityEpoch: 6 },
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
+          managedSession
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...authority}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+    await act(async () => button(container, "Make private").click());
+    await act(async () => dialogButton(container, "Make private").click());
+    await flush();
+
+    expect(container.textContent).toContain("Visible to people in Engineering.");
+    expect(container.textContent).not.toContain("Only you can open this session.");
+    expect(toastInfo).toHaveBeenCalledWith("Session access refreshed", {
+      description: "Session is visible to Engineering.",
+    });
+    expect(controller.snapshot(authority.operationScope).visibility).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("retires a visibility replay when the fresh projection is no longer present", async () => {
+    const controller = new SessionTenancyOperationController();
+    const authority = operationAuthority(controller);
+    const updateSessionVisibility = mock(async () => ({
+      operationId: crypto.randomUUID(),
+      eventId: crypto.randomUUID(),
+      eventSequence: 8,
+      visibility: "private" as const,
+      authorityEpoch: 5,
+      changed: true,
+      replay: true,
+      revokedGrantCount: 0,
+    }));
+    const getSession = mock(async () => ({ ...baseSession, tenancy: undefined }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
+          managedSession
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...authority}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+    await act(async () => button(container, "Make private").click());
+    await act(async () => dialogButton(container, "Make private").click());
+    await flush();
+
+    expect(container.textContent).toBe("");
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastInfo).toHaveBeenCalledWith("Session access refreshed", {
+      description: "Session access controls are no longer available.",
+    });
+    expect(controller.snapshot(authority.operationScope).visibility).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("reuses an outcome-unknown visibility key after an actual unmount and remount", async () => {
+    const keys: string[] = [];
+    const controller = new SessionTenancyOperationController();
+    const authority = operationAuthority(controller);
+    let calls = 0;
+    const updateSessionVisibility = mock(async (_workspaceId, _sessionId, request) => {
+      keys.push(request.idempotencyKey);
+      calls += 1;
+      if (calls === 1) {
+        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
+      }
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 8,
+        visibility: "private" as const,
+        authorityEpoch: 5,
+        changed: true,
+        replay: true,
+        revokedGrantCount: 0,
+      };
+    });
+    let reads = 0;
+    const getSession = mock(async () => {
+      reads += 1;
+      return reads === 1
+        ? baseSession
+        : {
+            ...baseSession,
+            tenancy: { ...baseSession.tenancy!, visibility: "private" as const, authorityEpoch: 5 },
+          };
+    });
+    const props = {
+      session: baseSession,
+      client: { updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient,
+      managedSession: true,
+      scopeLabel: "Engineering",
+      captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
+      ownsWorkspaceInvocation: () => true,
+      ...authority,
+      onRefreshSession: async () => undefined,
+      onOpenSession: () => undefined,
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+    await act(async () => root.render(<SessionTenancyControl {...props} />));
+    await act(async () => button(container, "Make private").click());
+    await act(async () => dialogButton(container, "Make private").click());
+    await flush();
+    await act(async () => root.unmount());
+
+    root = createRoot(container);
+    await act(async () => root.render(<SessionTenancyControl {...props} />));
+    await act(async () => button(container, "Make private").click());
+    expect(container.textContent).toContain("Retry make private");
+    await act(async () => dialogButton(container, "Retry make private").click());
+    await flush();
+
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+    expect(container.textContent).toContain("Only you can open this session.");
 
     await act(async () => root.unmount());
     container.remove();
@@ -328,6 +521,7 @@ describe("SessionTenancyControl", () => {
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
           onRefreshSession={async () => undefined}
           onOpenSession={() => undefined}
         />,
@@ -369,6 +563,16 @@ describe("SessionTenancyControl", () => {
         replay: true,
       };
     });
+    const getSession = mock(async () => ({
+      ...baseSession,
+      id: "session-fork",
+      tenancy: {
+        visibility: "private" as const,
+        authorityEpoch: 1,
+        ownedByCurrentUser: true,
+        fork: null,
+      },
+    }));
     const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
     const container = document.createElement("div");
     document.body.append(container);
@@ -377,11 +581,12 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ forkSession } as unknown as OpenGeniCoreClient}
+          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
           managedSession
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
           onRefreshSession={async () => undefined}
           onOpenSession={openSession}
         />,
@@ -394,7 +599,132 @@ describe("SessionTenancyControl", () => {
 
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
+    expect(getSession).toHaveBeenCalledTimes(1);
     expect(openSession).toHaveBeenCalledTimes(1);
+    expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("does not navigate a replayed fork whose fresh session is no longer private", async () => {
+    const controller = new SessionTenancyOperationController();
+    const authority = operationAuthority(controller);
+    const forkSession = mock(async () => ({
+      operationId: crypto.randomUUID(),
+      eventId: crypto.randomUUID(),
+      eventSequence: 9,
+      sessionId: "session-fork",
+      workspaceId: "workspace-a",
+      visibility: "private" as const,
+      authorityEpoch: 1 as const,
+      copiedHistoryItemCount: 4,
+      replay: true,
+    }));
+    const getSession = mock(async () => ({
+      ...baseSession,
+      id: "session-fork",
+      tenancy: {
+        visibility: "workspace" as const,
+        authorityEpoch: 2,
+        ownedByCurrentUser: true,
+        fork: null,
+      },
+    }));
+    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={baseSession}
+          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
+          managedSession
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...authority}
+          onRefreshSession={async () => undefined}
+          onOpenSession={openSession}
+        />,
+      );
+    });
+    await act(async () => button(container, "Private fork").click());
+    await act(async () => button(container, "Create private fork").click());
+    await flush();
+
+    expect(openSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "The fork is no longer an owned private session in this workspace.",
+    );
+    expect(controller.snapshot(authority.operationScope).fork).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("reuses an outcome-unknown fork key after an actual unmount and remount", async () => {
+    const keys: string[] = [];
+    const controller = new SessionTenancyOperationController();
+    const authority = operationAuthority(controller);
+    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
+      keys.push(request.idempotencyKey);
+      if (keys.length <= 2) {
+        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
+      }
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 9,
+        sessionId: "session-fork",
+        workspaceId: "workspace-a",
+        visibility: "private" as const,
+        authorityEpoch: 1 as const,
+        copiedHistoryItemCount: 4,
+        replay: true,
+      };
+    });
+    const getSession = mock(async () => ({
+      ...baseSession,
+      id: "session-fork",
+      tenancy: {
+        visibility: "private" as const,
+        authorityEpoch: 1,
+        ownedByCurrentUser: true,
+        fork: null,
+      },
+    }));
+    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
+    const props = {
+      session: baseSession,
+      client: { forkSession, getSession } as unknown as OpenGeniCoreClient,
+      managedSession: true,
+      scopeLabel: "Engineering",
+      captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
+      ownsWorkspaceInvocation: () => true,
+      ...authority,
+      onRefreshSession: async () => undefined,
+      onOpenSession: openSession,
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+    await act(async () => root.render(<SessionTenancyControl {...props} />));
+    await act(async () => button(container, "Private fork").click());
+    await act(async () => button(container, "Create private fork").click());
+    await flush();
+    await act(async () => root.unmount());
+
+    root = createRoot(container);
+    await act(async () => root.render(<SessionTenancyControl {...props} />));
+    expect(container.textContent).toContain("Retry private fork");
+    await act(async () => button(container, "Retry private fork").click());
+    await act(async () => dialogButton(container, "Retry private fork").click());
+    await flush();
+
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
     expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
 
     await act(async () => root.unmount());
@@ -418,6 +748,7 @@ describe("SessionTenancyControl", () => {
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => current}
+          {...operationAuthority()}
           onRefreshSession={async () => undefined}
           onOpenSession={openSession}
         />,
@@ -464,6 +795,7 @@ describe("SessionTenancyControl", () => {
             scopeLabel="Engineering"
             captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
             ownsWorkspaceInvocation={() => current}
+            {...operationAuthority()}
             onRefreshSession={refresh}
             onOpenSession={() => undefined}
           />,

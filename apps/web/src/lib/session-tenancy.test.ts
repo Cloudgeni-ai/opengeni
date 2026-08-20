@@ -6,6 +6,7 @@ import {
   isCurrentSessionTenancyTarget,
   prepareSessionForkAttempt,
   prepareSessionVisibilityAttempt,
+  retryableSessionTenancyReconciliationFailure,
   sessionTenancyBlockerMessage,
   visibilityAttemptReachedAuthoritativeState,
 } from "./session-tenancy";
@@ -165,6 +166,26 @@ describe("session tenancy browser operation state", () => {
         visibility: "workspace",
         authorityEpoch: 5,
       }),
+    ).toBe(false);
+  });
+
+  test("retains a settled receipt while fresh-state reconciliation is retryable", () => {
+    expect(retryableSessionTenancyReconciliationFailure(new TypeError("network"))).toBe(true);
+    expect(
+      retryableSessionTenancyReconciliationFailure(
+        new OpenGeniApiError(
+          503,
+          JSON.stringify({ error: { code: "unavailable", message: "retry", retryable: true } }),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      retryableSessionTenancyReconciliationFailure(
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({ error: { code: "not_found", message: "gone", retryable: false } }),
+        ),
+      ),
     ).toBe(false);
   });
 });

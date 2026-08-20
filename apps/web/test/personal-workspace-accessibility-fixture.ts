@@ -5,6 +5,7 @@ import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-bad
 import { WorkspaceMenuItemContent } from "../src/components/rail/switcher-block";
 import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
 import { managedSelfContextIdentity } from "../src/lib/managed-self-context";
+import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import type { Session, Workspace } from "../src/types";
 
@@ -83,6 +84,13 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           scopeLabel: "Roadmap Personal workspace",
           captureWorkspaceInvocation: () => null,
           ownsWorkspaceInvocation: () => false,
+          operationController: new SessionTenancyOperationController(),
+          operationScope: {
+            principalId: "33333333-3333-4333-8333-333333333333",
+            workspaceId: personalWorkspaceId,
+            sessionId: "44444444-4444-4444-8444-444444444444",
+            workspaceTransitionRevision: 1,
+          },
           onRefreshSession: async () => undefined,
           onOpenSession: () => undefined,
         }),

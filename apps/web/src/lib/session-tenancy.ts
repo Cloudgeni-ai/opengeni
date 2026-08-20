@@ -159,6 +159,10 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
   };
 }
 
+export function retryableSessionTenancyReconciliationFailure(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof OpenGeniApiError && error.retryable);
+}
+
 export function visibilityAttemptReachedAuthoritativeState(
   attempt: PendingSessionVisibilityAttempt,
   tenancy: { visibility: SessionVisibility; authorityEpoch: number } | undefined,
