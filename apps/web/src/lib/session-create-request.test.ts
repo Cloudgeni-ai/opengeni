@@ -130,6 +130,37 @@ describe("buildCreateSessionRequest", () => {
     ).toBe("fast");
   });
 
+  test("threads one atomic personal-resource command into create identity", () => {
+    const personalResourceAttachment = {
+      mode: "once" as const,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const request = build([], [], {
+      submission: { text: "start", resources: [], personalResourceAttachment },
+    });
+    expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
+
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client: {},
+      workspaceId: "workspace-a",
+      request,
+      freshIdempotencyKey: "first",
+    });
+    const changedMode = prepareCreateSessionAttempt({
+      pending: first.pending,
+      client: first.pending.client,
+      workspaceId: "workspace-a",
+      request: {
+        ...request,
+        personalResourceAttachment: { ...personalResourceAttachment, mode: "session" },
+      },
+      freshIdempotencyKey: "second",
+    });
+    expect(changedMode.request.idempotencyKey).toBe("second");
+  });
+
   test("creates a realtime-first session without an initial user message", () => {
     const request = build([], [], {
       submission: { text: "", resources: [] },

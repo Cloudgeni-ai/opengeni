@@ -208,6 +208,9 @@ export function buildCreateSessionRequest(
     ...(input.submission.firstPartyMcpTools
       ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
       : {}),
+    ...(input.submission.personalResourceAttachment
+      ? { personalResourceAttachment: input.submission.personalResourceAttachment }
+      : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined

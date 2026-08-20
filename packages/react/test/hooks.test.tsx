@@ -84,6 +84,19 @@ function paymentRequiredError(): OpenGeniApiError {
   );
 }
 
+function personalAttachmentConflict(): OpenGeniApiError {
+  return new OpenGeniApiError(
+    409,
+    JSON.stringify({
+      error: {
+        message: "The personal-resource attachment conflicts with accepted work",
+        retryable: true,
+      },
+    }),
+    { mutation: true },
+  );
+}
+
 function queueSnapshot(
   items: SessionTurn[],
   overrides: Partial<SessionQueueSnapshot> = {},
@@ -2666,6 +2679,90 @@ describe("useComposer durable draft and control binding", () => {
       await hook.unmount();
     });
   }
+
+  test("durable Send forwards personal-resource intent and a definitive epoch retry requires fresh confirmed extras", async () => {
+    let serverDraft: ComposerDraft = {
+      revision: 4,
+      text: "use my fixed environment",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const attempts: Array<Pick<SendMessageInput, "personalResourceAttachment" | "clientEventId">> =
+      [];
+    const failures: Array<{ input: SendMessageInput; delivery: string }> = [];
+    let epoch = 3;
+    let confirmed = true;
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: request.expectedRevision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+        attempts.push(request);
+        if (attempts.length === 1) throw personalAttachmentConflict();
+        return {
+          accepted: makeEvent(2, "user.message"),
+          turn: fakeTurn(),
+          draft: { ...serverDraft, revision: request.expectedDraftRevision + 1, text: "" },
+          interruptionCount: 0,
+          replay: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            personalResourceAttachment: {
+              mode: "session",
+              expectedAuthorityEpoch: epoch,
+              workspaceSharedAcknowledged: true,
+              sharedOutputWarningVersion: 1,
+            },
+          }),
+          sendBlocked: () => !confirmed,
+          onDeliveryError: (_error, input, delivery) => {
+            failures.push({ input, delivery });
+            confirmed = false;
+          },
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    await flush();
+    expect(attempts[0]?.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
+    expect(failures).toEqual([{ input: expect.any(Object), delivery: "send" }]);
+    const failed = hook.result.current.optimisticMessages?.find(
+      (message) => message.state === "failed",
+    );
+    expect(failed).toBeDefined();
+
+    await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+    expect(attempts).toHaveLength(1);
+    epoch = 4;
+    confirmed = true;
+    await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+    await flush();
+
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.personalResourceAttachment?.expectedAuthorityEpoch).toBe(4);
+    expect(attempts[1]?.clientEventId).not.toBe(attempts[0]?.clientEventId);
+    await hook.unmount();
+  });
 
   test("a whitespace-only file message saves and submits the same placeholder", async () => {
     const savedTexts: string[] = [];

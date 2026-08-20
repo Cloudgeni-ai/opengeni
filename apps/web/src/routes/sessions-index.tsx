@@ -43,6 +43,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
+import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import { Input } from "@/components/ui/input";
@@ -67,6 +68,7 @@ import {
   type PickerModelRow,
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import {
   useWorkspaceModelCatalog,
@@ -91,6 +93,10 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
+import {
+  usePersonalResourceAttachment,
+  type PersonalResourceAttachmentController,
+} from "@/lib/use-personal-resource-attachment";
 import { cn } from "@/lib/utils";
 import {
   runNewSessionRouteSubmission,
@@ -133,6 +139,20 @@ function SessionsIndexRouteContent({
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(firstPartyMcpToolPolicy.default),
   );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    fixed: {
+      variableSetId: draft.variableSetId || null,
+      rigId: draft.rigId || null,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+  });
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
@@ -291,7 +311,15 @@ function SessionsIndexRouteContent({
         : attachments.readyResources.length > 0
           ? FILE_ONLY_MESSAGE_TEXT
           : "";
-      if (busy || newSessionDraft.loading || newSessionDraft.conflict || !newSessionPolicyValid)
+      if (
+        busy ||
+        newSessionDraft.loading ||
+        newSessionDraft.conflict ||
+        !newSessionPolicyValid ||
+        (createdSessionAuthority === null && personalAttachment.requiresDecision) ||
+        (createdSessionAuthority === null && personalAttachment.loading) ||
+        (createdSessionAuthority === null && personalAttachment.refreshing)
+      )
         return false;
       if (
         createdSessionAuthority === null &&
@@ -344,6 +372,9 @@ function SessionsIndexRouteContent({
             const flushed = await newSessionDraft.flush();
             if (!flushed) return null;
             const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
+            if (personalAttachment.intent) {
+              submission.extras.personalResourceAttachment = personalAttachment.intent;
+            }
             const created = await context.startSession(
               workspaceId,
               {
@@ -485,6 +516,9 @@ function SessionsIndexRouteContent({
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
+      (createdSessionAuthority !== null || !personalAttachment.requiresDecision) &&
+      (createdSessionAuthority !== null || !personalAttachment.loading) &&
+      (createdSessionAuthority !== null || !personalAttachment.refreshing) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -654,7 +688,14 @@ function SessionsIndexRouteContent({
             draft={draft}
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
+            personalAttachment={personalAttachment}
           />
+          {draft.compute.kind === "sandbox" ? (
+            <PersonalResourceAttachmentControl
+              controller={personalAttachment}
+              disabled={busy || newSessionDraft.loading}
+            />
+          ) : null}
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
@@ -938,6 +979,7 @@ function ComputeTargetControl(props: {
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
+  personalAttachment: PersonalResourceAttachmentController;
 }) {
   const { draft, onChange } = props;
   // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
@@ -1013,12 +1055,24 @@ function ComputeTargetControl(props: {
     if (fleetLoadFailed) {
       return (
         <section className="mt-5 grid gap-2">
-          <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
+          <ManagedSandboxFields
+            draft={draft}
+            onChange={onChange}
+            disabled={props.disabled}
+            personalAttachment={props.personalAttachment}
+          />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
       );
     }
-    return <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />;
+    return (
+      <ManagedSandboxFields
+        draft={draft}
+        onChange={onChange}
+        disabled={props.disabled}
+        personalAttachment={props.personalAttachment}
+      />
+    );
   }
 
   return (
@@ -1054,7 +1108,12 @@ function ComputeTargetControl(props: {
       {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
+        <ManagedSandboxFields
+          draft={draft}
+          onChange={onChange}
+          disabled={props.disabled}
+          personalAttachment={props.personalAttachment}
+        />
       ) : (
         <ConnectedMachineFields
           draft={draft}
@@ -1126,12 +1185,21 @@ function ManagedSandboxFields(props: {
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
+  personalAttachment: PersonalResourceAttachmentController;
 }) {
   const { draft, onChange } = props;
   const variableSets = useVariableSets();
   const rigs = useRigs();
-  const showRigs = rigs.rigs.length > 0;
-  const showVariableSets = variableSets.variableSets.length > 0;
+  const personalRigs = props.personalAttachment.catalog?.rigs ?? [];
+  const personalVariableSets = props.personalAttachment.catalog?.variableSets ?? [];
+  const personalRigIds = new Set(personalRigs.map((resource) => resource.id));
+  const personalVariableSetIds = new Set(personalVariableSets.map((resource) => resource.id));
+  const workspaceRigs = rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
+  const workspaceVariableSets = variableSets.variableSets.filter(
+    (resource) => !personalVariableSetIds.has(resource.id),
+  );
+  const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
+  const showVariableSets = workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
   if (!showRigs && !showVariableSets) {
     return null;
   }
@@ -1155,8 +1223,9 @@ function ManagedSandboxFields(props: {
             disabled={props.disabled}
             onChange={(event) => {
               const rigId = event.target.value;
-              const picked = rigs.rigs.find((rig) => rig.id === rigId);
+              const picked = [...workspaceRigs, ...personalRigs].find((rig) => rig.id === rigId);
               const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
+              props.personalAttachment.setMode(null);
               onChange({
                 ...draft,
                 rigId,
@@ -1168,12 +1237,22 @@ function ManagedSandboxFields(props: {
             className="h-8 w-auto max-w-56 text-xs"
           >
             <option value="">Workspace default</option>
-            {rigs.rigs.map((rig) => (
+            {workspaceRigs.map((rig) => (
               <option key={rig.id} value={rig.id}>
                 {rig.name}
                 {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
               </option>
             ))}
+            {personalRigs.length > 0 ? (
+              <optgroup label="Only me">
+                {personalRigs.map((rig) => (
+                  <option key={rig.id} value={rig.id}>
+                    {rig.name}
+                    {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </Select>
         </div>
       ) : null}
@@ -1194,15 +1273,27 @@ function ManagedSandboxFields(props: {
           <Select
             value={draft.variableSetId}
             disabled={props.disabled}
-            onChange={(event) => onChange({ ...draft, variableSetId: event.target.value })}
+            onChange={(event) => {
+              props.personalAttachment.setMode(null);
+              onChange({ ...draft, variableSetId: event.target.value });
+            }}
             className="h-8 w-auto max-w-56 text-xs"
           >
             <option value="">No variable set</option>
-            {variableSets.variableSets.map((variableSet) => (
+            {workspaceVariableSets.map((variableSet) => (
               <option key={variableSet.id} value={variableSet.id}>
                 {variableSet.name} ({variableSet.variables.length} vars)
               </option>
             ))}
+            {personalVariableSets.length > 0 ? (
+              <optgroup label="Only me">
+                {personalVariableSets.map((variableSet) => (
+                  <option key={variableSet.id} value={variableSet.id}>
+                    {variableSet.name} ({variableSet.variables.length} vars)
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </Select>
         </div>
       ) : null}

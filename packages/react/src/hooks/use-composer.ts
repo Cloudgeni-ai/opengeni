@@ -33,6 +33,10 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the exact accepted wire input after a successful send. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
+    /** Called with the exact wire input after a delivery failure. */
+    onDeliveryError?:
+      | ((error: Error, input: SendMessageInput, delivery: "send" | "steer") => void)
+      | undefined;
     /**
      * Non-policy message fields merged into every send. Durable policy belongs
      * to this composer draft; attachments and credentials may remain host-owned.
@@ -593,6 +597,8 @@ export function useComposer(
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
   const onSubmitted = options.onSubmitted;
+  const onDeliveryErrorRef = useRef(options.onDeliveryError);
+  onDeliveryErrorRef.current = options.onDeliveryError;
   useLayoutEffect(() => {
     steeringRef.current = steering;
   }, [steering]);
@@ -1189,6 +1195,9 @@ export function useComposer(
             ...(wireInput.connectionAuthorities
               ? { connectionAuthorities: wireInput.connectionAuthorities }
               : {}),
+            ...(wireInput.personalResourceAttachment
+              ? { personalResourceAttachment: wireInput.personalResourceAttachment }
+              : {}),
           });
           adoptDraftBase(result.draft);
         } else {
@@ -1217,6 +1226,7 @@ export function useComposer(
         }
       } catch (cause) {
         const problem = asError(cause);
+        onDeliveryErrorRef.current?.(problem, operation.input, "send");
         const outcomeUnknown = isOutcomeUnknownError(cause) || operation.outcomeUnknown === true;
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -1434,6 +1444,9 @@ export function useComposer(
             ...(input.connectionAuthorities
               ? { connectionAuthorities: input.connectionAuthorities }
               : {}),
+            ...(input.personalResourceAttachment
+              ? { personalResourceAttachment: input.personalResourceAttachment }
+              : {}),
           });
           adoptDraftBase(result.draft);
           return result;
@@ -1524,6 +1537,7 @@ export function useComposer(
               });
             }
           } catch (cause) {
+            onDeliveryErrorRef.current?.(asError(cause), pending.input, pending.delivery);
             if (pending.delivery === "steer") keepSteering = true;
             if (
               targetKeyRef.current === ownedTargetKey &&
@@ -1613,6 +1627,7 @@ export function useComposer(
             });
           }
         } catch (cause) {
+          onDeliveryErrorRef.current?.(asError(cause), operation.input, operation.delivery);
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
           } else if (delivery === "steer") {
@@ -1749,6 +1764,7 @@ export function useComposer(
 
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
+      if (sendBlockedRef.current?.() === true) return;
       replaceOptimisticSends((current) =>
         current.map((operation) => {
           if (operation.clientEventId !== clientEventId || operation.state !== "failed") {
@@ -1758,13 +1774,26 @@ export function useComposer(
             return { ...operation, state: "sending", error: undefined };
           }
           const nextClientEventId = generateClientEventId();
-          const retryInput = composeSendInput(operation.text, nextClientEventId, operation.input, {
-            ...(options.effectiveControl?.controlEtag
-              ? { controlEtag: options.effectiveControl.controlEtag }
-              : {}),
-            resources: operation.resources,
-            annotations: operation.annotations,
-          });
+          const currentPersonalResourceAttachment = resolveSendExtras(
+            sendExtrasRef.current,
+          ).personalResourceAttachment;
+          const retryInput = composeSendInput(
+            operation.text,
+            nextClientEventId,
+            {
+              ...operation.input,
+              ...(currentPersonalResourceAttachment
+                ? { personalResourceAttachment: currentPersonalResourceAttachment }
+                : {}),
+            },
+            {
+              ...(options.effectiveControl?.controlEtag
+                ? { controlEtag: options.effectiveControl.controlEtag }
+                : {}),
+              resources: operation.resources,
+              annotations: operation.annotations,
+            },
+          );
           return {
             ...operation,
             clientEventId: nextClientEventId,
