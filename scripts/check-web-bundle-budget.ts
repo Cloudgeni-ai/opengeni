@@ -56,7 +56,12 @@ const budgets = {
   // 1,497,364 raw / 406,933 gzip bytes initially and 2,080,136 raw / 578,495 gzip
   // bytes on a direct session load. The next whole-KiB envelopes narrowly bind
   // those measurements while every unrelated graph and per-file cap stays fixed.
-  initialRaw: 1463 * kib,
+  // The explicit create-time resource/session scope controls and organization
+  // administration overview measure 1,498,577 raw bytes initially and
+  // 2,081,360 raw / 578,755 gzip bytes on a direct session load on
+  // macOS/arm64. Only these three graph envelopes advance to the next whole
+  // KiB; file, lazy, CSS, and all other caps remain unchanged.
+  initialRaw: 1464 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -70,8 +75,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2032 * kib,
-  directSessionGzip: 565 * kib,
+  directSessionRaw: 2033 * kib,
+  directSessionGzip: 566 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

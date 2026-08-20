@@ -127,7 +127,10 @@ import {
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
-import { requireCanonicalManagedHuman } from "../application/session-tenancy";
+import {
+  requireCanonicalManagedHuman,
+  requireManagedHumanPrivateSessionCreate,
+} from "../application/session-tenancy";
 import {
   assertToolRefsSubset,
   availableToolRefs,
@@ -607,6 +610,7 @@ export async function createAndStartSessionWithOutcome(input: {
   beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
   accountId: string;
   workspaceId: string;
+  visibility?: "user_private" | "workspace_shared";
   initialMessage: string;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
@@ -721,6 +725,7 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      visibility: input.visibility ?? "workspace_shared",
       initialMessage: input.initialMessage,
       initialModelContext: input.modelContext ?? null,
       resources: input.resources,
@@ -791,6 +796,7 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      visibility: input.visibility ?? "workspace_shared",
       initialMessage: input.initialMessage,
       initialModelContext: input.modelContext ?? null,
       resources: input.resources,
@@ -1388,6 +1394,17 @@ export async function createSessionForRequestWithOutcome(
 ): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  if (payload.visibility === "private") {
+    if (!authorization) {
+      throw new HTTPException(403, { message: "managed human session required" });
+    }
+    await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
+    if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {
+      throw new HTTPException(422, {
+        message: "Only-me sessions require their own sandbox",
+      });
+    }
+  }
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -1422,6 +1439,11 @@ export async function createSessionForRequestWithOutcome(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  if (payload.visibility === "private" && parentSessionId) {
+    throw new HTTPException(422, {
+      message: "Agent-created child sessions cannot be private",
+    });
+  }
   if (parentSessionId) {
     try {
       await requireSessionAuthorization(deps, grant, {
@@ -2091,6 +2113,7 @@ export async function createSessionForRequestWithOutcome(
       workflowClient,
       accountId: grant.accountId,
       workspaceId,
+      visibility: payload.visibility === "private" ? "user_private" : "workspace_shared",
       initialMessage: payload.initialMessage ?? "",
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,

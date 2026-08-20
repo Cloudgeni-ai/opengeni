@@ -1,8 +1,10 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import {
+  Building2Icon,
   CheckIcon,
   ClockIcon,
   Loader2Icon,
+  PencilIcon,
   RefreshCwIcon,
   ShieldCheckIcon,
   UserMinusIcon,
@@ -39,6 +41,7 @@ import {
 } from "@/lib/organization-admin";
 import { formatTimestamp } from "@/lib/format";
 import type {
+  OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
@@ -53,6 +56,372 @@ type OwnedState<Value> = {
 };
 
 type MemberAction = "suspend" | "reactivate" | "offboard";
+
+type PendingOrganizationRename = {
+  ownerKey: string;
+  name: string;
+  expectedUpdatedAt: string;
+  operationId: string;
+};
+
+export function OrganizationOverviewSection(props: {
+  client: OpenGeniCoreClient;
+  identity: OrganizationAdminIdentity;
+  actorRole: OrganizationMembershipRole | null;
+  managedSession: boolean;
+  accessibleWorkspaceIds: ReadonlySet<string>;
+  onOrganizationChanged: () => void | Promise<void>;
+}) {
+  const identityKey = organizationAdminIdentityKey(props.identity);
+  const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
+  identityRef.current = props.identity;
+  const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
+  const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
+  const pendingRenameRef = useRef<PendingOrganizationRename | null>(null);
+  const [state, setState] = useState<OwnedState<OrganizationAdministrationOverview | null>>({
+    ownerKey: "",
+    value: null,
+    loading: false,
+    error: null,
+  });
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const canAdminister = props.actorRole === "owner" || props.actorRole === "admin";
+
+  const claim = useCallback(
+    (lane: OrganizationAdminOperationLane) => {
+      const slot = organizationAdminOperationSlot("overview", lane);
+      const operation = beginOrganizationAdminOperation({
+        identity: props.identity,
+        resource: "overview",
+        lane,
+        previousSequence: sequenceRef.current.get(slot) ?? 0,
+      });
+      sequenceRef.current.set(slot, operation.sequence);
+      activeRef.current.set(slot, operation);
+      return operation;
+    },
+    [props.identity],
+  );
+  const owns = useCallback(
+    (operation: OrganizationAdminOperation) =>
+      ownsOrganizationAdminOperation({
+        currentIdentity: identityRef.current,
+        currentOperation:
+          activeRef.current.get(
+            organizationAdminOperationSlot(operation.resource, operation.lane),
+          ) ?? null,
+        accepted: operation,
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    const active = activeRef.current;
+    identityRef.current = props.identity;
+    if (pendingRenameRef.current?.ownerKey !== identityKey) {
+      pendingRenameRef.current = null;
+    }
+    return () => {
+      identityRef.current = null;
+      active.clear();
+    };
+  }, [identityKey, props.identity]);
+
+  const load = useCallback(async () => {
+    if (!props.managedSession || !canAdminister || !props.identity.organizationId) {
+      setState({ ownerKey: identityKey, value: null, loading: false, error: null });
+      return;
+    }
+    const operation = claim("read");
+    setState((current) => ({ ...current, ownerKey: identityKey, loading: true, error: null }));
+    try {
+      const overview = await props.client.getOrganizationAdministrationOverview(
+        props.identity.organizationId,
+      );
+      if (!owns(operation)) return;
+      const pendingRename = pendingRenameRef.current;
+      if (
+        pendingRename?.ownerKey === identityKey &&
+        overview.organization.name === pendingRename.name &&
+        overview.organization.updatedAt !== pendingRename.expectedUpdatedAt
+      ) {
+        pendingRenameRef.current = null;
+      }
+      setName(overview.organization.name);
+      setState({ ownerKey: identityKey, value: overview, loading: false, error: null });
+    } catch (error) {
+      if (!owns(operation)) return;
+      setState({
+        ownerKey: identityKey,
+        value: null,
+        loading: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }, [canAdminister, claim, identityKey, owns, props.client, props.identity, props.managedSession]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const visible = state.ownerKey === identityKey ? state : { ...state, value: null, loading: true };
+  const overview = visible.value;
+  const peopleWithAccess = new Set(
+    overview?.workspaces.flatMap((workspace) =>
+      workspace.members
+        .filter((member) => member.principalKind === "human")
+        .map((member) => member.subjectId),
+    ) ?? [],
+  ).size;
+
+  async function saveName() {
+    const requestedName = name.trim();
+    if (!overview || !requestedName || requestedName === overview.organization.name) {
+      setEditing(false);
+      return;
+    }
+    const existingAttempt = pendingRenameRef.current;
+    const attempt: PendingOrganizationRename =
+      existingAttempt?.ownerKey === identityKey &&
+      existingAttempt.name === requestedName &&
+      existingAttempt.expectedUpdatedAt === overview.organization.updatedAt
+        ? existingAttempt
+        : {
+            ownerKey: identityKey,
+            name: requestedName,
+            expectedUpdatedAt: overview.organization.updatedAt,
+            operationId: crypto.randomUUID(),
+          };
+    pendingRenameRef.current = attempt;
+    const operation = claim("mutation");
+    setBusy(true);
+    try {
+      const organization = await props.client.updateOrganizationName(
+        props.identity.organizationId,
+        {
+          name: attempt.name,
+          expectedUpdatedAt: attempt.expectedUpdatedAt,
+          operationId: attempt.operationId,
+        },
+      );
+      if (!owns(operation)) return;
+      if (pendingRenameRef.current?.operationId === attempt.operationId) {
+        pendingRenameRef.current = null;
+      }
+      setState((current) =>
+        current.ownerKey === identityKey && current.value
+          ? { ...current, value: { ...current.value, organization } }
+          : current,
+      );
+      setEditing(false);
+      toast.success("Organization name updated");
+      try {
+        await props.onOrganizationChanged();
+      } catch (error) {
+        if (!owns(operation)) return;
+        toast.error("Organization name updated, but the account menu couldn't refresh", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } catch (error) {
+      if (!owns(operation)) return;
+      const outcomeUnknown =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
+      if (!outcomeUnknown && pendingRenameRef.current?.operationId === attempt.operationId) {
+        pendingRenameRef.current = null;
+      }
+      toast.error("Couldn't update organization name", {
+        description: outcomeUnknown
+          ? "The result is not yet known. Retry Save to reconcile the same request safely."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    } finally {
+      if (owns(operation)) setBusy(false);
+    }
+  }
+
+  if (!props.managedSession || !canAdminister) {
+    return (
+      <Notice tone="muted" title="Organization overview unavailable">
+        An active organization owner or administrator session is required.
+      </Notice>
+    );
+  }
+  if (visible.error) {
+    return (
+      <LoadErrorState
+        title="Couldn't load the organization"
+        error={visible.error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (!overview) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-4 text-sm text-fg-muted">
+        <Loader2Icon className="size-4 animate-spin" /> Loading organization…
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-4">
+      <section className="grid gap-4 rounded-lg border border-border bg-surface p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Organization
+            </p>
+            {editing ? (
+              <div className="mt-1 flex max-w-lg gap-2">
+                <Input
+                  aria-label="Organization name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={120}
+                  autoFocus
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy || !name.trim()}
+                  onClick={() => void saveName()}
+                >
+                  {busy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <CheckIcon className="size-3.5" />
+                  )}{" "}
+                  Save
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setName(overview.organization.name);
+                    setEditing(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <h2 className="mt-1 text-xl font-semibold tracking-tight">
+                {overview.organization.name}
+              </h2>
+            )}
+            <p className="mt-1 text-xs text-fg-muted">
+              Manage the shared workspaces and access that make up your company.
+            </p>
+          </div>
+          {!editing ? (
+            <Button type="button" variant="secondary" size="sm" onClick={() => setEditing(true)}>
+              <PencilIcon className="size-3.5" /> Rename
+            </Button>
+          ) : null}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <Metric label="Shared workspaces" value={overview.workspaces.length} />
+          <Metric label="People with access" value={peopleWithAccess} />
+          <Metric label="Your role" value={props.actorRole ?? "Unknown"} />
+        </div>
+      </section>
+
+      <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+        <div>
+          <h2 className="text-sm font-medium">Workspace access</h2>
+          <p className="mt-1 text-xs text-fg-muted">
+            Every shared workspace in this organization. Personal workspaces and their content are
+            never included.
+          </p>
+        </div>
+        {overview.workspaces.length === 0 ? (
+          <p className="rounded-md border border-dashed border-border p-4 text-sm text-fg-muted">
+            No shared workspaces yet.
+          </p>
+        ) : (
+          <div className="grid gap-2">
+            {overview.workspaces.map((workspace) => (
+              <details
+                key={workspace.id}
+                className="group rounded-lg border border-border/80 bg-bg/25"
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Building2Icon className="size-4 shrink-0 text-brand" />
+                    <span className="truncate text-sm font-medium">{workspace.name}</span>
+                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
+                      <span className="rounded-full border border-border px-1.5 py-0.5 text-2xs text-fg-muted">
+                        You have access
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="shrink-0 text-xs text-fg-muted">
+                    {workspace.members.length}{" "}
+                    {workspace.members.length === 1 ? "member" : "members"}
+                  </span>
+                </summary>
+                <div className="border-t border-border/70 px-3 py-2">
+                  {workspace.members.length === 0 ? (
+                    <p className="py-2 text-xs text-fg-subtle">No direct workspace access.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-left text-xs">
+                        <thead className="text-fg-subtle">
+                          <tr>
+                            <th className="py-1 pr-4 font-medium">Person or service</th>
+                            <th className="py-1 pr-4 font-medium">Role</th>
+                            <th className="py-1 font-medium">Access</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {workspace.members.map((member) => (
+                            <tr key={member.membershipId} className="border-t border-border/50">
+                              <td className="py-2 pr-4">
+                                <span className="font-medium">
+                                  {member.subjectLabel ??
+                                    maskedOrganizationSubject(member.subjectId)}
+                                </span>
+                                <span className="ml-2 text-2xs capitalize text-fg-subtle">
+                                  {member.principalKind}
+                                </span>
+                              </td>
+                              <td className="py-2 pr-4 capitalize">{member.role}</td>
+                              <td className="py-2 text-fg-muted">
+                                {member.permissions.length} permissions
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </details>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-bg/35 px-3 py-2">
+      <p className="text-lg font-semibold capitalize">{value}</p>
+      <p className="text-2xs text-fg-subtle">{label}</p>
+    </div>
+  );
+}
 
 export function OrganizationPeopleSection(props: {
   client: OpenGeniCoreClient;

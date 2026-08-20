@@ -381,6 +381,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_membership_lifecycle_events",
           "organization_membership_operation_receipts",
           "organization_memberships",
+          "organization_profile_events",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",

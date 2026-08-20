@@ -18,6 +18,7 @@ import { HTTPException } from "hono/http-exception";
 import { SessionAuthorizationDeniedError } from "../src/session-authorization";
 import {
   forkManagedHumanSessionPrivate,
+  getManagedHumanSessionCreateCapabilities,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
 } from "../src/application/session-tenancy";
@@ -47,6 +48,57 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
+  test("reports private-create availability only to the exact managed human after activation", async () => {
+    if (!shared || !client) return;
+    const userId = `core-private-create-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Private create capability",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no shared workspace grant");
+    const canonical = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+    });
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${grant.accountId}, 1, ${"5".repeat(64)}, ${"6".repeat(64)}, 'core-private-create'
+      )`;
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({ activated: true, canCreatePrivate: true, reason: "available" });
+
+    await expect(
+      getManagedHumanSessionCreateCapabilities(
+        { db: client.db },
+        { ...canonical, canonicalManagedHumanSession: false },
+        grant.workspaceId,
+      ),
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "managed_session_required",
+    });
+  }, 180_000);
+
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-grants-${crypto.randomUUID()}`;

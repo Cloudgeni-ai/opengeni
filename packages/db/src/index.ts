@@ -145,7 +145,11 @@ import type {
   ModalCheckpointProviderBinding,
   SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
-import { sessionTenancyProductActivated } from "./session-tenancy";
+import {
+  closePrivateSessionCreateCapability,
+  openPrivateSessionCreateCapability,
+  sessionTenancyProductActivated,
+} from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
   failCodemodeOperationInTransaction,
@@ -1486,12 +1490,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           set: { name: accountName, updatedAt: new Date() },
         })
         .returning();
-    } else if (account.name !== accountName) {
-      [account] = await tx
-        .update(schema.managedAccounts)
-        .set({ name: accountName, updatedAt: new Date() })
-        .where(eq(schema.managedAccounts.id, account.id))
-        .returning();
     }
     if (!account) {
       throw new Error("Failed to ensure managed account");
@@ -1581,6 +1579,18 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         }
       }
       const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+      const organizationAccounts = await tx
+        .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+        .from(schema.managedAccounts)
+        .where(
+          inArray(
+            schema.managedAccounts.id,
+            activeOrganizationMemberships.map((membership) => membership.organizationId),
+          ),
+        );
+      const organizationNameById = new Map(
+        organizationAccounts.map((organization) => [organization.id, organization.name]),
+      );
       const defaultWorkspaceId =
         workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
       return {
@@ -1594,6 +1604,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             subjectLabel,
             role: organizationMembership.role,
             permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+            metadata: {
+              accountName: organizationNameById.get(organizationMembership.organizationId) ?? null,
+            },
           })),
           workspaceGrants,
           defaultAccountId,
@@ -1825,6 +1838,18 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         });
       }
     }
+    const organizationAccounts = await tx
+      .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+      .from(schema.managedAccounts)
+      .where(
+        inArray(
+          schema.managedAccounts.id,
+          activeOrganizationMemberships.map((activeMembership) => activeMembership.organizationId),
+        ),
+      );
+    const organizationNameById = new Map(
+      organizationAccounts.map((organization) => [organization.id, organization.name]),
+    );
     return {
       accessContext: {
         mode: "managed",
@@ -1836,6 +1861,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           subjectLabel,
           role: organizationMembership.role,
           permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+          metadata: {
+            accountName: organizationNameById.get(organizationMembership.organizationId) ?? null,
+          },
         })),
         workspaceGrants,
         defaultAccountId: account.id,
@@ -25718,7 +25746,7 @@ export class SessionIdConflictError extends Error {
 
 export class SessionCreateIdempotencyConflictError extends Error {
   constructor() {
-    super("Session create idempotency key was reused with a different personal-resource intent");
+    super("Session create idempotency key was reused with a different request");
     this.name = "SessionCreateIdempotencyConflictError";
   }
 }
@@ -25771,6 +25799,7 @@ export type SessionCreateInput = {
   requestedSessionId?: string;
   accountId: string;
   workspaceId: string;
+  visibility?: "user_private" | "workspace_shared";
   initialMessage: string;
   initialModelContext?: string | null;
   resources: ResourceRef[];
@@ -26166,6 +26195,7 @@ async function createSessionInTransaction(
   id: string,
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
+  const createRequestedVisibility = input.visibility ?? "workspace_shared";
   const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
     tx,
     input.workspaceId,
@@ -26205,6 +26235,9 @@ async function createSessionInTransaction(
         stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
         stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
       ) {
+        throw new SessionCreateIdempotencyConflictError();
+      }
+      if (existing.createRequestedVisibility !== createRequestedVisibility) {
         throw new SessionCreateIdempotencyConflictError();
       }
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -26264,6 +26297,26 @@ async function createSessionInTransaction(
       : null
     : null;
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
+  let privateCreateCapabilityId: string | null = null;
+  let privateCreateOwnerMembershipId: string | null = null;
+  if (createRequestedVisibility === "user_private") {
+    if (
+      frozenCreator.initiator.kind !== "subject" ||
+      !input.subjectId ||
+      input.parentSessionId ||
+      input.sandboxGroupId
+    ) {
+      throw new Error("Private session creation requires a top-level managed-human singleton");
+    }
+    const capability = await openPrivateSessionCreateCapability(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: id,
+      actorSubjectId: input.subjectId,
+    });
+    privateCreateCapabilityId = capability.capabilityId;
+    privateCreateOwnerMembershipId = capability.ownerMembershipId;
+  }
   try {
     insertedRows = await tx
       .insert(schema.sessions)
@@ -26284,6 +26337,12 @@ async function createSessionInTransaction(
             },
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
+            ...(privateCreateOwnerMembershipId
+              ? {
+                  ownerOrganizationMembershipId: privateCreateOwnerMembershipId,
+                  ownerSubjectId: input.subjectId,
+                }
+              : {}),
             model: input.model,
             reasoningEffort: input.reasoningEffort,
             latencyMode: input.latencyMode,
@@ -26299,6 +26358,8 @@ async function createSessionInTransaction(
             initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
             initialPersonalResourceAttachmentIntent:
               input.initialPersonalResourceAttachmentIntent ?? null,
+            visibility: createRequestedVisibility,
+            createRequestedVisibility,
             initialXaiProviderAccountAuthoritySnapshot: initialXaiProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
@@ -26326,6 +26387,10 @@ async function createSessionInTransaction(
       )
       .onConflictDoNothing()
       .returning();
+    if (privateCreateCapabilityId) {
+      await closePrivateSessionCreateCapability(tx, privateCreateCapabilityId);
+      privateCreateCapabilityId = null;
+    }
   } catch (error) {
     // The caller validated the channel workspace-scoped, but a concurrent
     // channel delete can still race the insert; keep the typed 422 path.
@@ -26350,6 +26415,9 @@ async function createSessionInTransaction(
           stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
           stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
         ) {
+          throw new SessionCreateIdempotencyConflictError();
+        }
+        if (existing.createRequestedVisibility !== createRequestedVisibility) {
           throw new SessionCreateIdempotencyConflictError();
         }
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [

@@ -145,6 +145,38 @@ export async function sessionTenancyProductActivated(
   });
 }
 
+/** Open the exact transaction-local trigger capability used by atomic private create. */
+export async function openPrivateSessionCreateCapability(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; actorSubjectId: string },
+): Promise<{ capabilityId: string; ownerMembershipId: string }> {
+  const rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
+    db,
+    sql`select
+      capability_id as "capabilityId",
+      owner_membership_id as "ownerMembershipId"
+    from open_private_session_create_capability(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid,
+      ${input.actorSubjectId}
+    )`,
+  );
+  const capabilityId = rows[0]?.capabilityId;
+  const ownerMembershipId = rows[0]?.ownerMembershipId;
+  if (!capabilityId || !ownerMembershipId) {
+    throw new Error("Private session create capability was not returned");
+  }
+  return { capabilityId, ownerMembershipId };
+}
+
+export async function closePrivateSessionCreateCapability(
+  db: Database,
+  capabilityId: string,
+): Promise<void> {
+  await db.execute(sql`select close_private_session_create_capability(${capabilityId}::uuid)`);
+}
+
 async function assertSessionTenancyProductActivated(
   db: Database,
   workspaceId: string,

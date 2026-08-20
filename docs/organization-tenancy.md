@@ -447,7 +447,13 @@ for people who have not registered remain separate integrations.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
-and Billing sections. It lists the organization roster and invitation state,
+and Billing sections. Overview projects the canonical organization name plus
+every shared workspace and its direct human/service access roster; the database
+excludes all Personal workspaces before JSON projection. Owners and
+administrators can rename the organization through a revision- and
+operation-fenced lifecycle function, and managed-access bootstrap never
+overwrites that deliberate name from the user's profile. It lists the
+organization roster and invitation state,
 supports the role and lifecycle transitions authorized above, accepts incoming
 invitations, and gives owners a version-fenced 30–90 day retention editor while
 administrators receive the read-only policy. The browser binds every read and
@@ -801,6 +807,16 @@ personal-workspace-or-ordinary-membership disjunction. Without that repair, a
 valid personal-workspace transition to private committed successfully and then
 hid the session and its event from its owner because personal workspaces never
 carry a `workspace_memberships` row.
+
+Migration 0311 adds atomic private visibility at session creation. The public
+create request defaults to workspace visibility; an explicit Only-me choice is
+accepted only for the exact canonical managed human in an activated
+organization and is inserted with owner provenance, visibility, and the first
+event/turn in the existing create transaction. The web checks the capability
+before enabling Only me, explains `not_activated` instead of silently hiding
+the choice, and never sends a restored private draft while that preflight is
+pending or denied. A Personal workspace remains intrinsically owner-only and
+therefore creates through the ordinary workspace-default wire path.
 
 **Mutation-active only after an explicit per-organization cutover.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY

@@ -5,11 +5,14 @@ import {
   ListOrganizationInvitationsPageQuery,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
+  OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationRetentionPolicy,
+  OrganizationSummary,
   RevokeOrganizationInvitationRequest,
   UpdateOrganizationMemberRequest,
+  UpdateOrganizationNameRequest,
   UpdateOrganizationRetentionPolicyRequest,
 } from "@opengeni/contracts";
 import {
@@ -22,6 +25,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getManagedUserByEmail,
+  getOrganizationAdministrationOverview,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
   listOrganizationMembers,
@@ -30,6 +34,7 @@ import {
   nestedPostgresSqlState,
   revokeOrganizationInvitation,
   updateOrganizationMember,
+  updateOrganizationName,
   updateOrganizationRetentionPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -130,6 +135,50 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
             subjectId,
             ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
             limit: query.data.limit,
+          }),
+        ),
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.get("/v1/organizations/:organizationId/overview", async (context) => {
+    const { subjectId } = await requireManagedHuman(context, deps);
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    try {
+      return context.json(
+        OrganizationAdministrationOverview.parse(
+          await getOrganizationAdministrationOverview(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+          }),
+        ),
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.patch("/v1/organizations/:organizationId", async (context) => {
+    const { subjectId } = await requireManagedHuman(context, deps);
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const payload = await parseBody(context, UpdateOrganizationNameRequest);
+    try {
+      return context.json(
+        OrganizationSummary.parse(
+          await updateOrganizationName(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+            ...payload,
           }),
         ),
       );

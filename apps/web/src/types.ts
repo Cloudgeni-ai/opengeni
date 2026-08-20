@@ -107,6 +107,7 @@ export type {
   LatencyMode,
   ManagedOrganizationMembership,
   ReasoningEffort,
+  ResourceAuthorityScope,
   ResourceRef,
   Rig,
   RigChange,
@@ -156,6 +157,11 @@ export type OrganizationMember = Awaited<
   ReturnType<OpenGeniCoreClient["listOrganizationMembers"]>
 >["members"][number];
 export type OrganizationMembershipRole = OrganizationMember["role"];
+export type OrganizationAdministrationOverview = Awaited<
+  ReturnType<OpenGeniCoreClient["getOrganizationAdministrationOverview"]>
+>;
+export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
+export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];
 export type OrganizationRetentionPolicy = Awaited<
   ReturnType<OpenGeniCoreClient["getOrganizationRetentionPolicy"]>
 >;

@@ -2,6 +2,14 @@
 
 An organization, workspace, or organization user can own named **rigs**: versioned sandbox machine definitions (a base image, a setup script, self-declared health checks, credential-hook refs, and default variable-set refs). Workspace scope is the compatibility default. Organization rigs are visible across the organization and require account-admin authority to mutate; user rigs follow their owner into every same-organization workspace the owner can currently access. A session **binds** to a rig at creation and **freezes** the rig's currently-active version onto the session row — the rig can gain new versions later without ever moving that session's box out from under it. Agents cannot edit a rig directly; they **propose changes**, which a clean-replay verification run ("rig CI") admits or rejects.
 
+The web creation form asks whether the Rig is for the Organization, the current
+Workspace, or Only me; every Rig list row shows that scope. Default Variable
+Sets are filtered by compatibility: an organization Rig may reference only
+organization sets, a workspace Rig may reference organization or same-workspace
+sets, and an Only-me Rig may additionally reference the owner's personal sets.
+The server rechecks the same matrix, so a stale or crafted browser request
+cannot create a broader dependency than its Rig.
+
 ## Invariants
 
 1. **Versions are append-only and definition-immutable.** The definition columns on `rig_versions` (`image`, `setup_script`, checks, credential hooks, default variable sets, changelog, attribution, and version number) are never updated in place. Only activation state and version-bound operational `provider_images` build metadata may change. Exactly one version per rig can be active at a time (a partial unique index on `(rig_id) WHERE active`).

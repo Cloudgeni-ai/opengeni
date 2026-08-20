@@ -6479,6 +6479,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
  */
 export const NewSessionDraftOptions = z.object({
+  visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),
   workingDir: z.string().min(1).optional(),
@@ -12501,6 +12502,9 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
+    /** Workspace-visible by default. Private creation is an activated,
+     * managed-cookie owning-human capability and commits atomically. */
+    visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or
     // starting an underlying agent turn. Realtime can then become the first
@@ -12677,6 +12681,13 @@ export const CreateSessionRequest = withVariableSetIdAlias(
   }
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
+
+export const SessionTenancyCreateCapabilities = z.object({
+  activated: z.boolean(),
+  canCreatePrivate: z.boolean(),
+  reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+});
+export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 
 // Generic, host-neutral structured human input. One model tool call creates one
 // request containing one or more questions; the durable response resumes that

@@ -819,7 +819,7 @@ describe("session create draft", () => {
   test("an untouched (managed sandbox) draft adds nothing to the create payload", () => {
     expect(submissionFromSessionDraft(emptySessionDraft())).toEqual({
       extras: {},
-      options: { targetSandboxId: null, workingDir: null },
+      options: { targetSandboxId: null, workingDir: null, visibility: "workspace" },
       omitWorkspaceResources: false,
     });
   });
@@ -846,7 +846,7 @@ describe("session create draft", () => {
         },
         firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
       },
-      options: { targetSandboxId: null, workingDir: null },
+      options: { targetSandboxId: null, workingDir: null, visibility: "workspace" },
       omitWorkspaceResources: false,
     });
   });
@@ -884,6 +884,7 @@ describe("session create draft", () => {
       options: {
         targetSandboxId: "sbx-machine-1",
         workingDir: "~/repos/opengeni",
+        visibility: "workspace",
       },
       omitWorkspaceResources: true,
     });
@@ -902,6 +903,7 @@ describe("session create draft", () => {
     expect(submission.options).toEqual({
       targetSandboxId: "sbx-machine-2",
       workingDir: null,
+      visibility: "workspace",
     });
     expect(submission.omitWorkspaceResources).toBe(true);
   });

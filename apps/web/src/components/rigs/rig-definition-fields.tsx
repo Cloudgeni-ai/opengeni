@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { RigCheck, VariableSet } from "@/types";
+import type { ResourceAuthorityScope, RigCheck, VariableSet } from "@/types";
 
 export type RigDefinitionDraft = {
   image: string;
@@ -27,12 +27,14 @@ export function RigDefinitionFields({
   onChange,
   variableSets,
   disabled,
+  rigScope = "user",
   idPrefix = "rig",
 }: {
   value: RigDefinitionDraft;
   onChange: (next: RigDefinitionDraft) => void;
   variableSets: VariableSet[];
   disabled?: boolean;
+  rigScope?: ResourceAuthorityScope;
   idPrefix?: string;
 }) {
   const checkKeys = useRef<string[]>([]);
@@ -54,6 +56,13 @@ export function RigDefinitionFields({
         : [...value.defaultVariableSetIds, id],
     });
   };
+
+  const compatibleVariableSets = variableSets.filter(
+    (variableSet) =>
+      rigScope === "user" ||
+      variableSet.scope === "organization" ||
+      (rigScope === "workspace" && variableSet.scope === "workspace"),
+  );
 
   return (
     <div className="grid gap-4">
@@ -163,14 +172,14 @@ export function RigDefinitionFields({
         )}
       </div>
 
-      {variableSets.length > 0 ? (
+      {compatibleVariableSets.length > 0 ? (
         <div className="grid gap-2">
           <Label>Default variable sets</Label>
           <p className="-mt-1 text-2xs text-fg-subtle">
             Preselected on new sessions that pick this rig. A session can still override them.
           </p>
           <div className="grid gap-1 sm:grid-cols-2">
-            {variableSets.map((variableSet) => {
+            {compatibleVariableSets.map((variableSet) => {
               const checked = value.defaultVariableSetIds.includes(variableSet.id);
               return (
                 <label

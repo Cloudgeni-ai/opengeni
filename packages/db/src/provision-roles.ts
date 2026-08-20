@@ -489,6 +489,8 @@ async function grantAppRoleIfSchemaExists(
     "get_self_organization_invitation(text,uuid)",
     "list_organization_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
+    "get_organization_administration_overview(uuid,text)",
+    "update_organization_name(uuid,text,text,timestamptz,uuid)",
     "organization_membership_command(jsonb)",
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
@@ -1227,6 +1229,26 @@ BEGIN
         'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM %I',
         ${literal(schema)},
         ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.close_private_session_create_capability(uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.close_private_session_create_capability(uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
       );
     END IF;
     IF to_regprocedure(

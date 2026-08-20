@@ -238,6 +238,7 @@ import {
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
+  getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
   forkManagedHumanSessionPrivate,
   moveHumanQueuePrompt,
@@ -471,6 +472,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ? { establishSandboxSession: deps.establishSandboxSession }
       : {}),
   };
+
+  app.get("/v1/workspaces/:workspaceId/session-tenancy/capabilities", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:create",
+    );
+    return c.json(await getManagedHumanSessionCreateCapabilities(deps, authorization, workspaceId));
+  });
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -4416,6 +4428,24 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionTenancyManagedHumanRequiredError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_FORBIDDEN",
+        message: "Only managed-account users can create an Only-me session.",
+      },
+      403,
+    );
+  }
+  if (error instanceof SessionTenancyNotActivatedError) {
+    return c.json(
+      {
+        code: "SESSION_TENANCY_NOT_ACTIVATED",
+        message: "Private sessions are not enabled for this organization.",
+      },
+      409,
+    );
+  }
   if (error instanceof ChannelNotFoundError) {
     // Covers the create-vs-channel-delete race the pre-validation cannot: the
     // insert's FK rejection surfaces as the same 422 an unknown id gets.

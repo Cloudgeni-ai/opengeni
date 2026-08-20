@@ -6,6 +6,9 @@ const switcherSource = await Bun.file(
 ).text();
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
+const organizationAdminSource = await Bun.file(
+  `${import.meta.dir}/components/organization-admin.tsx`,
+).text();
 
 describe("managed self-context surfaces", () => {
   test("loads the managed-only projection behind the credential/principal identity fence", () => {
@@ -43,12 +46,10 @@ describe("managed self-context surfaces", () => {
   });
 
   test("separates organization administration from Personal content", () => {
-    expect(organizationSource).toContain(
-      "Organization roles\n                    govern administration and billing; they never grant access to another",
+    expect(organizationAdminSource).toContain(
+      "Personal workspaces and their content are\n            never included.",
     );
-    expect(organizationSource).toContain(
-      "Organization administration does not expose private sessions, credentials,",
-    );
+    expect(organizationAdminSource).toContain("Every shared workspace in this organization.");
     expect(organizationSource).toContain("<OrganizationPeopleSection");
     expect(organizationSource).toContain("<OrganizationRetentionSection");
   });
