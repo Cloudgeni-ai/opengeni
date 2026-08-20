@@ -143,6 +143,7 @@ describe("release schema contract", () => {
       "0262_scoped_connected_machines_and_rigs.sql",
       "0264_connection_authority_runtime_activation.sql",
       "0273_scheduled_variable_set_materialization.sql",
+      "0304_personal_workspace_private_session_reads.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -188,6 +189,14 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "a37e307de730bc47ccf4ed6bf517427ebb0d20199640f54e8e525ae1ce046663",
       deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0304_personal_workspace_private_session_reads.sql",
+      ),
+    ).toMatchObject({
+      sha256: "8eebfc6e310006e8e359493bfad98075908958fdcbe38bca0d182444d9994867",
+      deploymentMode: "rolling",
     });
     expect(
       completeSourceContract.migrations.find(

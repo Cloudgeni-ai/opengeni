@@ -1374,6 +1374,89 @@ export const SessionTenancyPublicProjection = z.object({
 });
 export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
 
+export const SessionTenancyBlocker = z.enum([
+  "nonterminal_turn",
+  "nonterminal_attempt",
+  "unsettled_interruption",
+  "pending_system_update",
+  "pending_human_input",
+  "pending_tool_receipt",
+  "run_state",
+  "active_goal",
+  "capacity_waiter",
+  "active_realtime",
+  "active_scheduled_task",
+  "workspace_mutation_admission",
+  "retained_process",
+  "active_sandbox_access",
+  "shared_sandbox_group",
+]);
+export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
+
+export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
+const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+
+export const UpdateSessionVisibilityRequest = z
+  .object({
+    visibility: SessionVisibility,
+    expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+
+export const UpdateSessionVisibilityResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid().nullable(),
+    eventSequence: z.number().int().positive().nullable(),
+    visibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    changed: z.boolean(),
+    replay: z.boolean(),
+    revokedGrantCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["changed"],
+        message: "changed must match the presence of the durable event receipt",
+      });
+    }
+    if ((value.eventId === null) !== (value.eventSequence === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["eventId"],
+        message: "eventId and eventSequence must be present or absent together",
+      });
+    }
+  });
+export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibilityResponse>;
+
+export const ForkSessionRequest = z
+  .object({
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type ForkSessionRequest = z.infer<typeof ForkSessionRequest>;
+
+export const ForkSessionResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid(),
+    eventSequence: z.number().int().positive(),
+    sessionId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    visibility: z.literal("private"),
+    authorityEpoch: z.literal(1),
+    copiedHistoryItemCount: z.number().int().nonnegative(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type ForkSessionResponse = z.infer<typeof ForkSessionResponse>;
+
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -6142,7 +6225,6 @@ export const EffectiveSessionControl = z.object({
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
-export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
 const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const SessionCommandReceipt = z.object({

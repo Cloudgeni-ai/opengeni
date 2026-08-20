@@ -22,6 +22,7 @@ import {
   FsMoveRequest,
   FsReadRequest,
   FsWriteRequest,
+  ForkSessionRequest,
   HumanInputRequestStatus,
   GitDiffRequest,
   GitReadBatchRequest,
@@ -58,6 +59,7 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
+  UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -142,6 +144,10 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  SessionTenancyAccessError,
+  SessionTenancyConflictError,
+  SessionTenancyInvalidRequestError,
+  SessionTenancyNotActivatedError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
   sessionLatestWorkspaceCapture,
@@ -199,6 +205,8 @@ import {
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  SessionTenancyManagedHumanRequiredError,
+  SessionTenancyPersistenceOutcomeUnknownError,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -225,6 +233,7 @@ import {
   editHumanQueuePrompt,
   getActorNewSessionDraft,
   getHumanComposerDraft,
+  forkManagedHumanSessionPrivate,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
@@ -233,6 +242,7 @@ import {
   sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
   updateSessionMcpApprovalPolicy,
+  updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
   updateSessionTitle,
   workflowIdForSession,
@@ -249,6 +259,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import { ApiHttpError } from "../http/api-error";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -709,6 +720,63 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const parsed = UpdateSessionVisibilityRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session visibility request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    try {
+      return c.json(
+        await updateManagedHumanSessionVisibility(
+          deps,
+          authorization,
+          workspaceId,
+          sessionId,
+          parsed.data,
+          "http",
+        ),
+      );
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/forks", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const parsed = ForkSessionRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session fork request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    try {
+      const response = await forkManagedHumanSessionPrivate(
+        deps,
+        authorization,
+        workspaceId,
+        sessionId,
+        parsed.data,
+        "http",
+      );
+      return c.json(response, response.replay ? 200 : 201);
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
   });
 
   const publishRealtimeMutation = async (
@@ -3773,6 +3841,8 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
+  if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -3887,6 +3957,70 @@ function sessionAuthorizationHttpError(error: unknown): HTTPException {
   }
   if (error instanceof HTTPException) return error;
   throw error;
+}
+
+export function sessionTenancyHttpError(error: unknown): Error {
+  if (error instanceof SessionTenancyManagedHumanRequiredError) {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: "Session tenancy mutations require the owning managed-human session.",
+      retryable: false,
+    });
+  }
+  if (error instanceof SessionTenancyNotActivatedError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: "Session tenancy is not activated for this organization.",
+      retryable: false,
+      details: { reason: "not_activated" },
+    });
+  }
+  if (error instanceof SessionTenancyConflictError) {
+    return new ApiHttpError(409, {
+      code: error.reason === "operation_reuse" ? "idempotency_conflict" : "conflict",
+      message:
+        error.reason === "not_quiescent"
+          ? "The session must be fully quiescent before this change."
+          : error.reason === "authority_epoch"
+            ? "The session authority changed before this operation committed."
+            : "The idempotency key was already used with different input.",
+      retryable: false,
+      details: {
+        reason: error.reason,
+        ...(error.blocker ? { blocker: error.blocker } : {}),
+      },
+    });
+  }
+  if (error instanceof SessionTenancyAccessError) {
+    return new ApiHttpError(404, {
+      code: "not_found",
+      message: "Session not found.",
+      retryable: false,
+    });
+  }
+  if (error instanceof SessionTenancyInvalidRequestError) {
+    return new ApiHttpError(422, {
+      code: "validation_failed",
+      message: "Invalid session tenancy request.",
+      retryable: false,
+    });
+  }
+  if (error instanceof SessionTenancyPersistenceOutcomeUnknownError) {
+    return new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message:
+        "The session tenancy mutation outcome is unknown. Retry with the same idempotency key.",
+      retryable: true,
+      outcomeUnknown: true,
+    });
+  }
+  if (
+    error instanceof SessionAuthorizationDeniedError ||
+    error instanceof SessionAuthorizationUnavailableError
+  ) {
+    return sessionAuthorizationHttpError(error);
+  }
+  return error instanceof Error ? error : new Error("Unknown session tenancy error");
 }
 
 function eventEnumValue<T extends string>(

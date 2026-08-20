@@ -302,6 +302,16 @@ async function seedSession(human: ManagedHuman, workspaceId: string): Promise<st
   return session.id;
 }
 
+async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (
+      ${human.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-test'
+    )`;
+}
+
 const draftBody = {
   expectedRevision: 0,
   text: "draft in my own personal workspace",
@@ -333,6 +343,61 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session surface inside their own personal workspace", () => {
+  test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const sessionId = await seedSession(human, human.personalWorkspaceId);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+
+    const visibility = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/visibility`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          visibility: "private",
+          expectedAuthorityEpoch: 1,
+          idempotencyKey: "api-personal-visibility",
+        }),
+      },
+    );
+    expect(visibility.status).toBe(200);
+    expect(await visibility.json()).toMatchObject({
+      visibility: "private",
+      authorityEpoch: 2,
+      changed: true,
+      replay: false,
+    });
+
+    const fork = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+      },
+    );
+    expect(fork.status).toBe(201);
+    const created = (await fork.json()) as { sessionId: string; eventId: string };
+    expect(created).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
+
+    const replay = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+      },
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      replay: true,
+      sessionId: created.sessionId,
+      eventId: created.eventId,
+    });
+  }, 180_000);
+
   test("the premise: the personal workspace has no workspace_memberships row", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

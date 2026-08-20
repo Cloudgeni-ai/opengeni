@@ -14,6 +14,7 @@ import {
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
+  sessionVisibilityToPublic,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
 import {
@@ -83,6 +84,7 @@ import type {
   Session,
   SessionAuthorizationListScope,
   SessionListResponse,
+  SessionTenancyPublicProjection,
   SessionEvent,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -142,6 +144,7 @@ import type {
   ModalCheckpointProviderBinding,
   SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
+import { sessionTenancyProductActivated } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
   failCodemodeOperationInTransaction,
@@ -27438,6 +27441,11 @@ export async function listSessionsForSubject(
           throw new SessionListAccessError();
         }
 
+        const tenancyActivated = await sessionTenancyProductActivated(
+          tx as unknown as Database,
+          workspaceId,
+        );
+
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
@@ -27746,6 +27754,7 @@ export async function listSessionsForSubject(
                 control,
                 mcpServers.get(row.session.id) ?? [],
                 mapSessionPin(row.pin),
+                { subjectId: options.subjectId, activated: tenancyActivated },
               ),
               treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
             },
@@ -27824,12 +27833,15 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
+    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     return projectSessionForRelatedAccess(
       await mapSessionWithControl(
         scopedDb,
         row.session,
         mcpServers.get(sessionId) ?? [],
         mapSessionPin(row.pin),
+        undefined,
+        { subjectId, activated: tenancyActivated },
       ),
       relatedSessionAccess,
     );
@@ -29302,6 +29314,28 @@ export async function getSessionEvent(
   eventId: string,
 ): Promise<SessionEvent | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.id, eventId),
+        ),
+      )
+      .limit(1);
+    return row ? mapEvent(row) : null;
+  });
+}
+
+/** Read one durable event under the exact human subject visibility projection. */
+export async function getSessionEventForSubject(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+  eventId: string,
+): Promise<SessionEvent | null> {
+  return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.sessionEvents)
@@ -61342,11 +61376,41 @@ async function mapSessionWithControl(
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
   workspaceControl?: WorkspaceControlRow,
+  tenancyViewer?: { subjectId: string; activated: boolean },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  return mapSession(row, control, mcpServers, pin);
+  return mapSession(row, control, mcpServers, pin, tenancyViewer);
+}
+
+function mapSessionTenancy(
+  row: typeof schema.sessions.$inferSelect,
+  subjectId: string,
+): SessionTenancyPublicProjection {
+  const hasFork = row.forkedFromSessionId !== null;
+  if (
+    hasFork !==
+    (row.forkedFromVisibility !== null &&
+      row.forkedFromAuthorityEpoch !== null &&
+      row.forkedAt !== null)
+  ) {
+    throw new Error(`Session fork provenance is incomplete: ${row.id}`);
+  }
+  return {
+    visibility: sessionVisibilityToPublic(row.visibility as "user_private" | "workspace_shared"),
+    authorityEpoch: Number(row.authorityEpoch),
+    ownedByCurrentUser: row.ownerSubjectId === subjectId,
+    fork: hasFork
+      ? {
+          sourceVisibility: sessionVisibilityToPublic(
+            row.forkedFromVisibility as "user_private" | "workspace_shared",
+          ),
+          sourceAuthorityEpoch: Number(row.forkedFromAuthorityEpoch),
+          forkedAt: row.forkedAt!.toISOString(),
+        }
+      : null,
+  };
 }
 
 function mapSession(
@@ -61354,6 +61418,7 @@ function mapSession(
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
+  tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
   return {
     id: row.id,
@@ -61371,6 +61436,9 @@ function mapSession(
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
     metadata: row.metadata,
+    ...(tenancyViewer?.activated
+      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
+      : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,

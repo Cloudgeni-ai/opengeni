@@ -1379,6 +1379,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/sessions/:id/${match[1]}`,
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/lineage$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/lineage",
   },

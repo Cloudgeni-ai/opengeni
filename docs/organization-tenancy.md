@@ -713,13 +713,13 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
-## Session-visibility and fork surfaces: database activated, product callers pending
+## Session-visibility and private-fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
 surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
-mutation contract. Read this section before concluding either that session
-visibility "does not exist yet" or that it already has a public caller. Both
-are wrong.
+mutation contract. The database prerequisite and first public caller are now
+both present, but the caller remains inert for every organization without its
+exact version-1 activation receipt.
 
 **Active today.** These parts of 0225 run in production on every deployment:
 
@@ -740,20 +740,25 @@ are wrong.
 - The `authority_change` interruption kind and the runtime `EXECUTE` grants on
   both lifecycle functions.
 
-**Database-active only after an explicit cutover.**
+Migration 0304 aligns `session_private_actor_visible` with the same exact
+personal-workspace-or-ordinary-membership disjunction. Without that repair, a
+valid personal-workspace transition to private committed successfully and then
+hid the session and its event from its owner because personal workspaces never
+carry a `workspace_memberships` row.
+
+**Mutation-active only after an explicit per-organization cutover.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY
 DEFINER, are granted to the runtime role, are listed in
 `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and have a first-class adapter at
-`@opengeni/db/session-tenancy`. Nothing in `apps/api`, `apps/worker`,
-`apps/web`, `@opengeni/core`, `@opengeni/runtime`, `@opengeni/sdk`, or
-`@opengeni/react` calls either one. Their only invocations are the
-`packages/db` test lane, which uses them both to prove 0225's own fences and as
-the only way to manufacture a `user_private` session for later migrations' RLS
-coverage. The matching `SessionAuthorizationOperation` literals
-`session.visibility.write` and `session.fork.create` are declared in
-`@opengeni/contracts` and authorized nowhere, and the
-`session.visibility.changed` event type has no TypeScript emitter - only the
-SQL function writes it.
+`@opengeni/db/session-tenancy`. `@opengeni/core` now owns the sole product
+adapter call, reached by `PUT .../sessions/:id/visibility` and
+`POST .../sessions/:id/forks`; `@opengeni/sdk` exposes matching methods. Both
+routes require the canonical managed-cookie owner, the exact workspace/session
+permissions, and the corresponding host authorization operation. Worker, MCP,
+runtime, React, and web remain non-callers. The SQL function remains the sole
+writer of `session.visibility.changed`; core fetches the returned durable event
+id and sequence and performs best-effort live publication without appending a
+second event or waking a workflow.
 
 Migration 0303 itself is rolling and activates no organization. The drained
 `bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
@@ -766,9 +771,10 @@ organization receipt fails closed.
 0303 is also an intentional signature cutover: it removes the historical
 eight-argument transition and fork routines and installs only the corresponding
 nine-argument routines with a mandatory activation-version argument and no SQL
-default. There is no compatibility wrapper because no product caller exists and
-an omitted version must fail with undefined-function rather than infer or bypass
-activation. The 0225/0289 migration bodies remain historical checkpoints;
+default. There is no compatibility wrapper because no legacy product caller
+existed at the signature cutover, and an omitted version must fail with
+undefined-function rather than infer or bypass activation. The 0225/0289
+migration bodies remain historical checkpoints;
 anything running against the fully migrated schema, including later migration
 tests, must supply version `1` and operate under the exact durable receipt.
 
@@ -796,10 +802,16 @@ The activated database contract is intentionally narrow:
 - Both adapters return the exact durable event id and sequence required by a
   later core publisher.
 
-The practical product consequence remains: no API/core/worker/SDK/React/web
-caller changes a production session from `workspace_shared` yet.
-`test/session-visibility-contract-surface.test.ts` pins that boundary. The first
-real caller must update that contract deliberately.
+The practical product consequence is deliberately bounded. Only an activated
+organization's canonical managed-human owner may change an otherwise quiescent
+same-workspace session between `workspace_shared` and `user_private`, or make an
+independent same-workspace private fork. API keys, delegated/service callers,
+administrators acting on another human's session, workers, MCP, runtime, React,
+and web have no caller. The SDK requires an explicit idempotency key, and
+visibility changes additionally require the current public authority epoch.
+Subject-authorized session reads expose the secret-safe `tenancy` projection
+only after activation. `test/session-visibility-contract-surface.test.ts` pins
+that exact caller boundary.
 
 ## Referential integrity
 
@@ -847,7 +859,8 @@ remains future work at this phase; old writers remain accepted. Migration 0222
 separately delivers the accepted-attempt authority snapshot and stale
 activity-write fence described in the Legacy behavior section, and migration
 0225 subsequently activates new-session owner derivation and visibility-aware
-reads while leaving visibility mutation and fork without a caller.
+reads. The later bounded API/core/SDK activation described above does not widen
+the personal-workspace exception or add another durable membership row.
 
 ### C. Membership lifecycle (0263 current)
 
@@ -1359,10 +1372,9 @@ fencing is delivered by migration 0222.
 
 Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
-contract described in "Session-visibility and fork surfaces: database
-activated, product callers pending". Remaining work is the authorized
-API/core/SDK/UI surface and the personal-resource grant UX; no production
-caller exists yet.
+contract described in "Session-visibility and private-fork public activation".
+The bounded API/core/SDK owner caller is now active behind the per-organization
+receipt. Remaining work includes web UI and personal-resource grant UX.
 
 Cache and pin stripping is delivered by migration
 `0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
@@ -1609,11 +1621,12 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
-- a caller for the activated `transition_session_visibility` and
-  `fork_session_content` lifecycle functions: no API, SDK, worker, MCP, or UI
-  surface for session visibility mutation, session sharing, or independent
-  fork. Visibility-aware reads are *not* a non-goal - they are active (see
-  "Session-visibility and fork surfaces: database activated, product callers pending");
+- worker, MCP, runtime, React, or web callers for the activated
+  `transition_session_visibility` and `fork_session_content` lifecycle
+  functions; cross-workspace/public fork, session sharing, attachment APIs, and
+  personal-grant UI also remain out of scope. The bounded API/core/SDK owner
+  caller and activation-gated subject read projection are active (see
+  "Session-visibility and private-fork public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
 - an always-on retention deletion worker (0263 exposes a supported bounded

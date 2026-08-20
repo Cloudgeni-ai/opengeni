@@ -17,7 +17,6 @@ import {
   listSessionEvents,
   listSessionTurns,
   nestedPostgresSqlState,
-  SessionTenancyConflictError,
   transitionSessionVisibility,
   withSessionRlsActorContext,
   withWorkspaceRls,
@@ -564,7 +563,11 @@ describe("migration 0303 session tenancy product activation", () => {
         expectedAuthorityEpoch: 1,
         operationKey: `interaction-blocked:${crypto.randomUUID()}`,
       }),
-    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
+    ).rejects.toMatchObject({
+      name: "SessionTenancyConflictError",
+      reason: "not_quiescent",
+      blocker: "active_sandbox_access",
+    });
     const [unchanged] = await shared.admin<{ visibility: string; epoch: number }[]>`
       select visibility, authority_epoch as epoch from sessions where id = ${value.session.id}`;
     expect(unchanged).toEqual({ visibility: "workspace_shared", epoch: 1 });
@@ -730,7 +733,11 @@ describe("migration 0303 session tenancy product activation", () => {
         expectedAuthorityEpoch: 1,
         operationKey,
       }),
-    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
+    ).rejects.toMatchObject({
+      name: "SessionTenancyConflictError",
+      reason: "not_quiescent",
+      blocker: "active_goal",
+    });
     const [unchanged] = await shared.admin<
       Array<{ visibility: string; epoch: number; goalStatus: string }>
     >`
