@@ -982,7 +982,14 @@ It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
-the API manifest.
+the API manifest. The official BOM does **not** include `opengeni-desktop`.
+Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
+published by `.github/workflows/publish-desktop-image.yml`. Set Helm
+`desktop.imageRef` to that digest (`registry/opengeni-desktop@sha256:…`). The
+chart fails closed when `OPENGENI_SANDBOX_BACKEND=modal` and
+`OPENGENI_SANDBOX_DESKTOP_ENABLED=true` without a digest pin. Do not point Modal
+at official `opengeni-sandbox`. A pin change applies to **new** sandbox creates;
+rotate or reap the warm lease before an existing session can use the new box.
 Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the

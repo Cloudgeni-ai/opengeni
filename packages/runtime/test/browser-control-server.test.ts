@@ -19,7 +19,40 @@ describe("browser control server placement lifecycle", () => {
     expect(command).toContain("OPENGENI_BROWSERD_ADMIN_TOKEN_FILE='/run/opengeni/browserd-token'");
     expect(command).toContain("OPENGENI_BROWSERD_ALLOWED_ORIGINS='https://app.opengeni.com'");
     expect(command).toContain("OPENGENI_CODEMODE_TOKEN_FILE=/dev/null");
+    expect(command).toContain("test -x /usr/local/bin/opengeni-browserd-up");
+    expect(command).toContain("/usr/local/bin/opengeni-browserd-up");
     expect(command).not.toContain("Bearer");
+  });
+
+  test("classifies a missing browserd binary as engine_unavailable", async () => {
+    await expect(
+      ensureBrowserControlServer(
+        {
+          exec: async () => ({
+            exitCode: 127,
+            stderr: "env: ‘opengeni-browserd-up’: No such file or directory",
+          }),
+        },
+        { adminTokenFile: "/run/opengeni/browserd-token" },
+      ),
+    ).rejects.toMatchObject<BrowserControlServerError>({
+      exitCode: 127,
+      stage: "engine_unavailable",
+    });
+    await expect(
+      ensureBrowserControlServer(
+        {
+          exec: async () => ({
+            exitCode: 16,
+            stderr: "opengeni-browserd-up is not installed on this sandbox image",
+          }),
+        },
+        { adminTokenFile: "/run/opengeni/browserd-token" },
+      ),
+    ).rejects.toMatchObject<BrowserControlServerError>({
+      exitCode: 16,
+      stage: "engine_unavailable",
+    });
   });
 
   test("launches through structured exec and parses the exact readiness marker", async () => {
@@ -92,7 +125,7 @@ describe("browser control server placement lifecycle", () => {
         return "OPENGENI_BROWSERD_DOWN";
       },
     });
-    expect(commands).toEqual(["opengeni-browserd-down"]);
+    expect(commands).toEqual(["/usr/local/bin/opengeni-browserd-down"]);
   });
 
   test("rejects relative token paths and non-origin allowlist entries", () => {
