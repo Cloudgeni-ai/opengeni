@@ -19,6 +19,7 @@ export type LocalMcpBridgeDestination = Readonly<{
  */
 export type LocalMcpBridgeDescriptor = Readonly<{
   contractVersion: typeof LOCAL_MCP_BRIDGE_CONTRACT_VERSION;
+  assurance: "static_strict" | "revision_descriptive";
   adapterId: string;
   providerId: string;
   catalogIdentity: string;
@@ -40,7 +41,7 @@ export interface LocalMcpBridgeAdapter<TConfig, TContext> {
 }
 
 export function defineLocalMcpBridgeDescriptor(
-  input: Omit<LocalMcpBridgeDescriptor, "contractVersion" | "transport">,
+  input: Omit<LocalMcpBridgeDescriptor, "contractVersion" | "transport" | "assurance">,
 ): LocalMcpBridgeDescriptor {
   const adapterId = boundedIdentity(input.adapterId, "adapterId");
   const providerId = boundedIdentity(input.providerId, "providerId");
@@ -64,16 +65,44 @@ export function defineLocalMcpBridgeDescriptor(
     }
     return Object.freeze({ origin: url.origin, pathPrefix: destination.pathPrefix });
   });
+  return freezeDescriptor(
+    { ...input, adapterId, providerId, catalogIdentity },
+    "static_strict",
+    destinations,
+  );
+}
+
+/**
+ * Describe an already-accepted immutable revision without introducing a new
+ * runtime validation boundary. The revision compiler and transport retain
+ * their existing URL and authority contracts; this metadata grants neither.
+ */
+export function describeLocalMcpBridgeDescriptor(
+  input: Omit<LocalMcpBridgeDescriptor, "contractVersion" | "transport" | "assurance">,
+): LocalMcpBridgeDescriptor {
+  return freezeDescriptor(input, "revision_descriptive", input.destinations);
+}
+
+function freezeDescriptor(
+  input: Omit<LocalMcpBridgeDescriptor, "contractVersion" | "transport" | "assurance">,
+  assurance: LocalMcpBridgeDescriptor["assurance"],
+  destinations: readonly LocalMcpBridgeDestination[],
+): LocalMcpBridgeDescriptor {
   return Object.freeze({
     contractVersion: LOCAL_MCP_BRIDGE_CONTRACT_VERSION,
-    adapterId,
-    providerId,
-    catalogIdentity,
+    assurance,
+    adapterId: input.adapterId,
+    providerId: input.providerId,
+    catalogIdentity: input.catalogIdentity,
     transport: "in_process",
     authority: input.authority,
     toolSurface: input.toolSurface,
     mutationReplay: input.mutationReplay,
-    destinations: Object.freeze(destinations),
+    destinations: Object.freeze(
+      destinations.map((destination) =>
+        Object.freeze({ origin: destination.origin, pathPrefix: destination.pathPrefix }),
+      ),
+    ),
   });
 }
 

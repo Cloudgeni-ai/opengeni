@@ -12,7 +12,7 @@ import {
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
 import {
-  defineLocalMcpBridgeDescriptor,
+  describeLocalMcpBridgeDescriptor,
   type LocalMcpBridgeDescriptor,
   type LocalMcpBridgeServer,
 } from "./mcp-bridge";
@@ -268,11 +268,12 @@ export class OpenApiMcpServer implements LocalMcpBridgeServer {
 
   constructor(private readonly options: OpenApiServerOptions) {
     this.name = `openapi:${stableToolId(options.revision.definitionId)}`;
-    this.bridge = defineLocalMcpBridgeDescriptor({
+    this.bridge = describeLocalMcpBridgeDescriptor({
       adapterId: "openapi",
       providerId: options.revision.source.provider ?? options.revision.definitionId,
       catalogIdentity: `integration-definition:${options.revision.definitionId}@${options.revision.id}`,
-      authority: options.authority.connectionRef ? "connection" : "none",
+      authority:
+        options.authority.connectionRef && options.credentialResolver ? "connection" : "none",
       toolSurface: "immutable_revision",
       mutationReplay: "safe_reads_only",
       destinations: openApiBridgeDestinations(options.revision),
@@ -337,8 +338,10 @@ function openApiBridgeDestinations(revision: OpenApiRevision) {
   const destinations = new Map<string, { origin: string; pathPrefix: string }>();
   for (const binding of Object.values(revision.bindings)) {
     const url = new URL(binding.serverUrl);
-    const pathPrefix = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
-    destinations.set(`${url.origin}${pathPrefix}`, { origin: url.origin, pathPrefix });
+    // OpenAPI paths may legally resolve `..` segments outside a server base
+    // path. Root is the narrowest truthful static prefix for every operation
+    // on this frozen origin; the transport remains the actual network gate.
+    destinations.set(url.origin, { origin: url.origin, pathPrefix: "/" });
   }
   return [...destinations.values()].sort((left, right) =>
     `${left.origin}${left.pathPrefix}`.localeCompare(`${right.origin}${right.pathPrefix}`),

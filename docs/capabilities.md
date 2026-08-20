@@ -73,15 +73,18 @@ one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
-Provider APIs exposed through an in-process MCP adapter implement the shared
-local bridge contract in `packages/capabilities/src/mcp-bridge.ts`. The
-secret-free descriptor identifies the catalog identity, existing Connection,
-host, or no-credential authority class, exact HTTPS destinations, immutable or
-reviewed tool surface, and safe-read-only replay policy. It grants no authority:
-the concrete adapter still revalidates its existing authority before every
-physical request. Generic adapter selection rejects ambiguous matches and keeps
-provider matching out of the catalog importer, OAuth client/profiles, and web
-row/sheet components. See
+Reviewed first-party local bridges and immutable OpenAPI Integration adapters
+implement the shared contract in `packages/capabilities/src/mcp-bridge.ts`.
+Static bridges expose a strictly validated HTTPS descriptor; OpenAPI adapters
+expose conservative descriptive metadata over the already-accepted immutable
+revision without adding another URL, destination-count, or authority gate.
+The descriptor identifies catalog identity, actual complete Connection/host/no
+credential authority, tool-surface class, destinations, and safe-read-only
+replay policy, but grants no authority. Generic static-adapter selection rejects
+ambiguous matches and keeps provider matching out of the catalog importer,
+OAuth client/profiles, and web row/sheet components. GraphQL integrations use
+their existing local MCP adapter but do not yet claim this bridge descriptor.
+See
 [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install

@@ -11,12 +11,17 @@ or UI subsystem.
 
 The code contract is `packages/capabilities/src/mcp-bridge.ts`:
 
-- every server exposes a validated, secret-free `LocalMcpBridgeDescriptor`;
+- every server exposes a secret-free `LocalMcpBridgeDescriptor` whose
+  `assurance` distinguishes strict static validation from descriptive immutable
+  revision metadata;
 - a static reviewed bridge declares `toolSurface: "static_reviewed"`; a
   compiled Integration Definition declares `"immutable_revision"`;
 - `authority` names the existing authority spine (`connection`, `host`, or
   `none`) but never grants it;
-- every provider destination is an exact HTTPS origin plus path prefix;
+- a static reviewed bridge declares 1-32 exact HTTPS origins plus path
+  prefixes; an immutable OpenAPI revision is described without adding a new
+  runtime validation gate and conservatively reports each accepted origin at
+  `/`, including HTTP origins already permitted for local/test definitions;
 - `mutationReplay: "safe_reads_only"` is mandatory: a safe read may refresh
   and retry after an authorization failure, while a mutation with an ambiguous
   provider outcome is never replayed; and
@@ -55,7 +60,8 @@ authority.
   `GmailRestMcpServer` and the existing personal Connection resolver.
 - **Google Drive** already uses the immutable Integration Definition compiler
   and local OpenAPI MCP adapter. It now explicitly conforms to this contract;
-  its provider-specific facet/source authority and one Integration row remain
+  its descriptor is descriptive metadata over the already-accepted revision,
+  while provider-specific facet/source authority and one Integration row remain
   unchanged. A duplicate Connector row would be incorrect.
 - **Square Cash App** already has a streamable-HTTP provider endpoint in the
   committed catalog (`https://connect.squareup.com/v2/mcp/cash-app`). It needs
