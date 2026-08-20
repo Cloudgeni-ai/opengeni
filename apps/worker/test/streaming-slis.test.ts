@@ -5,6 +5,7 @@ import {
   ModelRequestLifecycleMetrics,
   recordBatchFlush,
   recordContextCompaction,
+  recordContextCompactionStarted,
   recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
@@ -446,11 +447,19 @@ describe("context-pressure signals", () => {
 
   test("compaction counter increments by trigger", async () => {
     const observability = worker();
+    recordContextCompactionStarted(observability, "auto");
+    recordContextCompactionStarted(observability, "operator");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "operator");
 
     const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="auto"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
+    );
     expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="overflow"[^}]*\} 2\b/,
     );

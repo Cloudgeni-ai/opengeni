@@ -99,6 +99,8 @@ export async function maybeCompactContext(
      * append again — the event is already durable.
      */
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /** Observe the durable start only after its attempt-fenced transition commits. */
+    onCompactionStarted?: (trigger: "auto" | "operator" | "proactive" | "overflow") => void;
     /** Materialize retained screenshot receipts only in the attempt-local model view. */
     materializeHistory?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
     /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
@@ -208,6 +210,7 @@ export async function maybeCompactContext(
       `turn attempt was fenced while recording context compaction start: ${started.reason}`,
     );
   }
+  options.onCompactionStarted?.(trigger);
   await options.publishLiveEvents?.(started.events);
 
   if (useRemoteV2) {
