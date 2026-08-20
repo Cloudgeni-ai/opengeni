@@ -29,6 +29,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 ] as const;
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
+const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -83,6 +84,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
@@ -251,6 +253,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",

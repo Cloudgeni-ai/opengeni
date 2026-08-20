@@ -193,6 +193,7 @@ export type TurnSubmission = {
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
   firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
+  personalResourceAttachment?: import("@opengeni/sdk").PersonalResourceAttachmentIntent;
 };
 
 export type AuthSession = {
