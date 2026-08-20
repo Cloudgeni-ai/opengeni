@@ -3,6 +3,7 @@ import {
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
+  PersonalResourceAttachmentSummary,
   TimelineAnnotations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
@@ -25,6 +26,7 @@ import {
   type ToolRef,
   type TurnExecutionPolicyV1,
   type TimelineAnnotation,
+  type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
@@ -66,6 +68,7 @@ import {
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
+import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -78,7 +81,8 @@ export type QueueCommandConflictCode =
   | "PROMPT_CHANGED"
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
-  | "EDIT_SOURCE_CHANGED";
+  | "EDIT_SOURCE_CHANGED"
+  | "ONCE_ATTACHMENT_IMMUTABLE";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -188,6 +192,9 @@ function mapSubmittedPromptTurn(row: typeof schema.sessionTurns.$inferSelect): S
     ),
     initiatorContext: row.initiatorContext ?? {},
     personalConnections,
+    personalResources: row.personalResourceAttachmentSummary
+      ? PersonalResourceAttachmentSummary.parse(row.personalResourceAttachmentSummary)
+      : null,
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
@@ -1110,6 +1117,17 @@ export async function editQueuedTurnInTransaction(
       draftRevision,
     });
   }
+  if (turn.personalResourceAttachmentSummary?.mode === "once") {
+    throw new QueueCommandConflictError(
+      "ONCE_ATTACHMENT_IMMUTABLE",
+      "A queued prompt with a once personal-resource attachment cannot be edited into new work",
+      {
+        queueVersion: session.queueVersion,
+        turnVersion: turn.version,
+        draftRevision,
+      },
+    );
+  }
   const nextDraftRevision = draftRevision + 1;
   const draftValues = {
     accountId: input.accountId,
@@ -1474,6 +1492,7 @@ export async function submitHumanPromptInTransaction(
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+    personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
@@ -1515,6 +1534,7 @@ export async function submitHumanPromptInTransaction(
     messagePresentation: input.messagePresentation ?? null,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+    personalResourceAttachment: input.personalResourceAttachment ?? null,
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1775,12 +1795,11 @@ export async function submitHumanPromptInTransaction(
   if (
     (input.personalConnectionDelegations ?? []).some(
       (delegation) => delegation.userDelegation !== undefined,
-    )
+    ) ||
+    input.personalResourceAttachment !== undefined
   ) {
     if (!acceptedInitiatingHumanSubjectId) {
-      throw new SessionControlInvariantError(
-        "Activated connection authority requires an exact causal human",
-      );
+      throw new SessionControlInvariantError("Personal authority requires an exact causal human");
     }
     await db.execute(
       sql`select set_config(
@@ -1883,6 +1902,49 @@ export async function submitHumanPromptInTransaction(
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
   let committedTurn = turn;
+  const personalResourceExpectedAuthorityEpoch =
+    input.personalResourceAttachment?.expectedAuthorityEpoch;
+  let acceptedPersonalResources: Awaited<
+    ReturnType<typeof acceptTurnPersonalResourceAttachmentInTransaction>
+  > | null = null;
+  if (input.personalResourceAttachment) {
+    if (personalResourceExpectedAuthorityEpoch === undefined) {
+      throw new SessionControlInvariantError(
+        "Personal-resource attachment requires an expected authority epoch",
+      );
+    }
+    acceptedPersonalResources = await acceptTurnPersonalResourceAttachmentInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId,
+      subjectId: acceptedInitiatingHumanSubjectId!,
+      intent: {
+        ...input.personalResourceAttachment,
+        expectedAuthorityEpoch: personalResourceExpectedAuthorityEpoch,
+      },
+    });
+  }
+  if (acceptedPersonalResources) {
+    committedTurn = {
+      ...turn,
+      personalResourceAttachmentSummary: acceptedPersonalResources.summary,
+      personalResourceProtocolVersion: 1,
+    };
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId,
+      sequence: ++sequence,
+      type: "session.personal_resources.attached",
+      payload: {
+        turnId,
+        ...acceptedPersonalResources.summary,
+      },
+      occurredAt: now,
+    });
+  }
   eventValues.push({
     accountId: input.accountId,
     workspaceId: input.workspaceId,

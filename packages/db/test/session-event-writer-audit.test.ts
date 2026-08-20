@@ -184,7 +184,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
-    inserts: 3,
+    inserts: 4,
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {

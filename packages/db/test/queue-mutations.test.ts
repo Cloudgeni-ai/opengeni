@@ -266,6 +266,45 @@ describe("canonical queue commands", () => {
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
   });
 
+  test("Edit cannot turn a queued once-bearing prompt into new work", async () => {
+    const value = await fixture();
+    const turn = value.turns[1]!;
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({
+          personalResourceProtocolVersion: 1,
+          personalResourceAttachmentSummary: {
+            mode: "once",
+            context: "user_private",
+            resourceCount: 1,
+            resourceKinds: ["variable_set"],
+            sharedOutputWarningVersion: 1,
+          },
+        })
+        .where(eq(schema.sessionTurns.id, turn.id));
+    });
+
+    await expect(
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: turn.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: turn.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ONCE_ATTACHMENT_IMMUTABLE" });
+  });
+
   test("Edit then Send preserves source model context in full audit data and rejects an override", async () => {
     const value = await fixture();
     const sourceModelContext = "host-only record context: source-42";

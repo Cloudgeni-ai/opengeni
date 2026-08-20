@@ -508,6 +508,7 @@ export async function registerSessionTurnAttemptClaim(
     authorityEpoch: number;
     authorityVisibility: "user_private" | "workspace_shared";
     authorityOwnerOrganizationMembershipId: string | null;
+    personalResourceProtocolVersion: number;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
     connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
@@ -562,6 +563,7 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
+    existing.personalResourceProtocolVersion !== input.personalResourceProtocolVersion ||
     JSON.stringify(existing.connectorActionPolicies) !==
       JSON.stringify(input.connectorActionPolicies) ||
     existing.state === "closed"
