@@ -2948,7 +2948,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     const onDemandAt = establishSource.indexOf('} else if (establishPolicy === "on-demand")');
     const prefetchAt = establishSource.indexOf("shouldPrefetchManagedSandbox({", onDemandAt);
     const establishCallAt = source.indexOf("await establishTurnSandbox({");
-    const toolsCallAt = source.indexOf("const toolRuntime = await prepareTurnToolRuntime(", establishCallAt);
+    const toolsCallAt = source.indexOf(
+      "const toolRuntime = await prepareTurnToolRuntime(",
+      establishCallAt,
+    );
     const lazyBindAt = source.indexOf("await bindLazySandboxProvisioner(", toolsCallAt);
     const toolsSource = await Bun.file(
       new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),

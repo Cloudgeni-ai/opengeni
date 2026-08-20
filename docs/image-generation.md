@@ -9,7 +9,7 @@ Canonical sources:
 
 - tool contract: `packages/contracts/src/image-generation.ts`
 - provider selection and turn integration:
-  `apps/worker/src/activities/agent-turn.ts`
+  `apps/worker/src/activities/agent-turn/agent-build.ts`
 - media validation, retention, and model projections:
   `apps/worker/src/activities/generated-images.ts`
 - adapter operation fence:

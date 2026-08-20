@@ -325,4 +325,4 @@ Canonical implementation: `packages/contracts/src/workspace-instruction-policies
 `packages/sdk/src/workspace-instruction-policies.ts`, with the bounded admin
 composer in `apps/web/src/routes/workspace-state.tsx`, plus runtime composition in
 `packages/runtime/src/workspace-governance.ts` and
-`apps/worker/src/activities/agent-turn.ts`.
+`apps/worker/src/activities/agent-turn/governance-model.ts`.

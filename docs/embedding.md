@@ -238,7 +238,7 @@ The workspace remains the operational boundary. Route and core code must use the
 
 ### Entitlements / Admit Run
 
-Canonical sources: `EntitlementsPort` in `packages/contracts/src/index.ts`, core `checkLimit`/`requireLimit` in `packages/core/src/billing/limits.ts`, worker-side `ensureRunAllowed` in `apps/worker/src/activities/agent-turn.ts`.
+Canonical sources: `EntitlementsPort` in `packages/contracts/src/index.ts`, core `checkLimit`/`requireLimit` in `packages/core/src/billing/limits.ts`, worker-side `ensureRunAllowed` in `apps/worker/src/activities/agent-turn/admission.ts`.
 
 `EntitlementsPort` is:
 

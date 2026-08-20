@@ -18,7 +18,7 @@ Canonical implementation:
 - concrete durable-learning adapter:
   `packages/core/src/domain/company-profile-durable-learning-adapter.ts`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
-  resolved by `apps/worker/src/activities/agent-turn.ts`;
+  resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
 - admin presentation: the existing Company Brain / Workspace State route at
   `apps/web/src/routes/workspace-state.tsx`.
 

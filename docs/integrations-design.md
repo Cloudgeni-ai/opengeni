@@ -186,7 +186,7 @@ type ResolveConnectionCredentialResult =
     };
 ```
 
-`PrepareToolsOptions` gains `resolveCredential` and `onAuthNeeded`; `prepareAgentTools` composes a broker fetch for servers carrying a `connectionRef`: resolve → inject headers → on 401 force-refresh once and retry → on 403 `insufficient_scope` emit `auth_needed` (§6). Wired from the worker (`apps/worker/src/activities/agent-turn.ts`) alongside `onRuntimeEvent`.
+`PrepareToolsOptions` gains `resolveCredential` and `onAuthNeeded`; `prepareAgentTools` composes a broker fetch for servers carrying a `connectionRef`: resolve → inject headers → on 401 force-refresh once and retry → on 403 `insufficient_scope` emit `auth_needed` (§6). Wired from the worker (`apps/worker/src/activities/agent-turn/tool-environment.ts`) alongside `onRuntimeEvent`.
 
 Broker rules:
 

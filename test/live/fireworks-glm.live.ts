@@ -89,7 +89,7 @@ describe("live Fireworks GLM 5.2 (multi-provider path)", () => {
       const resolved = resolveTurnModel(settings, GLM_MODEL_ID);
       expect(resolved).not.toBeNull();
 
-      // Build the agent exactly as apps/worker/src/activities/agent-turn.ts does
+      // Build the agent exactly as apps/worker/src/activities/agent-turn/agent-build.ts does
       // for a registry-resolved turn: the resolved Model instance plus the
       // provider-derived gating (no hosted web_search and no
       // encrypted reasoning — the chat wire API has no encrypted_content field).

@@ -76,6 +76,7 @@ import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { buildTurnAgent } from "./agent-build";
 
+/** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the

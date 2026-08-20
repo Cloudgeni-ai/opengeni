@@ -12,7 +12,7 @@ Canonical implementation sources:
   `packages/db/src/index.ts`, `packages/db/src/schema.ts`, and migration
   `0234_xai_subscription_authority.sql`;
 - runtime: `apps/worker/src/activities/xai-auth.ts` and
-  `apps/worker/src/activities/agent-turn.ts`;
+  `apps/worker/src/activities/agent-turn/xai-capacity.ts`;
 - workflow capacity orchestration: `apps/worker/src/activities/codex-capacity.ts`
   and `apps/worker/src/workflows/session.ts`;
 - clients: the SuperGrok methods/types in `@opengeni/sdk`,

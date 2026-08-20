@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 describe("pack sandbox image runtime settings", () => {
   const source = readFileSync(
-    join(import.meta.dir, "..", "src", "activities", "agent-turn.ts"),
+    join(import.meta.dir, "..", "src", "activities", "agent-turn", "sandbox-establish.ts"),
     "utf8",
   );
 

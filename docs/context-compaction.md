@@ -28,7 +28,7 @@ The implementation lives in:
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
   bounded remote overflow retry, remote fail-closed path, fenced durable replacement.
-- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery;
+- `apps/worker/src/activities/agent-turn/compaction-prep.ts`: pre-call and same-turn recovery;
   Codex ALS beta/turn-metadata headers for remote v2.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
