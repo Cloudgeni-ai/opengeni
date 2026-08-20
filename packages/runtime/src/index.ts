@@ -1,5 +1,9 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
+  createLocalMcpBridgeFromAdapters,
+  type LocalMcpBridgeAdapter,
+} from "@opengeni/capabilities";
+import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
@@ -83,7 +87,12 @@ import {
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
-import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+import {
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  type GmailRestMcpBridgeConfig,
+  type GmailRestMcpBridgeContext,
+} from "./gmail-rest-mcp";
+
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
   ConnectorAttachmentTransferError,
@@ -568,6 +577,10 @@ export type {
 
 ensureReadableStreamFrom();
 
+const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
+  GmailRestMcpBridgeConfig,
+  GmailRestMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -3535,57 +3548,66 @@ export async function prepareAgentTools(
         // auth misses are still published as actionable state because the
         // workspace catalog explicitly told the user that the surface existed.
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
-        // Every official-Gmail-resource turn executes through OpenGeni's own
-        // REST bridge, never Google's Developer Preview MCP endpoint directly:
-        // the bridge is the sole Gmail path (see gmail-rest-mcp.ts).
-        const useGmailRestAdapter = isOfficialGmailMcpConfig(config.url, config.connectionRef);
-        const innerServer = useGmailRestAdapter
-          ? new GmailRestMcpServer({
-              workspaceId: options.workspaceId ?? "",
-              ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
-              serverId: config.id,
-              connectionRef: config.connectionRef!,
-              resolveCredential: async (request) =>
-                await resolveConnectionForRequest(
-                  options,
-                  request.serverId,
-                  request.connectionRef,
-                  request.destinationUrl,
-                  request.toolName,
-                  request.forceRefresh === true,
-                ),
-              onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
-              onResolvedConnectionId: (connectionId) =>
-                recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
-              fetchImpl: mcpFetchImpl,
-            })
-          : new MCPServerStreamableHttp({
-              url,
-              name: config.name ?? config.id,
-              cacheToolsList: config.cacheToolsList,
-              // The upstream transport logger receives raw thrown errors, whose
-              // messages may contain response bodies, URLs, headers, or echoed
-              // credentials. Keep its diagnostic surface structural only.
-              logger: mcpTransportLogger(config.id, {
-                // Codex Apps setup is a read-only initialize/tools-list handshake.
-                // A statusless transport failure is safe to retry, while auth
-                // responses remain non-retryable and publish their specific
-                // reconnect reason through codexAppsAuthFetch.
-                recoverySafeSetup: isCodexAppsMcpServer(config),
-              }),
-              // codex_apps returns connector tools with empty `outputSchema: {}` that the
-              // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-              // sanitize the response on the wire before validation. The namespace Set
-              // also captures each tool's original connector namespace (P4 Part B.1).
-              fetch: fetchImpl,
-              ...(await mcpServerRequestInit(settings, config)),
-              ...(config.timeoutMs
-                ? {
-                    timeout: config.timeoutMs,
-                    clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-                  }
-                : {}),
-            });
+        // First-party bridges are ordinary in-process MCP servers selected by
+        // adapter-owned matchers. Adding another provider extends this registry;
+        // generic transport/catalog code never branches on provider identity.
+        const bridge = createLocalMcpBridgeFromAdapters<
+          GmailRestMcpBridgeConfig,
+          GmailRestMcpBridgeContext
+        >(
+          BUILT_IN_MCP_BRIDGE_ADAPTERS,
+          {
+            url: config.url,
+            ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+          },
+          {
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          },
+        );
+        const innerServer =
+          bridge ??
+          new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
         const server = new PrefixedMcpServer(
           innerServer,
           config.id,
