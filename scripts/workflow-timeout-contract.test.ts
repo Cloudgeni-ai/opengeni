@@ -9,11 +9,23 @@ const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/
 const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
 const MAX_TIMEOUT_MINUTES = 120;
 const JOB_SETUP_ALLOWANCE_MINUTES = 1;
-const AMBIGUOUS_SHELL_TEXT = "\0";
-const ASSEMBLY_FRAGMENT_WINDOW = 24;
 const TIMEOUT_SPELLINGS = ["timeout", "gtimeout", "--timeout", "--timeout-seconds"] as const;
+const MAX_INTERPRETED_ANSI_BODY_CHARS = 128;
 const ATTEMPT_TIMEOUT_INPUT = "${{ inputs.attempt-timeout-seconds }}";
 const ATTEMPTS_INPUT = "${{ inputs.attempts }}";
+
+const TIMEOUT_TARGETS = TIMEOUT_SPELLINGS.map((spelling) => {
+  const literalMasks = new Map<string, number>();
+  for (const [index, character] of [...spelling].entries()) {
+    literalMasks.set(character, (literalMasks.get(character) ?? 0) | (1 << index));
+  }
+  return {
+    spelling,
+    literalMasks,
+    endBit: 1 << spelling.length,
+    allPositionsMask: (1 << (spelling.length + 1)) - 1,
+  } as const;
+});
 
 type Step = Readonly<{
   name?: string;
@@ -160,82 +172,291 @@ function positiveNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function ambiguousShellProjection(source: string): string {
-  return source
-    .replace(
-      /\$'((?:\\[\s\S]|[^']){0,128})'/gu,
-      (_whole, body: string) =>
-        AMBIGUOUS_SHELL_TEXT +
-        body.replace(/\\(?:x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|[\s\S])/gu, AMBIGUOUS_SHELL_TEXT) +
-        AMBIGUOUS_SHELL_TEXT,
-    )
-    .replace(/\$\{[^}\r\n]{0,128}\}/gu, AMBIGUOUS_SHELL_TEXT)
-    .replace(/\$\([^\r\n)]{0,128}\)/gu, AMBIGUOUS_SHELL_TEXT)
-    .replace(/;\s*[A-Za-z_][A-Za-z0-9_]*\s*\+=/gu, AMBIGUOUS_SHELL_TEXT)
-    .replace(/\$[A-Za-z_][A-Za-z0-9_]*/gu, AMBIGUOUS_SHELL_TEXT)
-    .replace(/["']/gu, "");
+function isAsciiLetter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
-function hasAmbiguousTimeoutAssembly(source: string): boolean {
-  const projection = ambiguousShellProjection(source);
-  for (const ambiguity of projection.matchAll(/\0+/gu)) {
-    const index = ambiguity.index;
-    if (index === undefined) continue;
-    const left =
-      /(?:--)?[A-Za-z-]+$/u.exec(
-        projection.slice(Math.max(0, index - ASSEMBLY_FRAGMENT_WINDOW), index),
-      )?.[0] ?? "";
-    const right =
-      /^(?:--)?[A-Za-z-]+/u.exec(
-        projection.slice(index + ambiguity[0].length, index + ASSEMBLY_FRAGMENT_WINDOW),
-      )?.[0] ?? "";
-    for (const target of TIMEOUT_SPELLINGS) {
-      for (
-        let leftLength = 0;
-        leftLength <= Math.min(left.length, target.length);
-        leftLength += 1
-      ) {
-        const prefix = leftLength === 0 ? "" : left.slice(-leftLength);
-        if (leftLength > 0 && !target.startsWith(prefix)) continue;
-        for (
-          let rightLength = 0;
-          rightLength <= Math.min(right.length, target.length - leftLength);
-          rightLength += 1
-        ) {
-          const suffix = right.slice(0, rightLength);
-          if (leftLength + rightLength >= 4 && (rightLength === 0 || target.endsWith(suffix))) {
-            return true;
-          }
-        }
-      }
-    }
+function isTokenCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    isAsciiLetter(character) || (code >= 48 && code <= 57) || character === "_" || character === "-"
+  );
+}
+
+function isIdentifierStart(character: string): boolean {
+  return isAsciiLetter(character) || character === "_";
+}
+
+function isIdentifierContinuation(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return isIdentifierStart(character) || (code >= 48 && code <= 57);
+}
+
+function isSpecialShellParameter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    character === "@" ||
+    character === "*" ||
+    character === "#" ||
+    character === "?" ||
+    character === "-" ||
+    character === "$" ||
+    character === "!"
+  );
+}
+
+function isHorizontalShellWhitespace(character: string): boolean {
+  return character === " " || character === "\t" || character === "\r";
+}
+
+function isHexDigit(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+}
+
+function ansiEscapeEnd(source: string, backslashIndex: number, limit: number): number {
+  const escapeKind = source[backslashIndex + 1];
+  if (escapeKind === undefined || backslashIndex + 1 >= limit) return backslashIndex + 1;
+
+  let maxDigits = 0;
+  let index = backslashIndex + 2;
+  if (escapeKind === "x") maxDigits = 2;
+  else if (escapeKind === "u") maxDigits = 4;
+  else if (escapeKind === "U") maxDigits = 8;
+  else if (escapeKind >= "0" && escapeKind <= "7") {
+    maxDigits = 2;
+    index = backslashIndex + 2;
+  } else {
+    return backslashIndex + 2;
   }
-  return false;
+
+  let consumedDigits = 0;
+  while (
+    index < limit &&
+    consumedDigits < maxDigits &&
+    (escapeKind === "x" || escapeKind === "u" || escapeKind === "U"
+      ? isHexDigit(source[index] ?? "")
+      : (source[index] ?? "") >= "0" && (source[index] ?? "") <= "7")
+  ) {
+    index += 1;
+    consumedDigits += 1;
+  }
+  return index;
+}
+
+function appendValueStart(source: string, separatorIndex: number): number | null {
+  const separator = source[separatorIndex];
+  if (separator !== ";" && separator !== "\n") return null;
+
+  let index = separatorIndex + 1;
+  while (index < source.length && isHorizontalShellWhitespace(source[index] ?? "")) index += 1;
+  if (!isIdentifierStart(source[index] ?? "")) return null;
+  index += 1;
+  while (index < source.length && isIdentifierContinuation(source[index] ?? "")) index += 1;
+  while (index < source.length && isHorizontalShellWhitespace(source[index] ?? "")) index += 1;
+  return source[index] === "+" && source[index + 1] === "=" ? index + 2 : null;
+}
+
+function shellExpansionEnd(
+  source: string,
+  startIndex: number,
+  closingCharacter: "}" | ")",
+): number {
+  let index = startIndex;
+  while (index < source.length && source[index] !== "\n" && source[index] !== closingCharacter) {
+    index += 1;
+  }
+  return source[index] === closingCharacter ? index + 1 : index;
+}
+
+function hasDirectTimeoutSpelling(source: string): boolean {
+  let targetMasks = TIMEOUT_TARGETS.map(() => 1);
+  let quote: "'" | '"' | null = null;
+
+  const finishToken = () => {
+    const found = TIMEOUT_TARGETS.some(
+      (target, index) => (targetMasks[index] & target.endBit) !== 0,
+    );
+    targetMasks = TIMEOUT_TARGETS.map(() => 1);
+    return found;
+  };
+
+  const feedLiteral = (character: string) => {
+    for (const [index, target] of TIMEOUT_TARGETS.entries()) {
+      targetMasks[index] = (targetMasks[index] & (target.literalMasks.get(character) ?? 0)) << 1;
+    }
+  };
+
+  let index = 0;
+  while (index < source.length) {
+    const character = source[index] ?? "";
+    if (character === "'" || character === '"') {
+      if (quote === null) quote = character;
+      else if (quote === character) quote = null;
+      index += 1;
+      continue;
+    }
+    if (character === "\\" && (source[index + 1] === "\n" || source[index + 1] === "\r")) {
+      index += source[index + 1] === "\r" && source[index + 2] === "\n" ? 3 : 2;
+      continue;
+    }
+    if (character === "\\" && isTokenCharacter(source[index + 1] ?? "")) {
+      feedLiteral(source[index + 1] ?? "");
+      index += 2;
+      continue;
+    }
+    if (isTokenCharacter(character)) feedLiteral(character);
+    else if (finishToken()) return true;
+    index += 1;
+  }
+  return finishToken();
 }
 
 /**
  * This is deliberately lexical, not a shell parser. It joins line continuations
  * and removes quote/backslash spelling noise so known timeout words cannot hide,
  * but it never tries to execute, branch, expand, or add inner command budgets.
+ * Each target owns a fixed bitset of at most 18 prefix positions. A literal
+ * advances matching bits; a recognized ambiguity opens the remaining suffix.
+ * Repeating an ambiguity is therefore constant work, and a generic ambiguity
+ * cannot close a token without a literal boundary on its far side.
  */
 function hasTimeoutSpelling(source: string): boolean {
-  const normalized = source
-    .replace(/\\\r?\n/gu, "")
-    .replace(/\\(?=[A-Za-z-])/gu, "")
-    .replace(/["']/gu, "");
-  if (
-    /(^|[^A-Za-z0-9_])(?:gtimeout|timeout|--timeout(?:-seconds)?)(?=$|[^A-Za-z0-9_])/u.test(
-      normalized,
-    )
-  ) {
-    return true;
-  }
+  if (hasDirectTimeoutSpelling(source)) return true;
 
-  // This bounded ambiguity projection is not shell evaluation. It collapses
-  // nearby expansions, ANSI escapes, and append-shaped text to one marker, then
-  // asks whether that marker could complete a known spelling. It never decodes
-  // the middle, follows a variable, or infers an inner duration.
-  return hasAmbiguousTimeoutAssembly(source);
+  let targetMasks = TIMEOUT_TARGETS.map(() => 1);
+  let terminalKind: "literal" | "bridge" | "ansi" | null = null;
+  let quote: "'" | '"' | null = null;
+  let matched = false;
+
+  const finishToken = () => {
+    for (const [index, target] of TIMEOUT_TARGETS.entries()) {
+      if (
+        (terminalKind === "literal" || terminalKind === "ansi") &&
+        (targetMasks[index] & target.endBit) !== 0
+      ) {
+        matched = true;
+      }
+    }
+    targetMasks = TIMEOUT_TARGETS.map(() => 1);
+    terminalKind = null;
+  };
+
+  const feedLiteral = (character: string) => {
+    for (const [index, target] of TIMEOUT_TARGETS.entries()) {
+      targetMasks[index] = (targetMasks[index] & (target.literalMasks.get(character) ?? 0)) << 1;
+    }
+    terminalKind = "literal";
+  };
+
+  const feedAmbiguity = (kind: "bridge" | "ansi") => {
+    for (const [index, target] of TIMEOUT_TARGETS.entries()) {
+      const mask = targetMasks[index];
+      if (mask === 0) continue;
+      const lowestPositionBit = mask & -mask;
+      targetMasks[index] = target.allPositionsMask & ~(lowestPositionBit - 1);
+    }
+    terminalKind = kind;
+  };
+
+  const feedSourceCharacter = (character: string) => {
+    if (isTokenCharacter(character)) feedLiteral(character);
+    else finishToken();
+  };
+
+  let index = 0;
+  while (index < source.length) {
+    if (matched) return true;
+    const appendStart = appendValueStart(source, index);
+    if (appendStart !== null) {
+      feedAmbiguity("bridge");
+      index = appendStart;
+      continue;
+    }
+
+    const character = source[index] ?? "";
+    if (character === "\\" && (source[index + 1] === "\n" || source[index + 1] === "\r")) {
+      index += source[index + 1] === "\r" && source[index + 2] === "\n" ? 3 : 2;
+      continue;
+    }
+    if (character === "\\" && isTokenCharacter(source[index + 1] ?? "")) {
+      feedLiteral(source[index + 1] ?? "");
+      index += 2;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      if (quote === null) quote = character;
+      else if (quote === character) quote = null;
+      index += 1;
+      continue;
+    }
+
+    if (character === "$" && source[index + 1] === "'" && quote === null) {
+      const bodyStart = index + 2;
+      let bodyEnd = bodyStart;
+      let closed = false;
+      while (bodyEnd < source.length) {
+        if (source[bodyEnd] === "\\") {
+          bodyEnd = ansiEscapeEnd(source, bodyEnd, source.length);
+          continue;
+        }
+        if (source[bodyEnd] === "'") {
+          closed = true;
+          break;
+        }
+        bodyEnd += 1;
+      }
+
+      if (!closed || bodyEnd - bodyStart > MAX_INTERPRETED_ANSI_BODY_CHARS) {
+        feedAmbiguity("ansi");
+        index = closed ? bodyEnd + 1 : source.length;
+        continue;
+      }
+      if (bodyEnd === bodyStart) feedAmbiguity("bridge");
+      let bodyIndex = bodyStart;
+      while (bodyIndex < bodyEnd) {
+        if (source[bodyIndex] === "\\") {
+          feedAmbiguity("ansi");
+          bodyIndex = ansiEscapeEnd(source, bodyIndex, bodyEnd);
+        } else {
+          feedSourceCharacter(source[bodyIndex] ?? "");
+          bodyIndex += 1;
+        }
+        if (matched) break;
+      }
+      index = bodyEnd + 1;
+      continue;
+    }
+
+    if (character === "$" && source[index + 1] === "{") {
+      feedAmbiguity("bridge");
+      index = shellExpansionEnd(source, index + 2, "}");
+      continue;
+    }
+    if (character === "$" && source[index + 1] === "(") {
+      feedAmbiguity("bridge");
+      index = shellExpansionEnd(source, index + 2, ")");
+      continue;
+    }
+    if (character === "$" && isIdentifierStart(source[index + 1] ?? "")) {
+      feedAmbiguity("bridge");
+      index += 2;
+      while (index < source.length && isIdentifierContinuation(source[index] ?? "")) index += 1;
+      continue;
+    }
+    if (character === "$" && isSpecialShellParameter(source[index + 1] ?? "")) {
+      feedAmbiguity("bridge");
+      index += 2;
+      continue;
+    }
+
+    feedSourceCharacter(character);
+    index += 1;
+  }
+  finishToken();
+  return matched;
 }
 
 async function loadWorkflows(): Promise<Workflows> {
@@ -566,6 +787,17 @@ describe("workflow timeout contract", () => {
       "gti${EMPTY}meout 10h job",
       'bun test --timeo$(printf "")ut 720000',
       'flag=--ti; flag+=meout-seconds; bun test "$flag" 720',
+      "ti$''me$''out 10h job",
+      "EMPTY=; ti${EMPTY}me${EMPTY}out 10h job",
+      "ti$(printf '')me$(printf '')out 10h job",
+      "t$''i$''m$''e$''o$''u$''t 10h job",
+      "t${EMPTY}i${EMPTY}m${EMPTY}e${EMPTY}o${EMPTY}u${EMPTY}t 10h job",
+      "ti$8me$9out 10h job",
+      "$'\\x74\\x69\\x6d\\x65\\x6f\\x75\\x74' 10h job",
+      "$'\\164\\151\\155\\145\\157\\165\\164' 10h job",
+      'cmd=t; cmd+=i; cmd+=m; cmd+=e; cmd+=o; cmd+=u; cmd+=t; "$cmd" 10h job',
+      'cmd=t\ncmd+=i\ncmd+=m\ncmd+=e\ncmd+=o\ncmd+=u\ncmd+=t\n"$cmd" 10h job',
+      'flag=-; flag+=-; flag+=t; flag+=i; flag+=m; flag+=e; flag+=o; flag+=u; flag+=t; flag+=-seconds; bun test "$flag" 720',
     ];
     for (const probe of probes) {
       expect(inspectWorkflowCaps(syntheticWorkflow(probe), action).violations.length, probe).toBe(
@@ -579,6 +811,48 @@ describe("workflow timeout contract", () => {
         jobCap: 60,
       });
     }
+  });
+
+  test("lexical ambiguity stays token-bound and rejects ordinary suffix expansions", async () => {
+    const action = await loadPlaywrightAction();
+    const probes = [
+      "echo runtime${VERSION}",
+      "echo uptime${SECONDS}",
+      "echo time${ZONE}",
+      "echo ${PREFIX}timeoutish",
+      "echo gtimeoutish",
+      "echo my-timeout",
+      "echo --timeout-seconds-extra",
+      "echo runtime$'\\x74'",
+      "echo $'\\x74\\x69\\x6d\\x65\\x6f\\x75\\x74'ish",
+      "echo time$'\\x6f'utish",
+      'cmd=runtime; cmd+=version; echo "$cmd"',
+    ];
+    for (const probe of probes) {
+      expect(inspectWorkflowCaps(syntheticWorkflow(probe), action).violations, probe).toEqual([]);
+    }
+  });
+
+  test("the lexical scanner is bounded on malformed and dense ambiguity input", () => {
+    expect(hasTimeoutSpelling("echo $'unterminated")).toBe(true);
+    expect(hasTimeoutSpelling("echo runtime${BROKEN")).toBe(false);
+    expect(hasTimeoutSpelling("echo uptime$(broken")).toBe(false);
+
+    const denseFalsePositiveProbe = "runtime${VERSION};".repeat(100_000);
+    expect(denseFalsePositiveProbe.length).toBeGreaterThan(1_000_000);
+    const falsePositiveStartedAt = performance.now();
+    expect(hasTimeoutSpelling(denseFalsePositiveProbe)).toBe(false);
+    expect(performance.now() - falsePositiveStartedAt).toBeLessThan(5_000);
+
+    const repeatedMarkerProbe = `ti${"$''".repeat(100_000)}meout`;
+    const repeatedMarkerStartedAt = performance.now();
+    expect(hasTimeoutSpelling(repeatedMarkerProbe)).toBe(true);
+    expect(performance.now() - repeatedMarkerStartedAt).toBeLessThan(5_000);
+
+    const denseMalformedStatements = "\n".repeat(1_100_000);
+    const malformedStatementsStartedAt = performance.now();
+    expect(hasTimeoutSpelling(denseMalformedStatements)).toBe(false);
+    expect(performance.now() - malformedStatementsStartedAt).toBeLessThan(5_000);
   });
 
   test("shell structure never creates inferred inner sums", async () => {
