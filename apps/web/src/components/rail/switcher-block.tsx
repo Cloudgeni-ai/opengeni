@@ -18,6 +18,7 @@ import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
+import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -31,6 +32,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
 import { organizationsForSubject, workspacesInOrg } from "@/lib/org";
+import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
 import { workspaceCreationAccountId } from "@/lib/workspaces";
 import type { AccountGrant, Workspace } from "@/types";
 
@@ -70,6 +72,7 @@ export function SwitcherBlock() {
   const orgWorkspaces = activeAccountId
     ? workspacesInOrg(context.workspaces, activeAccountId)
     : context.workspaces;
+  const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const createAccountId = workspaceCreationAccountId(
     context.accessContext,
@@ -154,6 +157,7 @@ export function SwitcherBlock() {
           onSelect={rail.openWorkspace}
           onCreate={() => openDialog("create")}
           activeWorkspace={activeWorkspace}
+          managedSelfContext={context.managedSelfContext}
           canControl={canControlWorkspace}
           controlBusy={controlBusy}
           onToggleControl={() => void toggleWorkspaceControl()}
@@ -161,7 +165,11 @@ export function SwitcherBlock() {
         >
           <button
             type="button"
-            aria-label={`Workspace: ${activeWorkspace?.name ?? "switch workspace"}`}
+            aria-label={
+              activeIsPersonal
+                ? `Personal workspace: ${activeWorkspace?.name ?? "switch workspace"}`
+                : `Workspace: ${activeWorkspace?.name ?? "switch workspace"}`
+            }
             className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
           >
             {workspaceInitial(activeWorkspace)}
@@ -190,6 +198,7 @@ export function SwitcherBlock() {
         onSelect={rail.openWorkspace}
         onCreate={() => openDialog("create")}
         activeWorkspace={activeWorkspace}
+        managedSelfContext={context.managedSelfContext}
         canControl={canControlWorkspace}
         controlBusy={controlBusy}
         onToggleControl={() => void toggleWorkspaceControl()}
@@ -197,7 +206,11 @@ export function SwitcherBlock() {
       >
         <button
           type="button"
-          aria-label={`Workspace: ${activeWorkspace?.name ?? "none"}. Switch workspace`}
+          aria-label={
+            activeIsPersonal
+              ? `Personal workspace: ${activeWorkspace?.name ?? "none"}. Switch workspace`
+              : `Workspace: ${activeWorkspace?.name ?? "none"}. Switch workspace`
+          }
           className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
         >
           <Avatar size="sm" className="rounded-md">
@@ -211,6 +224,7 @@ export function SwitcherBlock() {
           >
             {activeWorkspace?.name ?? "Select workspace"}
           </span>
+          {activeIsPersonal ? <PersonalWorkspaceBadge decorative /> : null}
           <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
         </button>
       </WorkspaceMenu>
@@ -305,6 +319,7 @@ function WorkspaceMenu(props: {
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
   activeWorkspace: Workspace | null;
+  managedSelfContext: ManagedSelfContext | null;
   canControl: boolean;
   controlBusy: boolean;
   onToggleControl: () => void;
@@ -332,19 +347,11 @@ function WorkspaceMenu(props: {
             aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
             onSelect={() => props.onSelect(workspace.id)}
           >
-            <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
-              {workspaceInitial(workspace)}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-            {workspace.inferenceControl.state === "paused" ? (
-              <PauseIcon
-                className="size-3.5 fill-current text-status-waiting"
-                aria-label="Paused"
-              />
-            ) : null}
-            {workspace.id === props.activeWorkspaceId ? (
-              <CheckIcon className="size-4 text-brand" />
-            ) : null}
+            <WorkspaceMenuItemContent
+              workspace={workspace}
+              activeWorkspaceId={props.activeWorkspaceId}
+              managedSelfContext={props.managedSelfContext}
+            />
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -387,5 +394,35 @@ function WorkspaceMenu(props: {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+export function WorkspaceMenuItemContent(props: {
+  workspace: Workspace;
+  activeWorkspaceId: string;
+  managedSelfContext: ManagedSelfContext | null;
+}) {
+  const personal = isPersonalWorkspace(props.workspace, props.managedSelfContext);
+  const paused = props.workspace.inferenceControl.state === "paused";
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+      >
+        {workspaceInitial(props.workspace)}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{props.workspace.name}</span>
+      {personal ? <PersonalWorkspaceBadge /> : null}
+      {paused ? (
+        <>
+          <PauseIcon aria-hidden="true" className="size-3.5 fill-current text-status-waiting" />
+          <span className="sr-only"> Paused</span>
+        </>
+      ) : null}
+      {props.workspace.id === props.activeWorkspaceId ? (
+        <CheckIcon aria-hidden="true" className="size-4 text-brand" />
+      ) : null}
+    </>
   );
 }

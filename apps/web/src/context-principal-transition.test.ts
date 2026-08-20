@@ -56,6 +56,8 @@ describe("principal transition contract", () => {
     expect(invalidation).toContain("invalidatePrincipalTransition(");
     expect(invalidation).toContain("slackLinkPrepareController.clear()");
     expect(invalidation).toContain("options?.preservePendingSlackLink !== true");
+    expect(invalidation).toContain("managedSelfContextIdentityRef.current = null");
+    expect(invalidation).toContain("setManagedSelfContext(null)");
     expect(invalidation).toContain("resetWorkspaceState(null, true)");
 
     const reset = sourceBetween("const resetWorkspaceState", "const prepareWorkspaceTransition");
@@ -92,7 +94,7 @@ describe("principal transition contract", () => {
 
   test("access bootstrap is synchronously fenced by principal generation", () => {
     const accessLoad = sourceBetween(
-      "void Promise.all([client.getAccessContext(), client.listWorkspaces()])",
+      "void Promise.all([client.getAccessContext(), client.listWorkspaces(), selfContextPromise])",
       "const selectedInstalledRepositories",
     );
     expect(accessLoad).toContain(

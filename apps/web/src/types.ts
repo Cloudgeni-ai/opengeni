@@ -103,6 +103,7 @@ export type {
   SkillUninstallPreview,
   Permission as SdkPermission,
   LatencyMode,
+  ManagedOrganizationMembership,
   ReasoningEffort,
   ResourceRef,
   Rig,
