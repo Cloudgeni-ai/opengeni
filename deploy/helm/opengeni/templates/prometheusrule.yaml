@@ -321,19 +321,27 @@ spec:
             summary: OpenGeni sandbox inventory telemetry is stale or absent
             description: No control replica has completed a fresh database projection for at least one sandbox inventory domain. Threshold alerts for that domain intentionally fail closed until projection health returns.
         - alert: OpenGeniCodexCredentialPoolEmpty
-          expr: increase(opengeni_codex_pool_low_total{depth="zero"}[5m]) > 0
+          expr: |
+            sum by (namespace, release, environment, component, workspace_key) (
+              increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="zero"}[5m])
+            ) > 0
           for: 1m
           labels:
             severity: critical
           annotations:
             summary: A Codex workspace observed no eligible subscription credentials
+            description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed zero eligible subscription credentials. Restore or reconnect an allocator-enabled credential before new Codex turns require capacity.
         - alert: OpenGeniCodexCredentialPoolSingle
-          expr: increase(opengeni_codex_pool_low_total{depth="one"}[15m]) > 0
+          expr: |
+            sum by (namespace, release, environment, component, workspace_key) (
+              increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="one"}[15m])
+            ) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
             summary: A Codex workspace is operating with only one eligible subscription credential
+            description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one eligible subscription credential. Add or restore a second allocator-enabled credential to remove the single-account failure domain.
         - alert: OpenGeniServiceDown
           expr: up{job=~".*opengeni.*"} == 0
           for: 5m
