@@ -6,13 +6,12 @@ const DEPLOYMENT_SCOPE =
   "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
-  test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
+  test("alerts on cumulative provider-dispatch and first-byte p95 SLOs", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
     for (const [name, milestone] of [
-      ["OpenGeniTurnStartupQueueP95High", "queue"],
       ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
       ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
     ] as const) {
@@ -27,6 +26,10 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(expression).not.toContain("sessionId");
       expect(expression).not.toContain("turnId");
     }
+    expect(template).not.toContain("OpenGeniTurnStartupQueueP95High");
+    expect(template).not.toContain("turnStartupQueueP95Seconds");
+    expect(template).toContain("OpenGeniTurnEligibleBacklogOld");
+    expect(template).toContain("OpenGeniTurnSlotsSaturated");
   });
 
   test("renders disjoint startup alert scopes for separate releases and environments", async () => {

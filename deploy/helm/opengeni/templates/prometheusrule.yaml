@@ -1,7 +1,6 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
-{{- $turnStartupQueueP95Seconds := int (default 5 ((.Values.observability).prometheusRule).turnStartupQueueP95Seconds) }}
 {{- $turnStartupProviderDispatchP95Seconds := int (default 60 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
 {{- $turnStartupFirstByteP95Seconds := int (default 120 ((.Values.observability).prometheusRule).turnStartupFirstByteP95Seconds) }}
 {{- $turnStartupFirstByteAvailabilityRatio := float64 ((.Values.observability).prometheusRule).turnStartupFirstByteAvailabilityRatio }}
@@ -11,7 +10,7 @@
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
-{{- if or (le $turnStartupQueueP95Seconds 0) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
+{{- if or (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
 {{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive and first-byte availability ratio must be in (0, 1]" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
@@ -130,20 +129,12 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
-        - alert: OpenGeniTurnStartupQueueP95High
-          expr: |
-            histogram_quantile(
-              0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m]))
-            ) > {{ $turnStartupQueueP95Seconds }}
-            and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: OpenGeni turn queue p95 exceeds {{ $turnStartupQueueP95Seconds }} seconds
-            description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+        # The queue milestone includes intentional per-session FIFO wait behind
+        # an already-running turn. It is useful as a user-latency dashboard SLI,
+        # but it cannot diagnose worker admission: queued follow-ups may wait for
+        # hours while Temporal has zero runnable backlog and ample worker slots.
+        # OpenGeniTurnEligibleBacklogOld and OpenGeniTurnSlotsSaturated below own
+        # worker-capacity paging from fresh Temporal task-queue evidence.
         - alert: OpenGeniTurnStartupProviderDispatchP95High
           expr: |
             histogram_quantile(

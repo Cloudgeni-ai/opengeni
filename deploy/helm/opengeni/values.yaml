@@ -1154,7 +1154,6 @@ observability:
     inventoryFreshnessSeconds: 300
     # Cumulative p95 startup SLOs, measured from the durable turn queue time.
     # Keep these aligned with the canonical Turn Startup dashboard annotations.
-    turnStartupQueueP95Seconds: 5
     turnStartupProviderDispatchP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
     # Exclusive logical-turn first-byte completions divided by completed plus
