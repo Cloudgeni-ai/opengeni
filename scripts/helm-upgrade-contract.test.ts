@@ -87,6 +87,19 @@ describe("Helm database upgrade contract", () => {
     expect(configMap).not.toContain('hasKey .Values.config "OPENGENI_MCP_URL"');
   });
 
+  test("alerts on durable model-aware compaction starts instead of a static token guess", async () => {
+    const rules = await source("deploy/helm/opengeni/templates/prometheusrule.yaml");
+    const alertStart = rules.indexOf("- alert: OpenGeniCompactionNotFiring");
+    const nextAlert = rules.indexOf("- alert:", alertStart + 1);
+    const alert = rules.slice(alertStart, nextAlert);
+
+    expect(alertStart).toBeGreaterThan(-1);
+    expect(alert).toContain('opengeni_context_compaction_starts_total{trigger="auto"}[30m]');
+    expect(alert).toContain("opengeni_context_compactions_total[30m]");
+    expect(alert).not.toContain("opengeni_model_input_tokens_bucket");
+    expect(alert).not.toContain("150000");
+  });
+
   test("projects only dedicated credentials into the artifact materializer", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
     const materializer = await source(

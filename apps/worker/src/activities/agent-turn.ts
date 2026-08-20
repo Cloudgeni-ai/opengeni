@@ -415,6 +415,7 @@ import {
   modelCallAccountContext,
   recordBatchFlush,
   recordContextCompaction,
+  recordContextCompactionStarted,
   recordCreditMicros,
   recordModelCacheTokens,
   recordModelInputTokens,
@@ -6646,6 +6647,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const compactionModeOptions = {
         codexCompactionMode: session.codexCompactionMode,
         isCodexSubscriptionTurn: isCodexTurn,
+        onCompactionStarted: (compactionTrigger: "auto" | "operator" | "proactive" | "overflow") =>
+          recordContextCompactionStarted(observability, compactionTrigger),
         publishLiveEvents: publishCompactionLiveEvents,
         ...(remoteCompactionRequester
           ? { requestRemoteCompactionV2: remoteCompactionRequester }

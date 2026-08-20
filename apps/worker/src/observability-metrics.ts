@@ -1508,13 +1508,28 @@ export function recordModelInputTokens(
   });
 }
 
-/** A context compaction actually fired, by trigger (operator | overflow | proactive
- *  | auto). The rate of this — against the input-tokens histogram above — is how an
- *  operator sees compaction working (or silently not). */
+/** A context compaction actually completed, by trigger (operator | overflow |
+ *  proactive | auto). Paired with durable starts below, this shows whether
+ *  compaction is completing after the attempt fence commits. */
 export function recordContextCompaction(observability: Observability, trigger: string): void {
   observability.incrementCounter({
     name: "opengeni_context_compactions_total",
     help: "Total context compactions performed, by trigger.",
+    labels: { trigger },
+  });
+}
+
+/** A durable context-compaction start, recorded only after the attempt-fenced
+ *  `compaction.started` transition commits. Paired with completed compactions,
+ *  this distinguishes a real model-aware compaction attempt from a coarse
+ *  input-token histogram estimate. */
+export function recordContextCompactionStarted(
+  observability: Observability,
+  trigger: string,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_context_compaction_starts_total",
+    help: "Total durable context compaction starts, by trigger.",
     labels: { trigger },
   });
 }

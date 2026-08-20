@@ -1620,6 +1620,7 @@ describe("standalone context compaction execution", () => {
       session.id,
       attemptId,
     );
+    const compactionStarts: string[] = [];
 
     const outcome = await maybeCompactContext(
       client.db,
@@ -1634,9 +1635,15 @@ describe("standalone context compaction execution", () => {
       },
       null,
       async () => "larger replacement ".repeat(1_000),
-      { force: true, clearRequestedCompaction: true, trigger: "operator" },
+      {
+        force: true,
+        clearRequestedCompaction: true,
+        trigger: "operator",
+        onCompactionStarted: (trigger) => compactionStarts.push(trigger),
+      },
     );
 
+    expect(compactionStarts).toEqual(["operator"]);
     expect(outcome).toMatchObject({
       compacted: false,
       reason: "replacement_not_smaller",
