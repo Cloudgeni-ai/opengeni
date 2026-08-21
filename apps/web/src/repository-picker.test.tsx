@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
-import { repositoryBindingPresentation } from "@/components/repository-picker";
+import {
+  RepositoryContextPicker,
+  repositoryBindingPresentation,
+} from "@/components/repository-picker";
 import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type { GitHubRepository } from "@/types";
 
@@ -73,6 +76,61 @@ describe("repository picker GitHub binding status", () => {
 });
 
 describe("additive repository picker", () => {
+  test("keeps one selected repository identifiable in the compact trigger", async () => {
+    const repository: GitHubRepository = {
+      id: 456,
+      installationId: 123,
+      fullName: "Cloudgeni-ai/opengeni",
+      name: "opengeni",
+      private: true,
+      htmlUrl: "https://github.com/Cloudgeni-ai/opengeni",
+      cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+      defaultBranch: "main",
+      accountLogin: "Cloudgeni-ai",
+      accountType: "Organization",
+    };
+    const rendered = await renderComponent(
+      createElement(RepositoryContextPicker, {
+        setupMode: "platform",
+        configured: true,
+        status: "bound",
+        installUrl: null,
+        linkUrl: null,
+        installations: [],
+        repositories: [repository],
+        groups: [],
+        selectedRepoIds: new Set([repository.id]),
+        selectedRepoRefs: { [repository.id]: "main" },
+        selectedInstallationId: repository.installationId,
+        manualRepos: [],
+        manualOpen: false,
+        githubAppOpen: false,
+        org: "",
+        pending: false,
+        repoBusy: false,
+        githubAppBusy: false,
+        onRefresh: async () => {},
+        onToggleRepo: () => {},
+        onRefChange: () => {},
+        onManualOpenChange: () => {},
+        onManualAdd: () => {},
+        onManualUpdate: () => {},
+        onManualRemove: () => {},
+        onGitHubAppOpenChange: () => {},
+        onOrgChange: () => {},
+        onStartGitHubApp: () => {},
+        onDisconnectInstallation: async () => {},
+      }),
+    );
+
+    const trigger = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Repository context: Cloudgeni-ai/opengeni"]',
+    );
+    expect(trigger?.textContent).toContain("Cloudgeni-ai/opengeni");
+    expect(trigger?.title).toBe("Cloudgeni-ai/opengeni");
+    await rendered.unmount();
+  });
+
   test("renders already-mounted repositories as locked", async () => {
     const repository: GitHubRepository = {
       id: 456,

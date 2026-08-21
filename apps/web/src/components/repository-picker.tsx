@@ -639,6 +639,14 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
     props.installUrl,
     props.setupMode,
   );
+  const selectedInstalled = props.repositories.filter((repo) => props.selectedRepoIds.has(repo.id));
+  const selectedManual = props.manualRepos.filter((repo) => repo.url.trim().length > 0);
+  const selectedNames = [
+    ...selectedInstalled.map((repo) => repo.fullName),
+    ...selectedManual.map((repo) => repo.url.trim()),
+  ];
+  const selectedLabel =
+    selectedCount === 1 ? (selectedNames[0] ?? repoCountLabel(1)) : repoCountLabel(selectedCount);
 
   return (
     <DropdownMenu>
@@ -648,7 +656,12 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
           variant="ghost"
           size="sm"
           disabled={props.pending}
-          aria-label="Repository context"
+          aria-label={
+            selectedCount > 0
+              ? `Repository context: ${selectedNames.join(", ") || selectedLabel}`
+              : "Repository context"
+          }
+          title={selectedCount > 0 ? selectedNames.join(", ") || selectedLabel : "Repositories"}
           className={cn(
             "h-8 max-w-[13rem] gap-1.5 rounded-full border border-transparent px-2.5 text-xs",
             "text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg",
@@ -657,9 +670,7 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
           )}
         >
           <GitBranchIcon className="size-3.5" />
-          <span className="truncate">
-            {selectedCount > 0 ? repoCountLabel(selectedCount) : "Repos"}
-          </span>
+          <span className="truncate">{selectedCount > 0 ? selectedLabel : "Repos"}</span>
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",

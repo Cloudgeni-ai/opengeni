@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { MessageTimeline, type TimelineItem } from "../src";
+import { MessageTimeline, type TimelineItem, type UserMessageItem } from "../src";
 import { setScrollEndSupportForTests } from "../src/components/tip-follow";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
@@ -38,7 +38,7 @@ function reasoningDelta(sequence: number, text: string): SessionEvent {
   };
 }
 
-function userItem(id: string, text: string): TimelineItem {
+function userItem(id: string, text: string): UserMessageItem {
   return {
     kind: "user-message",
     id,
@@ -122,6 +122,47 @@ afterEach(() => {
 });
 
 describe("MessageTimeline pagination affordances", () => {
+  test("keeps an optimistic user message mounted through its durable event handoff", async () => {
+    const clientEventId = "client-send-1";
+    const optimistic: TimelineItem = {
+      ...userItem(`optimistic:${clientEventId}`, "test message"),
+      reconciliationKey: `user-message:${clientEventId}`,
+      delivery: { state: "sending" },
+    };
+    const durable = {
+      ...event(1),
+      id: "durable-event-1",
+      clientEventId,
+      payload: { text: "test message" },
+    };
+    const r = await renderComponent(<MessageTimeline items={[optimistic]} />);
+    await flush();
+
+    const selector = `[data-og-group-key="user-message:${clientEventId}"]`;
+    const rowBefore = r.container.querySelector(selector);
+    expect(rowBefore).not.toBeNull();
+    expect(r.container.textContent).toContain("test message");
+    expect(r.container.textContent).not.toContain("Sending");
+    expect(r.container.textContent).not.toContain("Queued");
+
+    await r.rerender(
+      <MessageTimeline items={[{ ...optimistic, delivery: { state: "queued" } }]} />,
+    );
+    expect(r.container.querySelector(selector)).toBe(rowBefore);
+    expect(r.container.textContent).toContain("test message");
+    expect(r.container.textContent).not.toContain("Queued");
+
+    await r.rerender(<MessageTimeline events={[durable]} />);
+
+    // The same mounted row moves from local delivery metadata to canonical
+    // event identity. A remount would replay animate-og-enter at opacity 0 and
+    // produce the visible blink reported by users.
+    expect(r.container.querySelector(selector)).toBe(rowBefore);
+    expect(r.container.textContent).toContain("test message");
+    expect(r.container.textContent).not.toContain("Queued");
+    await r.unmount();
+  });
+
   test("the full loaded window mounts in one bulk paint, ordered and animation-free", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {

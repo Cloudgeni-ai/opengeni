@@ -27,6 +27,13 @@ export type TimelineAnnotationSourceDescriptor = Omit<
 export type UserMessageItem = {
   kind: "user-message";
   id: string;
+  /**
+   * Renderer-only identity shared by a locally acknowledged message and the
+   * durable event that replaces it. The canonical event id remains `id`; this
+   * key only prevents the optimistic-to-durable handoff from remounting and
+   * replaying the row entrance animation.
+   */
+  reconciliationKey?: string | undefined;
   text: string;
   annotations?: TimelineAnnotation[] | undefined;
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
