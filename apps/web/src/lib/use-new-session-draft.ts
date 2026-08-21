@@ -173,10 +173,10 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   );
 
   const reload = useCallback(async (): Promise<void> => {
+    if (!resourceHydrationReady) return;
     const generation = targetGeneration.current;
     loadingRef.current = true;
     setLoading(true);
-    if (!resourceHydrationReady) return;
     try {
       const remote = await readRemote();
       if (remote && generation === targetGeneration.current) applyRemote(remote);

@@ -618,6 +618,27 @@ export function SessionRoute({
     pollIntervalMs: 30_000,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  const sandboxFileRequestSeq = useRef(0);
+  const [sandboxFileRequest, setSandboxFileRequest] = useState<{
+    path: string;
+    line: number;
+    requestId: number;
+  } | null>(null);
+  useEffect(() => {
+    setSandboxFileRequest(null);
+  }, [sessionId]);
+  const openSandboxFileAtLine = useCallback(
+    (path: string, line: number) => {
+      sandboxFileRequestSeq.current += 1;
+      setSandboxFileRequest({
+        path,
+        line,
+        requestId: sandboxFileRequestSeq.current,
+      });
+      context.setInspectorOpen(true);
+    },
+    [context.setInspectorOpen],
+  );
 
   if (!session) {
     if (loadError) {
@@ -642,6 +663,7 @@ export function SessionRoute({
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          openFileRequest={sandboxFileRequest}
           onOpenNavigation={() => {
             context.setInspectorOpen(false);
             rail.setDrawerOpen(true);
@@ -702,6 +724,7 @@ export function SessionRoute({
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
+      onOpenSandboxFile={openSandboxFileAtLine}
     />
   );
 
@@ -716,6 +739,7 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        openFileRequest={sandboxFileRequest}
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -754,6 +778,11 @@ function SessionDock(props: {
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
+  openFileRequest?: {
+    path: string;
+    line?: number | null;
+    requestId: number;
+  } | null;
 }) {
   const context = useAppContext();
   const dockLayoutStorageId = sessionDockLayoutStorageId(
@@ -851,6 +880,7 @@ function SessionDock(props: {
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
       mobileLeadingControl={
         <Button
           type="button"
@@ -975,6 +1005,7 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
+  onOpenSandboxFile: (path: string, line: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -1011,6 +1042,16 @@ function SessionChatPane(props: {
       );
     },
     [context.client, props.session.id, props.session.workspaceId],
+  );
+  const handleSandboxFile = useCallback(
+    async (path: string, line?: number) => {
+      if (line != null && line > 0) {
+        props.onOpenSandboxFile(path, line);
+        return;
+      }
+      await downloadSandboxFile(path);
+    },
+    [downloadSandboxFile, props.onOpenSandboxFile],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1491,15 +1532,11 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText
-            text={text}
-            streaming={item.streaming}
-            onSandboxFile={downloadSandboxFile}
-          />
+          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
         </div>
       );
     },
-    [downloadSandboxFile, props.session.workspaceId],
+    [handleSandboxFile, props.session.workspaceId],
   );
 
   return (

@@ -15,7 +15,7 @@ export function MarkdownText({
   text: string;
   compact?: boolean;
   streaming?: boolean;
-  onSandboxFile?: ((path: string) => void | Promise<void>) | undefined;
+  onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
 }) {
   return (
     <Markdown

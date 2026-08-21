@@ -71,12 +71,17 @@ const budgets = {
   // client, measuring 1,500,166 initial raw bytes and 2,083,879 direct-session
   // raw bytes on macOS/arm64. Advance only those raw envelopes by one KiB;
   // every compressed, file-count, lazy-chunk, and CSS cap remains unchanged.
+  // The rail workspace switcher lists every accessible workspace instead of
+  // the current org only. Linux/x64 production CI measured the direct-session
+  // gzip graph at 579,618 bytes, 34 over the 566 KiB envelope.
   // OPE-298's always-loaded rail click/failure handoff and its direct-session
-  // optimistic reconciliation measure 1,518,452 raw / 413,407 gzip bytes in
-  // the initial graph and 2,103,793 raw / 585,876 gzip bytes on a direct
-  // session load. Advance only those four aggregate envelopes to their next
-  // whole KiB; per-file, lazy, file-count, and CSS caps remain unchanged.
-  initialRaw: 1483 * kib,
+  // optimistic reconciliation, combined with current main's sandbox-file link
+  // support, measure 1,518,746 raw / 413,463 gzip bytes in the initial graph
+  // and 2,106,523 raw / 586,785 gzip bytes on a direct session load. Advance
+  // only the exceeded aggregate envelopes to their next whole KiB; per-file,
+  // lazy, file-count, CSS, and the still-sufficient initial-gzip cap remain
+  // unchanged.
+  initialRaw: 1484 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -90,8 +95,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2055 * kib,
-  directSessionGzip: 573 * kib,
+  directSessionRaw: 2058 * kib,
+  directSessionGzip: 574 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
