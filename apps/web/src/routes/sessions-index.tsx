@@ -729,44 +729,49 @@ function SessionsIndexRouteContent({
               />
             }
             actions={
-              <NewSessionRealtimeControl
-                client={context.client}
-                workspaceId={workspaceId}
-                codexConnected={codexConnected}
-                models={voiceSelection.models}
-                selectedModel={voiceSelection.selectedModel}
-                onSelectModel={voiceSelection.selectModel}
-                modelMenu="split-desktop"
-                disabled={
-                  busy ||
-                  newSessionDraft.loading ||
-                  newSessionDraft.conflict !== null ||
-                  attachments.hasUnresolved ||
-                  !newSessionPolicyValid ||
-                  !computeReady ||
-                  !context.workspaceMcpCatalogReady
-                }
-                disabledReason={
-                  newSessionDraft.conflict
-                    ? "Resolve the draft conflict before starting voice."
-                    : attachments.hasUnresolved
-                      ? "Wait for attachments to finish before starting voice."
-                      : !newSessionPolicyValid
-                        ? "Choose supported model settings before starting voice."
-                        : !computeReady
-                          ? "Choose where this session should run first."
-                          : !context.workspaceMcpCatalogReady
-                            ? "Wait for session tools to finish loading."
-                            : null
-                }
-                onStart={async (model) => await submitNewSession(model)}
-              />
+              <>
+                <SessionModelControl
+                  modelCatalog={modelCatalog}
+                  policyError={newSessionPolicyError}
+                  disabled={busy || newSessionDraft.loading}
+                />
+                <NewSessionRealtimeControl
+                  client={context.client}
+                  workspaceId={workspaceId}
+                  codexConnected={codexConnected}
+                  models={voiceSelection.models}
+                  selectedModel={voiceSelection.selectedModel}
+                  onSelectModel={voiceSelection.selectModel}
+                  modelMenu="split-desktop"
+                  disabled={
+                    busy ||
+                    newSessionDraft.loading ||
+                    newSessionDraft.conflict !== null ||
+                    attachments.hasUnresolved ||
+                    !newSessionPolicyValid ||
+                    !computeReady ||
+                    !context.workspaceMcpCatalogReady
+                  }
+                  disabledReason={
+                    newSessionDraft.conflict
+                      ? "Resolve the draft conflict before starting voice."
+                      : attachments.hasUnresolved
+                        ? "Wait for attachments to finish before starting voice."
+                        : !newSessionPolicyValid
+                          ? "Choose supported model settings before starting voice."
+                          : !computeReady
+                            ? "Choose where this session should run first."
+                            : !context.workspaceMcpCatalogReady
+                              ? "Wait for session tools to finish loading."
+                              : null
+                  }
+                  onStart={async (model) => await submitNewSession(model)}
+                />
+              </>
             }
-            controls={
-              <SessionControlStrip
+            header={
+              <SessionSetupStrip
                 workspaceId={workspaceId}
-                modelCatalog={modelCatalog}
-                policyError={newSessionPolicyError}
                 disabled={busy || newSessionDraft.loading}
                 showRepos={draft.compute.kind === "sandbox"}
                 channels={channelsQuery.channels}
@@ -954,13 +959,11 @@ function RecentSessionRow({
   );
 }
 
-// Composer footer pills: model, tools, and (for managed sandbox) repos — same
-// compact control language. Repo stays out of the compute band so that band
-// only shows when rigs / variable sets exist. On mobile, tools move under “+”.
-function SessionControlStrip({
+// Setup selections sit above the prompt so the footer remains an action row.
+// Repo stays out of the compute band so that band only shows when rigs /
+// variable sets exist. On mobile, tools and repos remain under “+”.
+function SessionSetupStrip({
   workspaceId,
-  modelCatalog,
-  policyError,
   disabled,
   showRepos,
   channels,
@@ -971,8 +974,6 @@ function SessionControlStrip({
   onToolSelectionChange,
 }: {
   workspaceId: string;
-  modelCatalog: WorkspaceModelCatalogState;
-  policyError: string | null;
   disabled: boolean;
   showRepos: boolean;
   channels: Channel[];
@@ -987,25 +988,12 @@ function SessionControlStrip({
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
   return (
-    <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden">
-      <ModelPicker
-        rows={modelCatalog.rows}
-        model={context.model}
-        effort={context.reasoningEffort}
-        latencyMode={context.latencyMode}
-        disabled={disabled}
-        loading={modelCatalog.loading}
-        error={modelCatalog.error ?? policyError}
-        className="shrink"
-        onModelChange={context.setModel}
-        onEffortChange={context.setReasoningEffort}
-        onLatencyModeChange={context.setLatencyMode}
-      />
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
       <SessionToolPicker
         servers={context.toolMcpServers}
         firstPartyTools={firstPartyToolOptions}
         selection={selection}
-        triggerClassName="min-w-0 shrink overflow-hidden max-sm:hidden"
+        triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
         disabled={disabled}
         onChange={onToolSelectionChange}
       />
@@ -1020,10 +1008,38 @@ function SessionControlStrip({
         <WorkspaceRepositoryPicker
           workspaceId={workspaceId}
           disabled={disabled}
-          triggerClassName="min-w-0 shrink overflow-hidden max-sm:hidden"
+          triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
         />
       ) : null}
     </div>
+  );
+}
+
+/** Keep model policy adjacent to voice/send in the bottom action row. */
+function SessionModelControl({
+  modelCatalog,
+  policyError,
+  disabled,
+}: {
+  modelCatalog: WorkspaceModelCatalogState;
+  policyError: string | null;
+  disabled: boolean;
+}) {
+  const context = useAppContext();
+  return (
+    <ModelPicker
+      rows={modelCatalog.rows}
+      model={context.model}
+      effort={context.reasoningEffort}
+      latencyMode={context.latencyMode}
+      disabled={disabled}
+      loading={modelCatalog.loading}
+      error={modelCatalog.error ?? policyError}
+      className="max-w-[8.5rem] shrink sm:max-w-[13rem] sm:shrink-0"
+      onModelChange={context.setModel}
+      onEffortChange={context.setReasoningEffort}
+      onLatencyModeChange={context.setLatencyMode}
+    />
   );
 }
 
@@ -1051,7 +1067,8 @@ function SessionFolderPicker({
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}
-          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
+          title={label}
+          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
         >
           <FolderIcon className="size-3.5 shrink-0" />
           <span className="min-w-0 truncate">{label}</span>

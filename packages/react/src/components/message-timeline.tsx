@@ -2031,7 +2031,9 @@ function useLiveSettleFold(folded: boolean): boolean {
 function timelineGroupKey(group: TimelineGroup): string {
   switch (group.kind) {
     case "item":
-      return group.item.id;
+      return group.item.kind === "user-message" && group.item.reconciliationKey
+        ? group.item.reconciliationKey
+        : group.item.id;
     case "activity":
       return group.id;
     case "turn":
@@ -2380,14 +2382,7 @@ function UserMessageRow({
     | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const deliveryLabel =
-    item.delivery?.state === "sending"
-      ? "Sending…"
-      : item.delivery?.state === "queued"
-        ? "Queued"
-        : item.delivery?.state === "failed"
-          ? "Not sent"
-          : null;
+  const deliveryFailed = item.delivery?.state === "failed";
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
@@ -2422,19 +2417,25 @@ function UserMessageRow({
             ) : null}
           </div>
         </CopyHoverFrame>
-        {deliveryLabel ? (
-          <div className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-fg-subtle">
-            <span title={item.delivery?.error}>{deliveryLabel}</span>
-            {item.delivery?.state === "failed" && item.delivery.onRetry ? (
+        {deliveryFailed ? (
+          <div
+            role="status"
+            className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-status-failed"
+          >
+            <span className="inline-flex items-center gap-1" title={item.delivery?.error}>
+              <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
+              <span>Message not sent</span>
+            </span>
+            {item.delivery?.onRetry ? (
               <button
                 type="button"
-                className="font-medium text-og-fg underline decoration-og-border underline-offset-2 hover:text-og-fg-strong"
+                className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                 onClick={item.delivery.onRetry}
               >
                 Retry
               </button>
             ) : null}
-            {item.delivery?.state === "failed" && item.delivery.onRemove ? (
+            {item.delivery?.onRemove ? (
               <button
                 type="button"
                 className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"

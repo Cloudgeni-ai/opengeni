@@ -10,8 +10,54 @@ export type SessionAttentionProjection = Pick<
   "id" | "workspaceId" | "unread" | "attentionVersion" | "lastSequence"
 >;
 
+export type LocalSessionDeliveryAttention = {
+  workspaceId: string;
+  sessionId: string;
+  failedMessageCount: number;
+};
+
 // RailShell renders exactly one desktop-or-mobile SessionList at a time.
 let listener: ((projection: SessionAttentionProjection) => void) | null = null;
+const localDeliveryAttention = new Map<string, LocalSessionDeliveryAttention>();
+const localDeliveryListeners = new Set<() => void>();
+
+function localDeliveryKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+/**
+ * Project browser-local delivery failure truth into the rail without mutating
+ * the durable session lifecycle or unread state. A retry, removal, or durable
+ * acceptance clears the projection when the composer no longer owns a failed
+ * optimistic message.
+ */
+export function updateLocalSessionDeliveryAttention(
+  projection: LocalSessionDeliveryAttention,
+): void {
+  const key = localDeliveryKey(projection.workspaceId, projection.sessionId);
+  const current = localDeliveryAttention.get(key);
+  if (projection.failedMessageCount <= 0) {
+    if (!current) return;
+    localDeliveryAttention.delete(key);
+  } else {
+    if (current?.failedMessageCount === projection.failedMessageCount) return;
+    localDeliveryAttention.set(key, projection);
+  }
+  for (const notify of localDeliveryListeners) notify();
+}
+
+export function localSessionDeliveryAttentionIds(workspaceId: string): ReadonlySet<string> {
+  return new Set(
+    [...localDeliveryAttention.values()]
+      .filter((projection) => projection.workspaceId === workspaceId)
+      .map((projection) => projection.sessionId),
+  );
+}
+
+export function subscribeToLocalSessionDeliveryAttention(onChange: () => void): () => void {
+  localDeliveryListeners.add(onChange);
+  return () => localDeliveryListeners.delete(onChange);
+}
 
 function isOlder(
   current: Pick<SessionAttentionProjection, "attentionVersion" | "lastSequence">,

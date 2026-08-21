@@ -3,11 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 import {
   applySessionAttentionProjection,
+  localSessionDeliveryAttentionIds,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
   subscribeToSessionAttentionChanges,
+  subscribeToLocalSessionDeliveryAttention,
+  updateLocalSessionDeliveryAttention,
 } from "./session-attention";
 
 const session = {
@@ -57,6 +60,32 @@ describe("session attention reconciliation", () => {
     notifySessionAttentionChanged(session);
 
     expect(received).toEqual([session.id]);
+  });
+
+  test("tracks local message-delivery attention without changing durable session state", () => {
+    const durableBefore = { ...session };
+    const revisions: string[][] = [];
+    const unsubscribe = subscribeToLocalSessionDeliveryAttention(() => {
+      revisions.push([...localSessionDeliveryAttentionIds(session.workspaceId)]);
+    });
+
+    updateLocalSessionDeliveryAttention({
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      failedMessageCount: 1,
+    });
+    expect(localSessionDeliveryAttentionIds(session.workspaceId)).toEqual(new Set([session.id]));
+    expect(session).toEqual(durableBefore);
+
+    updateLocalSessionDeliveryAttention({
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      failedMessageCount: 0,
+    });
+    unsubscribe();
+
+    expect(revisions).toEqual([[session.id], []]);
+    expect(localSessionDeliveryAttentionIds(session.workspaceId).size).toBe(0);
   });
 });
 

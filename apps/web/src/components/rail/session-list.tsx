@@ -30,6 +30,7 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -89,6 +90,7 @@ import {
 import {
   cancelSessionRowRevealIntent,
   consumeSessionRowRevealIntent,
+  requestSessionComposerFocus,
   sessionFocusAttribute,
   shouldRecordSessionRowFocusIntent,
   shouldMoveSessionRowFocus,
@@ -102,7 +104,9 @@ import {
 } from "@/lib/session-pins";
 import {
   applySessionAttentionProjection,
+  localSessionDeliveryAttentionIds,
   latestSessionAttentionProjection,
+  subscribeToLocalSessionDeliveryAttention,
   subscribeToSessionAttentionChanges,
   type SessionAttentionProjection,
 } from "@/lib/session-attention";
@@ -349,6 +353,16 @@ export function SessionList() {
   const [attentionOverrides, setAttentionOverrides] = useState<
     ReadonlyMap<string, SessionAttentionProjection>
   >(() => new Map());
+  const [localDeliveryAttention, setLocalDeliveryAttention] = useState<ReadonlySet<string>>(() =>
+    localSessionDeliveryAttentionIds(rail.workspaceId),
+  );
+  useEffect(() => {
+    const refreshLocalDeliveryAttention = () => {
+      setLocalDeliveryAttention(localSessionDeliveryAttentionIds(rail.workspaceId));
+    };
+    refreshLocalDeliveryAttention();
+    return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
+  }, [rail.workspaceId]);
   const archiving = useRef(new Set<string>());
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
@@ -1561,6 +1575,7 @@ export function SessionList() {
                 <SessionGroup
                   label="Pinned"
                   nodes={pinnedNodes}
+                  localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
                   focusIndex={focusIndex}
@@ -1615,6 +1630,7 @@ export function SessionList() {
                   sectionExpanded={!collapsedChannelSections.has(section.key)}
                   onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
+                  localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
                   focusIndex={focusIndex}
@@ -1638,6 +1654,7 @@ export function SessionList() {
                   <SessionGroup
                     label="Active"
                     nodes={forest.running}
+                    localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
                     activeSessionId={activeSessionId}
                     focusIndex={focusIndex}
@@ -1660,6 +1677,7 @@ export function SessionList() {
                     key={bucket.group}
                     label={bucket.label}
                     nodes={bucket.sessions}
+                    localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
                     activeSessionId={activeSessionId}
                     focusIndex={focusIndex}
@@ -1689,6 +1707,7 @@ export function SessionList() {
                 sectionExpanded={archivedOpen}
                 onToggleSection={() => setArchivedOpen((current) => !current)}
                 nodes={archivedNodes}
+                localDeliveryAttention={localDeliveryAttention}
                 flat={flat}
                 activeSessionId={activeSessionId}
                 focusIndex={focusIndex}
@@ -1799,6 +1818,7 @@ function SessionGroup(props: {
   sectionExpanded?: boolean;
   onToggleSection?: () => void;
   nodes: SessionTreeNode[];
+  localDeliveryAttention: ReadonlySet<string>;
   flat: Session[];
   activeSessionId: string | null;
   focusIndex: number;
@@ -1819,7 +1839,7 @@ function SessionGroup(props: {
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
   const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
-  const summary = summarizeRailNodes(props.nodes);
+  const summary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
   const collapsedSelection = props.channelHeader
     ? findSessionTreeNode(props.nodes, props.activeSessionId)
     : null;
@@ -1949,6 +1969,7 @@ function SessionGroup(props: {
             <SessionTreeRow
               key={node.session.id}
               node={node}
+              localDeliveryAttention={props.localDeliveryAttention}
               depth={0}
               flat={props.flat}
               activeSessionId={props.activeSessionId}
@@ -1976,6 +1997,7 @@ function SessionGroup(props: {
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
 function SessionTreeRow(props: {
   node: SessionTreeNode;
+  localDeliveryAttention: ReadonlySet<string>;
   depth: number;
   flat: Session[];
   activeSessionId: string | null;
@@ -2002,7 +2024,7 @@ function SessionTreeRow(props: {
   const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
   const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
-  const aggregateStatus = summarizeRailNodes([node]);
+  const aggregateStatus = summarizeRailNodes([node], props.localDeliveryAttention);
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
   // A collapsed branch keeps only its selected descendant visible, rendered as
@@ -2042,6 +2064,7 @@ function SessionTreeRow(props: {
           {collapsedSelectedNode ? (
             <SessionTreeRow
               node={collapsedSelectedNode}
+              localDeliveryAttention={props.localDeliveryAttention}
               depth={props.depth + 1}
               flat={props.flat}
               activeSessionId={props.activeSessionId}
@@ -2065,6 +2088,7 @@ function SessionTreeRow(props: {
                 <SessionTreeRow
                   key={child.session.id}
                   node={child}
+                  localDeliveryAttention={props.localDeliveryAttention}
                   depth={props.depth + 1}
                   flat={props.flat}
                   activeSessionId={props.activeSessionId}
@@ -2276,6 +2300,9 @@ function SessionRow(props: {
             onFocus={props.onFocus}
             onClick={(event) => {
               if (isModifiedNavigationClick(event)) return;
+              if (!rail.isMobile) {
+                requestSessionComposerFocus(rail.workspaceId, props.session.id);
+              }
               rail.setDrawerOpen(false);
             }}
             className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
@@ -2606,6 +2633,11 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
       />
     );
   }
+  if (summary.kind === "send_failed") {
+    return (
+      <TriangleAlertIcon aria-hidden="true" className="size-3.5 shrink-0 text-status-failed" />
+    );
+  }
   const tone =
     summary.kind === "needs_attention"
       ? "bg-status-waiting"
@@ -2620,7 +2652,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   );
 }
 
-function RailTrailingMetadata({
+export function RailTrailingMetadata({
   summary,
   scheduled = false,
   relativeTime,

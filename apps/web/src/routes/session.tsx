@@ -89,7 +89,15 @@ import {
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import {
+  consumeSessionComposerFocusIntent,
+  FOCUS_SESSION_COMPOSER_EVENT,
+  sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
+  type SessionComposerFocusIntent,
+} from "@/lib/session-focus";
+import {
   applySessionAttentionProjection,
+  updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
@@ -1005,6 +1013,64 @@ function SessionChatPane(props: {
     [context.client, props.session.id, props.session.workspaceId],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  useEffect(() => {
+    const onFocusRequest = (event: Event) => {
+      const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
+      if (
+        detail?.workspaceId === props.session.workspaceId &&
+        detail.sessionId === props.session.id
+      ) {
+        setComposerFocusSignal(detail.nonce);
+      }
+    };
+    globalThis.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+    return () => globalThis.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+  }, [props.session.id, props.session.workspaceId]);
+  useEffect(() => {
+    const intent = consumeSessionComposerFocusIntent(props.session.workspaceId, props.session.id);
+    if (!intent) return;
+    if (
+      !sessionComposerFocusIntentIsEligible({
+        viewportWidth: globalThis.innerWidth,
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)").matches ?? false,
+        terminal,
+        requiresAction: props.session.status === "requires_action",
+        pendingHumanInput: props.humanInput.requests.length > 0,
+        pendingApproval: props.approvals.length > 0,
+      })
+    ) {
+      return;
+    }
+    const frame = globalThis.requestAnimationFrame(() => {
+      const textarea = composerRegionRef.current?.querySelector("textarea");
+      if (!textarea || textarea.disabled) return;
+      const dialogOpen = Boolean(
+        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
+      );
+      if (
+        !shouldFocusSessionComposer(
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          props.session.id,
+          document.body,
+          dialogOpen,
+        )
+      ) {
+        return;
+      }
+      textarea.focus();
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [
+    composerFocusSignal,
+    props.approvals.length,
+    props.humanInput.requests.length,
+    props.session.id,
+    props.session.status,
+    props.session.workspaceId,
+    terminal,
+  ]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -1338,17 +1404,32 @@ function SessionChatPane(props: {
     setComposerModel,
     setComposerReasoningEffort,
   ]);
+  const acceptedClientEventIds = useMemo(
+    () =>
+      new Set(
+        props.events
+          .filter((event) => event.type === "user.message" && event.clientEventId)
+          .map((event) => event.clientEventId as string),
+      ),
+    [props.events],
+  );
+  const failedOptimisticMessageCount = (composer.optimisticMessages ?? []).filter(
+    (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
+  ).length;
+  useEffect(() => {
+    updateLocalSessionDeliveryAttention({
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      failedMessageCount: failedOptimisticMessageCount,
+    });
+  }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const acceptedClientEventIds = new Set(
-      props.events
-        .filter((event) => event.type === "user.message" && event.clientEventId)
-        .map((event) => event.clientEventId as string),
-    );
     const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
       .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
       .map((message) => ({
         kind: "user-message",
         id: `optimistic:${message.clientEventId}`,
+        reconciliationKey: `user-message:${message.clientEventId}`,
         text: message.text,
         annotations: message.annotations.map((annotation, ordinal) => ({
           ...annotation,
@@ -1369,7 +1450,7 @@ function SessionChatPane(props: {
         },
       }));
     return [...props.timeline, ...optimisticItems];
-  }, [composer, props.events, props.timeline]);
+  }, [acceptedClientEventIds, composer, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
@@ -1607,7 +1688,7 @@ function SessionChatPane(props: {
         </div>
       </div>
 
-      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+      <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <PersonalResourceAttachmentControl
             controller={personalAttachment}

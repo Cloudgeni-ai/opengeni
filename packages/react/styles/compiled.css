@@ -2801,6 +2801,12 @@
 :where(.og-root).decoration-og-border-strong,:where(.og-root) .decoration-og-border-strong {
     text-decoration-color: var(--og-color-border-strong);
   }
+:where(.og-root).decoration-og-status-failed\/50,:where(.og-root) .decoration-og-status-failed\/50 {
+    text-decoration-color: var(--og-color-status-failed);
+    @supports (color: color-mix(in lab, red, red)) {
+      text-decoration-color: color-mix(in oklab, var(--og-color-status-failed) 50%, transparent);
+    }
+  }
 :where(.og-root).decoration-dotted,:where(.og-root) .decoration-dotted {
     text-decoration-style: dotted;
   }
