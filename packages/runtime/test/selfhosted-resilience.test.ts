@@ -24,8 +24,10 @@ import {
   decideSelfhostedRetry,
   drainingMessage,
   execDeadlineHint,
+  parseExecBannerExitCode,
   payloadTooLargeMessage,
   selfhostedRetryBackoffMs,
+  stripExecBanner,
 } from "../src/sandbox";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -428,12 +430,13 @@ describe("exec / control deadline split", () => {
     expect(res.stdout).toBe("partial output\n");
     expect(res.stderr).toContain("300-second execution limit");
     expect(res.stderr).toContain("nohup");
-    // The result carries the timedOut flag for the stdout-only execCommand path.
+    // timedOut is Channel-A metadata. execCommand always includes stderr, so
+    // this hint already reaches the SDK banner without a second append.
     expect(res.timedOut).toBe(true);
   });
 });
 
-describe("execCommand — the deadline hint reaches the stdout-only SDK path", () => {
+describe("execCommand — the deadline hint reaches the SDK banner via stderr", () => {
   const timedOutExecStep =
     (stdout: string) =>
     (req: ControlRequest): ControlResponse => ({
@@ -457,8 +460,9 @@ describe("execCommand — the deadline hint reaches the stdout-only SDK path", (
       cmd: "sleep 999",
     });
     expect(out).not.toBe("");
-    expect(out).toContain("120-second execution limit");
-    expect(out).toContain("nohup");
+    expect(parseExecBannerExitCode(out)).toBe(1);
+    expect(stripExecBanner(out)).toContain("120-second execution limit");
+    expect(stripExecBanner(out)).toContain("nohup");
   });
 
   test("partial-stdout timeout: execCommand appends the hint after the output", async () => {
@@ -466,14 +470,15 @@ describe("execCommand — the deadline hint reaches the stdout-only SDK path", (
     const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({
       cmd: "sleep 999",
     });
-    // The original output, then the hint after a newline separator.
-    expect(out).toBe(`partial output\n\n${execDeadlineHint(120)}`);
+    expect(stripExecBanner(out)).toBe(`partial output\n\n${execDeadlineHint(120)}`);
+    expect(parseExecBannerExitCode(out)).toBe(1);
   });
 
-  test("non-timeout: execCommand returns stdout unchanged", async () => {
+  test("non-timeout: execCommand returns the SDK banner around stdout", async () => {
     const rpc = new ScriptedRpc([execOkStep]);
     const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({ cmd: "echo ok" });
-    expect(out).toBe("ok\n");
+    expect(parseExecBannerExitCode(out)).toBe(0);
+    expect(stripExecBanner(out)).toBe("ok\n");
     expect(out).not.toContain("execution limit");
   });
 });

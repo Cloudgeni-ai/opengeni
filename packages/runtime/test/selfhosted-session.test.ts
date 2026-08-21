@@ -11,6 +11,8 @@ import {
   isProviderSandboxNotFoundError,
   isSelfhostedProviderNotFoundError,
   offlineControlResponse,
+  parseExecBannerExitCode,
+  stripExecBanner,
   subjectFor,
   timeoutControlResponse,
 } from "../src/sandbox";
@@ -477,6 +479,27 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       command: ["/bin/zsh", "-l", "-c", "printf login"],
       shell: false,
     });
+  });
+
+  test("execCommand returns the SDK banner with stderr and exit code", async () => {
+    const stderr = "ls: cannot access '/workspace/missing': No such file or directory\n";
+    const mock = new MockAgentResponder({
+      exec: () => ({
+        exitCode: 2,
+        stdout: new Uint8Array(0),
+        stderr: new TextEncoder().encode(stderr),
+        timedOut: false,
+        durationMs: "4",
+      }),
+    });
+    const session = sessionWith(mock);
+    const banner = await session.execCommand({ cmd: "ls /workspace/missing" });
+    expect(parseExecBannerExitCode(banner)).toBe(2);
+    expect(stripExecBanner(banner)).toBe(stderr);
+    const structured = await session.exec({ cmd: "ls /workspace/missing" });
+    expect(structured.stdout).toBe("");
+    expect(structured.stderr).toBe(stderr);
+    expect(structured.exitCode).toBe(2);
   });
 
   test("exec maps explicit Windows shell families without POSIX flags", async () => {
