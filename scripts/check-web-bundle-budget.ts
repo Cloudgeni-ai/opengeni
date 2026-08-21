@@ -61,7 +61,13 @@ const budgets = {
   // 2,081,360 raw / 578,755 gzip bytes on a direct session load on
   // macOS/arm64. Only these three graph envelopes advance to the next whole
   // KiB; file, lazy, CSS, and all other caps remain unchanged.
-  initialRaw: 1464 * kib,
+  // The chat-native structured human-input exchange keeps pending and resolved
+  // multi-question decisions in the direct session graph. The exact Linux/x64
+  // production build measures 1,501,051 initial raw and 2,087,275 raw /
+  // 580,389 gzip bytes on a direct session load. Advance only those three
+  // aggregate envelopes to the next whole KiB; all per-file and unrelated
+  // graph limits stay fixed.
+  initialRaw: 1466 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -75,8 +81,8 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2033 * kib,
-  directSessionGzip: 566 * kib,
+  directSessionRaw: 2039 * kib,
+  directSessionGzip: 567 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

@@ -2540,8 +2540,8 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <div className={cn("text-og-md text-og-fg", multipleQuestions && "mt-0.5")}>
                         {answer.values.length > 1 ? (
                           <ul className="list-disc space-y-0.5 pl-5">
-                            {answer.values.map((value, index) => (
-                              <li key={`${answer.questionId}-${index}`}>{value}</li>
+                            {answer.values.map((value) => (
+                              <li key={`${answer.questionId}-${value}`}>{value}</li>
                             ))}
                           </ul>
                         ) : (
