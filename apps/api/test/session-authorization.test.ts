@@ -15,6 +15,7 @@ const root = `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/${ses
 const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
   ["PATCH", "", "session.title.write"],
+  ["DELETE", "", "session.delete"],
   ["PUT", "/pin", "session.pin.write"],
   ["PUT", "/attention", "session.attention.write"],
   ["PUT", "/archive", "session.archive.write"],

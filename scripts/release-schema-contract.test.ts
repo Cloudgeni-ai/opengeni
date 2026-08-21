@@ -147,6 +147,8 @@ describe("release schema contract", () => {
       "0305_personal_resource_grant_management.sql",
       "0306_atomic_personal_resource_attachments.sql",
       "0311_company_scope_and_private_session_create.sql",
+      "0312_quiescent_session_tree_deletion.sql",
+      "0313_private_child_session_authority.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

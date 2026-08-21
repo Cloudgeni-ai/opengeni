@@ -86,6 +86,45 @@ describe("channelRailSections", () => {
 });
 
 describe("summarizeRailNodes", () => {
+  test("shows a local message delivery failure without calling the session failed", () => {
+    const forest = buildRailForest([session({ id: "delivery-failed", status: "idle" })]);
+    const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+    expect(summarizeRailNodes(nodes, new Map([["delivery-failed", 2]]))).toEqual({
+      kind: "send_failed",
+      count: 2,
+      total: 1,
+      label: "2 messages not sent",
+    });
+    expect(nodes[0]?.session.status).toBe("idle");
+  });
+
+  test("keeps a loaded child's local failure visible through server tree stats", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root",
+        treeStats: {
+          directChildren: 1,
+          totalDescendants: 1,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          truncated: false,
+        },
+      }),
+      session({ id: "child", parentSessionId: "root" }),
+    ]);
+    const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+
+    expect(summarizeRailNodes(nodes, new Map([["child", 1]]))).toEqual({
+      kind: "send_failed",
+      count: 1,
+      total: 2,
+      label: "1 message not sent",
+    });
+  });
+
   test("uses the highest-priority hidden descendant state", () => {
     const forest = buildRailForest([
       session({

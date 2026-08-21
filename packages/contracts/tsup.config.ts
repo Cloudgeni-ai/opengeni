@@ -11,6 +11,7 @@ export default defineConfig({
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",
     "src/google-drive.ts",
+    "src/personal-github.ts",
     "src/slack-bot-scopes.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-committed-transaction.ts",

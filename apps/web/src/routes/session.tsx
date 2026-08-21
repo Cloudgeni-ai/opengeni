@@ -89,8 +89,18 @@ import {
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import {
+  consumeSessionComposerFocusIntent,
+  FOCUS_SESSION_COMPOSER_EVENT,
+  sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
+  type SessionComposerFocusIntent,
+} from "@/lib/session-focus";
+import {
   applySessionAttentionProjection,
+  updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
 } from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
@@ -176,6 +186,8 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
+    loadingLatest,
+    lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -259,43 +271,124 @@ export function SessionRoute({
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const {
+    client,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
-  const acknowledgedSessionRef = useRef<string | null>(null);
+  const acknowledgedProjectionRef = useRef<string | null>(null);
+  const retriedProjectionRef = useRef<string | null>(null);
+  const [foreground, setForeground] = useState(() => ({
+    documentVisible: document.visibilityState === "visible",
+    windowFocused: document.hasFocus(),
+  }));
+  const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
-    if (!session?.unread || acknowledgedSessionRef.current === session.id) return;
-    acknowledgedSessionRef.current = session.id;
-    void context.client
-      .updateSessionAttention(workspaceId, session.id, {
-        unread: false,
-        expectedVersion: session.attentionVersion ?? 0,
-      })
-      .then((updated) => {
-        // The rail owns separately polled page objects. Keep the completed
-        // acknowledgement there so leaving this route cannot resurrect the
-        // stale dot while the next 15-second poll settles.
-        notifySessionAttentionChanged(updated);
-        setContextSession((current) =>
-          current?.id === updated.id ? applySessionAttentionProjection(current, updated) : current,
-        );
-      })
-      .catch(() => {
-        // A later route load or the normal rail refresh can retry. Reading a
-        // chat should never interrupt the user with an acknowledgement error.
-        if (acknowledgedSessionRef.current === session.id) {
-          acknowledgedSessionRef.current = null;
-        }
+    const reconcileForeground = () => {
+      setForeground({
+        documentVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
       });
+    };
+    window.addEventListener("focus", reconcileForeground);
+    window.addEventListener("blur", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileForeground);
+      window.removeEventListener("blur", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
+  }, []);
+  useEffect(() => {
+    const projectionKey = session
+      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
+      : null;
+    const unreadProjection = session
+      ? {
+          ...session,
+          unread:
+            (session.unread || renderedThroughSequence > session.lastSequence) &&
+            projectionKey !== acknowledgedProjectionRef.current,
+        }
+      : null;
+    const liveTipLoaded =
+      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
+    if (
+      !session ||
+      !projectionKey ||
+      !shouldAcknowledgeActiveSession({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: unreadProjection,
+        liveTipLoaded,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+    const targetSession = session;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) return;
+      acknowledgedProjectionRef.current = projectionKey;
+      void client
+        .updateSessionAttention(workspaceId, targetSession.id, {
+          unread: false,
+          acknowledgedThroughSequence: renderedThroughSequence,
+        })
+        .then((updated) => {
+          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          // The rail owns separately polled page objects. Keep this exact
+          // frontier result there so a stale list poll cannot resurrect or
+          // prematurely clear the unread dot.
+          notifySessionAttentionChanged(updated);
+          setContextSession((current) =>
+            current?.id === updated.id
+              ? applySessionAttentionProjection(current, updated)
+              : current,
+          );
+        })
+        .catch(() => {
+          // Retry one transient failure for this exact frontier. Keeping the
+          // receipt after the second failure prevents a permanent 4xx/5xx from
+          // becoming an unbounded request and log loop.
+          if (
+            !cancelled &&
+            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+            acknowledgedProjectionRef.current === projectionKey &&
+            retriedProjectionRef.current !== projectionKey
+          ) {
+            retriedProjectionRef.current = projectionKey;
+            acknowledgedProjectionRef.current = null;
+            setAttentionRetryRevision((revision) => revision + 1);
+          }
+        });
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [
-    context.client,
-    session?.attentionVersion,
-    session?.id,
-    session?.unread,
+    attentionRetryRevision,
+    captureWorkspaceInvocation,
+    client,
+    foreground,
+    hasNewer,
+    initialLoading,
+    loadingLatest,
+    loadingNewer,
+    loadingOldest,
+    ownsWorkspaceInvocation,
+    renderedThroughSequence,
+    session,
+    sessionId,
     setContextSession,
     workspaceId,
   ]);
@@ -525,6 +618,28 @@ export function SessionRoute({
     pollIntervalMs: 30_000,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  const sandboxFileRequestSeq = useRef(0);
+  const [sandboxFileRequest, setSandboxFileRequest] = useState<{
+    path: string;
+    line: number;
+    requestId: number;
+  } | null>(null);
+  useEffect(() => {
+    setSandboxFileRequest(null);
+  }, [sessionId]);
+  const setInspectorOpen = context.setInspectorOpen;
+  const openSandboxFileAtLine = useCallback(
+    (path: string, line: number) => {
+      sandboxFileRequestSeq.current += 1;
+      setSandboxFileRequest({
+        path,
+        line,
+        requestId: sandboxFileRequestSeq.current,
+      });
+      setInspectorOpen(true);
+    },
+    [setInspectorOpen],
+  );
 
   if (!session) {
     if (loadError) {
@@ -549,6 +664,7 @@ export function SessionRoute({
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          openFileRequest={sandboxFileRequest}
           onOpenNavigation={() => {
             context.setInspectorOpen(false);
             rail.setDrawerOpen(true);
@@ -609,6 +725,7 @@ export function SessionRoute({
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
+      onOpenSandboxFile={openSandboxFileAtLine}
     />
   );
 
@@ -623,6 +740,7 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        openFileRequest={sandboxFileRequest}
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -661,6 +779,11 @@ function SessionDock(props: {
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
+  openFileRequest?: {
+    path: string;
+    line?: number | null;
+    requestId: number;
+  } | null;
 }) {
   const context = useAppContext();
   const dockLayoutStorageId = sessionDockLayoutStorageId(
@@ -758,6 +881,7 @@ function SessionDock(props: {
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
       mobileLeadingControl={
         <Button
           type="button"
@@ -882,6 +1006,7 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
+  onOpenSandboxFile: (path: string, line: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -919,7 +1044,76 @@ function SessionChatPane(props: {
     },
     [context.client, props.session.id, props.session.workspaceId],
   );
+  const onOpenSandboxFile = props.onOpenSandboxFile;
+  const handleSandboxFile = useCallback(
+    async (path: string, line?: number) => {
+      if (line != null && line > 0) {
+        onOpenSandboxFile(path, line);
+        return;
+      }
+      await downloadSandboxFile(path);
+    },
+    [downloadSandboxFile, onOpenSandboxFile],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  useEffect(() => {
+    const onFocusRequest = (event: Event) => {
+      const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
+      if (
+        detail?.workspaceId === props.session.workspaceId &&
+        detail.sessionId === props.session.id
+      ) {
+        setComposerFocusSignal(detail.nonce);
+      }
+    };
+    globalThis.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+    return () => globalThis.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+  }, [props.session.id, props.session.workspaceId]);
+  useEffect(() => {
+    const intent = consumeSessionComposerFocusIntent(props.session.workspaceId, props.session.id);
+    if (!intent) return;
+    if (
+      !sessionComposerFocusIntentIsEligible({
+        viewportWidth: globalThis.innerWidth,
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)").matches ?? false,
+        terminal,
+        requiresAction: props.session.status === "requires_action",
+        pendingHumanInput: props.humanInput.requests.length > 0,
+        pendingApproval: props.approvals.length > 0,
+      })
+    ) {
+      return;
+    }
+    const frame = globalThis.requestAnimationFrame(() => {
+      const textarea = composerRegionRef.current?.querySelector("textarea");
+      if (!textarea || textarea.disabled) return;
+      const dialogOpen = Boolean(
+        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
+      );
+      if (
+        !shouldFocusSessionComposer(
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          props.session.id,
+          document.body,
+          dialogOpen,
+        )
+      ) {
+        return;
+      }
+      textarea.focus();
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [
+    composerFocusSignal,
+    props.approvals.length,
+    props.humanInput.requests.length,
+    props.session.id,
+    props.session.status,
+    props.session.workspaceId,
+    terminal,
+  ]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -1253,17 +1447,32 @@ function SessionChatPane(props: {
     setComposerModel,
     setComposerReasoningEffort,
   ]);
+  const acceptedClientEventIds = useMemo(
+    () =>
+      new Set(
+        props.events
+          .filter((event) => event.type === "user.message" && event.clientEventId)
+          .map((event) => event.clientEventId as string),
+      ),
+    [props.events],
+  );
+  const failedOptimisticMessageCount = (composer.optimisticMessages ?? []).filter(
+    (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
+  ).length;
+  useEffect(() => {
+    updateLocalSessionDeliveryAttention({
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      failedMessageCount: failedOptimisticMessageCount,
+    });
+  }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const acceptedClientEventIds = new Set(
-      props.events
-        .filter((event) => event.type === "user.message" && event.clientEventId)
-        .map((event) => event.clientEventId as string),
-    );
     const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
       .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
       .map((message) => ({
         kind: "user-message",
         id: `optimistic:${message.clientEventId}`,
+        reconciliationKey: `user-message:${message.clientEventId}`,
         text: message.text,
         annotations: message.annotations.map((annotation, ordinal) => ({
           ...annotation,
@@ -1284,7 +1493,7 @@ function SessionChatPane(props: {
         },
       }));
     return [...props.timeline, ...optimisticItems];
-  }, [composer, props.events, props.timeline]);
+  }, [acceptedClientEventIds, composer, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
@@ -1325,15 +1534,11 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText
-            text={text}
-            streaming={item.streaming}
-            onSandboxFile={downloadSandboxFile}
-          />
+          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
         </div>
       );
     },
-    [downloadSandboxFile, props.session.workspaceId],
+    [handleSandboxFile, props.session.workspaceId],
   );
 
   return (
@@ -1520,7 +1725,7 @@ function SessionChatPane(props: {
         </div>
       </div>
 
-      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+      <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <PersonalResourceAttachmentControl
             controller={personalAttachment}

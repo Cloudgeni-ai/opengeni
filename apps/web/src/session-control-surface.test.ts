@@ -36,6 +36,29 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain('id: "agents"');
   });
 
+  test("keeps setup above the prompt and model beside voice/send on new sessions", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    const actions = route.indexOf("actions={");
+    const model = route.indexOf("<SessionModelControl", actions);
+    const voice = route.indexOf("<NewSessionRealtimeControl", model);
+    const header = route.indexOf("header={", voice);
+    const setup = route.indexOf("<SessionSetupStrip", header);
+    expect(actions).toBeGreaterThan(-1);
+    expect(model).toBeGreaterThan(actions);
+    expect(voice).toBeGreaterThan(model);
+    expect(header).toBeGreaterThan(voice);
+    expect(setup).toBeGreaterThan(header);
+
+    const setupImplementation = route.slice(
+      route.indexOf("function SessionSetupStrip"),
+      route.indexOf("function SessionModelControl"),
+    );
+    expect(setupImplementation).toContain("<SessionToolPicker");
+    expect(setupImplementation).toContain("<SessionFolderPicker");
+    expect(setupImplementation).toContain("<WorkspaceRepositoryPicker");
+    expect(setupImplementation).not.toContain("<ModelPicker");
+  });
+
   test("announces pin results through an independent live region", async () => {
     const [header, list] = await Promise.all([
       source("components/rail/session-header.tsx"),

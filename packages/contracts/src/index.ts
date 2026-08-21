@@ -5426,17 +5426,25 @@ export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
 /**
  * A member's durable follow-up state for one session. Reading the session does
  * not acknowledge it: `unread` changes only through this explicit mutation.
+ * A foreground reader may provide `acknowledgedThroughSequence` with
+ * `unread: false` so later server events remain unread instead of being
+ * consumed by a delayed acknowledgement request.
  * `activelyWorking` is an independent personal label that survives read state.
  */
 export const UpdateSessionAttentionRequest = z
   .object({
     unread: z.boolean().optional(),
+    acknowledgedThroughSequence: z.number().int().nonnegative().optional(),
     activelyWorking: z.boolean().optional(),
     expectedVersion: z.number().int().nonnegative().optional(),
   })
   .strict()
   .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
     message: "unread or activelyWorking is required",
+  })
+  .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
+    message: "acknowledgedThroughSequence requires unread false",
+    path: ["acknowledgedThroughSequence"],
   });
 export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
 
@@ -5887,6 +5895,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.pin.write",
   "session.attention.write",
   "session.archive.write",
+  "session.delete",
   "session.codex_account.write",
   "session.realtime.start",
   "session.realtime.control",
@@ -12502,8 +12511,11 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
-    /** Workspace-visible by default. Private creation is an activated,
-     * managed-cookie owning-human capability and commits atomically. */
+    /** Top-level omission is workspace-visible. Agent-child omission inherits
+     * the exact parent visibility; cross-visibility child creation is rejected.
+     * Top-level private creation is an activated managed-cookie owning-human
+     * capability, while a private child uses an exact live-parent-attempt
+     * database capability. Both commit atomically. */
     visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or

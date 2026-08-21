@@ -565,6 +565,11 @@ describe("deployment contract", () => {
         OPENGENI_DELEGATION_SECRET: "delegation",
         OPENGENI_BETTER_AUTH_SECRET: "better-auth",
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
+        OPENGENI_INTEGRATIONS_ENABLED: "true",
+        OPENGENI_INTEGRATIONS_STATE_SECRET: "integration-state",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
         OPENGENI_RESEND_API_KEY: "resend",
         OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
         OPENGENI_GITHUB_APP_ID: "1",
@@ -606,6 +611,13 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID=github-personal-staging",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET=github-personal-secret",
+    );
     expect(artifacts.helmValuesYaml).toContain('tag: "release-1"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
@@ -786,6 +798,29 @@ describe("deployment contract", () => {
       "OPENGENI_AZURE_OPENAI_BASE_URL=https://example.openai.azure.com/openai/v1/",
     );
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION=");
+  });
+
+  test("requires separate personal GitHub OAuth secrets only when explicitly enabled", () => {
+    const contract = contractForProfile("azure-managed", "managed-saas-staging");
+    const disabled = requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "openai",
+    });
+    expect(disabled).not.toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID");
+    expect(disabled).not.toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET");
+
+    const enabled = requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "openai",
+      OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+    });
+    expect(enabled).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_INTEGRATIONS_ENABLED",
+        "OPENGENI_INTEGRATIONS_STATE_SECRET",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      ]),
+    );
   });
 
   test("generates preview runtime artifacts with a restricted DB identity", () => {

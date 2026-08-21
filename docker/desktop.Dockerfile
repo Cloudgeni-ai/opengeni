@@ -33,8 +33,15 @@ ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a63
 FROM rust:1.82-bookworm AS computer-native-build
 
 WORKDIR /src/agent
+ARG TARGETPLATFORM
 COPY agent .
-RUN set -eux; \
+# Cache mounts keep the crates.io registry and the per-target build directory
+# between builds so an edit under agent/ recompiles only the changed crates;
+# the verified binary is installed to /out inside the same step.
+RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
+    --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
+    set -eux; \
     cargo build --locked --release -p opengeni-computer-native; \
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
@@ -46,7 +53,8 @@ FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
 ARG TARGETARCH
 WORKDIR /src
 COPY docker/anydoc/package.json docker/anydoc/bun.lock ./
-RUN set -eux; \
+RUN --mount=type=cache,id=opengeni-sandbox-bun-anydoc,target=/root/.bun/install/cache,sharing=locked \
+    set -eux; \
     case "$TARGETARCH" in \
       amd64) node_arch=x64 ;; \
       arm64) node_arch=arm64 ;; \
@@ -63,8 +71,50 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
 
 WORKDIR /src
+# Stage only the lock-resolving manifests first so the frozen install layer is
+# reused across source edits; every workspace manifest below is checked against
+# the repository workspace list by scripts/release-image-workflow-contract.test.ts.
+COPY package.json bun.lock tsconfig.base.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY packages/agent-proto/package.json packages/agent-proto/package.json
+COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
+COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
+COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
+COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
+COPY packages/browserd/package.json packages/browserd/package.json
+COPY packages/capabilities/package.json packages/capabilities/package.json
+COPY packages/codemode/package.json packages/codemode/package.json
+COPY packages/codex/package.json packages/codex/package.json
+COPY packages/config/package.json packages/config/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/core/package.json packages/core/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/documents/package.json packages/documents/package.json
+COPY packages/events/package.json packages/events/package.json
+COPY packages/github/package.json packages/github/package.json
+COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/network/package.json packages/network/package.json
+COPY packages/observability/package.json packages/observability/package.json
+COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react/package.json packages/react/package.json
+COPY packages/runtime/package.json packages/runtime/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
+COPY packages/storage/package.json packages/storage/package.json
+COPY packages/testing/package.json packages/testing/package.json
+COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
+COPY patches patches
+# The cache mount only holds Bun's download cache; the exact lock-resolved
+# node_modules tree still lands in the layer and is byte-identical without it.
+# Each stage owns its own cache id so concurrently building stages never share
+# one writer.
+RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/cache,sharing=locked \
+    bun install --frozen-lockfile
 COPY . .
-RUN bun install --frozen-lockfile
 
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
 # programs. The CLI and imported module therefore share source, catalog rules,

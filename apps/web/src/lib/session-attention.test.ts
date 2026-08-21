@@ -3,9 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 import {
   applySessionAttentionProjection,
+  localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
   subscribeToSessionAttentionChanges,
+  subscribeToLocalSessionDeliveryAttention,
+  updateLocalSessionDeliveryAttention,
 } from "./session-attention";
 
 const session = {
@@ -55,5 +60,99 @@ describe("session attention reconciliation", () => {
     notifySessionAttentionChanged(session);
 
     expect(received).toEqual([session.id]);
+  });
+
+  test("tracks local message-delivery attention without changing durable session state", () => {
+    const durableBefore = { ...session };
+    const revisions: Array<Array<[string, number]>> = [];
+    const unsubscribe = subscribeToLocalSessionDeliveryAttention(() => {
+      revisions.push([...localSessionDeliveryAttentionCounts(session.workspaceId)]);
+    });
+
+    updateLocalSessionDeliveryAttention({
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      failedMessageCount: 2,
+    });
+    expect(localSessionDeliveryAttentionCounts(session.workspaceId)).toEqual(
+      new Map([[session.id, 2]]),
+    );
+    expect(session).toEqual(durableBefore);
+
+    updateLocalSessionDeliveryAttention({
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      failedMessageCount: 0,
+    });
+    unsubscribe();
+
+    expect(revisions).toEqual([[[session.id, 2]], []]);
+    expect(localSessionDeliveryAttentionCounts(session.workspaceId).size).toBe(0);
+  });
+});
+
+describe("active session read acknowledgement", () => {
+  test("a later rendered event frontier requires a new acknowledgement", () => {
+    const acknowledged = sessionReadProjectionKey(session.id, 20);
+    expect(sessionReadProjectionKey(session.id, 20)).toBe(acknowledged);
+    expect(sessionReadProjectionKey(session.id, 21)).not.toBe(acknowledged);
+  });
+
+  test("acknowledges the exact unread chat only at the foreground live tip", () => {
+    expect(
+      shouldAcknowledgeActiveSession({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+        liveTipLoaded: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not consume unread state in the background or from a historical window", () => {
+    for (const candidate of [
+      { documentVisible: false, windowFocused: true, liveTipLoaded: true },
+      { documentVisible: true, windowFocused: false, liveTipLoaded: true },
+      { documentVisible: true, windowFocused: true, liveTipLoaded: false },
+    ]) {
+      expect(
+        shouldAcknowledgeActiveSession({
+          activeSessionId: session.id,
+          workspaceId: session.workspaceId,
+          session,
+          ...candidate,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  test("rejects stale route, workspace, read, archived, and absent projections", () => {
+    const candidates = [
+      { activeSessionId: "session-b", workspaceId: session.workspaceId, session },
+      { activeSessionId: session.id, workspaceId: "workspace-b", session },
+      {
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session: { ...session, unread: false },
+      },
+      {
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session: { ...session, archived: true },
+      },
+      { activeSessionId: session.id, workspaceId: session.workspaceId, session: null },
+    ];
+    for (const candidate of candidates) {
+      expect(
+        shouldAcknowledgeActiveSession({
+          ...candidate,
+          documentVisible: true,
+          windowFocused: true,
+          liveTipLoaded: true,
+        }),
+      ).toBe(false);
+    }
   });
 });

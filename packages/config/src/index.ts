@@ -1129,6 +1129,9 @@ const SettingsSchema = z.object({
   githubAppId: z.string().optional(),
   githubClientId: z.string().optional(),
   githubClientSecret: z.string().optional(),
+  githubPersonalOauthEnabled: EnvBoolean.default(false),
+  githubPersonalOauthClientId: z.string().optional(),
+  githubPersonalOauthClientSecret: z.string().optional(),
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
@@ -1231,6 +1234,12 @@ export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string
 export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
   const origin = canonicalPublicOrigin(publicBaseUrl);
   return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
+}
+
+/** Exact callback registered on the environment-specific personal GitHub OAuth App. */
+export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
+  const origin = canonicalPublicOrigin(publicBaseUrl);
+  return origin ? `${origin}/v1/integrations/github-personal/oauth/callback` : null;
 }
 
 /** Declarative voice-input transcription provider ids. */
@@ -2385,6 +2394,9 @@ export function getSettings(): Settings {
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
+    githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
+    githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
+    githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
@@ -5048,6 +5060,59 @@ function validateSettings(settings: Settings): void {
     throw new Error(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  }
+  if (
+    Boolean(settings.githubPersonalOauthClientId) !==
+    Boolean(settings.githubPersonalOauthClientSecret)
+  ) {
+    throw new Error(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.githubPersonalOauthEnabled) {
+    if (!settings.integrationsEnabled) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_ENABLED=true is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (settings.productAccessMode !== "managed") {
+      throw new Error(
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    if (!settings.githubPersonalOauthClientId || !settings.githubPersonalOauthClientSecret) {
+      throw new Error(
+        "personal GitHub OAuth requires OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      );
+    }
+    if (settings.githubPersonalOauthClientId === settings.githubClientId) {
+      throw new Error(
+        "personal GitHub OAuth must use a different OAuth App client from the OpenGeni GitHub App",
+      );
+    }
+    if (!personalGitHubOAuthCallbackUrl(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when personal GitHub OAuth is enabled",
+      );
+    }
+    if (
+      !settings.publicBaseUrl?.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when personal GitHub OAuth is enabled outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (!settings.environmentsEncryptionKey) {
+      throw new Error(
+        "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required when personal GitHub OAuth is enabled",
+      );
+    }
   }
   if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
     throw new Error(

@@ -1,12 +1,65 @@
 import type { Session } from "@/types";
 
+export type ActiveSessionReadCandidate = Pick<
+  Session,
+  "id" | "workspaceId" | "unread" | "archived"
+>;
+
 export type SessionAttentionProjection = Pick<
   Session,
   "id" | "workspaceId" | "unread" | "attentionVersion" | "lastSequence"
 >;
 
+export type LocalSessionDeliveryAttention = {
+  workspaceId: string;
+  sessionId: string;
+  failedMessageCount: number;
+};
+
 // RailShell renders exactly one desktop-or-mobile SessionList at a time.
 let listener: ((projection: SessionAttentionProjection) => void) | null = null;
+const localDeliveryAttention = new Map<string, LocalSessionDeliveryAttention>();
+const localDeliveryListeners = new Set<() => void>();
+
+function localDeliveryKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+/**
+ * Project browser-local delivery failure truth into the rail without mutating
+ * the durable session lifecycle or unread state. A retry, removal, or durable
+ * acceptance clears the projection when the composer no longer owns a failed
+ * optimistic message.
+ */
+export function updateLocalSessionDeliveryAttention(
+  projection: LocalSessionDeliveryAttention,
+): void {
+  const key = localDeliveryKey(projection.workspaceId, projection.sessionId);
+  const current = localDeliveryAttention.get(key);
+  if (projection.failedMessageCount <= 0) {
+    if (!current) return;
+    localDeliveryAttention.delete(key);
+  } else {
+    if (current?.failedMessageCount === projection.failedMessageCount) return;
+    localDeliveryAttention.set(key, projection);
+  }
+  for (const notify of localDeliveryListeners) notify();
+}
+
+export function localSessionDeliveryAttentionCounts(
+  workspaceId: string,
+): ReadonlyMap<string, number> {
+  return new Map(
+    [...localDeliveryAttention.values()]
+      .filter((projection) => projection.workspaceId === workspaceId)
+      .map((projection) => [projection.sessionId, projection.failedMessageCount]),
+  );
+}
+
+export function subscribeToLocalSessionDeliveryAttention(onChange: () => void): () => void {
+  localDeliveryListeners.add(onChange);
+  return () => localDeliveryListeners.delete(onChange);
+}
 
 function isOlder(
   current: Pick<SessionAttentionProjection, "attentionVersion" | "lastSequence">,
@@ -15,6 +68,37 @@ function isOlder(
   return (
     projected.attentionVersion! < current.attentionVersion! ||
     projected.lastSequence < current.lastSequence
+  );
+}
+
+/** One foreground-view receipt per exact session event frontier. */
+export function sessionReadProjectionKey(sessionId: string, latestEventSequence: number): string {
+  return `${sessionId}:${latestEventSequence}`;
+}
+
+/**
+ * A chat is read only while the exact route is genuinely in the foreground.
+ * Merely leaving a session route mounted in a background tab/window must not
+ * consume its unread signal.
+ */
+export function shouldAcknowledgeActiveSession(input: {
+  activeSessionId: string | null;
+  workspaceId: string;
+  session: ActiveSessionReadCandidate | null;
+  documentVisible: boolean;
+  windowFocused: boolean;
+  liveTipLoaded: boolean;
+}): boolean {
+  const { session } = input;
+  return Boolean(
+    input.liveTipLoaded &&
+    input.documentVisible &&
+    input.windowFocused &&
+    session &&
+    !session.archived &&
+    session.unread &&
+    session.workspaceId === input.workspaceId &&
+    session.id === input.activeSessionId,
   );
 }
 

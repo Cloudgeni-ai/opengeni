@@ -1,6 +1,89 @@
 export type SessionFocusTarget = "row" | "actions";
 export type SessionRowRevealIntent = { current: string | null };
 
+export const FOCUS_SESSION_COMPOSER_EVENT = "opengeni:focus-session-composer";
+
+export type SessionComposerFocusIntent = {
+  workspaceId: string;
+  sessionId: string;
+  nonce: number;
+};
+
+let pendingComposerFocusIntent: SessionComposerFocusIntent | null = null;
+let composerFocusNonce = 0;
+
+/**
+ * Record one explicit desktop rail-click intent before route navigation.
+ * Route refreshes, deep links, polling, and background state changes never call
+ * this seam, so they cannot acquire composer focus accidentally.
+ */
+export function requestSessionComposerFocus(workspaceId: string, sessionId: string): void {
+  pendingComposerFocusIntent = {
+    workspaceId,
+    sessionId,
+    nonce: ++composerFocusNonce,
+  };
+  globalThis.dispatchEvent?.(
+    new CustomEvent<SessionComposerFocusIntent>(FOCUS_SESSION_COMPOSER_EVENT, {
+      detail: pendingComposerFocusIntent,
+    }),
+  );
+}
+
+/** Consume only the exact destination's one-shot rail-click intent. */
+export function consumeSessionComposerFocusIntent(
+  workspaceId: string,
+  sessionId: string,
+): SessionComposerFocusIntent | null {
+  const intent = pendingComposerFocusIntent;
+  if (!intent || intent.workspaceId !== workspaceId || intent.sessionId !== sessionId) {
+    return null;
+  }
+  pendingComposerFocusIntent = null;
+  return intent;
+}
+
+/** Test/teardown seam. Production callers should consume rather than clear. */
+export function clearSessionComposerFocusIntent(): void {
+  pendingComposerFocusIntent = null;
+}
+
+/**
+ * A rail click may replace focus only while focus still belongs to that click.
+ * Any dialog or unrelated focused control wins over the navigation convenience.
+ */
+export function shouldFocusSessionComposer(
+  active: HTMLElement | null,
+  sessionId: string,
+  body: HTMLElement | null,
+  dialogOpen: boolean,
+): boolean {
+  if (dialogOpen) return false;
+  if (!active || active === body || !active.isConnected) return true;
+  return (
+    active.closest<HTMLElement>("[data-session-row]")?.getAttribute("data-session-row") ===
+    sessionId
+  );
+}
+
+export function sessionComposerFocusIntentIsEligible(input: {
+  viewportWidth: number;
+  coarsePointer: boolean;
+  terminal: boolean;
+  requiresAction: boolean;
+  pendingHumanInput: boolean;
+  pendingApproval: boolean;
+}): boolean {
+  return (
+    input.viewportWidth >= 1024 &&
+    !input.coarsePointer &&
+    !input.terminal &&
+    !input.requiresAction &&
+    !input.pendingHumanInput &&
+    !input.pendingApproval
+  );
+}
+
 /** Reader-owned rail movement supersedes an unfulfilled programmatic reveal. */
 export function cancelSessionRowRevealIntent(intent: SessionRowRevealIntent): void {
   intent.current = null;

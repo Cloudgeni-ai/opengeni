@@ -320,6 +320,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         items.push({
           kind: "user-message",
           id: event.id,
+          ...(event.clientEventId
+            ? { reconciliationKey: `user-message:${event.clientEventId}` }
+            : {}),
           text: voiceMessage?.text ?? stringValue(payload.text),
           annotations: timelineAnnotations(payload.annotations),
           annotationSource: {

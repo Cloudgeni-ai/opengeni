@@ -666,6 +666,43 @@ export type CreateConnectionRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+export type PersonalGitHubConnectionMetadata = {
+  credentialRole: "opengeni_github_personal";
+  providerFamily: "github";
+  providerPrincipalId: string;
+  githubUserId: string;
+  githubLogin: string;
+  oauthEnvironment: string;
+  oauthClientMarker: string;
+  credentialBindingId: string;
+  connectedAt: string;
+  lastVerifiedAt: string;
+  refreshTokenExpiresAt?: string | null | undefined;
+  disconnectedAt?: string | null | undefined;
+  [key: string]: unknown;
+};
+
+export type PersonalGitHubOAuthStartRequest = {
+  connectionId?: string | undefined;
+  returnPath?: string | undefined;
+};
+
+export type PersonalGitHubOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type PersonalGitHubConnectionStatusResponse = {
+  enabled: boolean;
+  connection: ConnectionMetadata | null;
+  reviewUrl: string | null;
+};
+
+export type PersonalGitHubDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
 export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
@@ -1283,6 +1320,7 @@ export type UpdateSessionPinRequest = {
 
 export type UpdateSessionAttentionRequest = {
   unread?: boolean;
+  acknowledgedThroughSequence?: number;
   activelyWorking?: boolean;
   expectedVersion?: number;
 };

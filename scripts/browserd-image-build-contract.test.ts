@@ -10,9 +10,11 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const sourceStage = dockerfile.indexOf(
     "FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build",
   );
-  const sourceCopy = dockerfile.indexOf("COPY . .", sourceStage);
-  const install = dockerfile.indexOf("RUN bun install --frozen-lockfile", sourceCopy);
-  const codemode = dockerfile.indexOf("runtime=/out/codemode-runtime", install);
+  // Manifests are staged first so the frozen install layer survives source
+  // edits; the full tree lands after it and before any source-dependent step.
+  const install = dockerfile.indexOf("bun install --frozen-lockfile", sourceStage);
+  const sourceCopy = dockerfile.indexOf("COPY . .", install);
+  const codemode = dockerfile.indexOf("runtime=/out/codemode-runtime", sourceCopy);
   const ogtool = dockerfile.indexOf("RUN cd packages/ogtool && bun run build", codemode);
   const targetStage = dockerfile.indexOf("FROM oven/bun:1.3.14 AS browserd-build", ogtool);
   const targetSource = dockerfile.indexOf(
@@ -38,9 +40,9 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
 
   return (
     sourceStage >= 0 &&
-    sourceCopy > sourceStage &&
-    install > sourceCopy &&
-    codemode > install &&
+    install > sourceStage &&
+    sourceCopy > install &&
+    codemode > sourceCopy &&
     ogtool > codemode &&
     targetStage > ogtool &&
     targetSource > targetStage &&

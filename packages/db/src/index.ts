@@ -147,6 +147,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   closePrivateSessionCreateCapability,
+  openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
   sessionTenancyProductActivated,
 } from "./session-tenancy";
@@ -4116,6 +4117,25 @@ export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
   providerPrincipalId: string;
   requestedConnectionId?: string;
   requestedConnectionVersion?: number;
+  /**
+   * Require this exact subject to retain live workspace authority in the same
+   * transaction that persists the credential. This is only a consistency
+   * fence: the caller must separately prove that the subject is the
+   * authenticated managed human before opting in.
+   */
+  requireLiveUserAuthority?: boolean;
+  /** Permission that must remain present while the owner row is locked. */
+  requiredLiveUserPermission?: "connections:write";
+  /**
+   * Permit the canonical managed-human personal-workspace exception when no
+   * ordinary membership row exists. The caller must have authenticated that
+   * exact human before opting in.
+   */
+  allowCanonicalPersonalWorkspaceOwner?: boolean;
+  /** Keep at most one non-revoked provider principal for this owner/family. */
+  exclusiveProviderPrincipalPerOwner?: boolean;
+  /** Existing values for these metadata keys survive exact-principal convergence. */
+  preserveExistingMetadataKeys?: readonly string[];
 };
 
 export type UpdateSlackBotDocumentDestinationInput = {
@@ -5114,11 +5134,28 @@ export async function prepareRetainedScreenshotArtifact(
   db: Database,
   input: PrepareRetainedScreenshotArtifactInput,
 ): Promise<{ artifact: RetainedScreenshotArtifact; created: boolean }> {
-  return await withRlsContext(
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      stage: "retained_screenshot_prepare",
+      correlationId: input.settlementKey,
+    },
     async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        if (!locks.sessions[0] || !locks.turns[0] || !locks.attempts[0]) {
+          throw new Error(
+            `Retained screenshot parent rows missing: ${input.sessionId}/${input.turnId}/${input.attemptId}`,
+          );
+        }
         await tx
           .insert(schema.workspaceScreenshotQuotas)
           .values({
@@ -8099,6 +8136,72 @@ export async function persistProviderOAuthConnection(
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const ownerKey = input.subjectId ?? "workspace";
+        if (input.requireLiveUserAuthority) {
+          if (!input.subjectId) {
+            throw new Error("Live user authority requires a subject-owned connection");
+          }
+          // Serialize with organization-membership lifecycle commands before
+          // deriving authority and firing the connection-authority trigger.
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+          );
+          const [membership] = await tx
+            .select({
+              accountId: schema.workspaceMemberships.accountId,
+              permissions: schema.workspaceMemberships.permissions,
+            })
+            .from(schema.workspaceMemberships)
+            .where(
+              and(
+                eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+                eq(schema.workspaceMemberships.subjectId, input.subjectId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const hasLiveAuthority = await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+          });
+          if (!hasLiveAuthority) {
+            throw new Error("Connection owner no longer has live workspace authority");
+          }
+          if (membership) {
+            if (
+              membership.accountId !== input.accountId ||
+              (input.requiredLiveUserPermission &&
+                !membership.permissions.includes(input.requiredLiveUserPermission) &&
+                !membership.permissions.includes("workspace:admin"))
+            ) {
+              throw new Error("Connection owner no longer has the required workspace permission");
+            }
+          } else if (!input.allowCanonicalPersonalWorkspaceOwner) {
+            throw new Error("Connection owner has no lockable workspace membership");
+          }
+        }
+        if (input.exclusiveProviderPrincipalPerOwner) {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-owner:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}`}, 0))`,
+          );
+          const [conflict] = await tx
+            .select({ id: schema.connections.id })
+            .from(schema.connections)
+            .where(
+              and(
+                eq(schema.connections.workspaceId, input.workspaceId),
+                connectionExactSubject(input.subjectId ?? null),
+                eq(schema.connections.providerDomain, input.providerDomain),
+                eq(schema.connections.kind, "oauth2"),
+                ne(schema.connections.status, "revoked"),
+                sql`${schema.connections.metadata} ->> 'credentialRole' = ${input.credentialRole}`,
+                sql`${schema.connections.metadata} ->> 'providerFamily' = ${input.providerFamily}`,
+                sql`${schema.connections.metadata} ->> 'providerPrincipalId' is distinct from ${input.providerPrincipalId}`,
+              ),
+            )
+            .limit(1);
+          if (conflict) return null;
+        }
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
@@ -8153,7 +8256,11 @@ export async function persistProviderOAuthConnection(
               .limit(1)
           )[0];
         if (!existing) {
-          return await createConnectionInScope(tx, input);
+          const created = await createConnectionInScope(tx, input);
+          if (input.requireLiveUserAuthority && !created.authorityId) {
+            throw new Error("Connection owner authority was not bound");
+          }
+          return created;
         }
         if (
           !input.requestedConnectionId &&
@@ -8171,7 +8278,12 @@ export async function persistProviderOAuthConnection(
               (value): value is string => typeof value === "string",
             )
           : [];
-        return await updateConnectionInScope(tx, {
+        const preservedMetadata = Object.fromEntries(
+          (input.preserveExistingMetadataKeys ?? [])
+            .filter((key) => Object.prototype.hasOwnProperty.call(existing.metadata, key))
+            .map((key) => [key, existing.metadata[key]]),
+        );
+        const updated = await updateConnectionInScope(tx, {
           workspaceId: input.workspaceId,
           connectionId: existing.id,
           visibleToSubjectId: input.visibleToSubjectId,
@@ -8186,6 +8298,7 @@ export async function persistProviderOAuthConnection(
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
+            ...preservedMetadata,
             ...(existingDefinitionIds.length > 0 || incomingDefinitionIds.length > 0
               ? {
                   authorizedDefinitionIds: [
@@ -8196,6 +8309,10 @@ export async function persistProviderOAuthConnection(
           },
           updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
         });
+        if (input.requireLiveUserAuthority && updated && !updated.authorityId) {
+          throw new Error("Connection owner authority was not bound");
+        }
+        return updated;
       });
     },
   );
@@ -11800,6 +11917,7 @@ export async function recordConnectionTokenRefresh(
     credentialEncrypted: string;
     expiresAt: Date | null;
     grantedScopes?: string[];
+    metadata?: Record<string, unknown>;
     lastRefreshAt: Date;
     subjectId?: string | null;
   },
@@ -11818,6 +11936,7 @@ export async function recordConnectionTokenRefresh(
         version: sql`${schema.connections.version} + 1`,
         updatedAt: new Date(),
         ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       };
       const updated = await scopedDb
         .update(schema.connections)
@@ -26196,6 +26315,15 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
+  if (createRequestedVisibility === "user_private" && input.parentSessionId) {
+    // A private child later proves the owner's live organization membership
+    // after locking the parent session/attempt. Serialize with organization
+    // suspend/offboard before taking any workspace or parent row lock, so the
+    // canonical membership -> session lifecycle cannot form a lock cycle.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+    );
+  }
   const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
     tx,
     input.workspaceId,
@@ -26299,23 +26427,42 @@ async function createSessionInTransaction(
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
+  let privateCreateOwnerSubjectId: string | null = null;
   if (createRequestedVisibility === "user_private") {
-    if (
-      frozenCreator.initiator.kind !== "subject" ||
-      !input.subjectId ||
-      input.parentSessionId ||
-      input.sandboxGroupId
-    ) {
-      throw new Error("Private session creation requires a top-level managed-human singleton");
+    if (input.parentSessionId) {
+      if (
+        frozenCreator.initiator.kind !== "subject" ||
+        !input.createdByActor ||
+        input.createdByActor.sessionId !== input.parentSessionId
+      ) {
+        throw new Error("Private child session creation requires its exact parent attempt");
+      }
+      const capability = await openPrivateChildSessionCreateCapability(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: id,
+        parentSessionId: input.parentSessionId,
+        actorTurnId: input.createdByActor.turnId,
+        actorAttemptId: input.createdByActor.attemptId,
+        actorExecutionGeneration: input.createdByActor.executionGeneration,
+      });
+      privateCreateCapabilityId = capability.capabilityId;
+      privateCreateOwnerMembershipId = capability.ownerMembershipId;
+      privateCreateOwnerSubjectId = capability.ownerSubjectId;
+    } else {
+      if (frozenCreator.initiator.kind !== "subject" || !input.subjectId || input.sandboxGroupId) {
+        throw new Error("Private session creation requires a top-level managed-human singleton");
+      }
+      const capability = await openPrivateSessionCreateCapability(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: id,
+        actorSubjectId: input.subjectId,
+      });
+      privateCreateCapabilityId = capability.capabilityId;
+      privateCreateOwnerMembershipId = capability.ownerMembershipId;
+      privateCreateOwnerSubjectId = input.subjectId;
     }
-    const capability = await openPrivateSessionCreateCapability(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: id,
-      actorSubjectId: input.subjectId,
-    });
-    privateCreateCapabilityId = capability.capabilityId;
-    privateCreateOwnerMembershipId = capability.ownerMembershipId;
   }
   try {
     insertedRows = await tx
@@ -26340,7 +26487,7 @@ async function createSessionInTransaction(
             ...(privateCreateOwnerMembershipId
               ? {
                   ownerOrganizationMembershipId: privateCreateOwnerMembershipId,
-                  ownerSubjectId: input.subjectId,
+                  ownerSubjectId: privateCreateOwnerSubjectId,
                 }
               : {}),
             model: input.model,
@@ -26565,6 +26712,273 @@ export async function getSession(
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
   });
+}
+
+export type DeleteSessionTreeIfQuiescentResult =
+  | { status: "deleted"; deletedSessionCount: number }
+  | {
+      status:
+        | "not_found"
+        | "not_root"
+        | "active_sessions"
+        | "active_video_generations"
+        | "live_sandboxes"
+        | "externally_referenced";
+    };
+
+/**
+ * Permanently delete one complete root session tree after proving that no
+ * runtime or provider-side owner can still act on it.
+ *
+ * The workspace-control and tree row locks fence new sessions and concurrent
+ * lifecycle changes. Session-owned evidence follows the migration-owned
+ * cascade; immutable workspace-level provenance and independent forks
+ * deliberately retain RESTRICT and surface `externally_referenced` instead of
+ * being orphaned.
+ */
+export async function deleteSessionTreeIfQuiescent(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; sessionId: string },
+): Promise<DeleteSessionTreeIfQuiescentResult> {
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.workspaceId,
+      input.subjectId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          // Match the canonical session-control lock prefix. Session creation
+          // takes this row FOR SHARE, so the update lock also fences a new
+          // descendant or shared-sandbox peer from appearing after our tree
+          // and group checks.
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          const [root] = await tx
+            .select({
+              id: schema.sessions.id,
+              parentSessionId: schema.sessions.parentSessionId,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .for("update", { noWait: true })
+            .limit(1);
+          if (!root) return { status: "not_found" as const };
+          if (root.parentSessionId !== null) return { status: "not_root" as const };
+
+          const tree = await tx
+            .select({
+              id: schema.sessions.id,
+              status: schema.sessions.status,
+              sandboxGroupId: schema.sessions.sandboxGroupId,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.rootSessionId, input.sessionId),
+              ),
+            )
+            .for("update", { noWait: true });
+          const sessionIds = tree.map((session) => session.id);
+          const groupIds = [...new Set(tree.map((session) => session.sandboxGroupId))];
+          if (
+            tree.some((session) =>
+              ["queued", "running", "requires_action", "recovering", "waiting_capacity"].includes(
+                session.status,
+              ),
+            )
+          ) {
+            return { status: "active_sessions" as const };
+          }
+
+          const [liveAttempts, activeVideoGenerations, externalForks, sharedGroups] =
+            await Promise.all([
+              tx
+                .select({ id: schema.sessionTurnAttempts.id })
+                .from(schema.sessionTurnAttempts)
+                .where(
+                  and(
+                    eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                    inArray(schema.sessionTurnAttempts.sessionId, sessionIds),
+                    inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.videoGenerationOperations.id })
+                .from(schema.videoGenerationOperations)
+                .where(
+                  and(
+                    eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+                    inArray(schema.videoGenerationOperations.sessionId, sessionIds),
+                    inArray(schema.videoGenerationOperations.status, [
+                      "preparing",
+                      "prepared",
+                      "accepted",
+                      "submission_uncertain",
+                      "provider_started",
+                      "retaining",
+                    ]),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.forkedFromSessionId, sessionIds),
+                    notInArray(schema.sessions.id, sessionIds),
+                  ),
+                )
+                .limit(1),
+              tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.sandboxGroupId, groupIds),
+                    notInArray(schema.sessions.id, sessionIds),
+                  ),
+                )
+                .limit(1),
+            ]);
+          if (liveAttempts.length > 0) return { status: "active_sessions" as const };
+          if (activeVideoGenerations.length > 0) {
+            return { status: "active_video_generations" as const };
+          }
+          if (externalForks.length > 0 || sharedGroups.length > 0) {
+            return { status: "externally_referenced" as const };
+          }
+
+          const leases = await tx
+            .select({
+              id: schema.sandboxLeases.id,
+              liveness: schema.sandboxLeases.liveness,
+              refcount: schema.sandboxLeases.refcount,
+              turnHolders: schema.sandboxLeases.turnHolders,
+              viewerHolders: schema.sandboxLeases.viewerHolders,
+              instanceId: schema.sandboxLeases.instanceId,
+              archiveCaptureId: schema.sandboxLeases.archiveCaptureId,
+              reaperHoldId: schema.sandboxLeases.reaperHoldId,
+              rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+              providerDeadlineAt: schema.sandboxLeases.providerDeadlineAt,
+            })
+            .from(schema.sandboxLeases)
+            .where(
+              and(
+                eq(schema.sandboxLeases.workspaceId, input.workspaceId),
+                inArray(schema.sandboxLeases.sandboxGroupId, groupIds),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (
+            leases.some(
+              (lease) =>
+                lease.liveness !== "cold" ||
+                lease.refcount !== 0 ||
+                lease.turnHolders !== 0 ||
+                lease.viewerHolders !== 0 ||
+                lease.instanceId !== null ||
+                lease.archiveCaptureId !== null ||
+                lease.reaperHoldId !== null ||
+                lease.rotationRequestedAt !== null ||
+                lease.providerDeadlineAt !== null,
+            )
+          ) {
+            return { status: "live_sandboxes" as const };
+          }
+
+          const leaseIds = leases.map((lease) => lease.id);
+          if (leaseIds.length > 0) {
+            const [holders, unsettledAdmissions, activeProcesses, openPtys] = await Promise.all([
+              tx
+                .select({ id: schema.sandboxLeaseHolders.id })
+                .from(schema.sandboxLeaseHolders)
+                .where(inArray(schema.sandboxLeaseHolders.leaseId, leaseIds))
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxWorkspaceMutationAdmissions.id })
+                .from(schema.sandboxWorkspaceMutationAdmissions)
+                .where(
+                  and(
+                    inArray(schema.sandboxWorkspaceMutationAdmissions.leaseId, leaseIds),
+                    isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxRetainedProcesses.id })
+                .from(schema.sandboxRetainedProcesses)
+                .where(
+                  and(
+                    inArray(schema.sandboxRetainedProcesses.leaseId, leaseIds),
+                    eq(schema.sandboxRetainedProcesses.state, "active"),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxPtySessions.id })
+                .from(schema.sandboxPtySessions)
+                .where(
+                  and(
+                    inArray(schema.sandboxPtySessions.sessionId, sessionIds),
+                    eq(schema.sandboxPtySessions.status, "open"),
+                  ),
+                )
+                .for("update", { noWait: true }),
+            ]);
+            if (
+              holders.length > 0 ||
+              unsettledAdmissions.length > 0 ||
+              activeProcesses.length > 0 ||
+              openPtys.length > 0
+            ) {
+              return { status: "live_sandboxes" as const };
+            }
+            await tx.delete(schema.sandboxLeases).where(inArray(schema.sandboxLeases.id, leaseIds));
+          }
+
+          const deleted = await tx
+            .delete(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (deleted.length !== 1) return { status: "not_found" as const };
+          return { status: "deleted" as const, deletedSessionCount: sessionIds.length };
+        }),
+    );
+  } catch (error) {
+    let current: unknown = error;
+    const visited = new Set<unknown>();
+    for (let depth = 0; depth < 8 && current && !visited.has(current); depth += 1) {
+      visited.add(current);
+      const code =
+        typeof current === "object" && "code" in current
+          ? (current as { code?: unknown }).code
+          : undefined;
+      if (code === "55P03") return { status: "live_sandboxes" };
+      if (code === "23503" || code === "42501" || code === "55000") {
+        return { status: "externally_referenced" };
+      }
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
+    throw error;
+  }
 }
 
 export type SessionAuthorityProjection = {
@@ -28293,9 +28707,9 @@ export async function setSessionPin(
 }
 
 /**
- * Idempotently update one member's explicit follow-up state. Opening a route is
- * intentionally absent from this protocol: acknowledgment is a deliberate
- * action, and the next durable session event makes the session unread again.
+ * Idempotently update one member's explicit follow-up state. Route reads remain
+ * side-effect free: a foreground client acknowledges its exact rendered event
+ * frontier through this mutation, and later durable events remain unread.
  */
 export async function setSessionAttention(
   db: Database,
@@ -28304,6 +28718,7 @@ export async function setSessionAttention(
     subjectId: string;
     sessionId: string;
     unread?: boolean | undefined;
+    acknowledgedThroughSequence?: number | undefined;
     activelyWorking?: boolean | undefined;
     expectedVersion?: number | undefined;
   },
@@ -28351,10 +28766,24 @@ export async function setSessionAttention(
           )
           .limit(1);
         const current = mapSessionAttention(session, existing);
-        const desiredUnread = input.unread ?? current.unread;
+        const currentAcknowledgedSequence = existing?.acknowledgedSequence ?? 0;
+        const acknowledgedSequence =
+          input.unread === undefined
+            ? currentAcknowledgedSequence
+            : input.unread
+              ? current.unread
+                ? currentAcknowledgedSequence
+                : Math.max(-1, session.lastSequence - 1)
+              : Math.max(
+                  currentAcknowledgedSequence,
+                  Math.min(
+                    input.acknowledgedThroughSequence ?? session.lastSequence,
+                    session.lastSequence,
+                  ),
+                );
         const desiredActivelyWorking = input.activelyWorking ?? current.activelyWorking;
         if (
-          desiredUnread === current.unread &&
+          acknowledgedSequence === currentAcknowledgedSequence &&
           desiredActivelyWorking === current.activelyWorking
         ) {
           const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -28375,12 +28804,6 @@ export async function setSessionAttention(
           throw new SessionAttentionVersionConflictError(current);
         }
 
-        const acknowledgedSequence =
-          input.unread === undefined
-            ? (existing?.acknowledgedSequence ?? 0)
-            : input.unread
-              ? Math.max(-1, session.lastSequence - 1)
-              : session.lastSequence;
         let state = existing ?? null;
         if (!existing) {
           const [inserted] = await tx
@@ -54188,6 +54611,19 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = scheduledTaskCausalHuman;
           }
+          if (session.visibility === "user_private") {
+            const privateOwnerSubjectId = session.ownerSubjectId?.trim() ?? "";
+            if (!privateOwnerSubjectId || !session.ownerOrganizationMembershipId) {
+              throw new Error("Private internal update has incomplete session owner authority");
+            }
+            if (initiatingHumanSubjectId && initiatingHumanSubjectId !== privateOwnerSubjectId) {
+              throw new Error("Private internal update subject does not match the session owner");
+            }
+            // This is the immutable owner frozen on the locked target session,
+            // not an ambient request subject. The attempt snapshot below also
+            // freezes the same visibility/owner-membership authority tuple.
+            initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
           if (
             internalPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
           ) {
@@ -60625,8 +61061,35 @@ export async function addSessionSystemUpdateWithSourceMutation(
           input.workspaceId,
           input.sessionId,
         );
+        const [goalForChildResult] =
+          input.kind === "child_terminal_result"
+            ? await tx
+                .select({ status: schema.sessionGoals.status })
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            : [];
+        // Child completion remains durable model memory, but it is not new
+        // human intent. A completed/paused goal or an already-failed parent is
+        // settled authority and cannot be restarted solely by a late child.
+        // A live parent turn consumes the update in its ordinary loop. Once an
+        // ordinary no-goal turn has settled, its child result remains pending
+        // until new human intent arrives. Only an active goal is a durable
+        // obligation that may autonomously wake an idle parent.
+        const childResultMayWake =
+          input.kind !== "child_terminal_result" ||
+          (session.status !== "failed" && goalForChildResult?.status === "active");
         const shouldWake =
-          !realtimeActive && session.activeTurnId === null && effectiveControl.state === "active";
+          childResultMayWake &&
+          !realtimeActive &&
+          session.activeTurnId === null &&
+          effectiveControl.state === "active";
         const wake = shouldWake
           ? await registerInternalUpdateWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,

@@ -33,6 +33,8 @@ export function ConsoleComposer(props: {
   fileUploadsEnabled: boolean;
   /** Rendered before attach (mobile “+” lives here). */
   controlsLeading?: ReactNode;
+  /** Session setup controls rendered above the message input. */
+  header?: ReactNode;
   controls?: ReactNode;
   actions?: ReactNode;
   commandContext?: SlashCommandContext;
@@ -57,6 +59,7 @@ export function ConsoleComposer(props: {
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
+      {...(props.header ? { header: props.header } : {})}
       // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
       attachButtonClassName="max-sm:hidden"
       controlsStart={props.controls}

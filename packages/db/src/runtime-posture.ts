@@ -299,6 +299,7 @@ const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "open_private_session_create_capability(uuid, uuid, uuid, text)",
+  "open_private_child_session_create_capability(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([

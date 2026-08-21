@@ -40,6 +40,12 @@ import {
   GoogleDriveOAuthStartResponse,
 } from "@opengeni/contracts/google-drive";
 import {
+  PERSONAL_GITHUB_PROVIDER_DOMAIN,
+  PersonalGitHubDisconnectRequest,
+  hasReservedPersonalGitHubMetadata,
+  isPersonalGitHubConnection,
+} from "@opengeni/contracts/personal-github";
+import {
   fikenConnectionMetadata,
   hasPermission,
   hasReservedFikenMetadata,
@@ -87,6 +93,7 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
+import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
   browseAtlassianSources,
   completeAtlassianOAuthCallback,
@@ -175,6 +182,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotReservedSlackBotMetadata(payload.metadata);
     assertNotReservedFikenMetadata(payload.metadata);
     assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
+    assertNotReservedPersonalGitHubMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
     const subjectId = createConnectionSubjectId(payload, grant.subjectId);
     if (subjectId !== null) {
@@ -184,6 +192,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
     assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
+    assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
     const connection = await createConnection(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -680,6 +689,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotReservedSlackBotMetadata(payload.metadata);
     assertNotReservedFikenMetadata(payload.metadata);
     assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
+    assertNotReservedPersonalGitHubMetadata(payload.metadata);
     const existing = await getConnectionMetadata(
       db,
       workspaceId,
@@ -766,6 +776,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "use the dedicated Atlassian reconnect or source-selection flow",
       });
     }
+    if (existing && isPersonalGitHubConnection(existing)) {
+      throw new HTTPException(422, {
+        message: "use the dedicated personal GitHub reconnect flow to update this connection",
+      });
+    }
     if (existing) {
       const providerDomain = canonicalProviderDomain(
         payload.providerDomain ?? existing.providerDomain,
@@ -774,6 +789,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertNotDirectPersonalSlackOAuth(providerDomain, kind);
       assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
       assertNotDirectAtlassianOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
+      assertNotDirectPersonalGitHubOAuth(
+        providerDomain,
+        kind,
+        payload.metadata ?? existing.metadata,
+      );
     }
     // Status is not a free-form field: revocation goes through DELETE, and the
     // broker owns needs_reauth/error. Reactivating a connection is only
@@ -830,6 +850,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
+    const isPersonalGitHub =
+      existing.subjectId === grant.subjectId && isPersonalGitHubConnection(existing);
+    if (isPersonalGitHub) {
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:write",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
+    }
     const isGoogleDrive =
       existing.subjectId === grant.subjectId &&
       existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
@@ -860,7 +891,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           atlassianDisconnect.error.issues[0]?.message ?? "invalid Atlassian disconnect request",
       });
     }
-    if (existing.status === "revoked" && !isGoogleDrive && !isAtlassian) {
+    const personalGitHubDisconnect = isPersonalGitHub
+      ? PersonalGitHubDisconnectRequest.safeParse(disconnectPayload)
+      : null;
+    if (personalGitHubDisconnect && !personalGitHubDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          personalGitHubDisconnect.error.issues[0]?.message ??
+          "invalid personal GitHub disconnect request",
+      });
+    }
+    if (existing.status === "revoked" && !isGoogleDrive && !isAtlassian && !isPersonalGitHub) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
     const connection = isGoogleDrive
@@ -877,24 +918,31 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             connection: existing,
             payload: atlassianDisconnect!.data,
           })
-        : isOpenGeniSlackBotConnection(existing)
-          ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-              accountId: grant.accountId,
+        : isPersonalGitHub
+          ? await disconnectPersonalGitHub(deps, {
               workspaceId,
               subjectId: grant.subjectId,
               connectionId,
-              expectedVersion: existing.version,
-              credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-              credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-              slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+              payload: personalGitHubDisconnect!.data,
             })
-          : await revokeConnection(
-              db,
-              workspaceId,
-              connectionId,
-              grant.subjectId,
-              existing.version,
-            );
+          : isOpenGeniSlackBotConnection(existing)
+            ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+                accountId: grant.accountId,
+                workspaceId,
+                subjectId: grant.subjectId,
+                connectionId,
+                expectedVersion: existing.version,
+                credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+                credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+                slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+              })
+            : await revokeConnection(
+                db,
+                workspaceId,
+                connectionId,
+                grant.subjectId,
+                existing.version,
+              );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
@@ -1281,6 +1329,31 @@ function assertNotDirectAtlassianOAuth(
   ) {
     throw new HTTPException(422, {
       message: "Atlassian credentials must use the dedicated OAuth connection flow",
+    });
+  }
+}
+
+function assertNotDirectPersonalGitHubOAuth(
+  providerDomain: string,
+  kind: string,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    (providerDomain === PERSONAL_GITHUB_PROVIDER_DOMAIN && kind === "oauth2") ||
+    hasReservedPersonalGitHubMetadata(metadata)
+  ) {
+    throw new HTTPException(422, {
+      message: "personal GitHub credentials must use the dedicated OAuth connection flow",
+    });
+  }
+}
+
+function assertNotReservedPersonalGitHubMetadata(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (hasReservedPersonalGitHubMetadata(metadata)) {
+    throw new HTTPException(422, {
+      message: "personal GitHub metadata is reserved for the dedicated OAuth connection flow",
     });
   }
 }

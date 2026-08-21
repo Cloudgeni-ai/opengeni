@@ -548,7 +548,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Not sent");
+    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.className).toContain(
+      "text-og-status-failed",
+    );
     const buttons = [...r.container.querySelectorAll("button")];
     const retry = buttons.find((button) => button.textContent === "Retry");
     const remove = buttons.find((button) => button.textContent === "Remove");

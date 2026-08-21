@@ -239,6 +239,80 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
 }
 
 describe("boundSessionDetailMcp", () => {
+  test("reports selected, mandatory, and effective tool policy separately", () => {
+    const effectiveToolPolicy = {
+      mode: "workspace_default" as const,
+      inheritedFromSessionId: null,
+      selectedIds: [],
+      effectiveIds: ["docs", "files", "opengeni"],
+      mandatoryIds: ["opengeni"],
+      lazyRouter: {
+        state: "required" as const,
+        deferredIds: ["docs", "files", "opengeni"],
+      },
+      configuredIds: ["docs", "files", "opengeni"],
+      droppedIds: [],
+      counts: {
+        selected: 0,
+        effective: 3,
+        mandatory: 1,
+        deferred: 3,
+        configured: 3,
+        dropped: 0,
+      },
+      idsTruncated: false,
+    };
+    const result = boundSessionDetailMcp(sessionFixture({ effectiveToolPolicy }));
+
+    expect(result.effectiveToolPolicy).toEqual(effectiveToolPolicy);
+    expect(result.projection.fields.effectiveToolPolicy).toMatchObject({ truncated: false });
+  });
+
+  test("marks effective tool ids truncated when the MCP envelope samples them further", () => {
+    const ids = Array.from({ length: 40 }, (_, index) => `tool-${String(index).padStart(2, "0")}`);
+    const result = boundSessionDetailMcp(
+      sessionFixture({
+        effectiveToolPolicy: {
+          mode: "explicit",
+          inheritedFromSessionId: null,
+          selectedIds: ids,
+          effectiveIds: ids,
+          mandatoryIds: ["opengeni"],
+          lazyRouter: { state: "required", deferredIds: ids },
+          configuredIds: ids,
+          droppedIds: [],
+          counts: {
+            selected: 40,
+            effective: 40,
+            mandatory: 1,
+            deferred: 40,
+            configured: 40,
+            dropped: 0,
+          },
+          idsTruncated: false,
+        },
+      }),
+    );
+    const policy = result.effectiveToolPolicy as {
+      selectedIds: string[];
+      effectiveIds: string[];
+      lazyRouter: { deferredIds: string[] };
+      configuredIds: string[];
+      counts: { effective: number };
+      idsTruncated: boolean;
+    };
+    expect(policy.selectedIds).toHaveLength(12);
+    expect(policy.effectiveIds).toHaveLength(12);
+    expect(policy.lazyRouter.deferredIds).toHaveLength(12);
+    expect(policy.configuredIds).toHaveLength(12);
+    expect(policy.counts.effective).toBe(40);
+    expect(policy.idsTruncated).toBeTrue();
+    expect(result.projection.fields.effectiveToolPolicy).toMatchObject({ truncated: true });
+    expect(result.projection.details).toContain(
+      "effectiveToolPolicy: ids sampled at 12 per set; counts remain exact",
+    );
+  });
+
   test("bounds every aggregate and reports exact final bytes", () => {
     const huge = "界🙂".repeat(50_000);
     const session = sessionFixture({

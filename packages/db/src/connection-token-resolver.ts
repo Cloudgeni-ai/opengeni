@@ -20,6 +20,13 @@ import {
   type ConnectionUseAuthorizationResult,
 } from "@opengeni/contracts/connection-authority";
 import {
+  PERSONAL_GITHUB_REQUESTED_SCOPES,
+  PERSONAL_GITHUB_PROVIDER_DOMAIN,
+  PERSONAL_GITHUB_TOKEN_URL,
+  PersonalGitHubConnectionMetadata,
+} from "@opengeni/contracts/personal-github";
+import { createHash } from "node:crypto";
+import {
   OAUTH_MAX_RESPONSE_BYTES,
   pinnedFetch,
   readResponseJsonBounded,
@@ -92,6 +99,7 @@ export type ConnectionTokenRefreshInput = {
   credentialEncrypted: string;
   expiresAt: Date | null;
   grantedScopes?: string[];
+  metadata?: Record<string, unknown>;
   lastRefreshAt: Date;
   subjectId?: string | null;
 };
@@ -778,6 +786,9 @@ export function buildConnectionTokenResolver(
     if (refreshed.grantedScopes !== undefined) {
       refreshRecord.grantedScopes = refreshed.grantedScopes;
     }
+    if (refreshed.metadata !== undefined) {
+      refreshRecord.metadata = refreshed.metadata;
+    }
     const persisted = await deps.recordRefresh(db, refreshRecord);
     if (persisted) {
       const current = await load({
@@ -1222,6 +1233,7 @@ export async function refreshOAuthConnectionCredential(
   credential: Record<string, unknown>;
   expiresAt: Date | null;
   grantedScopes?: string[];
+  metadata?: Record<string, unknown>;
 }> {
   if (cred.kind !== "oauth2") {
     return {
@@ -1231,12 +1243,20 @@ export async function refreshOAuthConnectionCredential(
     };
   }
   const refreshToken = stringValue((cred.credential as { refresh_token?: unknown }).refresh_token);
-  const tokenEndpoint =
+  const personalGitHubMetadata = PersonalGitHubConnectionMetadata.safeParse(cred.metadata);
+  const personalGitHub =
+    cred.providerDomain.toLowerCase() === PERSONAL_GITHUB_PROVIDER_DOMAIN &&
+    personalGitHubMetadata.success;
+  const storedTokenEndpoint =
     stringValue((cred.credential as { token_endpoint?: unknown }).token_endpoint) ??
     stringValue((cred.metadata as { tokenEndpoint?: unknown }).tokenEndpoint) ??
     stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
+  const tokenEndpoint = personalGitHub ? PERSONAL_GITHUB_TOKEN_URL : storedTokenEndpoint;
   if (!refreshToken || !tokenEndpoint) {
     throw new Error("connection has no refresh token endpoint");
+  }
+  if (personalGitHub && storedTokenEndpoint !== PERSONAL_GITHUB_TOKEN_URL) {
+    throw new ConnectionRefreshHttpError(401, "client_unavailable");
   }
   let validatedTokenEndpoint: string;
   try {
@@ -1257,11 +1277,25 @@ export async function refreshOAuthConnectionCredential(
     stringValue((cred.credential as { client_id?: unknown }).client_id) ??
     stringValue((cred.metadata as { clientId?: unknown }).clientId) ??
     stringValue((cred.metadata as { client_id?: unknown }).client_id);
-  const clientSecret = stringValue((cred.credential as { client_secret?: unknown }).client_secret);
+  const clientSecret = personalGitHub
+    ? settings.githubPersonalOauthClientSecret
+    : stringValue((cred.credential as { client_secret?: unknown }).client_secret);
   const authMethod =
     stringValue(
       (cred.credential as { token_endpoint_auth_method?: unknown }).token_endpoint_auth_method,
     ) ?? "none";
+  if (
+    personalGitHub &&
+    (!settings.githubPersonalOauthEnabled ||
+      !clientId ||
+      clientId !== settings.githubPersonalOauthClientId ||
+      personalGitHubMetadata.data.oauthEnvironment !== settings.environment ||
+      personalGitHubMetadata.data.oauthClientMarker !==
+        createHash("sha256").update(clientId).digest("hex").slice(0, 32) ||
+      !clientSecret)
+  ) {
+    throw new ConnectionRefreshHttpError(401, "client_unavailable");
+  }
   if (clientId) {
     body.set("client_id", clientId);
   }
@@ -1288,7 +1322,10 @@ export async function refreshOAuthConnectionCredential(
   if (resource && resourceParameterSupported) {
     body.set("resource", resource);
   }
-  if (ref.scopes?.length) {
+  const scopeParameterSupported =
+    (cred.credential as { scope_parameter_supported?: unknown }).scope_parameter_supported !==
+    false;
+  if (ref.scopes?.length && scopeParameterSupported) {
     body.set("scope", ref.scopes.join(" "));
   }
   const requestBody: BodyInit =
@@ -1330,6 +1367,23 @@ export async function refreshOAuthConnectionCredential(
   }
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
   const scopeText = stringValue(payload.scope);
+  const returnedScopes = scopeText?.split(/[\s,]+/).filter(Boolean) ?? [];
+  const refreshTokenExpiresIn =
+    typeof payload.refresh_token_expires_in === "number"
+      ? payload.refresh_token_expires_in
+      : undefined;
+  const refreshTokenExpiresAt =
+    personalGitHub && refreshTokenExpiresIn && refreshTokenExpiresIn > 0
+      ? new Date(Date.now() + refreshTokenExpiresIn * 1000).toISOString()
+      : null;
+  if (
+    personalGitHub &&
+    scopeText &&
+    (returnedScopes.length !== PERSONAL_GITHUB_REQUESTED_SCOPES.length ||
+      returnedScopes.some((scope) => !PERSONAL_GITHUB_REQUESTED_SCOPES.includes(scope as "repo")))
+  ) {
+    throw new ConnectionRefreshHttpError(401, "scope_changed");
+  }
   const nextCredential = {
     ...cred.credential,
     access_token: accessToken,
@@ -1341,14 +1395,27 @@ export async function refreshOAuthConnectionCredential(
     ...(expiresAt ? { expires_at: expiresAt.toISOString() } : {}),
     ...(resource ? { resource } : {}),
     ...(scopeText ? { scope: scopeText } : {}),
-    ...(clientSecret
+    ...(refreshTokenExpiresAt ? { refresh_token_expires_at: refreshTokenExpiresAt } : {}),
+    ...(clientSecret && !personalGitHub
       ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod }
       : {}),
   };
   return {
     credential: nextCredential,
     expiresAt,
-    ...(scopeText ? { grantedScopes: scopeText.split(/\s+/).filter(Boolean) } : {}),
+    ...(personalGitHub
+      ? { grantedScopes: [...PERSONAL_GITHUB_REQUESTED_SCOPES] }
+      : scopeText
+        ? { grantedScopes: returnedScopes }
+        : {}),
+    ...(refreshTokenExpiresAt
+      ? {
+          metadata: PersonalGitHubConnectionMetadata.parse({
+            ...personalGitHubMetadata.data,
+            refreshTokenExpiresAt,
+          }),
+        }
+      : {}),
   };
 }
 

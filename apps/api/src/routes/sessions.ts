@@ -93,6 +93,7 @@ import {
   getRetainedProcess,
   getSandbox,
   getSession,
+  deleteSessionTreeIfQuiescent,
   getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
@@ -1493,9 +1494,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  // Personal follow-up state. Viewing a session never acknowledges it; the
-  // member must explicitly mark it read/unread, and the actively-working label
-  // remains independent of that acknowledgment.
+  // Personal follow-up state. Session reads stay side-effect free; clients use
+  // this explicit mutation after a deliberate read/unread action. The managed
+  // web console treats an exact foreground chat event frontier as that action,
+  // while the actively-working label remains independent of acknowledgment.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -1724,6 +1726,44 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const deleted = await deleteSessionTreeIfQuiescent(db, {
+      workspaceId,
+      subjectId: grant.subjectId,
+      sessionId: c.req.param("sessionId"),
+    });
+    switch (deleted.status) {
+      case "deleted":
+        return c.json({ deletedSessionCount: deleted.deletedSessionCount });
+      case "not_found":
+        throw new HTTPException(404, { message: "session not found" });
+      case "not_root":
+        throw new HTTPException(409, {
+          message: "delete the root session to remove the complete workstream",
+        });
+      case "active_sessions":
+        throw new HTTPException(409, {
+          message: "cancel the workstream and wait for active turns to finish before deleting it",
+        });
+      case "active_video_generations":
+        throw new HTTPException(409, {
+          message: "wait for active video generations to finish before deleting this workstream",
+        });
+      case "live_sandboxes":
+        throw new HTTPException(409, {
+          message:
+            "wait for the workstream's sandbox activity to finish draining before deleting it",
+        });
+      case "externally_referenced":
+        throw new HTTPException(409, {
+          message:
+            "this workstream has durable workspace outputs or independent forks; archive it instead",
+        });
+    }
   });
 
   app.patch(
@@ -3983,6 +4023,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "") {
     if (verb === "GET") return "session.read";
     if (verb === "PATCH") return "session.title.write";
+    if (verb === "DELETE") return "session.delete";
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";

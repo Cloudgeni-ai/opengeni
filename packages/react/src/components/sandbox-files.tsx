@@ -2,6 +2,7 @@ import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
+import { prefersReducedMotion } from "../lib/motion";
 import { useThemeType } from "../lib/use-theme-type";
 import {
   CapturedFileUnavailableError,
@@ -38,6 +39,8 @@ export type SandboxFilesProps = {
   onSelectedPathChange?: ((path: string | null) => void) | undefined;
   /** A guarded diff path routed here by the parent workspace. */
   requestedPath?: string | undefined;
+  /** 1-based line to reveal after `requestedPath` opens. */
+  requestedLine?: number | null | undefined;
   /** Identity for one guarded-file request. Increment this when the same path is
    *  deliberately requested again; it also lets a pending request be consumed
    *  without overriding later manual tree navigation. Defaults to the path. */
@@ -74,6 +77,7 @@ export function SandboxFiles({
   initialSelectedPath,
   onSelectedPathChange,
   requestedPath,
+  requestedLine,
   requestedPathRequestId,
   requestedPathReady = true,
   workspaceResting = false,
@@ -87,6 +91,7 @@ export function SandboxFiles({
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
+  const [focusLine, setFocusLine] = useState<number | null>(null);
   const [liveRequestedPath, setLiveRequestedPath] = useState<string | null>(null);
   const [viewReloadRevision, setViewReloadRevision] = useState(0);
   const pendingRequestRef = useRef<string | number | null>(null);
@@ -111,7 +116,8 @@ export function SandboxFiles({
     setSelected(requestedPath);
     onSelectedPathChange?.(requestedPath);
     setEditMode(false);
-  }, [onSelectedPathChange, requestKey, requestedPath, requestedPathReady]);
+    setFocusLine(requestedLine != null && requestedLine > 0 ? requestedLine : null);
+  }, [onSelectedPathChange, requestKey, requestedLine, requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
   // stacked (tree over viewer) on a narrow dock. Tracked off the container so it
@@ -170,6 +176,7 @@ export function SandboxFiles({
       setSelected(path);
       onSelectedPathChange?.(path);
       setEditMode(false);
+      setFocusLine(null);
       setLiveRequestedPath(null);
       setViewReloadRevision(0);
     },
@@ -306,7 +313,11 @@ export function SandboxFiles({
               data-opengeni-selected-file
               className="min-w-0 truncate font-og-mono text-og-xs text-og-fg-muted"
             >
-              {selected ?? "No file selected"}
+              {selected
+                ? focusLine !== null
+                  ? `${selected}:${focusLine}`
+                  : selected
+                : "No file selected"}
             </span>
             {/* View/Edit toggle — only for a real, fully-loaded text file the editor
                 can safely round-trip. Binary/truncated/read-only files never get an
@@ -390,7 +401,7 @@ export function SandboxFiles({
                       loaded). Editing is disabled to avoid corrupting the file.
                     </div>
                   )}
-                  {usePierre ? (
+                  {usePierre && focusLine === null ? (
                     <PierreFile
                       path={viewPath}
                       contents={fileView.content}
@@ -401,6 +412,12 @@ export function SandboxFiles({
                         </pre>
                       }
                       className="p-1"
+                    />
+                  ) : focusLine !== null ? (
+                    <LineNumberedFile
+                      path={viewPath}
+                      contents={fileView.content}
+                      focusLine={focusLine}
                     />
                   ) : (
                     <pre className="overflow-auto whitespace-pre p-2 font-og-mono text-og-sm text-og-fg">
@@ -446,6 +463,65 @@ function WakeButton({ children, onClick }: { children: ReactNode; onClick: () =>
     >
       {children}
     </button>
+  );
+}
+
+function LineNumberedFile({
+  path,
+  contents,
+  focusLine,
+}: {
+  path: string;
+  contents: string;
+  focusLine: number;
+}) {
+  const lines = contents.split("\n");
+  const inRange = focusLine >= 1 && focusLine <= lines.length;
+  const targetRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    targetRef.current?.scrollIntoView({
+      block: "center",
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  }, [path, focusLine, contents]);
+
+  return (
+    <div
+      className="h-full min-h-0 overflow-auto font-og-mono text-og-sm text-og-fg"
+      role="region"
+      aria-label={inRange ? `${path} at line ${focusLine}` : path}
+    >
+      {!inRange ? (
+        <p
+          className="border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-fg-muted"
+          role="status"
+        >
+          Line {focusLine} is past the end of this file.
+        </p>
+      ) : null}
+      <div>
+        {lines.map((text, index) => {
+          const lineNumber = index + 1;
+          const focused = inRange && lineNumber === focusLine;
+          return (
+            <div
+              key={lineNumber}
+              ref={focused ? targetRef : undefined}
+              data-opengeni-file-line={lineNumber}
+              {...(focused ? { "data-opengeni-focus-line": "" } : {})}
+              aria-current={focused ? "location" : undefined}
+              className={cn("flex gap-3 px-2 py-0.5 leading-6", focused && "bg-og-accent-soft")}
+            >
+              <span className="w-11 shrink-0 select-none text-right tabular-nums text-og-fg-subtle">
+                {lineNumber}
+              </span>
+              <pre className="min-w-0 flex-1 whitespace-pre-wrap break-words">{text || " "}</pre>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

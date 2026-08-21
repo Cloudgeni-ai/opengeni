@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
+  addSessionSystemUpdate,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   createSessionWithIdempotencyKey,
@@ -9,13 +11,18 @@ import {
   forkSessionContent,
   getSessionEventForSubject,
   getSessionForSubject,
+  getOrCreateCompanyProfileSnapshot,
   grantWorkspaceAccess,
   nestedPostgresSqlState,
+  openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
   removeWorkspaceMember,
+  resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
+  submitHumanPromptInTransaction,
   transitionSessionVisibility,
   withRlsContext,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src/index";
 
@@ -202,6 +209,341 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         sandboxGroupId: created.session.id,
       });
     }
+  }, 180_000);
+
+  test("private internal-update attempts freeze the exact session owner for company context", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const created = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private internal update authority",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-internal-${crypto.randomUUID()}`,
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      sessionId: created.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `private-child-result:${crypto.randomUUID()}`,
+      summary: "Private child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(update).toMatchObject({ added: true, shouldWake: false });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
+      sessionId: created.session.id,
+      workflowId: `session-${created.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("private internal update was not claimed");
+    expect(claim.turn).toMatchObject({
+      source: "system",
+      initiatingHumanSubjectId: human.subjectId,
+    });
+    const companyClaims = {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      sessionId: created.session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    };
+    await getOrCreateCompanyProfileSnapshot(client.db, companyClaims);
+    const companyContext = await resolveCompanyBrainContextSelection(client.db, companyClaims);
+    expect(companyContext).toMatchObject({ receipt: { sessionRole: "root" } });
+  }, 180_000);
+
+  test("an exact private parent attempt creates a same-owner private child", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const parent = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private parent",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-parent-${crypto.randomUUID()}`,
+    });
+    const submitted = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      human.personalWorkspaceId,
+      human.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: human.accountId,
+            workspaceId: human.personalWorkspaceId,
+            sessionId: parent.session.id,
+            subjectId: human.subjectId,
+            actor: { type: "human", subjectId: human.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "spawn privately",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "medium",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId) {
+      throw new Error("private parent attempt was not claimed");
+    }
+    const child = await createSession(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private child",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      parentSessionId: parent.session.id,
+      sandboxGroupId: parent.session.sandboxGroupId,
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: parent.session.id,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      },
+    });
+
+    expect(
+      await getSessionForSubject(client.db, human.personalWorkspaceId, child.id, human.subjectId),
+    ).toMatchObject({
+      parentSessionId: parent.session.id,
+      sandboxGroupId: parent.session.sandboxGroupId,
+      tenancy: {
+        visibility: "private",
+        ownedByCurrentUser: true,
+        authorityEpoch: 1,
+      },
+    });
+  }, 180_000);
+
+  test("the database rejects a workspace-visible child under a private parent", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const parent = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private parent for direct child fence",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-parent-fence-${crypto.randomUUID()}`,
+    });
+    const childId = crypto.randomUUID();
+    let childInsertState: string | null = null;
+    let childInsertMessage = "";
+    try {
+      await shared.admin`insert into sessions
+        select (pg_catalog.jsonb_populate_record(
+          null::sessions,
+          to_jsonb(source) || pg_catalog.jsonb_build_object(
+            'id', ${childId}::uuid,
+            'parent_session_id', ${parent.session.id}::uuid,
+            'parent_turn_id', null,
+            'sandbox_group_id', ${childId}::uuid,
+            'visibility', 'workspace_shared',
+            'create_requested_visibility', 'workspace_shared',
+            'owner_organization_membership_id', null,
+            'owner_subject_id', null,
+            'create_idempotency_key', null,
+            'nested_agent_depth', 1
+          )
+        )).*
+        from sessions source where source.id = ${parent.session.id}::uuid`;
+    } catch (error) {
+      childInsertState = nestedPostgresSqlState(error);
+      childInsertMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(childInsertState).toBe("42501");
+    expect(childInsertMessage).toContain("child session authority must match its locked parent");
+  }, 180_000);
+
+  test("private child capability rejects stale attempts, wrong targets, wrong owners, and updates", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const parent = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.personalWorkspaceId,
+      visibility: "user_private",
+      initialMessage: "private parent for negative capability tests",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `private-parent-negative-${crypto.randomUUID()}`,
+    });
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      human.personalWorkspaceId,
+      human.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: human.accountId,
+            workspaceId: human.personalWorkspaceId,
+            sessionId: parent.session.id,
+            subjectId: human.subjectId,
+            actor: { type: "human", subjectId: human.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "spawn private children",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "medium",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("private parent turn was not claimed");
+    const actor = {
+      sessionId: parent.session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    };
+
+    let staleState: string | null = null;
+    try {
+      await withRlsContext(
+        client.db,
+        { accountId: human.accountId, workspaceId: human.personalWorkspaceId },
+        (tx) =>
+          openPrivateChildSessionCreateCapability(tx, {
+            accountId: human.accountId,
+            workspaceId: human.personalWorkspaceId,
+            sessionId: crypto.randomUUID(),
+            parentSessionId: parent.session.id,
+            actorTurnId: actor.turnId,
+            actorAttemptId: crypto.randomUUID(),
+            actorExecutionGeneration: actor.executionGeneration,
+          }),
+      );
+    } catch (error) {
+      staleState = nestedPostgresSqlState(error);
+    }
+    expect(staleState).toBe("42501");
+
+    const expectCapabilityWriteDenied = async (
+      mutation: "wrong_target" | "wrong_owner" | "update",
+    ) => {
+      const authorizedChildId = crypto.randomUUID();
+      let state: string | null = null;
+      try {
+        await withRlsContext(
+          client!.db,
+          { accountId: human.accountId, workspaceId: human.personalWorkspaceId },
+          async (tx) => {
+            await openPrivateChildSessionCreateCapability(tx, {
+              accountId: human.accountId,
+              workspaceId: human.personalWorkspaceId,
+              sessionId: authorizedChildId,
+              parentSessionId: parent.session.id,
+              actorTurnId: actor.turnId,
+              actorAttemptId: actor.attemptId,
+              actorExecutionGeneration: actor.executionGeneration,
+            });
+            if (mutation === "update") {
+              await tx.execute(
+                sql`update sessions set title = 'forbidden capability update'
+                  where id = ${parent.session.id}::uuid`,
+              );
+              return;
+            }
+            const insertPrivateChild = async (insertedId: string, ownerSubjectId: string) =>
+              await tx.execute(sql`insert into sessions
+                select (pg_catalog.jsonb_populate_record(
+                  null::sessions,
+                  to_jsonb(source) || pg_catalog.jsonb_build_object(
+                    'id', ${insertedId}::uuid,
+                    'parent_session_id', ${parent.session.id}::uuid,
+                    'parent_turn_id', ${actor.turnId}::uuid,
+                    'sandbox_group_id', ${parent.session.sandboxGroupId}::uuid,
+                    'visibility', 'user_private',
+                    'create_requested_visibility', 'user_private',
+                    'owner_organization_membership_id', ${human.organizationMembershipId}::uuid,
+                    'owner_subject_id', ${ownerSubjectId}::text,
+                    'create_idempotency_key', null,
+                    'nested_agent_depth', 1
+                  )
+                )).*
+                from sessions source where source.id = ${parent.session.id}::uuid`);
+            await insertPrivateChild(
+              mutation === "wrong_target" ? crypto.randomUUID() : authorizedChildId,
+              mutation === "wrong_owner" ? `user:wrong-${crypto.randomUUID()}` : human.subjectId,
+            );
+          },
+        );
+      } catch (error) {
+        state = nestedPostgresSqlState(error);
+      }
+      expect(state).toBe("42501");
+    };
+    await expectCapabilityWriteDenied("wrong_target");
+    await expectCapabilityWriteDenied("wrong_owner");
+    await expectCapabilityWriteDenied("update");
   }, 180_000);
 
   test("private-create authority is target-bound, INSERT-only, and requested visibility is immutable", async () => {
