@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { assertSessionTenancyActivationEvidence } from "./activate-session-tenancy";
 
 const cleanInventory = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   organizationMemberships: { activeWithoutPersonalWorkspace: 0 },
   workspaceMemberSubjectsWithoutMembershipAnchor: 0,
   // Legitimate service/API-key sessions and immutable pre-0277 writer history
@@ -56,7 +56,7 @@ describe("session tenancy activation evidence", () => {
 
   test("fails closed on malformed report versions", () => {
     expect(() =>
-      assertSessionTenancyActivationEvidence({ ...cleanInventory, schemaVersion: 2 }, cleanParity),
+      assertSessionTenancyActivationEvidence({ ...cleanInventory, schemaVersion: 1 }, cleanParity),
     ).toThrow(/inventory report is structurally invalid/);
     expect(() =>
       assertSessionTenancyActivationEvidence(cleanInventory, {

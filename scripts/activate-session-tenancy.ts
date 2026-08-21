@@ -5,6 +5,7 @@ import postgres from "postgres";
 const REQUIRED_MIGRATIONS = [
   "0285_organization_tenancy_inventory.sql",
   "0291_resource_authority_classification_assertion.sql",
+  "0292_truthful_tenancy_inventory_counters.sql",
   "0297_session_ownership_classification_and_backfill.sql",
   "0298_organization_tenancy_parity.sql",
   "0300_tenancy_backfill_ledger.sql",
@@ -75,7 +76,7 @@ export function assertSessionTenancyActivationEvidence(inventory: unknown, parit
   if (
     inventory === null ||
     typeof inventory !== "object" ||
-    numberAt(inventory, ["schemaVersion"]) !== 1
+    numberAt(inventory, ["schemaVersion"]) !== 2
   ) {
     throw new Error("Session tenancy activation inventory report is structurally invalid");
   }
