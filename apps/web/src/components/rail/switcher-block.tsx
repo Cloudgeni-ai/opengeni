@@ -308,11 +308,11 @@ export const WorkspaceSwitcherTrigger = forwardRef<
     collapsed: boolean;
   } & ButtonHTMLAttributes<HTMLButtonElement>
 >(function WorkspaceSwitcherTrigger(
-  { activeWorkspace, activeOrganizationLabel, personal, collapsed, ...rest },
+  { activeWorkspace, activeOrganizationLabel: organizationLabel, personal, collapsed, ...rest },
   ref,
 ) {
   const workspaceLabel = activeWorkspace?.name ?? (collapsed ? "switch workspace" : "none");
-  const accessibleLabel = `${activeOrganizationLabel}. ${
+  const accessibleLabel = `${organizationLabel}. ${
     personal ? "Personal workspace" : "Workspace"
   }: ${workspaceLabel}. Switch workspace`;
 
