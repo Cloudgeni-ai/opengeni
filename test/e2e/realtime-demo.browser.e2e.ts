@@ -122,9 +122,13 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(existing);
     const diagnostics = page.getByText("Realtime diagnostics", { exact: true });
-    await diagnostics.hover();
-    await page.getByText("controller", { exact: true }).last().waitFor();
-    expect(await page.getByText("active", { exact: true }).last().count()).toBe(1);
+    await diagnostics.focus();
+    await diagnostics.press("ArrowRight");
+    const diagnosticsMenu = page.locator('[data-slot="dropdown-menu-sub-content"]');
+    await diagnosticsMenu.waitFor();
+    const controllerRow = diagnosticsMenu.getByText("controller", { exact: true }).locator("..");
+    await controllerRow.waitFor();
+    expect(await controllerRow.getByText("active", { exact: true }).count()).toBe(1);
     await capture(page, "06-diagnostics-desktop.png");
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
