@@ -3190,8 +3190,8 @@ export const sessions = pgTable(
     // spawning a worker); null for direct API creates and scheduled-task runs.
     // When set, this worker's terminal-for-now transitions wake the parent so a
     // manager can orchestrate workers without busy-polling. The migration-owned
-    // self-reference uses ON DELETE RESTRICT so immutable hierarchy and
-    // authority lineage cannot be silently orphaned by a parent hard delete.
+    // self-reference uses ON DELETE CASCADE so the explicit quiescent root-tree
+    // deletion lifecycle removes the complete hierarchy atomically.
     parentSessionId: uuid("parent_session_id"),
     // Exact parent turn whose worker-signed attempt created this child. This is
     // private immutable authority lineage: child completion copies personal MCP
@@ -5561,7 +5561,7 @@ export const sessionTurnAttempts = pgTable(
       name: "session_turn_attempts_workspace_session_fk",
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     workspaceTurn: foreignKey({
       name: "session_turn_attempts_workspace_turn_fk",
       columns: [table.workspaceId, table.turnId],
@@ -6181,7 +6181,7 @@ export const sessionCommandReceipts = pgTable(
       name: "session_command_receipts_target_session_fk",
       columns: [table.workspaceId, table.targetSessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     targetTurn: foreignKey({
       name: "session_command_receipts_target_turn_fk",
       columns: [table.workspaceId, table.targetTurnId],
@@ -6247,7 +6247,7 @@ export const workspaceControlEvents = pgTable(
       name: "workspace_control_events_root_session_fk",
       columns: [table.workspaceId, table.rootSessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     workspaceRevision: uniqueIndex("workspace_control_events_workspace_revision_uq").on(
       table.workspaceId,
       table.revision,
@@ -6295,7 +6295,7 @@ export const sessionAttemptInterruptions = pgTable(
       name: "session_attempt_interruptions_workspace_session_fk",
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     operation: foreignKey({
       name: "session_attempt_interruptions_operation_fk",
       columns: [table.workspaceId, table.operationId],

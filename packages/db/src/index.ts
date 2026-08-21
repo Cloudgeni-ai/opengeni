@@ -26567,6 +26567,273 @@ export async function getSession(
   });
 }
 
+export type DeleteSessionTreeIfQuiescentResult =
+  | { status: "deleted"; deletedSessionCount: number }
+  | {
+      status:
+        | "not_found"
+        | "not_root"
+        | "active_sessions"
+        | "active_video_generations"
+        | "live_sandboxes"
+        | "externally_referenced";
+    };
+
+/**
+ * Permanently delete one complete root session tree after proving that no
+ * runtime or provider-side owner can still act on it.
+ *
+ * The workspace-control and tree row locks fence new sessions and concurrent
+ * lifecycle changes. Session-owned evidence follows the migration-owned
+ * cascade; immutable workspace-level provenance and independent forks
+ * deliberately retain RESTRICT and surface `externally_referenced` instead of
+ * being orphaned.
+ */
+export async function deleteSessionTreeIfQuiescent(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; sessionId: string },
+): Promise<DeleteSessionTreeIfQuiescentResult> {
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.workspaceId,
+      input.subjectId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          // Match the canonical session-control lock prefix. Session creation
+          // takes this row FOR SHARE, so the update lock also fences a new
+          // descendant or shared-sandbox peer from appearing after our tree
+          // and group checks.
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          const [root] = await tx
+            .select({
+              id: schema.sessions.id,
+              parentSessionId: schema.sessions.parentSessionId,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .for("update", { noWait: true })
+            .limit(1);
+          if (!root) return { status: "not_found" as const };
+          if (root.parentSessionId !== null) return { status: "not_root" as const };
+
+          const tree = await tx
+            .select({
+              id: schema.sessions.id,
+              status: schema.sessions.status,
+              sandboxGroupId: schema.sessions.sandboxGroupId,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.rootSessionId, input.sessionId),
+              ),
+            )
+            .for("update", { noWait: true });
+          const sessionIds = tree.map((session) => session.id);
+          const groupIds = [...new Set(tree.map((session) => session.sandboxGroupId))];
+          if (
+            tree.some((session) =>
+              ["queued", "running", "requires_action", "recovering", "waiting_capacity"].includes(
+                session.status,
+              ),
+            )
+          ) {
+            return { status: "active_sessions" as const };
+          }
+
+          const [liveAttempts, activeVideoGenerations, externalForks, sharedGroups] =
+            await Promise.all([
+              tx
+                .select({ id: schema.sessionTurnAttempts.id })
+                .from(schema.sessionTurnAttempts)
+                .where(
+                  and(
+                    eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                    inArray(schema.sessionTurnAttempts.sessionId, sessionIds),
+                    inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.videoGenerationOperations.id })
+                .from(schema.videoGenerationOperations)
+                .where(
+                  and(
+                    eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+                    inArray(schema.videoGenerationOperations.sessionId, sessionIds),
+                    inArray(schema.videoGenerationOperations.status, [
+                      "preparing",
+                      "prepared",
+                      "accepted",
+                      "submission_uncertain",
+                      "provider_started",
+                      "retaining",
+                    ]),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.forkedFromSessionId, sessionIds),
+                    notInArray(schema.sessions.id, sessionIds),
+                  ),
+                )
+                .limit(1),
+              tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    inArray(schema.sessions.sandboxGroupId, groupIds),
+                    notInArray(schema.sessions.id, sessionIds),
+                  ),
+                )
+                .limit(1),
+            ]);
+          if (liveAttempts.length > 0) return { status: "active_sessions" as const };
+          if (activeVideoGenerations.length > 0) {
+            return { status: "active_video_generations" as const };
+          }
+          if (externalForks.length > 0 || sharedGroups.length > 0) {
+            return { status: "externally_referenced" as const };
+          }
+
+          const leases = await tx
+            .select({
+              id: schema.sandboxLeases.id,
+              liveness: schema.sandboxLeases.liveness,
+              refcount: schema.sandboxLeases.refcount,
+              turnHolders: schema.sandboxLeases.turnHolders,
+              viewerHolders: schema.sandboxLeases.viewerHolders,
+              instanceId: schema.sandboxLeases.instanceId,
+              archiveCaptureId: schema.sandboxLeases.archiveCaptureId,
+              reaperHoldId: schema.sandboxLeases.reaperHoldId,
+              rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+              providerDeadlineAt: schema.sandboxLeases.providerDeadlineAt,
+            })
+            .from(schema.sandboxLeases)
+            .where(
+              and(
+                eq(schema.sandboxLeases.workspaceId, input.workspaceId),
+                inArray(schema.sandboxLeases.sandboxGroupId, groupIds),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (
+            leases.some(
+              (lease) =>
+                lease.liveness !== "cold" ||
+                lease.refcount !== 0 ||
+                lease.turnHolders !== 0 ||
+                lease.viewerHolders !== 0 ||
+                lease.instanceId !== null ||
+                lease.archiveCaptureId !== null ||
+                lease.reaperHoldId !== null ||
+                lease.rotationRequestedAt !== null ||
+                lease.providerDeadlineAt !== null,
+            )
+          ) {
+            return { status: "live_sandboxes" as const };
+          }
+
+          const leaseIds = leases.map((lease) => lease.id);
+          if (leaseIds.length > 0) {
+            const [holders, unsettledAdmissions, activeProcesses, openPtys] = await Promise.all([
+              tx
+                .select({ id: schema.sandboxLeaseHolders.id })
+                .from(schema.sandboxLeaseHolders)
+                .where(inArray(schema.sandboxLeaseHolders.leaseId, leaseIds))
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxWorkspaceMutationAdmissions.id })
+                .from(schema.sandboxWorkspaceMutationAdmissions)
+                .where(
+                  and(
+                    inArray(schema.sandboxWorkspaceMutationAdmissions.leaseId, leaseIds),
+                    isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxRetainedProcesses.id })
+                .from(schema.sandboxRetainedProcesses)
+                .where(
+                  and(
+                    inArray(schema.sandboxRetainedProcesses.leaseId, leaseIds),
+                    eq(schema.sandboxRetainedProcesses.state, "active"),
+                  ),
+                )
+                .for("update", { noWait: true }),
+              tx
+                .select({ id: schema.sandboxPtySessions.id })
+                .from(schema.sandboxPtySessions)
+                .where(
+                  and(
+                    inArray(schema.sandboxPtySessions.sessionId, sessionIds),
+                    eq(schema.sandboxPtySessions.status, "open"),
+                  ),
+                )
+                .for("update", { noWait: true }),
+            ]);
+            if (
+              holders.length > 0 ||
+              unsettledAdmissions.length > 0 ||
+              activeProcesses.length > 0 ||
+              openPtys.length > 0
+            ) {
+              return { status: "live_sandboxes" as const };
+            }
+            await tx.delete(schema.sandboxLeases).where(inArray(schema.sandboxLeases.id, leaseIds));
+          }
+
+          const deleted = await tx
+            .delete(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (deleted.length !== 1) return { status: "not_found" as const };
+          return { status: "deleted" as const, deletedSessionCount: sessionIds.length };
+        }),
+    );
+  } catch (error) {
+    let current: unknown = error;
+    const visited = new Set<unknown>();
+    for (let depth = 0; depth < 8 && current && !visited.has(current); depth += 1) {
+      visited.add(current);
+      const code =
+        typeof current === "object" && "code" in current
+          ? (current as { code?: unknown }).code
+          : undefined;
+      if (code === "55P03") return { status: "live_sandboxes" };
+      if (code === "23503" || code === "42501" || code === "55000") {
+        return { status: "externally_referenced" };
+      }
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
+    throw error;
+  }
+}
+
 export type SessionAuthorityProjection = {
   sessionId: string;
   rootSessionId: string;
