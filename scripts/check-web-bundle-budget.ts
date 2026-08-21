@@ -77,7 +77,7 @@ const budgets = {
   // Opening sandbox file links at a cited Files line adds the numbered viewer
   // plus session wiring to the direct-session graph. macOS/arm64 production
   // measured 2,086,125 raw / 580,320 gzip bytes; gzip still fits 567 KiB.
-  // OPE-298's always-loaded rail click/failure handoff and its direct-session
+  // The always-loaded rail click/failure handoff and direct-session
   // optimistic reconciliation, combined with current main's corrected
   // sandbox-file link support, measure 1,518,543 raw / 413,439 gzip bytes in
   // the initial graph and 2,106,263 raw / 586,764 gzip bytes on a direct session
