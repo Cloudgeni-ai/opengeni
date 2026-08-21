@@ -4042,6 +4042,29 @@ export const CreateCheckoutResponse = z.object({
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
+export const BillingInvoiceStatus = z.enum(["draft", "open", "paid", "uncollectible", "void"]);
+export type BillingInvoiceStatus = z.infer<typeof BillingInvoiceStatus>;
+
+export const BillingInvoice = z.object({
+  id: z.string(),
+  number: z.string().nullable(),
+  status: BillingInvoiceStatus.nullable(),
+  createdAt: z.string().datetime(),
+  totalMicros: z.number().int(),
+  amountPaidMicros: z.number().int(),
+  currency: z.string(),
+  invoicePdfUrl: z.string().url().nullable(),
+  hostedInvoiceUrl: z.string().url().nullable(),
+});
+export type BillingInvoice = z.infer<typeof BillingInvoice>;
+
+export const BillingInvoicesResponse = z.object({
+  invoices: z.array(BillingInvoice),
+  hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
+});
+export type BillingInvoicesResponse = z.infer<typeof BillingInvoicesResponse>;
+
 export const RepositoryResourceRef = z.object({
   kind: z.literal("repository"),
   uri: z.string().min(1),

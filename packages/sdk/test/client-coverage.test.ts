@@ -1752,6 +1752,11 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       workspaceId: WORKSPACE_ID,
     });
+    await client.getBillingInvoices({
+      accountId: "acc-1",
+      limit: 12,
+      startingAfter: "in_123",
+    });
     await client.getBillingEntitlements();
     await client.createBillingCheckout({ amountUsd: 25 });
     expect(
@@ -1762,10 +1767,11 @@ describe("OpenGeniClient billing", () => {
     ).toEqual([
       "GET /v1/billing?accountId=acc-1",
       `GET /v1/billing/usage?accountId=acc-1&workspaceId=${WORKSPACE_ID}`,
+      "GET /v1/billing/invoices?accountId=acc-1&limit=12&startingAfter=in_123",
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
     ]);
-    expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({ amountUsd: 25 });
   });
 });
 

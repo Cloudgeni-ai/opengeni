@@ -30,6 +30,8 @@ export type {
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,
+  BillingInvoice,
+  BillingInvoicesResponse,
   BillingSummary,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,

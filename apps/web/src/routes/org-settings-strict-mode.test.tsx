@@ -28,6 +28,23 @@ const getBillingEntitlements = mock(async () => ({
   mode: "managed" as const,
   entitlements: { seats: 10 },
 }));
+const getBillingInvoices = mock(async () => ({
+  invoices: [
+    {
+      id: "in_123",
+      number: "OG-0042",
+      status: "paid" as const,
+      createdAt: timestamp,
+      totalMicros: 25_000_000,
+      amountPaidMicros: 25_000_000,
+      currency: "usd",
+      invoicePdfUrl: "https://pay.stripe.com/invoice/test/pdf",
+      hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
+    },
+  ],
+  hasMore: false,
+  nextCursor: null,
+}));
 const createBillingCheckout = mock(async () => {
   throw new Error("bounded checkout failure");
 });
@@ -35,6 +52,7 @@ const createBillingCheckout = mock(async () => {
 const context = {
   client: {
     getBilling,
+    getBillingInvoices,
     getBillingEntitlements,
     createBillingCheckout,
   } as unknown as OpenGeniCoreClient,
@@ -153,8 +171,14 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getBillingInvoices.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
+    expect(container.textContent).toContain("OG-0042");
+    expect(container.textContent).toContain("Download PDF");
+    expect(container.querySelector('a[href="https://pay.stripe.com/invoice/test/pdf"]')).not.toBe(
+      null,
+    );
 
     await act(async () => button(container, "Add credits").click());
     await flush();

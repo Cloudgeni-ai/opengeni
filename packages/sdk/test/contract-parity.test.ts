@@ -10,6 +10,7 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   AttachViewerResponse as ContractAttachViewerResponse,
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
+  BillingInvoicesResponse as ContractBillingInvoicesResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
@@ -143,6 +144,7 @@ import type {
   AttachViewerRequest,
   AttachViewerResponse,
   BeginSessionRealtimeRequest,
+  BillingInvoicesResponse,
   CreateKnowledgeMemoryRequest,
   FirstPartyMcpToolName,
   KnowledgeMemory,
@@ -257,6 +259,18 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("billing invoice page shapes stay in parity", () => {
+    const sdkAcceptsContract = (
+      value: z.infer<typeof ContractBillingInvoicesResponse>,
+    ): BillingInvoicesResponse => value;
+    const contractAcceptsSdk = (
+      value: BillingInvoicesResponse,
+    ): z.input<typeof ContractBillingInvoicesResponse> => value;
+    expect([sdkAcceptsContract, contractAcceptsSdk].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
+  });
+
   test("personal-resource management request and page shapes stay in parity", () => {
     const request = (
       value: IssueUserResourceGrantRequest,

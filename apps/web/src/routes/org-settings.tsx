@@ -7,6 +7,8 @@ import { Link } from "@tanstack/react-router";
 import {
   ActivityIcon,
   BuildingIcon,
+  DownloadIcon,
+  FileTextIcon,
   GaugeIcon,
   Loader2Icon,
   LockIcon,
@@ -45,6 +47,7 @@ import {
 import { hasAccountPermission } from "@/lib/permissions";
 import type {
   BillingEntitlementsResponse,
+  BillingInvoicesResponse,
   BillingSummary,
   OrganizationMembershipRole,
   UsageEvent,
@@ -74,6 +77,10 @@ export function OrgSettingsRoute({
   const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
   const [entitlementsOwnerKey, setEntitlementsOwnerKey] = useState("");
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
+  const [invoicePage, setInvoicePage] = useState<BillingInvoicesResponse | null>(null);
+  const [invoiceOwnerKey, setInvoiceOwnerKey] = useState("");
+  const [invoiceError, setInvoiceError] = useState<Error | null>(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
   const [busyOwnerKey, setBusyOwnerKey] = useState("");
@@ -105,7 +112,7 @@ export function OrgSettingsRoute({
     new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>(),
   );
   const claimBillingOperation = useCallback(
-    (resource: "billing" | "entitlements", lane: OrganizationAdminOperationLane) => {
+    (resource: "billing" | "invoices" | "entitlements", lane: OrganizationAdminOperationLane) => {
       const slot = organizationAdminOperationSlot(resource, lane);
       const operation = beginOrganizationAdminOperation({
         identity: adminIdentity,
@@ -187,6 +194,52 @@ export function OrgSettingsRoute({
     }
   }, [accountId, canReadBilling, claimBillingOperation, client, identityKey, ownsBillingOperation]);
 
+  const currentBillingMode = billingOwnerKey === identityKey ? billing?.mode : undefined;
+  const refreshInvoices = useCallback(
+    async (startingAfter?: string) => {
+      if (!accountId || !canReadBilling || currentBillingMode !== "stripe") {
+        setInvoicePage(null);
+        setInvoiceOwnerKey(identityKey);
+        setInvoiceError(null);
+        setInvoiceLoading(false);
+        return;
+      }
+      const operation = claimBillingOperation("invoices", "read");
+      setInvoiceOwnerKey(identityKey);
+      if (!startingAfter) setInvoicePage(null);
+      setInvoiceError(null);
+      setInvoiceLoading(true);
+      try {
+        const result = await client.getBillingInvoices({
+          accountId,
+          limit: 12,
+          ...(startingAfter ? { startingAfter } : {}),
+        });
+        if (!ownsBillingOperation(operation)) return;
+        setInvoicePage((current) =>
+          startingAfter && current
+            ? { ...result, invoices: [...current.invoices, ...result.invoices] }
+            : result,
+        );
+        setInvoiceError(null);
+      } catch (error) {
+        if (!ownsBillingOperation(operation)) return;
+        setInvoiceError(error instanceof Error ? error : new Error(String(error)));
+      } finally {
+        if (ownsBillingOperation(operation)) setInvoiceLoading(false);
+      }
+    },
+    [
+      accountId,
+      canReadBilling,
+      claimBillingOperation,
+      client,
+      currentBillingMode,
+      identityKey,
+      ownsBillingOperation,
+    ],
+  );
+
   const refresh = useCallback(async () => {
     await Promise.all([refreshBilling(), refreshEntitlements()]);
   }, [refreshBilling, refreshEntitlements]);
@@ -197,6 +250,10 @@ export function OrgSettingsRoute({
     }
     void refresh();
   }, [workspaceId, refresh]);
+
+  useEffect(() => {
+    void refreshInvoices();
+  }, [refreshInvoices]);
 
   // Confirm the Stripe checkout outcome the /billing return redirect forwarded
   // here. Credits post via the asynchronous webhook, so success is phrased as
@@ -235,6 +292,9 @@ export function OrgSettingsRoute({
   const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
   const visibleEntitlements = entitlementsOwnerKey === identityKey ? entitlements : null;
   const visibleEntitlementsError = entitlementsOwnerKey === identityKey ? entitlementsError : null;
+  const visibleInvoicePage = invoiceOwnerKey === identityKey ? invoicePage : null;
+  const visibleInvoiceError = invoiceOwnerKey === identityKey ? invoiceError : null;
+  const visibleInvoiceLoading = invoiceOwnerKey === identityKey ? invoiceLoading : true;
   const visibleBusy = busyOwnerKey === identityKey && busy;
 
   return (
@@ -411,6 +471,21 @@ export function OrgSettingsRoute({
           </section>
         ) : null}
 
+        {section === "billing" && visibleBilling?.mode === "stripe" ? (
+          <InvoicesSection
+            enabled={canReadBilling && Boolean(accountId)}
+            page={visibleInvoicePage}
+            error={visibleInvoiceError}
+            loading={visibleInvoiceLoading}
+            onRefresh={() => void refreshInvoices()}
+            onLoadMore={() => {
+              if (visibleInvoicePage?.nextCursor) {
+                void refreshInvoices(visibleInvoicePage.nextCursor);
+              }
+            }}
+          />
+        ) : null}
+
         {section === "billing" ? (
           <EntitlementsSection
             enabled={canReadBilling && Boolean(accountId)}
@@ -430,6 +505,114 @@ export function OrgSettingsRoute({
         ) : null}
       </section>
     </ContentPage>
+  );
+}
+
+export function InvoicesSection(props: {
+  enabled: boolean;
+  page: BillingInvoicesResponse | null;
+  error: Error | null;
+  loading: boolean;
+  onRefresh: () => void;
+  onLoadMore: () => void;
+}) {
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <FileTextIcon className="size-3.5 text-brand" />
+            Invoices
+          </h2>
+          <p className="mt-1 text-xs text-fg-muted">
+            Receipts and tax invoices for Stripe credit purchases.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!props.enabled || props.loading}
+          onClick={props.onRefresh}
+        >
+          <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
+          Refresh
+        </Button>
+      </div>
+
+      {!props.enabled ? (
+        <p className="text-xs text-fg-subtle">You don't have permission to view invoices.</p>
+      ) : props.error && !props.page ? (
+        <LoadErrorState
+          title="Couldn't load invoices"
+          error={props.error}
+          onRetry={props.onRefresh}
+        />
+      ) : props.loading && !props.page ? (
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2Icon className="size-3.5 animate-spin" />
+          Loading invoices
+        </div>
+      ) : !props.page || props.page.invoices.length === 0 ? (
+        <p className="text-xs text-fg-subtle">No invoices yet</p>
+      ) : (
+        <>
+          <div className="divide-y divide-border/70 rounded-md border border-border">
+            {props.page.invoices.map((invoice) => (
+              <div
+                key={invoice.id}
+                className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{invoice.number ?? invoice.id}</p>
+                  <p className="mt-0.5 text-xs text-fg-muted">
+                    {formatTimestamp(invoice.createdAt)} ·{" "}
+                    {formatMoneyMicros(invoice.totalMicros, invoice.currency)}
+                    {invoice.status ? ` · ${invoice.status}` : ""}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1">
+                  {invoice.invoicePdfUrl ? (
+                    <Button asChild type="button" variant="secondary" size="sm">
+                      <a href={invoice.invoicePdfUrl} target="_blank" rel="noreferrer" download>
+                        <DownloadIcon className="size-3.5" />
+                        Download PDF
+                      </a>
+                    </Button>
+                  ) : null}
+                  {invoice.hostedInvoiceUrl ? (
+                    <Button asChild type="button" variant="ghost" size="sm">
+                      <a href={invoice.hostedInvoiceUrl} target="_blank" rel="noreferrer">
+                        View invoice
+                      </a>
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+          {props.error ? (
+            <LoadErrorState
+              title="Couldn't load more invoices"
+              error={props.error}
+              onRetry={props.onLoadMore}
+            />
+          ) : null}
+          {props.page.hasMore ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={props.loading}
+              onClick={props.onLoadMore}
+            >
+              {props.loading ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+              Load more
+            </Button>
+          ) : null}
+        </>
+      )}
+    </section>
   );
 }
 

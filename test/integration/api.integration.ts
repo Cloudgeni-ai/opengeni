@@ -1052,8 +1052,10 @@ describe("API component integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         productAccessMode: "managed",
+        billingMode: "stripe",
         betterAuthSecret: "test-better-auth-secret-32-bytes",
         publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
         environmentsEncryptionKey: environmentsTestKey,
       }),
       db: dbClient.db,
@@ -1129,6 +1131,12 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${billingKeyBody.token}` },
     });
     expect(billing.status).toBe(200);
+    const invoices = await app.request(
+      `/v1/billing/invoices?accountId=${context.defaultAccountId}`,
+      { headers: { authorization: `Bearer ${billingKeyBody.token}` } },
+    );
+    expect(invoices.status).toBe(200);
+    expect(await invoices.json()).toEqual({ invoices: [], hasMore: false, nextCursor: null });
 
     const workspaceOnlyKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
@@ -1146,6 +1154,11 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` },
     });
     expect(deniedBilling.status).toBe(403);
+    const deniedInvoices = await app.request(
+      `/v1/billing/invoices?accountId=${context.defaultAccountId}`,
+      { headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` } },
+    );
+    expect(deniedInvoices.status).toBe(403);
 
     const exactSecret =
       `ordinary source: const fakeToken = "ghp_not_a_credential";\n` +

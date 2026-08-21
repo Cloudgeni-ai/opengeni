@@ -26,7 +26,12 @@ import {
   temporalOverlapPolicy,
   temporalScheduleSpec,
 } from "../src/index";
-import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
+import {
+  billingInvoiceFromStripe,
+  parseStripeInvoicePagination,
+  stripeCheckoutSessionCreateParams,
+  stripeCustomerProvider,
+} from "../src/routes/billing";
 import {
   applyCapabilityEnablement,
   createCatalogItem,
@@ -924,6 +929,17 @@ describe("API helpers", () => {
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
+    expect(params.invoice_creation).toEqual({
+      enabled: true,
+      invoice_data: {
+        metadata: {
+          opengeni_account_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_credit_amount_usd: "25.50",
+          opengeni_credit_micros: "25500000",
+          opengeni_credit_idempotency_key: "checkout:test",
+        },
+      },
+    });
     expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(2550);
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
@@ -971,6 +987,48 @@ describe("API helpers", () => {
     expect(
       stripeCustomerProvider({ settings: { stripeSecretKey: "sk_test_example" } } as never),
     ).toBe("stripe:test");
+  });
+
+  test("projects Stripe invoices into the public download shape", () => {
+    expect(
+      billingInvoiceFromStripe({
+        id: "in_123",
+        number: "OG-0042",
+        status: "paid",
+        created: 1_767_225_600,
+        total: 2550,
+        amount_paid: 2550,
+        currency: "usd",
+        invoice_pdf: "https://pay.stripe.com/invoice/acct_test/pdf",
+        hosted_invoice_url: "https://invoice.stripe.com/i/acct_test",
+      } as never),
+    ).toEqual({
+      id: "in_123",
+      number: "OG-0042",
+      status: "paid",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      totalMicros: 25_500_000,
+      amountPaidMicros: 25_500_000,
+      currency: "usd",
+      invoicePdfUrl: "https://pay.stripe.com/invoice/acct_test/pdf",
+      hostedInvoiceUrl: "https://invoice.stripe.com/i/acct_test",
+    });
+  });
+
+  test("bounds Stripe invoice pagination parameters", () => {
+    expect(parseStripeInvoicePagination({})).toEqual({ limit: 24 });
+    expect(
+      parseStripeInvoicePagination({
+        limit: "100",
+        startingAfter: "in_123ABC",
+      }),
+    ).toEqual({ limit: 100, startingAfter: "in_123ABC" });
+    expect(() => parseStripeInvoicePagination({ limit: "0" })).toThrow(
+      "limit must be an integer between 1 and 100",
+    );
+    expect(() => parseStripeInvoicePagination({ startingAfter: "cus_wrong" })).toThrow(
+      "startingAfter must be a Stripe invoice id",
+    );
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {

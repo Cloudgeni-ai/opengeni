@@ -3,6 +3,7 @@ import {
   AddDocumentRequest,
   assertUniqueResourceMountPaths,
   approvalIdentifier,
+  BillingInvoicesResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -98,6 +99,46 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("validates paginated billing invoice download metadata", () => {
+    expect(
+      BillingInvoicesResponse.parse({
+        invoices: [
+          {
+            id: "in_123",
+            number: "OG-0042",
+            status: "paid",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            totalMicros: 25_000_000,
+            amountPaidMicros: 25_000_000,
+            currency: "usd",
+            invoicePdfUrl: "https://pay.stripe.com/invoice/test/pdf",
+            hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
+          },
+        ],
+        hasMore: true,
+        nextCursor: "in_123",
+      }).nextCursor,
+    ).toBe("in_123");
+    expect(
+      BillingInvoicesResponse.safeParse({
+        invoices: [
+          {
+            id: "in_123",
+            number: null,
+            status: "refunded",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            totalMicros: 0,
+            amountPaidMicros: 0,
+            currency: "usd",
+            invoicePdfUrl: null,
+            hostedInvoiceUrl: null,
+          },
+        ],
+        hasMore: false,
+        nextCursor: null,
+      }).success,
+    ).toBe(false);
+  });
   test("keeps model context contribution summaries content-free and uniquely keyed", () => {
     const valid = {
       source: "workspace_instruction_policy",

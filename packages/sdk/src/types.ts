@@ -6304,6 +6304,26 @@ export type BillingUsageResponse = {
   usage: UsageEvent[];
 };
 
+export type BillingInvoiceStatus = "draft" | "open" | "paid" | "uncollectible" | "void";
+
+export type BillingInvoice = {
+  id: string;
+  number: string | null;
+  status: BillingInvoiceStatus | null;
+  createdAt: string;
+  totalMicros: number;
+  amountPaidMicros: number;
+  currency: string;
+  invoicePdfUrl: string | null;
+  hostedInvoiceUrl: string | null;
+};
+
+export type BillingInvoicesResponse = {
+  invoices: BillingInvoice[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
 export type InsightsRange = "today" | "week" | "month" | "ytd";
 
 export type InsightsBillingPath = "opengeni_credits" | "external";
