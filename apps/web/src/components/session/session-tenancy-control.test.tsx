@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "b
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError, type Session } from "@opengeni/sdk";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import { act, type ReactNode, type RefObject } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
@@ -13,7 +13,6 @@ import {
 
 const toastSuccess = mock((_message: string) => undefined);
 const toastInfo = mock((_message: string) => undefined);
-let confirmRestoreFocusRef: RefObject<HTMLElement | null> | undefined;
 
 mock.module("sonner", () => ({
   ...SonnerPackage,
@@ -33,17 +32,14 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     description,
     onConfirm,
     open,
-    restoreFocusRef,
     title,
   }: {
     confirmLabel: string;
     description?: ReactNode;
     onConfirm: () => unknown;
     open: boolean;
-    restoreFocusRef?: RefObject<HTMLElement | null>;
     title: ReactNode;
   }) => {
-    confirmRestoreFocusRef = restoreFocusRef;
     return open ? (
       <div role="dialog">
         <span>{title}</span>
@@ -201,7 +197,6 @@ afterAll(() => {
 beforeEach(() => {
   toastInfo.mockClear();
   toastSuccess.mockClear();
-  confirmRestoreFocusRef = undefined;
 });
 
 describe("SessionTenancyControl", () => {
@@ -241,43 +236,6 @@ describe("SessionTenancyControl", () => {
     expect(container.textContent).toContain("Workspace");
     expect(container.querySelector('[aria-label^="Workspace session access"]')).not.toBeNull();
     expect(container.querySelector('[aria-label$="Manage session access"]')).toBeNull();
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("offers Fork session from a private session and restores the access trigger", async () => {
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    const privateSession = {
-      ...baseSession,
-      tenancy: { ...baseSession.tenancy!, visibility: "private" as const },
-    };
-
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={privateSession}
-          client={{} as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => true}
-          {...operationAuthority()}
-          onOpenSession={() => undefined}
-        />,
-      );
-    });
-
-    const trigger = container.querySelector<HTMLButtonElement>(
-      'button[aria-label$="Manage session access"]',
-    );
-    expect(trigger).not.toBeNull();
-    await chooseAccessAction(container, "Fork session…");
-    expect(container.textContent).toContain("Fork this session?");
-    expect(container.textContent).toContain("continue in a new one");
-    expect(confirmRestoreFocusRef?.current).toBe(trigger);
 
     await act(async () => root.unmount());
     container.remove();
@@ -617,231 +575,6 @@ describe("SessionTenancyControl", () => {
     await flush();
     expect(epochs).toEqual([4, 5]);
     expect(keys[1]).not.toBe(keys[0]);
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("retries an unknown fork with the exact key and navigates only from its receipt", async () => {
-    const keys: string[] = [];
-    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
-      keys.push(request.idempotencyKey);
-      if (keys.length === 1) {
-        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
-      }
-      return {
-        operationId: crypto.randomUUID(),
-        eventId: crypto.randomUUID(),
-        eventSequence: 9,
-        sessionId: "session-fork",
-        workspaceId: "workspace-a",
-        visibility: "private" as const,
-        authorityEpoch: 1 as const,
-        copiedHistoryItemCount: 4,
-        replay: true,
-      };
-    });
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "private" as const,
-        authorityEpoch: 1,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => true}
-          {...operationAuthority()}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await chooseAccessAction(container, "Fork session…");
-    expect(container.textContent).toContain("copies the session into a new session");
-    expect(container.textContent).toContain("current session stays unchanged");
-    expect(container.textContent).not.toContain("privately");
-    await act(async () => button(container, "Fork session").click());
-    await flush();
-
-    expect(keys).toHaveLength(2);
-    expect(keys[1]).toBe(keys[0]);
-    expect(getSession).toHaveBeenCalledTimes(1);
-    expect(openSession).toHaveBeenCalledTimes(1);
-    expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("does not navigate a replayed fork whose fresh session is no longer private", async () => {
-    const controller = new SessionTenancyOperationController();
-    const authority = operationAuthority(controller);
-    const forkSession = mock(async () => ({
-      operationId: crypto.randomUUID(),
-      eventId: crypto.randomUUID(),
-      eventSequence: 9,
-      sessionId: "session-fork",
-      workspaceId: "workspace-a",
-      visibility: "private" as const,
-      authorityEpoch: 1 as const,
-      copiedHistoryItemCount: 4,
-      replay: true,
-    }));
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "workspace" as const,
-        authorityEpoch: 2,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => true}
-          {...authority}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await chooseAccessAction(container, "Fork session…");
-    await act(async () => button(container, "Fork session").click());
-    await flush();
-
-    expect(openSession).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      "The fork is no longer an owned private session in this workspace.",
-    );
-    expect(controller.snapshot(authority.operationScope).fork).toBeNull();
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("reuses an outcome-unknown fork key after an actual unmount and remount", async () => {
-    const keys: string[] = [];
-    const controller = new SessionTenancyOperationController();
-    const authority = operationAuthority(controller);
-    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
-      keys.push(request.idempotencyKey);
-      if (keys.length <= 2) {
-        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
-      }
-      return {
-        operationId: crypto.randomUUID(),
-        eventId: crypto.randomUUID(),
-        eventSequence: 9,
-        sessionId: "session-fork",
-        workspaceId: "workspace-a",
-        visibility: "private" as const,
-        authorityEpoch: 1 as const,
-        copiedHistoryItemCount: 4,
-        replay: true,
-      };
-    });
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "private" as const,
-        authorityEpoch: 1,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const props = {
-      session: baseSession,
-      client: { forkSession, getSession } as unknown as OpenGeniCoreClient,
-      managedSession: true,
-      scopeLabel: "Engineering",
-      captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
-      ownsWorkspaceInvocation: () => true,
-      ...authority,
-      onRefreshSession: async () => undefined,
-      onOpenSession: openSession,
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    let root = createRoot(container);
-    await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await chooseAccessAction(container, "Fork session…");
-    await act(async () => button(container, "Fork session").click());
-    await flush();
-    await act(async () => root.unmount());
-
-    root = createRoot(container);
-    await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await chooseAccessAction(container, "Retry: Fork session…");
-    await act(async () => dialogButton(container, "Retry fork").click());
-    await flush();
-
-    expect(keys).toHaveLength(3);
-    expect(new Set(keys).size).toBe(1);
-    expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("does not replay an unknown fork after the principal transition becomes stale", async () => {
-    let current = true;
-    const pending = deferred<never>();
-    const forkSession = mock(async () => await pending.promise);
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => current}
-          {...operationAuthority()}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await chooseAccessAction(container, "Fork session…");
-    await act(async () => button(container, "Fork session").click());
-    current = false;
-    pending.reject(apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true }));
-    await flush();
-
-    expect(forkSession).toHaveBeenCalledTimes(1);
-    expect(openSession).not.toHaveBeenCalled();
-    expect(toastSuccess).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
     container.remove();

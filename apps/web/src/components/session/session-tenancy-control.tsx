@@ -4,7 +4,6 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   CircleAlertIcon,
-  CopyPlusIcon,
   Loader2Icon,
   LockKeyholeIcon,
   UsersIcon,
@@ -45,7 +44,7 @@ import {
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
 
-type Confirmation = { kind: "visibility"; visibility: SessionVisibility } | { kind: "fork" };
+type Confirmation = { kind: "visibility"; visibility: SessionVisibility };
 
 export default function SessionRouteAuxiliary(
   props:
@@ -134,7 +133,6 @@ export function SessionTenancyControl({
   ownsWorkspaceInvocation,
   operationController,
   operationScope,
-  onOpenSession,
 }: {
   session: Session;
   events?: SessionEvent[] | undefined;
@@ -159,7 +157,6 @@ export function SessionTenancyControl({
   const visibilityEventSequenceRef = useRef(0);
   const operationSnapshot = operationController.snapshot(operationScope);
   const pendingVisibility = operationSnapshot.visibility;
-  const pendingFork = operationSnapshot.fork;
   const [override, setOverride] = useState(session.tenancy);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
@@ -425,93 +422,6 @@ export function SessionTenancyControl({
     ],
   );
 
-  const createPrivateFork = useCallback(async (): Promise<boolean> => {
-    if (!displayedTenancy || !mayManage) return true;
-    const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
-    if (!acceptedTransition) return true;
-    const operationSequence = operationSequenceRef.current + 1;
-    operationSequenceRef.current = operationSequence;
-    const attempt = operationController.prepareFork(operationScope, () => crypto.randomUUID());
-    setBusy(true);
-    setFailure(null);
-    let receiptConfirmed = false;
-
-    const invoke = async () =>
-      await runCurrentTransitionInvocation({
-        isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
-        request: async () =>
-          await client.forkSession(target.workspaceId, target.sessionId, {
-            idempotencyKey: attempt.idempotencyKey,
-          }),
-      });
-
-    try {
-      let result;
-      try {
-        result = await invoke();
-      } catch (error) {
-        const classified = classifySessionTenancyFailure(error);
-        if (classified.kind !== "outcome_unknown") throw error;
-        if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-        // The first request may have committed. Repeating the exact key is the
-        // only authoritative reconciliation because the destination id is not
-        // knowable from the source session alone.
-        result = await invoke();
-      }
-      if (result.status === "stale") return true;
-      const fork = result.value;
-      receiptConfirmed = true;
-      if (fork.workspaceId !== target.workspaceId) {
-        throw new Error("The fork response did not match this workspace.");
-      }
-      const destination = await runCurrentTransitionInvocation({
-        isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
-        request: async () =>
-          await client.getSession(fork.workspaceId, fork.sessionId, { fresh: true }),
-      });
-      if (destination.status === "stale") return true;
-      if (
-        destination.value.workspaceId !== target.workspaceId ||
-        destination.value.tenancy?.visibility !== "private" ||
-        destination.value.tenancy.ownedByCurrentUser !== true
-      ) {
-        throw new Error("The fork is no longer an owned private session in this workspace.");
-      }
-      operationController.settleFork(operationScope, attempt);
-      setAnnouncement("Session fork created in this workspace.");
-      toast.success("Session fork created");
-      onOpenSession(fork.workspaceId, fork.sessionId);
-      return true;
-    } catch (error) {
-      if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-      const classified = classifySessionTenancyFailure(error);
-      if (classified.reconcile && classified.kind !== "outcome_unknown") {
-        await reconcileSource(target, acceptedTransition, operationSequence).catch(() => null);
-      }
-      if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-      const retainAttempt =
-        classified.retainAttempt ||
-        (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
-      if (!retainAttempt) operationController.settleFork(operationScope, attempt);
-      setFailure(classified.message);
-      setAnnouncement(classified.message);
-      return !retainAttempt;
-    } finally {
-      if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
-    }
-  }, [
-    captureWorkspaceInvocation,
-    client,
-    displayedTenancy,
-    isCurrentInvocation,
-    mayManage,
-    onOpenSession,
-    operationController,
-    operationScope,
-    reconcileSource,
-    target,
-  ]);
-
   if (!displayedTenancy) return null;
 
   const privateSession = displayedTenancy.visibility === "private";
@@ -583,18 +493,6 @@ export function SessionTenancyControl({
                 {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
                 {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
               </DropdownMenuItem>
-              <DropdownMenuItem
-                aria-label={pendingFork ? "Retry: Fork session…" : "Fork session…"}
-                onSelect={() => setConfirmation({ kind: "fork" })}
-              >
-                <CopyPlusIcon />
-                <span className="flex flex-col">
-                  <span>{pendingFork ? "Retry: Fork session…" : "Fork session…"}</span>
-                  <span className="text-xs font-normal text-muted-foreground">
-                    Copies this session so you can continue in a new one.
-                  </span>
-                </span>
-              </DropdownMenuItem>
               {failure ? (
                 <>
                   <DropdownMenuSeparator />
@@ -626,35 +524,21 @@ export function SessionTenancyControl({
           if (!open) setConfirmation(null);
         }}
         title={
-          confirmation?.kind === "fork"
-            ? "Fork this session?"
-            : confirmation?.visibility === "workspace"
-              ? `Share this session with ${scopeLabel}?`
-              : "Limit this session to you?"
+          confirmation?.visibility === "workspace"
+            ? `Share this session with ${scopeLabel}?`
+            : "Limit this session to you?"
         }
         description={
-          confirmation?.kind === "fork"
-            ? "This copies the session into a new session and opens it so you can continue there. The current session stays unchanged."
-            : confirmation?.visibility === "workspace"
-              ? "People who can access this workspace will be able to open the session after all current work has settled."
-              : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+          confirmation?.visibility === "workspace"
+            ? "People who can access this workspace will be able to open the session after all current work has settled."
+            : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
         }
-        confirmLabel={
-          confirmation?.kind === "fork"
-            ? pendingFork
-              ? "Retry fork"
-              : "Fork session"
-            : visibilityConfirmLabel
-        }
-        destructive={confirmation?.kind !== "fork" && confirmation?.visibility === "workspace"}
+        confirmLabel={visibilityConfirmLabel}
+        destructive={confirmation?.visibility === "workspace"}
         cancelAutoFocus
         restoreFocusRef={accessTriggerRef}
         onConfirm={() =>
-          confirmation?.kind === "fork"
-            ? createPrivateFork()
-            : confirmation?.kind === "visibility"
-              ? changeVisibility(confirmation.visibility)
-              : true
+          confirmation?.kind === "visibility" ? changeVisibility(confirmation.visibility) : true
         }
       >
         {failure ? (
