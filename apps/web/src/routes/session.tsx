@@ -22,6 +22,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BugIcon,
   CheckIcon,
   Loader2Icon,
   MenuIcon,
@@ -825,12 +826,8 @@ function SessionDock(props: {
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
-      label: (
-        <span className="inline-flex items-center gap-1.5">
-          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
-          <span>Artifacts</span>
-        </span>
-      ),
+      label: "Artifacts",
+      icon: <PanelsTopLeftIcon />,
       ...(artifactSummaries.length > 0
         ? {
             badge: (
@@ -859,6 +856,7 @@ function SessionDock(props: {
     trailingTabs.push({
       id: "debug",
       label: "Debug",
+      icon: <BugIcon />,
       content: (
         <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -1566,11 +1564,6 @@ function SessionChatPane(props: {
               creditExhausted={props.creditExhausted}
               workspaceId={props.session.workspaceId}
             />
-          ) : null}
-          {props.session.tenancy ? (
-            <Suspense fallback={null}>
-              <LazySessionRouteAuxiliary session={props.session} events={props.events} />
-            </Suspense>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline

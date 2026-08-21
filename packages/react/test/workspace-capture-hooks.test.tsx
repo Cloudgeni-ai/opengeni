@@ -2493,7 +2493,7 @@ describe("deriveMachineChip", () => {
       }),
     ).toEqual({
       state: "offline",
-      label: "Offline — as of 5m ago",
+      label: "Sleeping · saved 5m ago",
       asOf: "2026-07-08T12:00:00.000Z",
     });
   });
@@ -2506,7 +2506,22 @@ describe("deriveMachineChip", () => {
     expect(deriveMachineChip({ activeMachineState: "reconnecting" }).state).toBe("waking");
   });
 
-  test("cold/idle → offline, labelled 'as of <time>'", () => {
+  test("a capability error stays offline-state even when warm intent is retained", () => {
+    const chip = deriveMachineChip({
+      liveness: "cold",
+      capabilitiesState: "error",
+      wantsWarm: true,
+      capturedAt: "2026-07-08T12:00:00.000Z",
+      now: NOW,
+    });
+    expect(chip).toEqual({
+      state: "offline",
+      label: "Sleeping · saved 5m ago",
+      asOf: "2026-07-08T12:00:00.000Z",
+    });
+  });
+
+  test("managed cold/idle is sleeping with saved-workspace freshness", () => {
     const chip = deriveMachineChip({
       liveness: "cold",
       capturedAt: "2026-07-08T12:00:00.000Z",
@@ -2514,7 +2529,7 @@ describe("deriveMachineChip", () => {
     });
     expect(chip.state).toBe("offline");
     expect(chip.asOf).toBe("2026-07-08T12:00:00.000Z");
-    expect(chip.label).toBe("Offline — as of 5m ago");
+    expect(chip.label).toBe("Sleeping · saved 5m ago");
   });
 
   test("self-hosted offline is honest offline even if warm was requested", () => {
@@ -2527,10 +2542,10 @@ describe("deriveMachineChip", () => {
       now: NOW,
     });
     expect(chip.state).toBe("offline");
-    expect(chip.label).toBe("Offline — as of 1h ago");
+    expect(chip.label).toBe("Offline");
   });
 
-  test("offline with no capture time reads a bare 'Offline'", () => {
-    expect(deriveMachineChip({ liveness: "cold" }).label).toBe("Offline");
+  test("managed sleeping with no capture time reads a bare 'Sleeping'", () => {
+    expect(deriveMachineChip({ liveness: "cold" }).label).toBe("Sleeping");
   });
 });

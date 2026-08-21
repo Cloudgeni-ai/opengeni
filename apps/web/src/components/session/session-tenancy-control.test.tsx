@@ -51,6 +51,29 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
+// Keep mutation/reconciliation tests independent of Radix portal geometry.
+// The production module remains Radix-backed; this semantic stand-in exposes
+// the same trigger/menuitem interaction in the test document.
+mock.module("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
+  DropdownMenuItem: ({
+    children,
+    onSelect,
+    "aria-label": ariaLabel,
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    "aria-label"?: string;
+  }) => (
+    <button type="button" role="menuitem" aria-label={ariaLabel} onClick={onSelect}>
+      {children}
+    </button>
+  ),
+  DropdownMenuSeparator: () => <hr />,
+}));
+
 const { SessionTenancyControl } = await import("./session-tenancy-control");
 
 const baseSession = {
@@ -138,6 +161,20 @@ function dialogButton(container: HTMLElement, label: string): HTMLButtonElement 
   return button(dialog, label);
 }
 
+async function chooseAccessAction(container: HTMLElement, label: string): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label$="Manage session access"]',
+  );
+  if (!trigger) throw new Error("Missing session access menu trigger");
+  await act(async () => trigger.click());
+  const item = Array.from(container.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+    (candidate) =>
+      candidate.getAttribute("aria-label") === label || candidate.textContent?.trim() === label,
+  );
+  if (!item) throw new Error(`Missing session access action: ${label}`);
+  await act(async () => item.click());
+}
+
 async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -196,8 +233,8 @@ describe("SessionTenancyControl", () => {
       );
     });
     expect(container.textContent).toContain("Workspace");
-    expect(container.textContent).not.toContain("Make private");
-    expect(container.textContent).not.toContain("Private copy");
+    expect(container.querySelector('[aria-label^="Workspace session access"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label$="Manage session access"]')).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();
@@ -258,20 +295,20 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
       "Close active Files, Terminal, Desktop, and viewer access first.",
     );
-    expect(container.textContent).toContain("Retry make private");
+    expect(container.textContent).toContain("Retry limit to me");
 
-    await act(async () => dialogButton(container, "Retry make private").click());
+    await act(async () => dialogButton(container, "Retry limit to me").click());
     await flush();
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
     expect(getSession).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("Only me");
+    expect(container.textContent).toContain("Private");
 
     await act(async () => root.unmount());
     container.remove();
@@ -303,8 +340,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(getSession).toHaveBeenCalledTimes(1);
@@ -352,8 +389,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(container.textContent).toContain("Visible to people in Engineering.");
@@ -399,8 +436,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(container.textContent).toBe("");
@@ -461,16 +498,16 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     let root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     await act(async () => root.unmount());
 
     root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Make private").click());
-    expect(container.textContent).toContain("Retry make private");
-    await act(async () => dialogButton(container, "Retry make private").click());
+    await chooseAccessAction(container, "Retry: Limit this session to me…");
+    expect(container.textContent).toContain("Retry limit to me");
+    await act(async () => dialogButton(container, "Retry limit to me").click());
     await flush();
 
     expect(keys).toHaveLength(2);
@@ -525,15 +562,15 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
       "Session access changed in another tab. The latest state has been loaded.",
     );
 
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(epochs).toEqual([4, 5]);
     expect(keys[1]).not.toBe(keys[0]);
@@ -590,9 +627,11 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private copy").click());
-    expect(container.textContent).toContain("independent private session in the same workspace");
-    await act(async () => button(container, "Create private copy").click());
+    await chooseAccessAction(container, "Fork session…");
+    expect(container.textContent).toContain("copies the session into a new session");
+    expect(container.textContent).toContain("current session stays unchanged");
+    expect(container.textContent).not.toContain("privately");
+    await act(async () => button(container, "Fork session").click());
     await flush();
 
     expect(keys).toHaveLength(2);
@@ -648,8 +687,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
+    await chooseAccessAction(container, "Fork session…");
+    await act(async () => button(container, "Fork session").click());
     await flush();
 
     expect(openSession).not.toHaveBeenCalled();
@@ -709,16 +748,15 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     let root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
+    await chooseAccessAction(container, "Fork session…");
+    await act(async () => button(container, "Fork session").click());
     await flush();
     await act(async () => root.unmount());
 
     root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    expect(container.textContent).toContain("Retry private copy");
-    await act(async () => button(container, "Retry private copy").click());
-    await act(async () => dialogButton(container, "Retry private copy").click());
+    await chooseAccessAction(container, "Retry: Fork session…");
+    await act(async () => dialogButton(container, "Retry fork").click());
     await flush();
 
     expect(keys).toHaveLength(3);
@@ -752,8 +790,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
+    await chooseAccessAction(container, "Fork session…");
+    await act(async () => button(container, "Fork session").click());
     current = false;
     pending.reject(apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true }));
     await flush();
@@ -799,8 +837,8 @@ describe("SessionTenancyControl", () => {
           />,
         );
       });
-      await act(async () => button(container, "Make private").click());
-      await act(async () => dialogButton(container, "Make private").click());
+      await chooseAccessAction(container, "Limit this session to me…");
+      await act(async () => dialogButton(container, "Limit to me").click());
       current = false;
       pending.resolve({
         operationId: crypto.randomUUID(),

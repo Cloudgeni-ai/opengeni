@@ -177,9 +177,15 @@ being observed.
 | `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 
-The machine-state chip (live / waking… / offline — as of `<time>`) is rendered in
-the dock header automatically; its popover carries the machine identity, the
-shared-session disclosure, and a retry when the fleet fails to resolve.
+Workspace surfaces use a vertical, keyboard-navigable activity rail. Up/Down
+move between panels and Home/End jump to the ends. The rail becomes icon-first
+when a desktop split is narrow, with accessible names and tooltips, and keeps
+readable labels in overlays and maximized views. Visited panels stay mounted.
+
+The machine-state chip is rendered in the dock header automatically. Managed
+cold compute reads `Sleeping` with saved-workspace freshness, for example
+`Sleeping · saved 2m ago`; this is capture freshness, not a heartbeat. A
+Connected Machine that is genuinely unreachable reads `Offline`.
 
 ## 5. Theming
 

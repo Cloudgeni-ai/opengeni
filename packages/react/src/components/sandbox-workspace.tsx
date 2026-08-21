@@ -125,17 +125,6 @@ function captureDegradedMessage(reason: string): string {
   }
 }
 
-function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="[&>svg]:size-3.5" aria-hidden>
-        {icon}
-      </span>
-      <span>{children}</span>
-    </span>
-  );
-}
-
 function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
   return (
     <CenteredState
@@ -262,7 +251,7 @@ function workspaceTurnInFlight(events: SessionEvent[]): boolean {
 export type WorkspaceMachine = {
   /** Whether at least one built-in workbench surface is enabled. */
   enabled: boolean;
-  /** The derived live/waking/offline chip model. */
+  /** The derived live/waking/sleeping-or-offline chip model. */
   chip: MachineChip;
   /** The machine these surfaces are bound to (the Modal group box or a
    *  self-hosted machine), or null while the fleet is still resolving. */
@@ -718,7 +707,8 @@ export function useSandboxWorkspaceTabs(
     if (changesEnabled)
       list.push({
         id: WORKBENCH_TAB_CHANGES,
-        label: <WorkbenchTabLabel icon={<GitCompareArrowsIcon />}>Changes</WorkbenchTabLabel>,
+        label: "Changes",
+        icon: <GitCompareArrowsIcon />,
         badge: dirtyCount > 0 ? <DirtyBadge count={dirtyCount} /> : undefined,
         content: (
           <ChangesTabBody
@@ -750,7 +740,8 @@ export function useSandboxWorkspaceTabs(
     if (filesEnabled)
       list.push({
         id: WORKBENCH_TAB_FILES,
-        label: <WorkbenchTabLabel icon={<FileCode2Icon />}>Files</WorkbenchTabLabel>,
+        label: "Files",
+        icon: <FileCode2Icon />,
         content: (
           <SandboxFiles
             key={sessionId}
@@ -796,7 +787,8 @@ export function useSandboxWorkspaceTabs(
     if (terminalOn) {
       list.push({
         id: WORKBENCH_TAB_TERMINAL,
-        label: <WorkbenchTabLabel icon={<SquareTerminalIcon />}>Terminal</WorkbenchTabLabel>,
+        label: "Terminal",
+        icon: <SquareTerminalIcon />,
         content: (
           <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
@@ -821,7 +813,8 @@ export function useSandboxWorkspaceTabs(
     if (browserEnabled) {
       list.push({
         id: WORKBENCH_TAB_BROWSER,
-        label: <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>,
+        label: "Browser",
+        icon: <Globe2Icon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
             <LazyBrowserViewer
@@ -857,7 +850,8 @@ export function useSandboxWorkspaceTabs(
     if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Desktop</WorkbenchTabLabel>,
+        label: "Desktop",
+        icon: <MonitorIcon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Desktop" />}>
             <LazyComputerViewer
@@ -1200,7 +1194,7 @@ function chipDotClass(state: MachineChip["state"]): string {
 }
 
 /**
- * The dock-header machine status: one quiet, truthful live/waking/offline
+ * The dock-header machine status: one quiet, truthful live/waking/resting
  * indicator. It is intentionally not interactive; detailed machine controls do
  * not belong in a transient popover above the workspace tabs.
  */

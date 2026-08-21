@@ -2663,8 +2663,8 @@ export function RailTrailingMetadata({
 }) {
   const hasStatusMarker = summary.kind !== "neutral";
   return (
-    <span className="flex w-[3.625rem] shrink-0 items-center">
-      <span className="grid w-[3.625rem] shrink-0 grid-cols-[0.875rem_0.75rem_1.5rem] items-center gap-1">
+    <span className="flex w-[4.375rem] shrink-0 items-center">
+      <span className="grid w-[4.375rem] shrink-0 grid-cols-[0.875rem_0.75rem_2.25rem] items-center gap-1">
         <span className="flex size-3.5 items-center justify-center">
           {scheduled && hasStatusMarker ? (
             <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
@@ -2677,7 +2677,7 @@ export function RailTrailingMetadata({
             <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
           ) : null}
         </span>
-        <span className="w-6 text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
+        <span className="w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
           {relativeTime}
         </span>
       </span>

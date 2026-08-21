@@ -12,9 +12,11 @@ import { BrandMark } from "@/components/brand-mark";
 import {
   useCallback,
   useEffect,
+  lazy,
   useRef,
   useState,
   useSyncExternalStore,
+  Suspense,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
@@ -48,6 +50,12 @@ import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
+
+const LazySessionTenancyRouteControl = lazy(() =>
+  import("@/components/session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
+    default: SessionTenancyRouteControl,
+  })),
+);
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
 function RailBody() {
@@ -528,6 +536,13 @@ function SessionRouteHeader({
       billingClass={selectedRow?.billingClass}
       modelLabel={selectedRow?.label}
       policyLoading={policyLoading}
+      accessSlot={
+        session.tenancy ? (
+          <Suspense fallback={null}>
+            <LazySessionTenancyRouteControl session={session} events={events} />
+          </Suspense>
+        ) : null
+      }
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
           <SessionSandboxSwitcher
