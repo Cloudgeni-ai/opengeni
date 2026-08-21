@@ -304,7 +304,9 @@ function SessionsIndexRouteContent({
     ],
   );
   const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
-    rehydrateRepositoryResources(resources, context.githubRepos),
+    rehydrateRepositoryResources(resources, context.githubRepos, {
+      catalogReady: context.githubCatalogReady,
+    }),
   );
   const setModel = context.setModel;
   const setReasoningEffort = context.setReasoningEffort;
@@ -356,7 +358,9 @@ function SessionsIndexRouteContent({
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
     hydrateResources,
-    resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
+    // Tool policy needs the MCP catalog. GitHub is optional: an unreadied
+    // catalog must not keep the create composer disabled / unsendable.
+    resourceHydrationReady: context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
@@ -435,7 +439,15 @@ function SessionsIndexRouteContent({
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
               const flushed = await newSessionDraft.flush();
-              if (!flushed) return null;
+              if (!flushed) {
+                toast.error("Couldn't save the draft", {
+                  description:
+                    newSessionDraft.error?.message ??
+                    newSessionDraft.conflict?.message ??
+                    "Resolve the draft conflict, then try again.",
+                });
+                return null;
+              }
               const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
               const created = await context.startSession(
                 workspaceId,
@@ -466,7 +478,15 @@ function SessionsIndexRouteContent({
 
             const submittedResources = persistedValue.resources;
             const flushed = await newSessionDraft.flush();
-            if (!flushed) return null;
+            if (!flushed) {
+              toast.error("Couldn't save the draft", {
+                description:
+                  newSessionDraft.error?.message ??
+                  newSessionDraft.conflict?.message ??
+                  "Resolve the draft conflict, then try again.",
+              });
+              return null;
+            }
             const submission = submissionFromSessionDraft(
               draft,
               firstPartyMcpToolPolicy.default,

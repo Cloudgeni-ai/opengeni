@@ -650,4 +650,38 @@ describe("useNewSessionDraft", () => {
     expect(hook.result.current.draft.revision).toBe(9);
     await hook.unmount();
   });
+
+  test("reload before catalogs are ready does not fetch", async () => {
+    let reads = 0;
+    const draftClient = client({
+      getNewSessionDraft: async () => {
+        reads += 1;
+        return remote(1, { text: "hydrated" });
+      },
+    });
+    const hook = await renderHook(
+      (props: { resourceHydrationReady: boolean }) => {
+        const [value, setValue] = useState(() => editable());
+        const draft = useNewSessionDraft({
+          client: draftClient,
+          workspaceId: WORKSPACE_A,
+          value,
+          onApplyRemote: setValue,
+          restoreReadyFiles: () => {},
+          resourceHydrationReady: props.resourceHydrationReady,
+        });
+        return { draft, value };
+      },
+      { resourceHydrationReady: false },
+    );
+    expect(reads).toBe(0);
+    expect(hook.result.current.draft.loading).toBe(true);
+
+    await hook.rerender({ resourceHydrationReady: true });
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.value.text).toBe("hydrated");
+    expect(hook.result.current.draft.loading).toBe(false);
+    await hook.unmount();
+  });
 });

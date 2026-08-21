@@ -1263,8 +1263,9 @@ export function RootRouteComponent() {
         }
         // A failed status/catalog request is unavailable/unknown, not proof
         // that the last-known installation or repository identities vanished.
-        // Keep the last successful snapshot and readiness fence so draft
-        // hydration cannot project it to [] and autosave destructive loss.
+        // Keep the last successful snapshot and leave readiness unchanged: a
+        // first-load failure must not look like an empty catalog, or draft
+        // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
           description: String(error),
@@ -1283,32 +1284,40 @@ export function RootRouteComponent() {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
-      const result = await runCurrentWorkspaceRequest({
-        signal,
-        requestId: refreshId,
-        currentRequestId: () => mcpRefreshId.current,
-        request: async () =>
-          await Promise.all([
-            runSingleFlight(
-              mcpCatalogRequests.current,
-              requestKey,
-              async () => await client.listCapabilities(workspaceId),
-            ),
-            client.listApiIntegrations(workspaceId),
-          ]),
-      });
-      if (!result) {
-        return;
+      try {
+        const result = await runCurrentWorkspaceRequest({
+          signal,
+          requestId: refreshId,
+          currentRequestId: () => mcpRefreshId.current,
+          request: async () =>
+            await Promise.all([
+              runSingleFlight(
+                mcpCatalogRequests.current,
+                requestKey,
+                async () => await client.listCapabilities(workspaceId),
+              ),
+              client.listApiIntegrations(workspaceId),
+            ]),
+        });
+        if (!result) {
+          return;
+        }
+        const [catalog, apiIntegrations] = result;
+        setWorkspaceMcpServers(
+          mergeMcpServerOptions(
+            enabledWorkspaceCapabilityMcpServers(catalog.items),
+            installedApiIntegrationMcpServers(apiIntegrations.integrations),
+          ),
+        );
+        setWorkspaceCapabilityCatalog(catalog.items);
+        setWorkspaceMcpCatalogReady(true);
+      } catch (error) {
+        if (signal?.aborted || mcpRefreshId.current !== refreshId) throw error;
+        // Fail-open: an unavailable catalog must not leave the create composer
+        // stuck on draft hydrate / canSend=false.
+        setWorkspaceMcpCatalogReady(true);
+        throw error;
       }
-      const [catalog, apiIntegrations] = result;
-      setWorkspaceMcpServers(
-        mergeMcpServerOptions(
-          enabledWorkspaceCapabilityMcpServers(catalog.items),
-          installedApiIntegrationMcpServers(apiIntegrations.integrations),
-        ),
-      );
-      setWorkspaceCapabilityCatalog(catalog.items);
-      setWorkspaceMcpCatalogReady(true);
     },
     [accessKeyVersion, client],
   );

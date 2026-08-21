@@ -1869,6 +1869,7 @@ describe("GitHub repository resources", () => {
     const manualResource = resources[2] as Extract<ResourceRef, { kind: "repository" }>;
     const hydrated = rehydrateRepositoryResources(resources, [privateRepo, publicRepo]);
     expect(hydrated).toEqual([privateResource, manualResource]);
+    expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
       manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
       selectedRepoIds: new Set([privateRepo.id]),
