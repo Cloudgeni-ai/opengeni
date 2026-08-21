@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 import {
   applySessionAttentionProjection,
-  localSessionDeliveryAttentionIds,
+  localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
@@ -64,17 +64,19 @@ describe("session attention reconciliation", () => {
 
   test("tracks local message-delivery attention without changing durable session state", () => {
     const durableBefore = { ...session };
-    const revisions: string[][] = [];
+    const revisions: Array<Array<[string, number]>> = [];
     const unsubscribe = subscribeToLocalSessionDeliveryAttention(() => {
-      revisions.push([...localSessionDeliveryAttentionIds(session.workspaceId)]);
+      revisions.push([...localSessionDeliveryAttentionCounts(session.workspaceId)]);
     });
 
     updateLocalSessionDeliveryAttention({
       workspaceId: session.workspaceId,
       sessionId: session.id,
-      failedMessageCount: 1,
+      failedMessageCount: 2,
     });
-    expect(localSessionDeliveryAttentionIds(session.workspaceId)).toEqual(new Set([session.id]));
+    expect(localSessionDeliveryAttentionCounts(session.workspaceId)).toEqual(
+      new Map([[session.id, 2]]),
+    );
     expect(session).toEqual(durableBefore);
 
     updateLocalSessionDeliveryAttention({
@@ -84,8 +86,8 @@ describe("session attention reconciliation", () => {
     });
     unsubscribe();
 
-    expect(revisions).toEqual([[session.id], []]);
-    expect(localSessionDeliveryAttentionIds(session.workspaceId).size).toBe(0);
+    expect(revisions).toEqual([[[session.id, 2]], []]);
+    expect(localSessionDeliveryAttentionCounts(session.workspaceId).size).toBe(0);
   });
 });
 

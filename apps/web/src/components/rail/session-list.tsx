@@ -104,7 +104,7 @@ import {
 } from "@/lib/session-pins";
 import {
   applySessionAttentionProjection,
-  localSessionDeliveryAttentionIds,
+  localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   subscribeToLocalSessionDeliveryAttention,
   subscribeToSessionAttentionChanges,
@@ -353,12 +353,12 @@ export function SessionList() {
   const [attentionOverrides, setAttentionOverrides] = useState<
     ReadonlyMap<string, SessionAttentionProjection>
   >(() => new Map());
-  const [localDeliveryAttention, setLocalDeliveryAttention] = useState<ReadonlySet<string>>(() =>
-    localSessionDeliveryAttentionIds(rail.workspaceId),
+  const [localDeliveryAttention, setLocalDeliveryAttention] = useState<ReadonlyMap<string, number>>(
+    () => localSessionDeliveryAttentionCounts(rail.workspaceId),
   );
   useEffect(() => {
     const refreshLocalDeliveryAttention = () => {
-      setLocalDeliveryAttention(localSessionDeliveryAttentionIds(rail.workspaceId));
+      setLocalDeliveryAttention(localSessionDeliveryAttentionCounts(rail.workspaceId));
     };
     refreshLocalDeliveryAttention();
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
@@ -1818,7 +1818,7 @@ function SessionGroup(props: {
   sectionExpanded?: boolean;
   onToggleSection?: () => void;
   nodes: SessionTreeNode[];
-  localDeliveryAttention: ReadonlySet<string>;
+  localDeliveryAttention: ReadonlyMap<string, number>;
   flat: Session[];
   activeSessionId: string | null;
   focusIndex: number;
@@ -1997,7 +1997,7 @@ function SessionGroup(props: {
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
 function SessionTreeRow(props: {
   node: SessionTreeNode;
-  localDeliveryAttention: ReadonlySet<string>;
+  localDeliveryAttention: ReadonlyMap<string, number>;
   depth: number;
   flat: Session[];
   activeSessionId: string | null;

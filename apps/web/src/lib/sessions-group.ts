@@ -189,11 +189,11 @@ type RailStatusCounts = {
 
 function ownRailStatusCounts(
   session: Session,
-  localDeliveryAttention: ReadonlySet<string>,
+  localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
   return {
     total: 1,
-    sendFailed: localDeliveryAttention.has(session.id) ? 1 : 0,
+    sendFailed: localDeliveryAttention.get(session.id) ?? 0,
     attention: session.status === "requires_action" ? 1 : 0,
     failed: session.status === "failed" ? 1 : 0,
     active:
@@ -220,7 +220,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
 
 function railStatusCounts(
   node: SessionTreeNode,
-  localDeliveryAttention: ReadonlySet<string>,
+  localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
   const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
   const stats = node.session.treeStats;
@@ -238,6 +238,8 @@ function railStatusCounts(
     for (const child of node.children) {
       if (child.session.parentSessionId !== node.session.id) {
         addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      } else {
+        counts.sendFailed += loadedLocalDeliveryFailureCount(child, localDeliveryAttention);
       }
     }
   } else {
@@ -248,10 +250,28 @@ function railStatusCounts(
   return counts;
 }
 
+/**
+ * Durable treeStats already account for ordinary descendants' lifecycle state,
+ * but browser-local delivery failures have no server aggregate. Fold only that
+ * local fact through the loaded child tree so collapsed parents stay truthful.
+ */
+function loadedLocalDeliveryFailureCount(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): number {
+  return (
+    (localDeliveryAttention.get(node.session.id) ?? 0) +
+    node.children.reduce(
+      (total, child) => total + loadedLocalDeliveryFailureCount(child, localDeliveryAttention),
+      0,
+    )
+  );
+}
+
 /** One status for a collapsed parent or workstream, including all descendants. */
 export function summarizeRailNodes(
   nodes: readonly SessionTreeNode[],
-  localDeliveryAttention: ReadonlySet<string> = new Set(),
+  localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
 ): RailAggregateStatus {
   const counts: RailStatusCounts = {
     total: 0,

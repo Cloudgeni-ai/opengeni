@@ -72,8 +72,8 @@ const budgets = {
   // raw bytes on macOS/arm64. Advance only those raw envelopes by one KiB;
   // every compressed, file-count, lazy-chunk, and CSS cap remains unchanged.
   // OPE-298's always-loaded rail click/failure handoff and its direct-session
-  // optimistic reconciliation measure 1,518,322 raw / 413,386 gzip bytes in
-  // the initial graph and 2,103,663 raw / 585,860 gzip bytes on a direct
+  // optimistic reconciliation measure 1,518,452 raw / 413,407 gzip bytes in
+  // the initial graph and 2,103,793 raw / 585,876 gzip bytes on a direct
   // session load. Advance only those four aggregate envelopes to their next
   // whole KiB; per-file, lazy, file-count, and CSS caps remain unchanged.
   initialRaw: 1483 * kib,

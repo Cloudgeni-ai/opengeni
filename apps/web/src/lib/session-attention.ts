@@ -46,11 +46,13 @@ export function updateLocalSessionDeliveryAttention(
   for (const notify of localDeliveryListeners) notify();
 }
 
-export function localSessionDeliveryAttentionIds(workspaceId: string): ReadonlySet<string> {
-  return new Set(
+export function localSessionDeliveryAttentionCounts(
+  workspaceId: string,
+): ReadonlyMap<string, number> {
+  return new Map(
     [...localDeliveryAttention.values()]
       .filter((projection) => projection.workspaceId === workspaceId)
-      .map((projection) => projection.sessionId),
+      .map((projection) => [projection.sessionId, projection.failedMessageCount]),
   );
 }
 
