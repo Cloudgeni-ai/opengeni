@@ -607,8 +607,13 @@ export const organizationMembershipInvitations = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    targetSubjectId: text("target_subject_id").notNull(),
+    targetSubjectId: text("target_subject_id"),
     targetEmail: text("target_email").notNull(),
+    targetName: text("target_name"),
+    initialWorkspaceIds: uuid("initial_workspace_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
     role: text("role").notNull().default("member"),
     status: text("status").notNull().default("pending"),
     revision: bigint("revision", { mode: "number" }).notNull().default(1),
@@ -625,6 +630,9 @@ export const organizationMembershipInvitations = pgTable(
     ),
     pendingTarget: uniqueIndex("organization_membership_invitations_pending_target_uq")
       .on(table.accountId, table.targetSubjectId)
+      .where(sql`${table.status} = 'pending' AND ${table.targetSubjectId} IS NOT NULL`),
+    pendingEmail: uniqueIndex("organization_membership_invitations_pending_email_uq")
+      .on(table.accountId, table.targetEmail)
       .where(sql`${table.status} = 'pending'`),
     accountCreated: index("organization_membership_invitations_account_created_idx").on(
       table.accountId,

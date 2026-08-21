@@ -54,7 +54,7 @@ beforeAll(async () => {
           headers: new Headers(),
           response: {
             session: { id: authSessionId },
-            user: { id: userId, email, name: "Organization member" },
+            user: { id: userId, email, name: "Organization member", emailVerified: true },
           },
         }),
       },
@@ -143,6 +143,7 @@ describe("organization membership routes", () => {
                 id: targetUserId,
                 email: targetEmail,
                 name: "Invitation target",
+                emailVerified: true,
               },
             },
           }),
@@ -283,6 +284,38 @@ describe("organization membership routes", () => {
       );
       expect(rejectedRetention.status).toBe(422);
     }
+  });
+
+  test("creates a non-enumerating invitation before the email is registered", async () => {
+    if (!app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const email = `not-registered-${crypto.randomUUID()}@example.test`;
+    const response = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        name: "Future teammate",
+        initialWorkspaceIds: [],
+        role: "member",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      targetEmail: email,
+      targetName: "Future teammate",
+      targetRegistrationStatus: "unregistered",
+      initialWorkspaceIds: [],
+      status: "pending",
+    });
   });
 
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {

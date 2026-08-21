@@ -1,0 +1,271 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acceptOrganizationInvitation,
+  bindPendingOrganizationInvitationsForVerifiedEmail,
+  createDb,
+  createOrganizationInvitation,
+  ensureManagedAccessForUser,
+  ensureManagedAccessForUserWithOrganizationMemberships,
+  listSelfOrganizationInvitations,
+  listSelfOrganizationMemberships,
+  nestedPostgresSqlState,
+  revokeOrganizationInvitation,
+  type DbClient,
+} from "../src";
+
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("migration-0313-unregistered-invitations");
+  if (!shared && requireRealDatabase) throw new Error("migration 0313 requires PostgreSQL");
+  if (shared) client = createDb(shared.appUrl, { max: 4 });
+}, 180_000);
+
+afterAll(async () => {
+  await client?.close().catch(() => undefined);
+  await shared?.release();
+}, 180_000);
+
+async function expectSqlState(action: () => Promise<unknown>, state: string): Promise<void> {
+  let failure: unknown;
+  try {
+    await action();
+  } catch (error) {
+    failure = error;
+  }
+  expect(nestedPostgresSqlState(failure)).toBe(state);
+}
+
+describe("migration 0313 unregistered organization invitations", () => {
+  test("binds only a verified email and joins without provisioning a second organization", async () => {
+    if (!shared || !client) return;
+    const ownerId = `invite-owner-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    const ownerAccess = await ensureManagedAccessForUser(client.db, {
+      userId: ownerId,
+      email: `${ownerId}@example.test`,
+      name: "Invitation owner",
+    });
+    await shared.admin`
+      update workspaces set name = 'Engineering'
+      where id = ${ownerAccess.defaultWorkspaceId!}`;
+    await ensureManagedAccessForUser(client.db, {
+      userId: ownerId,
+      email: `${ownerId}@example.test`,
+      name: "Invitation owner",
+    });
+    const [renamedWorkspace] = await shared.admin<{ name: string }[]>`
+      select name from workspaces where id = ${ownerAccess.defaultWorkspaceId!}`;
+    expect(renamedWorkspace?.name).toBe("Engineering");
+    const [ownerMembership] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    expect(ownerMembership).toBeDefined();
+    const organizationId = ownerMembership!.organizationId;
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0313-test'
+      ) on conflict (account_id) do nothing`;
+
+    const revokedTargetUserId = crypto.randomUUID();
+    const revokedTargetSubject = `user:${revokedTargetUserId}`;
+    const revokedTargetEmail = `revoked-${revokedTargetUserId}@example.test`;
+    const revokedInvitation = await createOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail: revokedTargetEmail,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${revokedTargetUserId}, 'Revoked target', ${revokedTargetEmail}, true)`;
+    expect(
+      await bindPendingOrganizationInvitationsForVerifiedEmail(client.db, {
+        subjectId: revokedTargetSubject,
+        email: revokedTargetEmail,
+      }),
+    ).toBe(1);
+    await revokeOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      invitationId: revokedInvitation.id,
+      expectedRevision: revokedInvitation.revision + 1,
+    });
+    const revokedTargetAccess = await ensureManagedAccessForUserWithOrganizationMemberships(
+      client.db,
+      {
+        userId: revokedTargetUserId,
+        email: revokedTargetEmail,
+        name: "Revoked target",
+        emailVerified: true,
+      },
+    );
+    expect(revokedTargetAccess.accessContext.defaultAccountId).not.toBe(organizationId);
+    expect(revokedTargetAccess.accessContext.defaultAccountId).not.toBeNull();
+
+    const initialWorkspaceId = crypto.randomUUID();
+    await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (
+        ${initialWorkspaceId}, ${organizationId}, 'Product', 'migration-0313',
+        ${crypto.randomUUID()}
+      )`;
+
+    const targetUserId = crypto.randomUUID();
+    const targetSubject = `user:${targetUserId}`;
+    const targetEmail = `new-${targetUserId}@example.test`;
+    await expectSqlState(
+      () =>
+        createOrganizationInvitation(client!.db, {
+          organizationId,
+          actorSubjectId: ownerSubject,
+          operationId: crypto.randomUUID(),
+          targetSubjectId: null,
+          targetEmail: `personal-${targetEmail}`,
+          initialWorkspaceIds: [ownerMembership!.personalWorkspaceId!],
+          role: "member",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      "22023",
+    );
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail,
+      targetName: "New teammate",
+      initialWorkspaceIds: [initialWorkspaceId],
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    expect(invitation).toMatchObject({
+      targetName: "New teammate",
+      targetRegistrationStatus: "unregistered",
+      initialWorkspaceIds: [initialWorkspaceId],
+      revision: 1,
+    });
+
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${targetUserId}, 'New teammate', ${targetEmail}, false)`;
+    await expectSqlState(
+      () =>
+        bindPendingOrganizationInvitationsForVerifiedEmail(client!.db, {
+          subjectId: targetSubject,
+          email: targetEmail,
+        }),
+      "42501",
+    );
+    await shared.admin`
+      update auth_users set email_verified = true where id = ${targetUserId}`;
+    await expectSqlState(
+      () =>
+        bindPendingOrganizationInvitationsForVerifiedEmail(client!.db, {
+          subjectId: targetSubject,
+          email: `wrong-${targetEmail}`,
+        }),
+      "42501",
+    );
+    expect(
+      await bindPendingOrganizationInvitationsForVerifiedEmail(client.db, {
+        subjectId: targetSubject,
+        email: targetEmail,
+      }),
+    ).toBe(1);
+
+    const pendingAccess = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId: targetUserId,
+      email: targetEmail,
+      name: "New teammate",
+      emailVerified: true,
+    });
+    expect(pendingAccess.accessContext).toMatchObject({
+      accountGrants: [],
+      workspaceGrants: [],
+      defaultAccountId: null,
+      defaultWorkspaceId: null,
+    });
+    const [fallbackAccount] = await shared.admin<{ id: string }[]>`
+      select id from managed_accounts
+      where external_source = 'better-auth:user' and external_id = ${targetUserId}`;
+    expect(fallbackAccount).toBeUndefined();
+
+    const selfInvitations = await listSelfOrganizationInvitations(client.db, {
+      subjectId: targetSubject,
+      limit: 10,
+    });
+    expect(selfInvitations.invitations).toEqual([
+      expect.objectContaining({
+        id: invitation.id,
+        targetRegistrationStatus: "registered",
+        revision: 2,
+      }),
+    ]);
+    const accepted = await acceptOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: targetSubject,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: selfInvitations.invitations[0]!.revision,
+    });
+    expect(accepted.membership).toMatchObject({
+      organizationId,
+      subjectId: targetSubject,
+      status: "active",
+    });
+
+    const access = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId: targetUserId,
+      email: targetEmail,
+      name: "New teammate",
+      emailVerified: true,
+    });
+    expect(access.accessContext.defaultAccountId).toBe(organizationId);
+    expect(
+      access.accessContext.workspaceGrants.some(
+        (grant) =>
+          grant.workspaceId === initialWorkspaceId &&
+          grant.permissions.includes("sessions:create") &&
+          !grant.permissions.includes("workspace:admin"),
+      ),
+    ).toBe(true);
+    const [initialWorkspaceMembership] = await shared.admin<
+      Array<{ subjectLabel: string; role: string }>
+    >`
+      select subject_label as "subjectLabel", role
+      from workspace_memberships
+      where workspace_id = ${initialWorkspaceId} and subject_id = ${targetSubject}`;
+    expect(initialWorkspaceMembership).toEqual({
+      subjectLabel: "New teammate",
+      role: "member",
+    });
+    const [stillNoFallbackAccount] = await shared.admin<{ id: string }[]>`
+      select id from managed_accounts
+      where external_source = 'better-auth:user' and external_id = ${targetUserId}`;
+    expect(stillNoFallbackAccount).toBeUndefined();
+  }, 180_000);
+
+  test("declares bounded fields, exact verified binding and runtime-only capabilities", async () => {
+    const source = await Bun.file(
+      new URL("../drizzle/0313_unregistered_organization_invitations.sql", import.meta.url),
+    ).text();
+    expect(source).toStartWith("-- deployment-mode: rolling");
+    expect(source).toContain("ALTER COLUMN target_subject_id DROP NOT NULL");
+    expect(source).toContain("initial_workspace_ids uuid[] NOT NULL");
+    expect(source).toContain("auth_user.email_verified IS TRUE");
+    expect(source).toContain("invitation.target_email = normalized_email");
+    expect(source).toContain("has_pending_organization_invitation_for_subject");
+    expect(source).toContain("organization-membership:");
+    expect(source).toContain("FOR KEY SHARE");
+    expect(source).toContain("REVOKE ALL ON FUNCTION create_organization_invitation_v2");
+    expect(source).not.toContain("GRANT SELECT ON organization_membership_invitations");
+  });
+});

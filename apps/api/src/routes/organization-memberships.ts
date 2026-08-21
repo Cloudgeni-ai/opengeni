@@ -104,6 +104,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         userId: session.user.id,
         email: session.user.email,
         name: session.user.name,
+        emailVerified: session.user.emailVerified,
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
@@ -204,19 +205,16 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         limit: 1,
       });
       const targetUserId = await getManagedUserByEmail(deps.db, payload.email);
-      if (!targetUserId) {
-        throw new HTTPException(404, {
-          message: "invitations currently require an existing registered user",
-        });
-      }
       return context.json(
         OrganizationInvitation.parse(
           await createOrganizationInvitation(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
             operationId: payload.operationId,
-            targetSubjectId: `user:${targetUserId}`,
+            targetSubjectId: targetUserId ? `user:${targetUserId}` : null,
             targetEmail: payload.email.trim().toLowerCase(),
+            ...(payload.name === undefined ? {} : { targetName: payload.name }),
+            initialWorkspaceIds: payload.initialWorkspaceIds,
             role: payload.role,
             expiresAt: payload.expiresAt,
           }),

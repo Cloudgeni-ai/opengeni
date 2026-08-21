@@ -412,8 +412,8 @@ resource authority, and the runtime grant itself.
 
 Migration `0263_organization_membership_lifecycle.sql` activates the bounded
 managed-human administration plane without making organization membership a
-workspace grant. Owners may invite an already-registered human as owner,
-administrator, or member; administrators may invite and manage members only.
+workspace grant. Owners may invite a human as owner, administrator, or member;
+administrators may invite and manage members only.
 Acceptance is bound to the exact authenticated `user:<id>` named by the
 invitation. Pending invitations can be revoked. Role changes, suspension,
 reactivation, offboarding, and retention-policy changes require an exact
@@ -442,8 +442,39 @@ The managed-human API surface is:
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 These routes require a direct managed-human cookie session; API keys and
-delegated bearer requests are rejected. Provider email delivery and invitations
-for people who have not registered remain separate integrations.
+delegated bearer requests are rejected. Provider email delivery remains a
+separate integration.
+
+### Pre-registration invitations and signup convergence (0313)
+
+Migration `0313_unregistered_organization_invitations.sql` lets an owner or
+administrator record an invitation before its target has an OpenGeni login.
+The durable row keeps the normalized email, optional display name, role, and a
+bounded set of initial shared-workspace ids, while `target_subject_id` stays
+null. The public response states whether the target is registered without
+turning the route into a user-enumeration oracle: organization administration
+is authorized before the server performs the global email lookup.
+
+A pending invitation binds only after the exact Better Auth `user:<uuid>` has
+verified the matching normalized email. Binding is performed by a
+PUBLIC-revoked SECURITY DEFINER capability under the existing organization
+lifecycle policy, serializes on the canonical per-organization advisory lock,
+and never accepts a caller-asserted verification fact. Until acceptance, the
+verified user receives an empty managed access context sufficient for the
+managed invitation surface; the fallback `better-auth:user` organization and
+workspace are not provisioned. Acceptance then uses the existing exact-subject,
+revision-fenced 0263 lifecycle to create the organization membership and
+personal workspace, and atomically adds the selected shared-workspace grants.
+Consequently a newly provisioned invited user joins the inviting organization
+without also creating a redundant personal organization. Existing registered-
+user invitations retain their prior exact-subject path.
+
+The Better Auth create hook no longer provisions access before required email
+verification. Email verification and later canonical managed-cookie access
+both run the verified binding/convergence seam. Managed bootstrap also stops
+renaming an existing initial workspace back to `Default workspace`, so a later
+administrator rename is durable. Invitation delivery itself is still outside
+this migration and no provider message is sent by the lifecycle.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
@@ -470,9 +501,10 @@ lifecycle API does not expose a safe profile name or email. It never links or
 derives identity from another member's `personalWorkspaceId`, and organization
 administration does not grant access to that member's Personal workspace,
 private sessions, credentials, Connections, or personal resources. Workspace
-access remains a separately labelled administration surface. Provider email
-delivery and invitations for unregistered recipients remain non-goals; the web
-surface accurately requires an already-registered user.
+access remains a separately labelled administration surface. The current web
+form still needs its 0313 product update and approval before it can collect a
+pre-registration name and initial-workspace access. Provider email delivery
+remains a non-goal.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
@@ -950,8 +982,10 @@ the personal-workspace exception or add another durable membership row.
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
-described above is also active. Provider email delivery, unregistered-recipient
-invitations, and automatic scheduling of the operator command remain deferred.
+described above is also active. Pre-registration invitation storage, verified
+email binding, and direct invited-user convergence are active through 0313.
+Provider email delivery and automatic scheduling of the operator command remain
+deferred.
 
 ### D. Backfill
 
@@ -1712,7 +1746,6 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 ## Remaining non-goals
 
 - provider invitation email delivery;
-- invitations for unregistered humans;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;

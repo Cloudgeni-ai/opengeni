@@ -10,6 +10,9 @@ export const OrganizationInvitation = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
   targetEmail: z.string().email(),
+  targetName: z.string().trim().min(1).max(120).nullable().default(null),
+  targetRegistrationStatus: z.enum(["registered", "unregistered"]).default("registered"),
+  initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
   role: OrganizationMembershipRole,
   status: OrganizationInvitationStatus,
   revision: z.number().int().positive(),
@@ -169,6 +172,8 @@ export type OrganizationRetentionDeletionPreview = z.infer<
 
 export const CreateOrganizationInvitationRequest = z.object({
   email: z.string().email().max(320),
+  name: z.string().trim().min(1).max(120).optional(),
+  initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
   role: OrganizationMembershipRole.default("member"),
   expiresAt: z.string().datetime({ offset: true }),
   operationId: z.string().uuid(),

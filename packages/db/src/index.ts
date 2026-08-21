@@ -59,6 +59,7 @@ import type {
   HostUsageExportBatch,
   ManagedAccount,
   ManagedOrganizationMembershipProjection,
+  OrganizationMember as OrganizationMemberType,
   McpPersonalConnectionDelegation,
   ModelContextContributionSummary,
   Permission,
@@ -1446,6 +1447,7 @@ export async function ensureManagedAccessForUser(
     userId: string;
     email: string;
     name: string;
+    emailVerified?: boolean;
   },
 ): Promise<AccessContext> {
   return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
@@ -1456,17 +1458,223 @@ export type ManagedAccessProvisioningResult = {
   organizationMemberships: ManagedOrganizationMembershipProjection[];
 };
 
+async function projectManagedOrganizationAccess(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    organizationMemberships: OrganizationMemberType[];
+  },
+): Promise<ManagedAccessProvisioningResult> {
+  const activeOrganizationMemberships = input.organizationMemberships.flatMap(
+    (organizationMembership) =>
+      organizationMembership.status === "active" &&
+      organizationMembership.personalWorkspaceId !== null
+        ? [
+            {
+              ...organizationMembership,
+              status: "active" as const,
+              personalWorkspaceId: organizationMembership.personalWorkspaceId,
+            },
+          ]
+        : [],
+  );
+  if (activeOrganizationMemberships.length === 0) {
+    const organizationId = input.organizationMemberships[0]?.organizationId;
+    if (organizationId) {
+      await setRlsContext(db, { accountId: organizationId, workspaceId: null });
+      await assertActiveManagedHumanOrganizationMembership(db, {
+        accountId: organizationId,
+        subjectId: input.subjectId,
+      });
+    }
+    throw new Error("Inactive managed organization unexpectedly passed active membership");
+  }
+
+  const workspaceGrants: AccessGrant[] = [];
+  for (const organizationMembership of activeOrganizationMemberships) {
+    await setRlsContext(db, {
+      accountId: organizationMembership.organizationId,
+      workspaceId: null,
+    });
+    const persistedMemberships = await db
+      .select({
+        membership: schema.workspaceMemberships,
+        workspace: schema.workspaces,
+      })
+      .from(schema.workspaceMemberships)
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+      )
+      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .orderBy(desc(schema.workspaces.createdAt));
+    workspaceGrants.push(
+      ...persistedMemberships.map((row) => ({
+        workspaceId: row.workspace.id,
+        accountId: row.workspace.accountId,
+        subjectId: input.subjectId,
+        subjectLabel: input.subjectLabel,
+        permissions: row.membership.permissions as Permission[],
+        principalKind: "human_session" as const,
+      })),
+    );
+  }
+  for (const organizationMembership of activeOrganizationMemberships) {
+    if (
+      !workspaceGrants.some(
+        (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
+      )
+    ) {
+      workspaceGrants.push({
+        workspaceId: organizationMembership.personalWorkspaceId,
+        accountId: organizationMembership.organizationId,
+        subjectId: input.subjectId,
+        subjectLabel: input.subjectLabel,
+        permissions: managedPersonalWorkspacePermissions,
+        principalKind: "human_session",
+      });
+    }
+  }
+  const organizationAccounts = await db
+    .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+    .from(schema.managedAccounts)
+    .where(
+      inArray(
+        schema.managedAccounts.id,
+        activeOrganizationMemberships.map((membership) => membership.organizationId),
+      ),
+    );
+  const organizationNameById = new Map(
+    organizationAccounts.map((organization) => [organization.id, organization.name]),
+  );
+  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  const defaultWorkspaceId =
+    workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
+  return {
+    accessContext: {
+      mode: "managed",
+      subjectId: input.subjectId,
+      subjectLabel: input.subjectLabel,
+      accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
+        accountId: organizationMembership.organizationId,
+        subjectId: input.subjectId,
+        subjectLabel: input.subjectLabel,
+        role: organizationMembership.role,
+        permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
+        metadata: {
+          accountName: organizationNameById.get(organizationMembership.organizationId) ?? null,
+        },
+      })),
+      workspaceGrants,
+      defaultAccountId,
+      defaultWorkspaceId,
+    },
+    organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
+      id: organizationMembership.id,
+      organizationId: organizationMembership.organizationId,
+      status: "active" as const,
+      personalWorkspaceId: organizationMembership.personalWorkspaceId,
+    })),
+  };
+}
+
 export async function ensureManagedAccessForUserWithOrganizationMemberships(
   db: Database,
   input: {
     userId: string;
     email: string;
     name: string;
+    emailVerified?: boolean;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
   const subjectLabel = input.email || input.name;
   return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    await setSubjectRlsContext(txDb, subjectId);
+    if (input.emailVerified === true) {
+      await rawRows(
+        txDb,
+        sql`select bind_pending_organization_invitations_for_verified_email(
+          ${subjectId}::text, ${input.email}::text
+        )`,
+      );
+    }
+    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
+      txDb,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    const existingOrganizationMemberships = OrganizationMember.array().parse(
+      existingOrganizationMembershipResult?.result ?? [],
+    );
+    if (existingOrganizationMemberships.some((membership) => membership.status === "active")) {
+      return await projectManagedOrganizationAccess(txDb, {
+        subjectId,
+        subjectLabel,
+        organizationMemberships: existingOrganizationMemberships,
+      });
+    }
+    if (
+      existingOrganizationMemberships.some(
+        (membership) => membership.status === "suspended" || membership.status === "revoked",
+      )
+    ) {
+      const [fallbackAccount] = await tx
+        .select({ id: schema.managedAccounts.id })
+        .from(schema.managedAccounts)
+        .where(
+          and(
+            eq(schema.managedAccounts.externalSource, "better-auth:user"),
+            eq(schema.managedAccounts.externalId, input.userId),
+          ),
+        )
+        .limit(1);
+      if (
+        fallbackAccount &&
+        existingOrganizationMemberships.some(
+          (membership) => membership.organizationId === fallbackAccount.id,
+        )
+      ) {
+        return await projectManagedOrganizationAccess(txDb, {
+          subjectId,
+          subjectLabel,
+          organizationMemberships: existingOrganizationMemberships,
+        });
+      }
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: [],
+          workspaceGrants: [],
+          defaultAccountId: null,
+          defaultWorkspaceId: null,
+        },
+        organizationMemberships: [],
+      };
+    }
+    const [pendingInvitationResult] = await rawRows<{ result: boolean }>(
+      txDb,
+      sql`select has_pending_organization_invitation_for_subject(
+        ${subjectId}::text
+      ) as result`,
+    );
+    if (pendingInvitationResult?.result === true) {
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: [],
+          workspaceGrants: [],
+          defaultAccountId: null,
+          defaultWorkspaceId: null,
+        },
+        organizationMemberships: [],
+      };
+    }
     const accountName = input.name || input.email;
     let [account] = await tx
       .select()
@@ -1500,127 +1708,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       workspaceId: null,
     });
     await setSubjectRlsContext(tx as unknown as Database, subjectId);
-    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
-      tx,
-      sql`select list_self_organization_memberships(${subjectId}) as result`,
-    );
-    const existingOrganizationMemberships = OrganizationMember.array().parse(
-      existingOrganizationMembershipResult?.result ?? [],
-    );
-    const selfOrganizationMembership = existingOrganizationMemberships.find(
-      (organizationMembership) => organizationMembership.organizationId === account.id,
-    );
-    if (
-      selfOrganizationMembership?.status === "suspended" ||
-      selfOrganizationMembership?.status === "revoked"
-    ) {
-      const activeOrganizationMemberships = existingOrganizationMemberships.flatMap(
-        (organizationMembership) =>
-          organizationMembership.status === "active" &&
-          organizationMembership.personalWorkspaceId !== null
-            ? [
-                {
-                  ...organizationMembership,
-                  status: "active" as const,
-                  personalWorkspaceId: organizationMembership.personalWorkspaceId,
-                },
-              ]
-            : [],
-      );
-      if (activeOrganizationMemberships.length === 0) {
-        await assertActiveManagedHumanOrganizationMembership(tx as unknown as Database, {
-          accountId: account.id,
-          subjectId,
-        });
-        throw new Error("Inactive managed organization unexpectedly passed active membership");
-      }
-      const workspaceGrants: AccessGrant[] = [];
-      for (const organizationMembership of activeOrganizationMemberships) {
-        await setRlsContext(tx as unknown as Database, {
-          accountId: organizationMembership.organizationId,
-          workspaceId: null,
-        });
-        const persistedMemberships = await tx
-          .select({
-            membership: schema.workspaceMemberships,
-            workspace: schema.workspaces,
-          })
-          .from(schema.workspaceMemberships)
-          .innerJoin(
-            schema.workspaces,
-            eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
-          )
-          .where(eq(schema.workspaceMemberships.subjectId, subjectId))
-          .orderBy(desc(schema.workspaces.createdAt));
-        workspaceGrants.push(
-          ...persistedMemberships.map((row) => ({
-            workspaceId: row.workspace.id,
-            accountId: row.workspace.accountId,
-            subjectId,
-            subjectLabel,
-            permissions: row.membership.permissions as Permission[],
-            principalKind: "human_session" as const,
-          })),
-        );
-      }
-      for (const organizationMembership of activeOrganizationMemberships) {
-        if (
-          !workspaceGrants.some(
-            (grant) => grant.workspaceId === organizationMembership.personalWorkspaceId,
-          )
-        ) {
-          workspaceGrants.push({
-            workspaceId: organizationMembership.personalWorkspaceId,
-            accountId: organizationMembership.organizationId,
-            subjectId,
-            subjectLabel,
-            permissions: managedPersonalWorkspacePermissions,
-            principalKind: "human_session",
-          });
-        }
-      }
-      const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
-      const organizationAccounts = await tx
-        .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
-        .from(schema.managedAccounts)
-        .where(
-          inArray(
-            schema.managedAccounts.id,
-            activeOrganizationMemberships.map((membership) => membership.organizationId),
-          ),
-        );
-      const organizationNameById = new Map(
-        organizationAccounts.map((organization) => [organization.id, organization.name]),
-      );
-      const defaultWorkspaceId =
-        workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
-      return {
-        accessContext: {
-          mode: "managed",
-          subjectId,
-          subjectLabel,
-          accountGrants: activeOrganizationMemberships.map((organizationMembership) => ({
-            accountId: organizationMembership.organizationId,
-            subjectId,
-            subjectLabel,
-            role: organizationMembership.role,
-            permissions: accountPermissionsForOrganizationRole(organizationMembership.role),
-            metadata: {
-              accountName: organizationNameById.get(organizationMembership.organizationId) ?? null,
-            },
-          })),
-          workspaceGrants,
-          defaultAccountId,
-          defaultWorkspaceId,
-        },
-        organizationMemberships: activeOrganizationMemberships.map((organizationMembership) => ({
-          id: organizationMembership.id,
-          organizationId: organizationMembership.organizationId,
-          status: "active" as const,
-          personalWorkspaceId: organizationMembership.personalWorkspaceId,
-        })),
-      };
-    }
     let [defaultWorkspace] = await tx
       .select()
       .from(schema.workspaces)
@@ -1645,12 +1732,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           target: [schema.workspaces.externalSource, schema.workspaces.externalId],
           set: { name: "Default workspace", updatedAt: new Date() },
         })
-        .returning();
-    } else if (defaultWorkspace.name !== "Default workspace") {
-      [defaultWorkspace] = await tx
-        .update(schema.workspaces)
-        .set({ name: "Default workspace", updatedAt: new Date() })
-        .where(eq(schema.workspaces.id, defaultWorkspace.id))
         .returning();
     }
     if (!defaultWorkspace) {
