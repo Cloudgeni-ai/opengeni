@@ -419,6 +419,11 @@ export type SessionEventWriteLocks = {
  * this helper and may discover exact turn IDs only after locking the session.
  * They use the explicit `already_locked` stages, while retaining the same
  * monotonic table order. New event writers should prefer one complete call.
+ *
+ * Retained-screenshot prepare is not an event writer, but its INSERT still
+ * KEY SHAREs the turn and attempt through FKs. It must take this same prefix
+ * first: PostgreSQL fires those FK checks in catalog name/OID order, which can
+ * be attempt-then-turn and otherwise deadlocks against this helper.
  */
 export async function lockSessionEventWriteRows(
   db: Database,
