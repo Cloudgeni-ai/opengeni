@@ -100,7 +100,7 @@ describe("public realtime React demo browser acceptance", () => {
     expect(await primary.getAttribute("data-phase")).toBe("listening");
     await humanInput.getByRole("radio", { name: /Staging/ }).check();
     await capture(page, "04b-realtime-with-structured-question.png");
-    await humanInput.getByRole("button", { name: "Continue" }).click();
+    await humanInput.getByRole("button", { name: "Send answers" }).click();
     await existing.locator("[data-human-input-surface]").waitFor({ state: "detached" });
     expect(await primary.getAttribute("data-phase")).toBe("listening");
 

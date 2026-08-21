@@ -20,7 +20,7 @@ export type HumanInputSurfaceProps = {
 
 /**
  * One decision shell for pending structured human-input requests. Parallel
- * freezes are shown one at a time (oldest first) as “N of M”; Continue/Skip
+ * freezes are shown one at a time (oldest first) as “N of M”; Send answers/Skip
  * settles the active request and the next remaining set advances automatically
  * when the authoritative pending list updates.
  */
