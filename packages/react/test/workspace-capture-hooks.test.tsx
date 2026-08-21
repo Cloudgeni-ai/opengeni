@@ -2530,6 +2530,18 @@ describe("deriveMachineChip", () => {
     expect(chip.label).toBe("Offline — as of 1h ago");
   });
 
+  test("capability error is honest offline even if warm was requested", () => {
+    const chip = deriveMachineChip({
+      liveness: "cold",
+      capabilitiesState: "error",
+      wantsWarm: true,
+      capturedAt: "2026-07-08T12:00:00.000Z",
+      now: NOW,
+    });
+    expect(chip.state).toBe("offline");
+    expect(chip.label).toBe("Offline — as of 5m ago");
+  });
+
   test("offline with no capture time reads a bare 'Offline'", () => {
     expect(deriveMachineChip({ liveness: "cold" }).label).toBe("Offline");
   });

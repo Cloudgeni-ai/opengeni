@@ -191,7 +191,9 @@ export const BrowserSessionCapabilities = z
     downloads: z.boolean(),
     uploads: z.boolean(),
     clipboard: z.boolean(),
-    permissions: z.boolean(),
+    // Rows created before this capability existed omit the key. Treat that as
+    // unsupported rather than failing the whole BrowserSession list.
+    permissions: z.boolean().default(false),
     diagnostics: z.boolean(),
     rawCdp: z.boolean(),
     linkedComputer: z.boolean(),

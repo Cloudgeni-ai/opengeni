@@ -86,6 +86,12 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   const selfhostedOffline =
     input.activeIsSelfhosted === true && input.activeMachineState === "offline";
 
+  // A failed capability handshake (including 402 credit drain) is not an in-flight
+  // warm-up. Keep wantsWarm from pinning the chip on "Waking…" forever.
+  if (input.capabilitiesState === "error") {
+    return { state: "offline", label: offlineLabel, asOf };
+  }
+
   // 2. Actively coming up: negotiation in flight, an edit/terminal is warming, or
   //    the active machine is (re)connecting. Never when self-hosted is hard-offline.
   const machineWarming =

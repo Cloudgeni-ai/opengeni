@@ -130,6 +130,7 @@ import {
   loadConnectionCredentialForBroker,
   markProtectedAuthFillOutcomeUnknown,
   startAuthRun,
+  SandboxViewerAdmissionBlockedError,
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
@@ -199,6 +200,7 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { httpExceptionForSandboxViewerAdmission } from "../http/sandbox-viewer-admission-error";
 import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
@@ -393,14 +395,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               rootSecret: authority,
               placement: placement.placement,
             });
-            const interactionHeld = await ensureInteractionHolder(
-              deps,
-              grant,
-              sourceSession,
-              prepared.session.id,
-              placement,
-              context.req.raw.signal,
-            );
+            let interactionHeld = false;
+            try {
+              interactionHeld = await ensureInteractionHolder(
+                deps,
+                grant,
+                sourceSession,
+                prepared.session.id,
+                placement,
+                context.req.raw.signal,
+              );
+            } catch (error) {
+              if (error instanceof SandboxViewerAdmissionBlockedError) {
+                await failBrowserSessionOperation(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: request.operationId,
+                  browserSessionId: prepared.session.id,
+                  error: {
+                    code: "resource_unavailable",
+                    message: error.message,
+                    retryable: false,
+                  },
+                });
+              }
+              throw error;
+            }
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -2335,14 +2355,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               rootSecret: authority,
               placement: placement.placement,
             });
-            const interactionHeld = await ensureInteractionHolder(
-              deps,
-              grant,
-              sourceSession,
-              browserSessionId,
-              placement,
-              context.req.raw.signal,
-            );
+            let interactionHeld = false;
+            try {
+              interactionHeld = await ensureInteractionHolder(
+                deps,
+                grant,
+                sourceSession,
+                browserSessionId,
+                placement,
+                context.req.raw.signal,
+              );
+            } catch (error) {
+              if (error instanceof SandboxViewerAdmissionBlockedError) {
+                await failBrowserSessionResumePreparation(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: request.operationId,
+                  browserSessionId,
+                  error: {
+                    code: "resource_unavailable",
+                    message: error.message,
+                    retryable: false,
+                  },
+                });
+              }
+              throw error;
+            }
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -4553,6 +4591,8 @@ async function recordBrowserDownloadFileUsage(
 }
 
 function browserRouteError(error: unknown): HTTPException {
+  const admission = httpExceptionForSandboxViewerAdmission(error);
+  if (admission) return admission;
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;

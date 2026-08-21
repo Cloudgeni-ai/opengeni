@@ -764,6 +764,8 @@ export function useSandboxWorkspaceTabs(
             workspaceWaking={!liveWorkspaceExpected && !captureAvailable && workspaceWaking}
             liveWorkspaceReady={liveWorkspaceExpected}
             onWakeWorkspace={() => requestWarmIntent("warmFiles")}
+            capabilitiesError={caps.error}
+            onRetryCapabilities={caps.renegotiate}
             {...(requestedFilePath
               ? {
                   requestedPath: requestedFilePath,
