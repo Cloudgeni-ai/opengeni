@@ -260,6 +260,105 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
   });
 
+  test("counts effective pauses and excludes paused descendants from active totals", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const root = await session({ ...workspace, message: "effective pause root" });
+    const pausedChild = await session({
+      ...workspace,
+      message: "directly paused queued child",
+      parentSessionId: root.id,
+    });
+    const inheritedGrandchild = await session({
+      ...workspace,
+      message: "inherited paused running grandchild",
+      parentSessionId: pausedChild.id,
+    });
+    const resumedGreatGrandchild = await session({
+      ...workspace,
+      message: "resumed queued great-grandchild",
+      parentSessionId: inheritedGrandchild.id,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set
+          status = case
+            when id = ${pausedChild.id} then 'queued'
+            when id = ${inheritedGrandchild.id} then 'running'
+            when id = ${resumedGreatGrandchild.id} then 'queued'
+            else status
+          end,
+          direct_control_state = case
+            when id = ${pausedChild.id} then 'paused'
+            else direct_control_state
+          end,
+          direct_pause_revision = case
+            when id = ${pausedChild.id} then 10
+            else direct_pause_revision
+          end,
+          subtree_run_override_revision = case
+            when id = ${resumedGreatGrandchild.id} then 11
+            else subtree_run_override_revision
+          end,
+          control_version = case
+            when id = ${pausedChild.id} then 10
+            when id = ${resumedGreatGrandchild.id} then 11
+            else control_version
+          end,
+          updated_at = now()
+        where id in (
+          ${pausedChild.id},
+          ${inheritedGrandchild.id},
+          ${resumedGreatGrandchild.id}
+        )
+      `,
+    );
+
+    const directPauseStats = await withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
+      sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    );
+    expect(directPauseStats.get(root.id)).toMatchObject({
+      totalDescendants: 3,
+      runningDescendants: 0,
+      queuedDescendants: 1,
+      pausedDescendants: 2,
+    });
+
+    await admin`
+      update workspace_inference_controls
+      set revision = 20, workspace_state = 'paused', workspace_pause_revision = 20
+      where workspace_id = ${workspace.workspaceId}`;
+    const workspacePauseStats = await withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
+      sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    );
+    expect(workspacePauseStats.get(root.id)).toMatchObject({
+      totalDescendants: 3,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      pausedDescendants: 3,
+    });
+
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set subtree_run_override_revision = 21, control_version = 21, updated_at = now()
+        where id = ${resumedGreatGrandchild.id}
+      `,
+    );
+    const resumedStats = await withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
+      sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
+    );
+    expect(resumedStats.get(root.id)).toMatchObject({
+      totalDescendants: 3,
+      runningDescendants: 0,
+      queuedDescendants: 1,
+      pausedDescendants: 2,
+    });
+  });
+
   test("bounds deep, wide, and overlapping descendant summaries with explicit lower bounds", async () => {
     if (!available) return;
     const workspace = await freshWorkspace({ maxNestedAgentDepth: 64 });

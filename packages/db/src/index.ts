@@ -27706,9 +27706,39 @@ export async function sessionTreeStatsForSessions(
         stats."activelyWorkingDescendants",
         stats.truncated
       from ${schema.sessions} root
+      join ${schema.workspaceInferenceControls} workspace_control
+        on workspace_control.workspace_id = root.workspace_id
       cross join lateral (
-        with recursive descendants(id, status, last_sequence, depth, path) as (
-          select root.id, root.status, root.last_sequence, 0, array[root.id]::uuid[]
+        with recursive descendants(
+          id,
+          status,
+          last_sequence,
+          effective_pause_revision,
+          depth,
+          path
+        ) as (
+          select
+            root.id,
+            root.status,
+            root.last_sequence,
+            greatest(
+              case
+                when workspace_control.workspace_state = 'paused'
+                  and workspace_control.workspace_pause_revision is not null
+                  and (
+                    root.subtree_run_override_revision is null
+                    or root.subtree_run_override_revision <= workspace_control.workspace_pause_revision
+                  )
+                  then workspace_control.workspace_pause_revision
+                else null
+              end,
+              case
+                when root.direct_control_state = 'paused' then root.direct_pause_revision
+                else null
+              end
+            ),
+            0,
+            array[root.id]::uuid[]
 
           union all
 
@@ -27716,6 +27746,24 @@ export async function sessionTreeStatsForSessions(
             child.id,
             child.status,
             child.last_sequence,
+            greatest(
+              case
+                -- A subtree resume defeats every inherited pause older than it.
+                -- Preserve only the strongest still-undefeated blocker, then
+                -- apply the child's own pause (which its own override cannot defeat).
+                when descendants.effective_pause_revision is not null
+                  and (
+                    child.subtree_run_override_revision is null
+                    or child.subtree_run_override_revision <= descendants.effective_pause_revision
+                  )
+                  then descendants.effective_pause_revision
+                else null
+              end,
+              case
+                when child.direct_control_state = 'paused' then child.direct_pause_revision
+                else null
+              end
+            ),
             descendants.depth + 1,
             descendants.path || child.id
           from descendants
@@ -27729,11 +27777,18 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, last_sequence, depth, path
+          select id, status, last_sequence, effective_pause_revision, depth, path
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
-          select id, status, last_sequence, depth, path, row_number() over () as ordinal
+          select
+            id,
+            status,
+            last_sequence,
+            effective_pause_revision,
+            depth,
+            path,
+            row_number() over () as ordinal
           from bounded
         )
         select
@@ -27745,11 +27800,15 @@ export async function sessionTreeStatsForSessions(
           )::int as "totalDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status in ('running', 'recovering')
+              and depth > 0
+              and effective_pause_revision is null
+              and status in ('running', 'recovering')
           )::int as "runningDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status in ('queued', 'waiting_capacity')
+              and depth > 0
+              and effective_pause_revision is null
+              and status in ('queued', 'waiting_capacity')
           )::int as "queuedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
@@ -27757,7 +27816,7 @@ export async function sessionTreeStatsForSessions(
           )::int as "attentionDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'paused'
+              and depth > 0 and effective_pause_revision is not null
           )::int as "pausedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
