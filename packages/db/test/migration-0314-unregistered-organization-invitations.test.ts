@@ -176,6 +176,27 @@ describe("migration 0314 unregistered organization invitations", () => {
       initialWorkspaceIds: [initialWorkspaceId],
       revision: 1,
     });
+    const secondOwnerId = `invite-second-owner-${crypto.randomUUID()}`;
+    const secondOwnerSubject = `user:${secondOwnerId}`;
+    await ensureManagedAccessForUser(client.db, {
+      userId: secondOwnerId,
+      email: `${secondOwnerId}@example.test`,
+      name: "Second invitation owner",
+    });
+    const [secondOwnerMembership] = await listSelfOrganizationMemberships(
+      client.db,
+      secondOwnerSubject,
+    );
+    expect(secondOwnerMembership).toBeDefined();
+    const secondInvitation = await createOrganizationInvitation(client.db, {
+      organizationId: secondOwnerMembership!.organizationId,
+      actorSubjectId: secondOwnerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
     const [invitationEvent] = await shared.admin<
       Array<{ actorMembershipId: string; kind: string; targetMembershipId: string | null }>
     >`
@@ -215,7 +236,7 @@ describe("migration 0314 unregistered organization invitations", () => {
         subjectId: targetSubject,
         email: targetEmail,
       }),
-    ).toBe(1);
+    ).toBe(2);
     const [bindingEvent] = await shared.admin<
       Array<{ targetSubjectId: string; resultingRevision: number }>
     >`
@@ -254,18 +275,28 @@ describe("migration 0314 unregistered organization invitations", () => {
       subjectId: targetSubject,
       limit: 10,
     });
-    expect(selfInvitations.invitations).toEqual([
-      expect.objectContaining({
-        id: invitation.id,
-        revision: 2,
-      }),
-    ]);
+    expect(selfInvitations.invitations).toHaveLength(2);
+    expect(selfInvitations.invitations.map((candidate) => candidate.id)).toEqual(
+      expect.arrayContaining([invitation.id, secondInvitation.id]),
+    );
+    expect(
+      (
+        await listSelfOrganizationInvitations(client.db, {
+          subjectId: targetSubject,
+          limit: 10,
+        })
+      ).invitations.map((candidate) => candidate.id),
+    ).toEqual(selfInvitations.invitations.map((candidate) => candidate.id));
+    const selectedInvitation = selfInvitations.invitations.find(
+      (candidate) => candidate.id === invitation.id,
+    );
+    expect(selectedInvitation?.revision).toBe(2);
     const accepted = await acceptOrganizationInvitation(client.db, {
       organizationId,
       actorSubjectId: targetSubject,
       operationId: crypto.randomUUID(),
       invitationId: invitation.id,
-      expectedRevision: selfInvitations.invitations[0]!.revision,
+      expectedRevision: selectedInvitation!.revision,
     });
     expect(accepted.membership).toMatchObject({
       organizationId,
@@ -302,6 +333,19 @@ describe("migration 0314 unregistered organization invitations", () => {
       select id from managed_accounts
       where external_source = 'better-auth:user' and external_id = ${targetUserId}`;
     expect(stillNoFallbackAccount).toBeUndefined();
+    expect(
+      (await listSelfOrganizationMemberships(client.db, targetSubject)).map(
+        (membership) => membership.organizationId,
+      ),
+    ).not.toContain(secondOwnerMembership!.organizationId);
+    expect(
+      (
+        await listSelfOrganizationInvitations(client.db, {
+          subjectId: targetSubject,
+          limit: 10,
+        })
+      ).invitations.find((candidate) => candidate.id === secondInvitation.id),
+    ).toMatchObject({ status: "pending", revision: 2 });
   }, 180_000);
 
   test("serializes verified signup convergence behind a committing email invitation", async () => {
