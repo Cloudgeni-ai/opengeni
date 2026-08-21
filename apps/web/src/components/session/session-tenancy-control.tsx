@@ -5,7 +5,6 @@ import { CopyPlusIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-re
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
@@ -449,7 +448,7 @@ export function SessionTenancyControl({
       const fork = result.value;
       receiptConfirmed = true;
       if (fork.workspaceId !== target.workspaceId) {
-        throw new Error("The private fork response did not match this workspace.");
+        throw new Error("The private copy response did not match this workspace.");
       }
       const destination = await runCurrentTransitionInvocation({
         isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
@@ -465,8 +464,8 @@ export function SessionTenancyControl({
         throw new Error("The fork is no longer an owned private session in this workspace.");
       }
       operationController.settleFork(operationScope, attempt);
-      setAnnouncement("Private fork created in this workspace.");
-      toast.success("Private fork created");
+      setAnnouncement("Private copy created in this workspace.");
+      toast.success("Private copy created");
       onOpenSession(fork.workspaceId, fork.sessionId);
       return true;
     } catch (error) {
@@ -515,28 +514,28 @@ export function SessionTenancyControl({
     <>
       <section
         aria-label="Session access"
-        className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap items-center gap-2 rounded-lg border border-border bg-surface/55 px-3 py-2 text-sm"
+        className="mx-auto mb-1 flex w-full max-w-3xl flex-wrap items-center justify-end gap-1.5 text-sm"
       >
-        <span className="inline-flex min-w-0 items-center gap-2 font-medium text-fg">
+        <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 font-medium text-fg">
           {privateSession ? (
             <LockKeyholeIcon className="size-4 shrink-0 text-brand" aria-hidden="true" />
           ) : (
             <UsersIcon className="size-4 shrink-0 text-fg-muted" aria-hidden="true" />
           )}
-          <span>Access</span>
-          <Badge variant="outline">{privateSession ? "Private" : "Workspace"}</Badge>
-        </span>
-        <span className="min-w-0 flex-1 basis-44 text-xs leading-5 text-fg-muted">
-          {privateSession
-            ? "Only you can open this session."
-            : `Visible to people in ${scopeLabel}.`}
+          <span>{privateSession ? "Only me" : "Workspace"}</span>
+          <span className="sr-only">
+            {privateSession
+              ? "Only you can open this session."
+              : `Visible to people in ${scopeLabel}.`}
+          </span>
         </span>
         {mayManage ? (
-          <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
             <Button
               type="button"
               variant="ghost"
               size="sm"
+              aria-label={privateSession ? "Share with workspace" : visibilityAction}
               className="min-h-9 pointer-coarse:min-h-11"
               disabled={busy}
               onClick={() =>
@@ -546,23 +545,25 @@ export function SessionTenancyControl({
               {busy && confirmation?.kind === "visibility" ? (
                 <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
               ) : null}
-              {visibilityAction}
+              {privateSession ? "Share" : visibilityAction}
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="min-h-9 pointer-coarse:min-h-11"
-              disabled={busy}
-              onClick={() => setConfirmation({ kind: "fork" })}
-            >
-              {busy && confirmation?.kind === "fork" ? (
-                <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
-              ) : (
-                <CopyPlusIcon className="size-3.5" />
-              )}
-              {pendingFork ? "Retry private fork" : "Private fork"}
-            </Button>
+            {!privateSession ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="min-h-9 pointer-coarse:min-h-11"
+                disabled={busy}
+                onClick={() => setConfirmation({ kind: "fork" })}
+              >
+                {busy && confirmation?.kind === "fork" ? (
+                  <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <CopyPlusIcon className="size-3.5" />
+                )}
+                {pendingFork ? "Retry private copy" : "Private copy"}
+              </Button>
+            ) : null}
           </div>
         ) : null}
         {failure ? (
@@ -582,14 +583,14 @@ export function SessionTenancyControl({
         }}
         title={
           confirmation?.kind === "fork"
-            ? "Create a private fork?"
+            ? "Create a private copy?"
             : confirmation?.visibility === "workspace"
               ? `Share this session with ${scopeLabel}?`
               : "Make this session private?"
         }
         description={
           confirmation?.kind === "fork"
-            ? "This creates an independent private session in the same workspace. Current work, access grants, connections, and sandbox state stay behind."
+            ? "This creates an independent private session in the same workspace. Current work, access grants, connections, and sandbox state stay with the original."
             : confirmation?.visibility === "workspace"
               ? "People who can access this workspace will be able to open the session after all current work has settled."
               : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
@@ -597,8 +598,8 @@ export function SessionTenancyControl({
         confirmLabel={
           confirmation?.kind === "fork"
             ? pendingFork
-              ? "Retry private fork"
-              : "Create private fork"
+              ? "Retry private copy"
+              : "Create private copy"
             : visibilityConfirmLabel
         }
         destructive={confirmation?.kind !== "fork" && confirmation?.visibility === "workspace"}

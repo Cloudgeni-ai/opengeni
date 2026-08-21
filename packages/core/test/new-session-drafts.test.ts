@@ -10,9 +10,12 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
+import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
   saveActorNewSessionDraft,
@@ -73,6 +76,62 @@ const settings = testSettings({
 const mcp = (id: string): ToolRef => ({ kind: "mcp", id });
 
 describe("core new-session draft hydration", () => {
+  test("accepts the exact saved visibility when creating the first session turn", async () => {
+    if (!available) return;
+    const { grant } = await fixture();
+    const saved = await saveActorNewSessionDraft(
+      { db, settings, objectStorage: null },
+      grant,
+      grant.workspaceId!,
+      {
+        expectedRevision: 0,
+        text: "Start a private-by-choice session",
+        resources: [],
+        tools: [],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        options: { visibility: "workspace" },
+      },
+    );
+    const noop = async () => undefined;
+    const deps = {
+      settings,
+      db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        signalUserMessage: noop,
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+        signalApprovalDecision: noop,
+        signalSessionControl: noop,
+        syncScheduledTask: noop,
+        deleteScheduledTaskSchedule: noop,
+        triggerScheduledTask: noop,
+      } as unknown as SessionWorkflowClient,
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: noop },
+      getDocumentServices: () => ({}) as never,
+    } as unknown as ApiRouteDeps;
+
+    const session = await createSessionForRequest(deps, grant, grant.workspaceId!, {
+      initialMessage: saved.text,
+      visibility: "workspace",
+      resources: [],
+      tools: [],
+      model: saved.model,
+      reasoningEffort: saved.reasoningEffort,
+      latencyMode: saved.latencyMode,
+      expectedNewSessionDraftRevision: saved.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+
+    expect(session.id).toBeString();
+    expect(session.initialTurnId).toBeString();
+  }, 180_000);
+
   test("treats a markerless old-client save, including [], as explicit tools", async () => {
     if (!available) return;
     const { grant } = await fixture();

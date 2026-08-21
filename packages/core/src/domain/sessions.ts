@@ -1546,6 +1546,11 @@ export async function createSessionForRequestWithOutcome(
     ? payload.skills
     : (parentSession?.skills ?? payload.skills);
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
+  // Visibility became durable draft state after older clients had already
+  // written rows without it. Compare it only when the create request supplied
+  // the field explicitly; the parsed schema default must not manufacture a
+  // mismatch for a legacy draft.
+  const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   const requestedTools = validateToolRefs(
     toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
     runtimeSettings,
@@ -1709,6 +1714,7 @@ export async function createSessionForRequestWithOutcome(
           reasoningEffort,
           latencyMode,
           options: {
+            ...(visibilityProvided ? { visibility: payload.visibility } : {}),
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
             ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),

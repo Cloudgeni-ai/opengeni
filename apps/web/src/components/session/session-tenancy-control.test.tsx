@@ -197,7 +197,7 @@ describe("SessionTenancyControl", () => {
     });
     expect(container.textContent).toContain("Workspace");
     expect(container.textContent).not.toContain("Make private");
-    expect(container.textContent).not.toContain("Private fork");
+    expect(container.textContent).not.toContain("Private copy");
 
     await act(async () => root.unmount());
     container.remove();
@@ -271,7 +271,7 @@ describe("SessionTenancyControl", () => {
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
     expect(getSession).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("Private");
+    expect(container.textContent).toContain("Only me");
 
     await act(async () => root.unmount());
     container.remove();
@@ -590,9 +590,9 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private fork").click());
+    await act(async () => button(container, "Private copy").click());
     expect(container.textContent).toContain("independent private session in the same workspace");
-    await act(async () => button(container, "Create private fork").click());
+    await act(async () => button(container, "Create private copy").click());
     await flush();
 
     expect(keys).toHaveLength(2);
@@ -648,8 +648,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private fork").click());
-    await act(async () => button(container, "Create private fork").click());
+    await act(async () => button(container, "Private copy").click());
+    await act(async () => button(container, "Create private copy").click());
     await flush();
 
     expect(openSession).not.toHaveBeenCalled();
@@ -709,16 +709,16 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     let root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Private fork").click());
-    await act(async () => button(container, "Create private fork").click());
+    await act(async () => button(container, "Private copy").click());
+    await act(async () => button(container, "Create private copy").click());
     await flush();
     await act(async () => root.unmount());
 
     root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    expect(container.textContent).toContain("Retry private fork");
-    await act(async () => button(container, "Retry private fork").click());
-    await act(async () => dialogButton(container, "Retry private fork").click());
+    expect(container.textContent).toContain("Retry private copy");
+    await act(async () => button(container, "Retry private copy").click());
+    await act(async () => dialogButton(container, "Retry private copy").click());
     await flush();
 
     expect(keys).toHaveLength(3);
@@ -752,8 +752,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Private fork").click());
-    await act(async () => button(container, "Create private fork").click());
+    await act(async () => button(container, "Private copy").click());
+    await act(async () => button(container, "Create private copy").click());
     current = false;
     pending.reject(apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true }));
     await flush();

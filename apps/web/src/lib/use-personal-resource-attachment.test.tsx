@@ -78,6 +78,46 @@ function authorityPage(active: boolean, kind: "variable_set" | "rig") {
 }
 
 describe("usePersonalResourceAttachment", () => {
+  test("discovers personal options without surfacing authority failure when nothing is selected", async () => {
+    let calls = 0;
+    const client = {
+      listVariableSets: async () => {
+        calls += 1;
+        throw new Error("personal catalog unavailable");
+      },
+      listRigs: async () => {
+        calls += 1;
+        throw new Error("personal catalog unavailable");
+      },
+      listUserResourceAuthorities: async () => {
+        calls += 1;
+        throw new Error("personal catalog unavailable");
+      },
+    } as unknown as OpenGeniCoreClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      () =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          fixed: { variableSetId: null, rigId: null },
+          personalWorkspaceTarget: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(calls).toBeGreaterThan(0);
+    expect(hook.result.current.eligible).toBe(true);
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.requiresDecision).toBe(false);
+    await hook.unmount();
+  });
+
   test("drops a late owner response after the authenticated principal changes", async () => {
     let resolveVariable!: (value: ReturnType<typeof authorityPage>) => void;
     let resolveRig!: (value: ReturnType<typeof authorityPage>) => void;

@@ -58,12 +58,12 @@ describe("personal resource attachments in Chromium", () => {
     expect(await control.first().getByRole("radio").count()).toBe(3);
     await control
       .first()
-      .getByRole("radio", { name: /This workspace/ })
+      .getByRole("radio", { name: /Remember here/ })
       .check();
     expect(
       await control
         .first()
-        .getByRole("radio", { name: /This workspace/ })
+        .getByRole("radio", { name: /Remember here/ })
         .isChecked(),
     ).toBe(true);
 
@@ -143,7 +143,7 @@ describe("personal resource attachments in Chromium", () => {
     const unavailableControl = page.locator("[data-personal-resource-attachment]").first();
     expect(await unavailableControl.count()).toBe(1);
     expect(await unavailableControl.getByRole("alert").textContent()).toContain(
-      "authority could not be verified",
+      "couldn’t check access to the selected Variable Set or Rig",
     );
     expect(await unavailableControl.getByRole("button", { name: "Retry" }).count()).toBe(1);
     expect(await unavailableControl.getByRole("status").textContent()).toContain(
