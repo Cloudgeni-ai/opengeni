@@ -74,6 +74,10 @@ const budgets = {
   // The rail workspace switcher lists every accessible workspace instead of
   // the current org only. Linux/x64 production CI measured the direct-session
   // gzip graph at 579,618 bytes, 34 over the 566 KiB envelope.
+  // Sandbox file-line citations add the direct-session viewer handoff and
+  // measure 2,086,612 raw bytes on the canonical local production build. Raise
+  // only that graph to its next whole-KiB envelope; compressed, file-count,
+  // lazy-chunk, initial, and CSS caps remain unchanged.
   initialRaw: 1466 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
@@ -88,7 +92,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2036 * kib,
+  directSessionRaw: 2038 * kib,
   directSessionGzip: 567 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

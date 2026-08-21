@@ -1096,6 +1096,9 @@
 :where(.og-root).w-7,:where(.og-root) .w-7 {
     width: calc(var(--spacing) * 7);
   }
+:where(.og-root).w-10,:where(.og-root) .w-10 {
+    width: calc(var(--spacing) * 10);
+  }
 :where(.og-root).w-11,:where(.og-root) .w-11 {
     width: calc(var(--spacing) * 11);
   }
@@ -2909,6 +2912,12 @@
     --tw-ring-color: var(--og-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
       --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 45%, transparent);
+    }
+  }
+:where(.og-root).ring-og-accent\/50,:where(.og-root) .ring-og-accent\/50 {
+    --tw-ring-color: var(--og-color-accent);
+    @supports (color: color-mix(in lab, red, red)) {
+      --tw-ring-color: color-mix(in oklab, var(--og-color-accent) 50%, transparent);
     }
   }
 :where(.og-root).ring-og-border\/60,:where(.og-root) .ring-og-border\/60 {

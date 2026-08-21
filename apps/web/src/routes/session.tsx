@@ -152,6 +152,7 @@ export function SessionRoute({
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
 }) {
   const context = useAppContext();
+  const setInspectorOpen = context.setInspectorOpen;
   const rail = useRail();
   const navigate = useNavigate();
   const consumeRealtimeAutostart = useCallback(() => {
@@ -627,9 +628,9 @@ export function SessionRoute({
         line,
         requestId: sandboxFileRequestSeq.current,
       });
-      context.setInspectorOpen(true);
+      setInspectorOpen(true);
     },
-    [context.setInspectorOpen],
+    [setInspectorOpen],
   );
 
   if (!session) {
@@ -1000,6 +1001,7 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line: number) => void;
 }) {
   const context = useAppContext();
+  const onOpenSandboxFile = props.onOpenSandboxFile;
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useMachines({
     sessionId: props.session.id,
@@ -1038,12 +1040,12 @@ function SessionChatPane(props: {
   const handleSandboxFile = useCallback(
     async (path: string, line?: number) => {
       if (line != null && line > 0) {
-        props.onOpenSandboxFile(path, line);
+        onOpenSandboxFile(path, line);
         return;
       }
       await downloadSandboxFile(path);
     },
-    [downloadSandboxFile, props.onOpenSandboxFile],
+    [downloadSandboxFile, onOpenSandboxFile],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
