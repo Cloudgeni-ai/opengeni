@@ -223,6 +223,24 @@ describe("workspace model access policy editor", () => {
     });
   });
 
+  test("collapses the editor by default", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<ModelAccessPolicySection workspaceId="workspace-a" canManage />);
+        await flush();
+      });
+
+      expect(container.querySelector("details")?.open).toBe(false);
+      expect(container.textContent).toContain("3 of 3");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("keeps provider identities private and confirms before exact-model conversion", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -242,14 +260,14 @@ describe("workspace model access policy editor", () => {
       expect(chooseExact).toBeDefined();
       await act(async () => chooseExact?.click());
       expect(container.textContent).toContain("Replace the provider-level model policy?");
-      expect(container.textContent).not.toContain("Allow selected model IDs");
+      expect(container.textContent).not.toContain("Selected models");
 
       const confirm = [...container.querySelectorAll("button")].find((button) =>
         button.textContent?.includes("Confirm replacement"),
       );
       await act(async () => confirm?.click());
       expect(container.textContent).toContain("Provider-level restriction will be replaced");
-      expect(container.textContent).toContain("Allow selected model IDs");
+      expect(container.textContent).toContain("Selected models");
       expect(container.textContent).not.toContain("private-provider-id");
     } finally {
       await act(async () => root.unmount());
@@ -305,9 +323,7 @@ describe("workspace model access policy editor", () => {
         );
         await flush();
       });
-      expect(container.textContent).toContain(
-        "All configured models are permitted by workspace policy.",
-      );
+      expect(container.textContent).toContain("All models");
       expect(container.textContent).not.toContain("Provider-level restriction active");
 
       await act(async () => {
@@ -319,9 +335,7 @@ describe("workspace model access policy editor", () => {
         await flush();
       });
 
-      expect(container.textContent).toContain(
-        "All configured models are permitted by workspace policy.",
-      );
+      expect(container.textContent).toContain("All models");
       expect(container.textContent).not.toContain("Provider-level restriction active");
       expect(
         getWorkspaceModelAccessPolicy.mock.calls.filter(([workspaceId]) =>

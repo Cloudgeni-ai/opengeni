@@ -57,15 +57,32 @@ describe("workspace model catalog availability", () => {
     });
     expect(managed.deployment).toBeUndefined();
     expect(managed.credentialSource).toBeUndefined();
+    const gemini = disconnected.models.find((model) => model.id === "gemini-3.7-flash")!;
+    const glm = disconnected.models.find((model) => model.id === "glm-5.3")!;
+    expect(gemini).toMatchObject({
+      label: "Gemini 3.7 Flash",
+      shortLabel: "3.7 Flash",
+      source: "opengeni",
+    });
+    expect(glm).toMatchObject({
+      label: "GLM 5.3",
+      shortLabel: "GLM 5.3",
+      source: "opengeni",
+    });
     const publicManagedModel = JSON.stringify(managed);
+    const publicNewModels = JSON.stringify([gemini, glm]);
     for (const internalName of [
       "baseten",
       "novita",
       "deepinfra",
       "fireworks",
+      "google",
+      "vertex",
+      "zai",
       "ai-gateway.vercel.sh",
     ]) {
       expect(publicManagedModel).not.toContain(internalName);
+      expect(publicNewModels).not.toContain(internalName);
     }
 
     const workspaceModel = disconnected.models.find(
