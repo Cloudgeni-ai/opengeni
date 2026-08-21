@@ -1825,6 +1825,22 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         sandboxLeaseReaperPeriodMs: 30_000,
       }),
     ).toBe(60 * 60_000);
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxDrainSnapshotTimeoutMs: 30 * 60_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(30 * 60_000 + 50_000);
+  });
+
+  test("drain snapshots can use extended recovery headroom without changing ordinary snapshots", () => {
+    const settings = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(30 * 60_000) },
+      () => getSettings(),
+    );
+    expect(settings.sandboxSnapshotTimeoutMs).toBe(60_000);
+    expect(settings.sandboxDrainSnapshotTimeoutMs).toBe(30 * 60_000);
   });
 
   test("snapshot configuration cannot consume the durable claim's settlement window", () => {

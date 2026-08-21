@@ -45,13 +45,17 @@ describe("sandbox reaper per-box timeout contract", () => {
   });
 
   test("only an unusually large capture gets the isolated extended budget", () => {
-    const settings = { sandboxSnapshotTimeoutMs: 30 * 60_000 };
+    const settings = {
+      sandboxSnapshotTimeoutMs: 60_000,
+      sandboxDrainSnapshotTimeoutMs: 30 * 60_000,
+    };
     const timing = sandboxDrainTiming(settings);
 
     expect(timing.captureTimeoutMs).toBe(30 * 60_000 + 10_000);
     expect(timing.timeoutClass).toBe("extended");
     expect(timing.activityTimeoutMs).toBe(SANDBOX_DRAIN_EXTENDED_ACTIVITY_TIMEOUT_MS);
     expect(() => assertSandboxReaperActivityTimeout(settings)).not.toThrow();
+    expect(settings.sandboxSnapshotTimeoutMs).toBe(60_000);
     expect(sandboxDrainTimeoutClass(60_000)).toBe("fast");
     expect(sandboxDrainActivityTimeoutMs("extended")).toBe(
       SANDBOX_DRAIN_EXTENDED_ACTIVITY_TIMEOUT_MS,
