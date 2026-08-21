@@ -89,10 +89,13 @@ credential location, and one or more model definitions:
 Registry providers default to `kind: "api-key"` and `api: "chat"`. Prefer
 `apiKeyEnv` to an inline `apiKey`. A provider that intentionally accepts public,
 unauthenticated inference must set `kind: "anonymous"`; that kind rejects
-`apiKey`, `apiKeyEnv`, and credential-like default header/query names. Missing a
-key on an ordinary `api-key` provider remains a boot error. `defaultQuery` and
-`defaultHeaders` are provider request configuration, not model identity aliases.
-Provider base URLs must not contain userinfo, a query, or a fragment.
+`apiKey`, `apiKeyEnv`, and all configured default header/query metadata. This
+keeps an operator from attaching an upstream session cookie or another hidden
+credential while retaining external-metered billing. Missing a key on an
+ordinary `api-key` provider remains a boot error. `defaultQuery` and
+`defaultHeaders` are provider request configuration, not model identity aliases,
+and are available only to authenticated provider kinds. Provider base URLs must
+not contain userinfo, a query, or a fragment.
 
 A registry model may add:
 

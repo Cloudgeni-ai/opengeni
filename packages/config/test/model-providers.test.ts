@@ -357,12 +357,17 @@ describe("parseModelProvidersJson", () => {
     expect(provider?.apiKeyEnv).toBeUndefined();
   });
 
-  test("rejects credentials and credential-like metadata on anonymous providers", () => {
+  test("rejects credentials and all configured request metadata on anonymous providers", () => {
     for (const forbidden of [
       { apiKey: "must-not-send" },
       { apiKeyEnv: "MUST_NOT_RESOLVE" },
       { defaultHeaders: { "x-api-key": "must-not-send" } },
+      { defaultHeaders: { Cookie: "session=must-not-send" } },
+      { defaultHeaders: { "x-trace-id": "also-not-allowed" } },
       { defaultQuery: { access_token: "must-not-send" } },
+      { defaultQuery: { locale: "also-not-allowed" } },
+      { publicDefaultHeaderNames: ["x-version"] },
+      { publicDefaultQueryNames: ["api-version"] },
     ]) {
       expect(() =>
         parseModelProvidersJson(

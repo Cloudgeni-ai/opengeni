@@ -332,9 +332,7 @@ describe("ModelPolicyPicker", () => {
       label: "OpenCode Ox Alpha",
       provider: "opencode-zen",
       providerLabel: "OpenCode Zen",
-      source: "external",
       api: "chat",
-      credentialSource: { kind: "deployment", mechanism: "none" },
       billing: { upstreamPayer: "deployment", metering: "external" },
     };
     const container = await mount(

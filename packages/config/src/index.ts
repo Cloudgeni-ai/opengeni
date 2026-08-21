@@ -1757,23 +1757,33 @@ const RegistryProviderSchema = z
         message: "anonymous providers must not declare apiKeyEnv",
       });
     }
-    for (const name of Object.keys(provider.defaultHeaders ?? {})) {
-      if (isCredentialLikeMetadataName(name)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["defaultHeaders", name],
-          message: "anonymous providers must not declare credential-like request headers",
-        });
-      }
+    if (provider.defaultHeaders !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultHeaders"],
+        message: "anonymous providers must not declare defaultHeaders",
+      });
     }
-    for (const name of Object.keys(provider.defaultQuery ?? {})) {
-      if (isCredentialLikeMetadataName(name)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["defaultQuery", name],
-          message: "anonymous providers must not declare credential-like query parameters",
-        });
-      }
+    if (provider.defaultQuery !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultQuery"],
+        message: "anonymous providers must not declare defaultQuery",
+      });
+    }
+    if (provider.publicDefaultHeaderNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultHeaderNames"],
+        message: "anonymous providers must not declare publicDefaultHeaderNames",
+      });
+    }
+    if (provider.publicDefaultQueryNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultQueryNames"],
+        message: "anonymous providers must not declare publicDefaultQueryNames",
+      });
     }
   });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;

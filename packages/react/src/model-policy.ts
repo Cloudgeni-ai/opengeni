@@ -50,10 +50,7 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (
-    model.source === "external" ||
-    (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment")
-  ) {
+  if (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment") {
     return "external";
   }
   if (model.source === "supergrok") {
@@ -168,7 +165,9 @@ export function payerSummaryForModel(model: ClientModel): string {
 export function advancedSourceSummary(model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
-    return null;
+    return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
+      ? "Deployment route · no authentication"
+      : null;
   }
   if (source.kind === "connected_subscription") {
     return source.provider === "xai"
@@ -179,11 +178,8 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     return "Workspace AI Gateway";
   }
   if (source.kind === "deployment") {
-    if (source.mechanism === "azure_ad_bearer") {
-      return "Deployment Azure identity";
-    }
-    return source.mechanism === "none"
-      ? "Deployment route · no authentication"
+    return source.mechanism === "azure_ad_bearer"
+      ? "Deployment Azure identity"
       : "Deployment API key";
   }
   return null;

@@ -80,8 +80,6 @@ describe("model-policy", () => {
     const model = catalogModel({
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
-      source: "external",
-      credentialSource: { kind: "deployment", mechanism: "none" },
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
     expect(billingClassForModel(model)).toBe("external");

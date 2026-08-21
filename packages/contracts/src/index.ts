@@ -13892,7 +13892,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer", "none"]),
+          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
         })
         .strict(),
       z
@@ -13910,6 +13910,16 @@ export const ModelCredentialSourceV1 =
     ]),
   );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
+
+const TurnExecutionCredentialSourceV1 = z.union([
+  ModelCredentialSourceV1,
+  z
+    .object({
+      kind: z.literal("deployment"),
+      mechanism: z.literal("none"),
+    })
+    .strict(),
+]);
 
 export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
@@ -13967,7 +13977,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
       wireApi: z.enum(["responses", "chat"]),
-      credentialSource: ModelCredentialSourceV1,
+      credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
     })
@@ -14109,7 +14119,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "external", "codex", "supergrok", "workspace_gateway"]).optional(),
+    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.

@@ -1727,8 +1727,13 @@ describe("buildProviderClient", () => {
           Authorization: "Bearer must-not-leak",
           "Api-Key": "must-not-leak",
           "X-Api-Key": "must-not-leak",
+          Cookie: "session=must-not-leak",
+          "Proxy-Authorization": "Bearer must-not-leak",
+          "X-Auth-Token": "must-not-leak",
+          "X-Goog-Api-Key": "must-not-leak",
           "OpenAI-Organization": "must-not-leak",
           "OpenAI-Project": "must-not-leak",
+          "X-Trace-Id": "safe-metadata",
         },
         credentialSource: { kind: "deployment", mechanism: "none" },
         billing: { upstreamPayer: "deployment", metering: "external" },
@@ -1742,8 +1747,13 @@ describe("buildProviderClient", () => {
       expect(capturedHeaders.get("authorization")).toBeNull();
       expect(capturedHeaders.get("api-key")).toBeNull();
       expect(capturedHeaders.get("x-api-key")).toBeNull();
+      expect(capturedHeaders.get("cookie")).toBeNull();
+      expect(capturedHeaders.get("proxy-authorization")).toBeNull();
+      expect(capturedHeaders.get("x-auth-token")).toBeNull();
+      expect(capturedHeaders.get("x-goog-api-key")).toBeNull();
       expect(capturedHeaders.get("openai-organization")).toBeNull();
       expect(capturedHeaders.get("openai-project")).toBeNull();
+      expect(capturedHeaders.get("x-trace-id")).toBe("safe-metadata");
     } finally {
       globalThis.fetch = originalFetch;
     }

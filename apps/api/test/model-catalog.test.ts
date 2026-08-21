@@ -3,7 +3,38 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testSettings } from "@opengeni/testing";
+import { z } from "zod";
 import { buildWorkspaceModelCatalog } from "../src/model-catalog";
+
+const previousClientModelSchema = z
+  .object({
+    id: z.string(),
+    label: z.string(),
+    provider: z.string(),
+    providerLabel: z.string(),
+    api: z.enum(["responses", "chat"]),
+    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
+    credentialSource: z
+      .union([
+        z
+          .object({
+            kind: z.literal("deployment"),
+            mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("connected_subscription"),
+            provider: z.enum(["codex", "xai"]),
+          })
+          .strict(),
+        z
+          .object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") })
+          .strict(),
+      ])
+      .optional(),
+  })
+  .passthrough();
 
 describe("workspace model catalog availability", () => {
   test("projects anonymous providers as ready external routes", () => {
@@ -35,7 +66,6 @@ describe("workspace model catalog availability", () => {
     expect(model).toMatchObject({
       provider: "opencode-zen",
       providerLabel: "OpenCode Zen",
-      source: "external",
       billing: { upstreamPayer: "deployment", metering: "external" },
       credentialReadiness: {
         status: "ready",
@@ -45,6 +75,9 @@ describe("workspace model catalog availability", () => {
       },
       availability: { status: "unknown", selectable: true, reason: null },
     });
+    expect(model.source).toBeUndefined();
+    expect(model.credentialSource).toBeUndefined();
+    expect(() => previousClientModelSchema.parse(model)).not.toThrow();
   });
 
   test("SuperGrok definitions use a distinct public rail and workspace readiness", () => {

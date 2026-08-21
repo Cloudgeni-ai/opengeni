@@ -83,15 +83,56 @@ export function buildOpenAIClientFromSettings(
  */
 const providerClientCache = new Map<string, OpenAI>();
 
+const ANONYMOUS_PROVIDER_AUTHENTICATION_HEADERS = new Set([
+  "api-key",
+  "authorization",
+  "cookie",
+  "cookie2",
+  "openai-organization",
+  "openai-project",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+]);
+const ANONYMOUS_PROVIDER_AUTHENTICATION_HEADER_PARTS = new Set([
+  "apikey",
+  "auth",
+  "authorization",
+  "bearer",
+  "cookie",
+  "credential",
+  "password",
+  "secret",
+  "session",
+  "signature",
+  "token",
+]);
+
+function isAnonymousProviderAuthenticationHeader(name: string): boolean {
+  const normalized = name.toLowerCase();
+  if (ANONYMOUS_PROVIDER_AUTHENTICATION_HEADERS.has(normalized)) {
+    return true;
+  }
+  const parts = normalized.split(/[-_.]/u);
+  if (parts.some((part) => ANONYMOUS_PROVIDER_AUTHENTICATION_HEADER_PARTS.has(part))) {
+    return true;
+  }
+  return (
+    parts.includes("key") &&
+    parts.some((part) => ["access", "api", "auth", "client", "credential", "secret"].includes(part))
+  );
+}
+
 function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const headers = new Headers(input instanceof Request ? input.headers : undefined);
-    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
-    headers.delete("authorization");
-    headers.delete("api-key");
-    headers.delete("x-api-key");
-    headers.delete("openai-organization");
-    headers.delete("openai-project");
+    const mergedHeaders = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => mergedHeaders.set(name, value));
+    const headers = new Headers();
+    mergedHeaders.forEach((value, name) => {
+      if (!isAnonymousProviderAuthenticationHeader(name)) {
+        headers.set(name, value);
+      }
+    });
     return await inner(input, { ...init, headers });
   }) as typeof fetch;
 }

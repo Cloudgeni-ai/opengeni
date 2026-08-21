@@ -36,32 +36,33 @@ export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 
 /** Static, client-safe definition projection. No provider secret is reachable. */
 export function projectClientModel(model: ConfiguredModel): ClientModel {
+  const anonymousProvider =
+    model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
   const source =
-    model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none"
-      ? "external"
-      : model.credentialSource.kind === "connected_subscription"
-        ? model.credentialSource.provider === "xai"
-          ? "supergrok"
-          : "codex"
-        : model.credentialSource.kind === "workspace_connection"
-          ? "workspace_gateway"
+    model.credentialSource.kind === "connected_subscription"
+      ? model.credentialSource.provider === "xai"
+        ? "supergrok"
+        : "codex"
+      : model.credentialSource.kind === "workspace_connection"
+        ? "workspace_gateway"
+        : anonymousProvider
+          ? undefined
           : "opengeni";
-  const publicProvider =
-    source === "external"
-      ? { provider: model.providerId, providerLabel: model.providerLabel }
-      : source === "codex"
-        ? { provider: "codex", providerLabel: "Codex" }
-        : source === "supergrok"
-          ? { provider: "supergrok", providerLabel: "SuperGrok" }
-          : source === "workspace_gateway"
-            ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-            : { provider: "opengeni", providerLabel: "OpenGeni" };
+  const publicProvider = anonymousProvider
+    ? { provider: model.providerId, providerLabel: model.providerLabel }
+    : source === "codex"
+      ? { provider: "codex", providerLabel: "Codex" }
+      : source === "supergrok"
+        ? { provider: "supergrok", providerLabel: "SuperGrok" }
+        : source === "workspace_gateway"
+          ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+          : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
     ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
     ...publicProvider,
-    source,
+    ...(source === undefined ? {} : { source }),
     api: model.api,
     ...(model.contextWindowTokens === undefined
       ? {}
