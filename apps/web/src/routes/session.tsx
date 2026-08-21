@@ -325,6 +325,7 @@ export function SessionRoute({
       void client
         .updateSessionAttention(workspaceId, targetSession.id, {
           unread: false,
+          acknowledgedThroughSequence: latestEventSequence,
         })
         .then(async (updated) => {
           if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
