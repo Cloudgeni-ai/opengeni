@@ -348,8 +348,9 @@ organization membership rather than that workspace. A self-service user with
 no membership or pending invitation receives the legacy `better-auth:user`
 organization. Maintenance migration 0314 binds pending invitations only after
 the exact Better Auth email is verified, suppresses that fallback while an
-invitation is pending, and accepts the invited user directly into the inviting
-organization with any selected shared-workspace grants. Invitation creation
+invitation is pending, appends immutable exact-subject binding evidence, and
+accepts the invited user directly into the inviting organization with any
+selected shared-workspace grants. Invitation creation
 and signup convergence share one normalized-email advisory fence before the
 canonical organization locks, so a committing invitation cannot race the
 fallback organization decision. Public invitation projections never expose

@@ -674,6 +674,44 @@ export const organizationMembershipInvitations = pgTable(
   }),
 );
 
+export const organizationInvitationBindingEvents = pgTable(
+  "organization_invitation_binding_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    invitationId: uuid("invitation_id").notNull(),
+    targetSubjectId: text("target_subject_id").notNull(),
+    resultingRevision: bigint("resulting_revision", { mode: "number" }).notNull(),
+    boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    invitation: foreignKey({
+      name: "organization_invitation_binding_events_invitation_fk",
+      columns: [table.invitationId, table.accountId],
+      foreignColumns: [
+        organizationMembershipInvitations.id,
+        organizationMembershipInvitations.accountId,
+      ],
+    }).onDelete("restrict"),
+    invitationIdentity: uniqueIndex("organization_invitation_binding_events_invitation_uq").on(
+      table.accountId,
+      table.invitationId,
+    ),
+    subjectValid: check(
+      "organization_invitation_binding_events_subject_check",
+      sql`${table.targetSubjectId} = btrim(${table.targetSubjectId})
+        and ${table.targetSubjectId} like 'user:%'
+        and octet_length(convert_to(${table.targetSubjectId}, 'UTF8')) between 6 and 1024`,
+    ),
+    revisionValid: check(
+      "organization_invitation_binding_events_revision_check",
+      sql`${table.resultingRevision} > 1`,
+    ),
+  }),
+);
+
 export const organizationMembershipOperationReceipts = pgTable(
   "organization_membership_operation_receipts",
   {

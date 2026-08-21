@@ -124,6 +124,36 @@ CREATE UNIQUE INDEX organization_membership_invitations_pending_email_uq
   ON organization_membership_invitations (account_id, target_email)
   WHERE status = 'pending';
 
+CREATE TABLE organization_invitation_binding_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
+  invitation_id uuid NOT NULL,
+  target_subject_id text NOT NULL,
+  resulting_revision bigint NOT NULL,
+  bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT organization_invitation_binding_events_invitation_fk
+    FOREIGN KEY (invitation_id, account_id)
+    REFERENCES organization_membership_invitations(id, account_id) ON DELETE RESTRICT,
+  CONSTRAINT organization_invitation_binding_events_subject_check CHECK (
+    target_subject_id = btrim(target_subject_id)
+    AND target_subject_id LIKE 'user:%'
+    AND octet_length(convert_to(target_subject_id, 'UTF8')) BETWEEN 6 AND 1024
+  ),
+  CONSTRAINT organization_invitation_binding_events_revision_check CHECK (
+    resulting_revision > 1
+  )
+);
+CREATE UNIQUE INDEX organization_invitation_binding_events_invitation_uq
+  ON organization_invitation_binding_events (account_id, invitation_id);
+
+ALTER TABLE organization_invitation_binding_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE organization_invitation_binding_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY organization_tenancy_lifecycle ON organization_invitation_binding_events
+  USING (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle')
+  WITH CHECK (current_setting('opengeni.organization_tenancy_lifecycle', true)
+    = 'organization_membership_lifecycle');
+
 CREATE OR REPLACE FUNCTION opengeni_private.organization_invitation_row_json(
   p_invitation organization_membership_invitations
 ) RETURNS jsonb
@@ -316,6 +346,12 @@ BEGIN
   ) VALUES (
     account_id_value, operation_id_value, 'invite', input_hash_value, result
   );
+  INSERT INTO organization_membership_lifecycle_events (
+    account_id, operation_id, actor_membership_id, target_membership_id, kind,
+    prior_authorization_revision, resulting_authorization_revision, reason
+  ) VALUES (
+    account_id_value, operation_id_value, actor.id, NULL, 'invite', NULL, NULL, NULL
+  );
   RETURN result;
 END
 $body$;
@@ -402,10 +438,16 @@ BEGIN
             AND existing.target_subject_id = p_subject_id
             AND existing.status = 'pending'
         )
+      RETURNING invitation.id, invitation.account_id, invitation.revision
+    ), recorded AS (
+      INSERT INTO organization_invitation_binding_events (
+        account_id, invitation_id, target_subject_id, resulting_revision
+      )
+      SELECT account_id, id, p_subject_id, revision FROM bound
       RETURNING 1
     )
     SELECT bound_count + pg_catalog.count(*)::integer
-    INTO bound_count FROM bound;
+    INTO bound_count FROM recorded;
   END LOOP;
   RETURN bound_count;
 END
@@ -538,10 +580,16 @@ REVOKE ALL ON FUNCTION bind_pending_organization_invitations_for_verified_email(
   FROM PUBLIC;
 REVOKE ALL ON FUNCTION has_pending_organization_invitation_for_subject(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION accept_organization_invitation_v2(jsonb) FROM PUBLIC;
+REVOKE ALL ON TABLE organization_invitation_binding_events FROM PUBLIC;
+
+CREATE TRIGGER organization_invitation_binding_events_immutable
+  BEFORE UPDATE OR DELETE ON organization_invitation_binding_events
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.organization_membership_history_immutable();
 
 DO $runtime_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    REVOKE ALL ON TABLE organization_invitation_binding_events FROM opengeni_app;
     GRANT EXECUTE ON FUNCTION create_organization_invitation_v2(jsonb) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       bind_pending_organization_invitations_for_verified_email(text,text) TO opengeni_app;
@@ -554,3 +602,5 @@ $runtime_grants$;
 
 COMMENT ON FUNCTION bind_pending_organization_invitations_for_verified_email(text,text) IS
   'Binds active pending email invitations only after the exact Better Auth user has verified that email.';
+COMMENT ON TABLE organization_invitation_binding_events IS
+  'Immutable exact-subject and revision evidence for verified-email invitation binding.';

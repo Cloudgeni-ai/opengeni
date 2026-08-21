@@ -159,10 +159,11 @@ describe("migration 0314 unregistered organization invitations", () => {
         }),
       "22023",
     );
+    const invitationOperationId = crypto.randomUUID();
     const invitation = await createOrganizationInvitation(client.db, {
       organizationId,
       actorSubjectId: ownerSubject,
-      operationId: crypto.randomUUID(),
+      operationId: invitationOperationId,
       targetSubjectId: null,
       targetEmail,
       targetName: "New teammate",
@@ -174,6 +175,18 @@ describe("migration 0314 unregistered organization invitations", () => {
       targetName: "New teammate",
       initialWorkspaceIds: [initialWorkspaceId],
       revision: 1,
+    });
+    const [invitationEvent] = await shared.admin<
+      Array<{ actorMembershipId: string; kind: string; targetMembershipId: string | null }>
+    >`
+      select actor_membership_id as "actorMembershipId", kind,
+        target_membership_id as "targetMembershipId"
+      from organization_membership_lifecycle_events
+      where account_id = ${organizationId} and operation_id = ${invitationOperationId}`;
+    expect(invitationEvent).toEqual({
+      actorMembershipId: ownerMembership!.id,
+      kind: "invite",
+      targetMembershipId: null,
     });
 
     await shared.admin`
@@ -203,6 +216,22 @@ describe("migration 0314 unregistered organization invitations", () => {
         email: targetEmail,
       }),
     ).toBe(1);
+    const [bindingEvent] = await shared.admin<
+      Array<{ targetSubjectId: string; resultingRevision: number }>
+    >`
+      select target_subject_id as "targetSubjectId",
+        resulting_revision::int as "resultingRevision"
+      from organization_invitation_binding_events
+      where account_id = ${organizationId} and invitation_id = ${invitation.id}`;
+    expect(bindingEvent).toEqual({ targetSubjectId: targetSubject, resultingRevision: 2 });
+    await expectSqlState(
+      () =>
+        shared!.admin`
+          update organization_invitation_binding_events
+          set resulting_revision = resulting_revision + 1
+          where account_id = ${organizationId} and invitation_id = ${invitation.id}`,
+      "55000",
+    );
 
     const pendingAccess = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
       userId: targetUserId,
@@ -410,10 +439,13 @@ describe("migration 0314 unregistered organization invitations", () => {
     expect(source).toContain("auth_user.email_verified IS TRUE");
     expect(source).toContain("invitation.target_email = normalized_email");
     expect(source).toContain("has_pending_organization_invitation_for_subject");
+    expect(source).toContain("organization_invitation_binding_events");
+    expect(source).toContain("organization_membership_lifecycle_events");
     expect(source).toContain("organization-membership:");
     expect(source).toContain("organization-invitation-email:");
     expect(source).toContain("FOR KEY SHARE");
     expect(source).toContain("REVOKE ALL ON FUNCTION create_organization_invitation_v2");
+    expect(source).toContain("REVOKE ALL ON TABLE organization_invitation_binding_events");
     expect(source).not.toContain("GRANT SELECT ON organization_membership_invitations");
   });
 });

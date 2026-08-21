@@ -460,8 +460,10 @@ verified the matching normalized email. Binding is performed by a
 PUBLIC-revoked SECURITY DEFINER capability under the existing organization
 lifecycle policy, serializes first on a normalized-email advisory fence and
 then on canonical per-organization advisory locks, and never accepts a
-caller-asserted verification fact. Invitation creation takes the same email
-fence before its organization lock. Because managed-access convergence keeps
+caller-asserted verification fact. Each successful bind appends immutable
+evidence naming the exact invitation, verified subject, and resulting revision.
+Invitation creation takes the same email fence before its organization lock.
+Because managed-access convergence keeps
 the transaction-scoped email fence through its pending check and fallback
 provisioning decision, it cannot snapshot an absent invitation while a matching
 create commits. Until acceptance, the
@@ -474,7 +476,7 @@ Consequently a newly provisioned invited user joins the inviting organization
 without also creating a redundant personal organization. Self-invitation reads
 and acceptance bind through the same database-attested verified-email seam.
 
-0313 is a drained maintenance cutover, not a rolling migration. Old callers can
+0314 is a drained maintenance cutover, not a rolling migration. Old callers can
 accept an invitation without applying its initial workspace grants and can run
 fallback provisioning before verified-email convergence. Stop every API,
 control worker, and turn worker; provide the exact old/new application database
@@ -635,7 +637,7 @@ kinds or malformed/unrepresentable storage facts fail closed. Membership,
 lifecycle, grant/authority, cleanup-obligation, deletion-receipt, and event
 evidence is retained.
 
-Invitation, operation-receipt, and lifecycle-event tables are FORCE RLS with
+Invitation, binding-event, operation-receipt, and lifecycle-event tables are FORCE RLS with
 zero direct application-role DML. Target-schema-local SECURITY DEFINER routines
 are PUBLIC-revoked, explicitly granted, and pinned to
 `pg_catalog,<target-schema>,pg_temp`. Managed access refresh re-reads all active

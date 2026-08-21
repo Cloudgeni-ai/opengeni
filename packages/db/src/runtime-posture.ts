@@ -95,6 +95,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "complete_organization_retention_deletion(uuid, uuid, uuid, text)",
 ] as const;
 const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
+  "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
@@ -536,6 +537,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
@@ -980,6 +982,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
