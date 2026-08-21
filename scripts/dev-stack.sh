@@ -163,24 +163,11 @@ else
   export OPENGENI_CODEX_SUBSCRIPTION_ENABLED
 fi
 
-slugify() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
-}
-
-# Compose project identity: directory basename (unique per linked worktree path).
-# Ignore ambient COMPOSE_PROJECT_NAME from the parent shell — a prior export of
-# `opengeni` would otherwise collapse every worktree onto one project. Override
-# only via OPENGENI_COMPOSE_PROJECT in .env / the environment.
-if [ -n "${OPENGENI_COMPOSE_PROJECT:-}" ]; then
-  COMPOSE_PROJECT_NAME="$(slugify "$OPENGENI_COMPOSE_PROJECT")"
-else
-  COMPOSE_PROJECT_NAME="$(slugify "$(basename "$(pwd)")")"
-  # Bare main-checkout directory name only — never rewrite an explicit override
-  # (operators may still want COMPOSE project `opengeni` for legacy volumes).
-  if [ "$COMPOSE_PROJECT_NAME" = "opengeni" ]; then
-    COMPOSE_PROJECT_NAME="opengeni-main"
-  fi
-fi
+# Compose project identity is shared with scripts/dev-stack-down.sh so
+# `bun run dev:down` / `dev:clean` always target exactly this worktree's stack.
+# shellcheck disable=SC1091
+. ./scripts/dev-stack-project.sh
+COMPOSE_PROJECT_NAME="$(resolve_compose_project_name)"
 export COMPOSE_PROJECT_NAME
 
 # Modal's application name is also an ownership namespace: the sandbox reaper
@@ -832,7 +819,27 @@ fi
 unset OPENGENI_ARTIFACT_RUNTIME_MANIFEST
 export NODE_ENV=development
 artifact_development_root="$(pwd)/.opengeni/artifact-runtime-development"
-bun scripts/prepare-development-artifact-runtime.ts \
+# Optional shared Cargo target cache for the host-side Rust builds (artifact
+# kernel napi binding here, Connected Machine relay below). Opt-in only: by
+# default every checkout keeps its own in-repo target/ trees. When set, each
+# Cargo workspace gets its own subdirectory so the two never mix, and parallel
+# worktrees reuse compiled registry dependencies instead of recompiling them.
+artifact_kernel_cargo_env=()
+relay_cargo_env=()
+if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then
+  case "$OPENGENI_DEV_CARGO_TARGET_DIR" in
+  /*) ;;
+  *)
+    echo "OPENGENI_DEV_CARGO_TARGET_DIR must be an absolute path." >&2
+    exit 1
+    ;;
+  esac
+  mkdir -p "${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel" "${OPENGENI_DEV_CARGO_TARGET_DIR}/agent"
+  artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")
+  relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")
+fi
+env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}" \
+  bun scripts/prepare-development-artifact-runtime.ts \
   --repository-root "$(pwd)" \
   --output "$artifact_development_root"
 export OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST="${artifact_development_root}/installation.development.json"
@@ -968,6 +975,14 @@ if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
       --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
 if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  # 6gb was the documented cap before one build's cache working set (10-14 GB)
+  # was measured; copied .env files still carry it and it makes every start
+  # evict and rebuild the whole image. Treat that exact stale value as unset;
+  # any other explicit value remains authoritative.
+  if [ "${OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX:-}" = "6gb" ]; then
+    echo "OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX=6gb is below one sandbox build's cache working set; using the default cap instead (set another explicit value in .env to override)." >&2
+    unset OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX
+  fi
   bun scripts/prepare-development-sandbox-image.ts \
     --repository-root "$(pwd)" \
     --image "${OPENGENI_DOCKER_IMAGE}" \
@@ -981,7 +996,8 @@ else
 fi
 
 if [ "$start_local_relay" = "1" ]; then
-  bash scripts/run-development-relay.sh &
+  env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
+    bash scripts/run-development-relay.sh &
   pids+=("$!")
 fi
 

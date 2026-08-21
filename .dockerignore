@@ -6,6 +6,13 @@
 .env.*
 !.env.example
 node_modules
+# Workspace-local node_modules are host-specific link trees recreated by the
+# in-image `bun install`; the images stage manifests, install, then copy the
+# tree, so host copies must never land on top of the container install.
+apps/*/node_modules
+examples/*/node_modules
+packages/*/node_modules
+docker/anydoc/node_modules
 var
 # The Rust cargo build output (agent/target/) is large + irrelevant to the API/web
 # images. The signed PER-SHA agent binaries the API serves are staged into

@@ -158,6 +158,42 @@ describe("release image workflow contract", () => {
     }
   });
 
+  test.each(["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"])(
+    "%s source stage installs from staged manifests before copying the tree",
+    async (path) => {
+      const [dockerfile, workload] = await Promise.all([
+        readFile(resolve(root, path), "utf8"),
+        readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8"),
+      ]);
+      const stageStart = dockerfile.indexOf("AS browserd-source-build");
+      const stageEnd = dockerfile.indexOf("\nFROM ", stageStart);
+      const stage = dockerfile.slice(stageStart, stageEnd);
+      const frozenInstall = stage.indexOf("bun install --frozen-lockfile");
+      const patchCopy = stage.indexOf("COPY patches patches");
+      const treeCopy = stage.indexOf("COPY . .");
+
+      expect(stageStart).toBeGreaterThan(-1);
+      expect(frozenInstall).toBeGreaterThan(-1);
+      expect(patchCopy).toBeGreaterThan(-1);
+      expect(patchCopy).toBeLessThan(frozenInstall);
+      expect(treeCopy).toBeGreaterThan(frozenInstall);
+      expect(stage.slice(frozenInstall - 120, frozenInstall)).toContain("--mount=type=cache,");
+
+      const staged = (source: string, end: number) =>
+        Array.from(
+          source.slice(0, end).matchAll(/^COPY (\S+\/package\.json) \S+\/package\.json$/gmu),
+          (match) => match[1]!,
+        ).sort();
+      const sandboxStaged = staged(stage, frozenInstall);
+      const workloadStaged = staged(
+        workload,
+        workload.indexOf("RUN bun install --frozen-lockfile"),
+      );
+      expect(sandboxStaged).toEqual(workloadStaged);
+      expect(sandboxStaged).toEqual([...(await workspaceManifestPaths()).values()].sort());
+    },
+  );
+
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
