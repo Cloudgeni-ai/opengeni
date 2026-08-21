@@ -147,6 +147,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   closePrivateSessionCreateCapability,
+  openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
   sessionTenancyProductActivated,
 } from "./session-tenancy";
@@ -26314,6 +26315,15 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
+  if (createRequestedVisibility === "user_private" && input.parentSessionId) {
+    // A private child later proves the owner's live organization membership
+    // after locking the parent session/attempt. Serialize with organization
+    // suspend/offboard before taking any workspace or parent row lock, so the
+    // canonical membership -> session lifecycle cannot form a lock cycle.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+    );
+  }
   const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
     tx,
     input.workspaceId,
@@ -26417,23 +26427,42 @@ async function createSessionInTransaction(
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
+  let privateCreateOwnerSubjectId: string | null = null;
   if (createRequestedVisibility === "user_private") {
-    if (
-      frozenCreator.initiator.kind !== "subject" ||
-      !input.subjectId ||
-      input.parentSessionId ||
-      input.sandboxGroupId
-    ) {
-      throw new Error("Private session creation requires a top-level managed-human singleton");
+    if (input.parentSessionId) {
+      if (
+        frozenCreator.initiator.kind !== "subject" ||
+        !input.createdByActor ||
+        input.createdByActor.sessionId !== input.parentSessionId
+      ) {
+        throw new Error("Private child session creation requires its exact parent attempt");
+      }
+      const capability = await openPrivateChildSessionCreateCapability(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: id,
+        parentSessionId: input.parentSessionId,
+        actorTurnId: input.createdByActor.turnId,
+        actorAttemptId: input.createdByActor.attemptId,
+        actorExecutionGeneration: input.createdByActor.executionGeneration,
+      });
+      privateCreateCapabilityId = capability.capabilityId;
+      privateCreateOwnerMembershipId = capability.ownerMembershipId;
+      privateCreateOwnerSubjectId = capability.ownerSubjectId;
+    } else {
+      if (frozenCreator.initiator.kind !== "subject" || !input.subjectId || input.sandboxGroupId) {
+        throw new Error("Private session creation requires a top-level managed-human singleton");
+      }
+      const capability = await openPrivateSessionCreateCapability(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: id,
+        actorSubjectId: input.subjectId,
+      });
+      privateCreateCapabilityId = capability.capabilityId;
+      privateCreateOwnerMembershipId = capability.ownerMembershipId;
+      privateCreateOwnerSubjectId = input.subjectId;
     }
-    const capability = await openPrivateSessionCreateCapability(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: id,
-      actorSubjectId: input.subjectId,
-    });
-    privateCreateCapabilityId = capability.capabilityId;
-    privateCreateOwnerMembershipId = capability.ownerMembershipId;
   }
   try {
     insertedRows = await tx
@@ -26458,7 +26487,7 @@ async function createSessionInTransaction(
             ...(privateCreateOwnerMembershipId
               ? {
                   ownerOrganizationMembershipId: privateCreateOwnerMembershipId,
-                  ownerSubjectId: input.subjectId,
+                  ownerSubjectId: privateCreateOwnerSubjectId,
                 }
               : {}),
             model: input.model,
@@ -54588,6 +54617,19 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = scheduledTaskCausalHuman;
           }
+          if (session.visibility === "user_private") {
+            const privateOwnerSubjectId = session.ownerSubjectId?.trim() ?? "";
+            if (!privateOwnerSubjectId || !session.ownerOrganizationMembershipId) {
+              throw new Error("Private internal update has incomplete session owner authority");
+            }
+            if (initiatingHumanSubjectId && initiatingHumanSubjectId !== privateOwnerSubjectId) {
+              throw new Error("Private internal update subject does not match the session owner");
+            }
+            // This is the immutable owner frozen on the locked target session,
+            // not an ambient request subject. The attempt snapshot below also
+            // freezes the same visibility/owner-membership authority tuple.
+            initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
           if (
             internalPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
           ) {
@@ -61020,8 +61062,35 @@ export async function addSessionSystemUpdateWithSourceMutation(
           input.workspaceId,
           input.sessionId,
         );
+        const [goalForChildResult] =
+          input.kind === "child_terminal_result"
+            ? await tx
+                .select({ status: schema.sessionGoals.status })
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            : [];
+        // Child completion remains durable model memory, but it is not new
+        // human intent. A completed/paused goal or an already-failed parent is
+        // settled authority and cannot be restarted solely by a late child.
+        // A live parent turn consumes the update in its ordinary loop. Once an
+        // ordinary no-goal turn has settled, its child result remains pending
+        // until new human intent arrives. Only an active goal is a durable
+        // obligation that may autonomously wake an idle parent.
+        const childResultMayWake =
+          input.kind !== "child_terminal_result" ||
+          (session.status !== "failed" && goalForChildResult?.status === "active");
         const shouldWake =
-          !realtimeActive && session.activeTurnId === null && effectiveControl.state === "active";
+          childResultMayWake &&
+          !realtimeActive &&
+          session.activeTurnId === null &&
+          effectiveControl.state === "active";
         const wake = shouldWake
           ? await registerInternalUpdateWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,

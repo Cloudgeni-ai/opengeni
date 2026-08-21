@@ -84,16 +84,6 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
         createdByContext: {},
       }),
   );
-  if (options.privateRoot) {
-    await transitionSessionVisibility(client.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: root.id,
-      actorSubjectId: ownerSubjectId,
-      targetVisibility: "user_private",
-      expectedAuthorityEpoch: 1,
-      operationKey: `private-${suffix}`,
-    });
-  }
   const child = options.child
     ? await withSessionRlsActorContext(
         { subjectId: ownerSubjectId },
@@ -114,6 +104,26 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
           }),
       )
     : null;
+  if (options.privateRoot) {
+    await transitionSessionVisibility(client.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: root.id,
+      actorSubjectId: ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `private-root-${suffix}`,
+    });
+    if (child) {
+      await transitionSessionVisibility(client.db, {
+        workspaceId: grant.workspaceId,
+        sessionId: child.id,
+        actorSubjectId: ownerSubjectId,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `private-child-${suffix}`,
+      });
+    }
+  }
   return { grant, ownerSubjectId, root, child };
 }
 
