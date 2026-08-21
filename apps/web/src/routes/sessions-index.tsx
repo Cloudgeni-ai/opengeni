@@ -503,9 +503,7 @@ function SessionsIndexRouteContent({
                   setMessage("");
                   setDraft(emptySessionDraft(firstPartyMcpToolPolicy.default));
                   attachments.removeReadyFiles(
-                    submittedResources.flatMap((resource) =>
-                      resource.kind === "file" ? [resource.fileId] : [],
-                    ),
+                    submittedResources.filter((resource) => resource.kind === "file"),
                   );
                 } else if (
                   !acknowledged ||

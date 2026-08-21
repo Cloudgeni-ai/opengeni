@@ -82,6 +82,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/composer-attachments.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
@@ -251,6 +252,7 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/composer-attachments.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,

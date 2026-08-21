@@ -45,6 +45,7 @@ import {
   type SlashCommandContext,
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
+import { fileResourceIdentity } from "../lib/resource-identity";
 import {
   ComposerResponsiveContext,
   type ResponsiveBasis,
@@ -77,6 +78,7 @@ export type ComposerDelivery = Pick<
 
 export type ComposerDraftState = Pick<
   ComposerState,
+  | "draftPersistence"
   | "draftConflict"
   | "draftSaving"
   | "resolveDraftConflict"
@@ -375,6 +377,61 @@ export function useChatComposerController({
     };
   }, []);
 
+  const hydratesRestoredFiles =
+    draft?.draftPersistence === "durable" && attachments?.restoreResources !== undefined;
+  const restoredFileResources = useMemo(
+    () =>
+      draft?.draftPersistence === "durable"
+        ? draft.restoredResources.filter((resource) => resource.kind === "file")
+        : [],
+    [draft?.draftPersistence, draft?.restoredResources],
+  );
+  const restoredFileSignature = restoredFileResources.map(fileResourceIdentity).join("\n");
+  useEffect(() => {
+    if (hydratesRestoredFiles) attachments.restoreResources?.(restoredFileResources);
+    // The serialized identity is the semantic dependency. Draft reloads often
+    // replace the array object without changing the selected file set; do not
+    // remint signed preview URLs for that incidental projection churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachments?.restoreResources, hydratesRestoredFiles, restoredFileSignature]);
+
+  const attachmentResourceKeys = useMemo(
+    () =>
+      new Set(
+        attachments?.attachments.flatMap((attachment) => {
+          const resource = attachmentResource(attachment);
+          return resource ? [fileResourceIdentity(resource)] : [];
+        }) ?? [],
+      ),
+    [attachments?.attachments],
+  );
+  const visibleRestoredResources = useMemo(
+    () =>
+      draft?.restoredResources.filter(
+        (resource) =>
+          resource.kind !== "file" ||
+          (!hydratesRestoredFiles && !attachmentResourceKeys.has(fileResourceIdentity(resource))),
+      ) ?? [],
+    [attachmentResourceKeys, draft?.restoredResources, hydratesRestoredFiles],
+  );
+
+  const removeAttachment = useCallback(
+    (attachmentId: string) => {
+      const attachment = attachments?.attachments.find(
+        (candidate) => candidate.id === attachmentId,
+      );
+      attachments?.remove(attachmentId);
+      const resource = attachment ? attachmentResource(attachment) : undefined;
+      if (!resource || !draft?.removeRestoredResource) return;
+      const key = fileResourceIdentity(resource);
+      const matching = draft.restoredResources.flatMap((candidate, index) =>
+        candidate.kind === "file" && fileResourceIdentity(candidate) === key ? [index] : [],
+      );
+      for (const index of matching.reverse()) draft.removeRestoredResource(index);
+    },
+    [attachments, draft],
+  );
+
   useEffect(() => {
     const openControl = (event: Event) => {
       const requestedId =
@@ -662,7 +719,7 @@ export function useChatComposerController({
     hasDraftState: draft !== undefined,
     draftConflict: draft?.draftConflict ?? null,
     draftSaving: draft?.draftSaving ?? false,
-    restoredResources: draft?.restoredResources ?? [],
+    restoredResources: visibleRestoredResources,
     removeRestoredResource: draft?.removeRestoredResource,
     resolveDraftConflict: draft?.resolveDraftConflict,
     hasControl: control !== undefined,
@@ -696,6 +753,7 @@ export function useChatComposerController({
     handlePaste,
     handleFileChange,
     focusInput: () => textareaRef.current?.focus(),
+    removeAttachment,
     setValue: delivery.setValue,
     value: delivery.value,
   };
@@ -909,8 +967,9 @@ export function Attachments() {
     <AttachmentChips
       attachments={controller.attachments.attachments}
       messages={controller.messages}
-      onRemove={controller.attachments.remove}
+      onRemove={controller.removeAttachment}
       onRetry={controller.attachments.retry}
+      onPreviewError={controller.attachments.failPreview}
     />
   );
 }
@@ -1601,18 +1660,26 @@ function AttachmentChips({
   messages,
   onRemove,
   onRetry,
+  onPreviewError,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
+  onPreviewError?: ((id: string) => void) | undefined;
 }) {
   return (
     <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
-        const statusText =
-          attachment.status === "uploading"
+        const fallbackFileId = attachment.resource?.fileId;
+        const displayName =
+          attachment.metadataStatus && fallbackFileId
+            ? messages.restoredFile(fallbackFileId)
+            : attachment.name;
+        const statusText = attachment.metadataStatus
+          ? ""
+          : attachment.status === "uploading"
             ? messages.uploading
             : failed
               ? attachment.error || messages.uploadFailed
@@ -1631,6 +1698,7 @@ function AttachmentChips({
               <img
                 src={attachment.previewUrl}
                 alt=""
+                onError={() => onPreviewError?.(attachment.id)}
                 className="size-8 shrink-0 rounded object-cover"
               />
             ) : attachment.contentType.startsWith("image/") ? (
@@ -1639,14 +1707,14 @@ function AttachmentChips({
               <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-og-fg">{attachment.name}</div>
+              <div className="truncate font-medium text-og-fg">{displayName}</div>
               {failed ? (
                 <ComposerTip tip={statusText}>
                   <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
                 </ComposerTip>
-              ) : (
+              ) : statusText ? (
                 <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
-              )}
+              ) : null}
             </div>
             {attachment.status === "uploading" ? (
               <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
@@ -1667,7 +1735,7 @@ function AttachmentChips({
               type="button"
               onClick={() => onRemove(attachment.id)}
               className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-10"
-              aria-label={messages.removeAttachment(attachment.name)}
+              aria-label={messages.removeAttachment(displayName)}
             >
               <XIcon className="size-3.5" />
             </button>
@@ -1675,6 +1743,13 @@ function AttachmentChips({
         );
       })}
     </div>
+  );
+}
+
+function attachmentResource(attachment: UseFileAttachmentsResult["attachments"][number]) {
+  return (
+    attachment.resource ??
+    (attachment.file ? ({ kind: "file", fileId: attachment.file.id } as const) : undefined)
   );
 }
 
