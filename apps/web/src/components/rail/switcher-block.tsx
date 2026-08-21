@@ -14,7 +14,7 @@ import {
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
-import { forwardRef, useState, type ReactNode } from "react";
+import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
@@ -39,6 +39,7 @@ import {
 } from "@/lib/org";
 import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
 import { workspaceCreationAccountId } from "@/lib/workspaces";
+import { cn } from "@/lib/utils";
 import type { Workspace } from "@/types";
 
 function workspaceInitial(workspace: Workspace | null): string {
@@ -54,6 +55,9 @@ function activeOrganizationLabel(orgs: OrgOption[], activeAccountId: string | nu
     `Org ${shortAccountId(activeAccountId)}`
   );
 }
+
+export const WORKSPACE_SWITCHER_GRID_CLASS =
+  "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 px-3 pt-1";
 
 export function SwitcherBlock() {
   const context = useAppContext();
@@ -144,6 +148,7 @@ export function SwitcherBlock() {
     return (
       <>
         <WorkspaceMenu
+          collapsed={rail.collapsed}
           orgs={orgs}
           workspaces={context.workspaces}
           activeWorkspaceId={rail.workspaceId}
@@ -177,7 +182,7 @@ export function SwitcherBlock() {
   }
 
   return (
-    <div className="grid gap-1.5 px-3 pt-1">
+    <div className={WORKSPACE_SWITCHER_GRID_CLASS}>
       <OrganizationSwitcherLine
         orgs={orgs}
         currentLabel={currentOrgLabel}
@@ -187,6 +192,7 @@ export function SwitcherBlock() {
       />
 
       <WorkspaceMenu
+        collapsed={rail.collapsed}
         orgs={orgs}
         workspaces={context.workspaces}
         activeWorkspaceId={rail.workspaceId}
@@ -299,59 +305,76 @@ export function OrganizationSwitcherLine(props: {
   );
 }
 
+type WorkspaceSwitcherTriggerProps = {
+  activeWorkspace: Workspace | null;
+  activeOrganizationLabel: string;
+  personal: boolean;
+  collapsed: boolean;
+} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children">;
+
 export const WorkspaceSwitcherTrigger = forwardRef<
   HTMLButtonElement,
+  WorkspaceSwitcherTriggerProps
+>(function WorkspaceSwitcherTrigger(
   {
-    activeWorkspace: Workspace | null;
-    activeOrganizationLabel: string;
-    personal: boolean;
-    collapsed: boolean;
-  }
->(function WorkspaceSwitcherTrigger(props, ref) {
-  const workspaceLabel =
-    props.activeWorkspace?.name ?? (props.collapsed ? "switch workspace" : "none");
-  const accessibleLabel = `${props.activeOrganizationLabel}. ${
-    props.personal ? "Personal workspace" : "Workspace"
+    activeWorkspace,
+    activeOrganizationLabel: organizationLabel,
+    personal,
+    collapsed,
+    className,
+    ...buttonProps
+  },
+  ref,
+) {
+  const workspaceLabel = activeWorkspace?.name ?? (collapsed ? "switch workspace" : "none");
+  const accessibleLabel = `${organizationLabel}. ${
+    personal ? "Personal workspace" : "Workspace"
   }: ${workspaceLabel}. Switch workspace`;
 
-  if (props.collapsed) {
+  if (collapsed) {
     return (
       <button
+        {...buttonProps}
         ref={ref}
         type="button"
         aria-label={accessibleLabel}
-        className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+        className={cn(
+          "mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none",
+          className,
+        )}
       >
-        {workspaceInitial(props.activeWorkspace)}
+        {workspaceInitial(activeWorkspace)}
       </button>
     );
   }
 
   return (
     <button
+      {...buttonProps}
       ref={ref}
       type="button"
       aria-label={accessibleLabel}
-      className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+      className={cn(
+        "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none",
+        className,
+      )}
     >
       <Avatar size="sm" className="rounded-md">
         <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-          {workspaceInitial(props.activeWorkspace)}
+          {workspaceInitial(activeWorkspace)}
         </AvatarFallback>
       </Avatar>
-      <span
-        className="min-w-0 flex-1 truncate text-sm font-medium"
-        title={props.activeWorkspace?.name}
-      >
-        {props.activeWorkspace?.name ?? "Select workspace"}
+      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
+        {activeWorkspace?.name ?? "Select workspace"}
       </span>
-      {props.personal ? <PersonalWorkspaceBadge decorative /> : null}
+      {personal ? <PersonalWorkspaceBadge decorative /> : null}
       <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
     </button>
   );
 });
 
-function WorkspaceMenu(props: {
+export function WorkspaceMenu(props: {
+  collapsed: boolean;
   orgs: OrgOption[];
   workspaces: Workspace[];
   activeWorkspaceId: string;
@@ -366,7 +389,6 @@ function WorkspaceMenu(props: {
   align: "start" | "end";
   children: ReactNode;
 }) {
-  const rail = useRail();
   const grouped = props.orgs.map((org) => ({
     org,
     workspaces: workspacesInOrg(props.workspaces, org.accountId),
@@ -374,7 +396,7 @@ function WorkspaceMenu(props: {
   const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
   return (
     <DropdownMenu>
-      {rail.collapsed ? (
+      {props.collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="inline-flex">{trigger}</span>
@@ -387,7 +409,7 @@ function WorkspaceMenu(props: {
       <DropdownMenuContent
         align={props.align}
         className="min-w-60"
-        side={rail.collapsed ? "right" : "bottom"}
+        side={props.collapsed ? "right" : "bottom"}
       >
         {grouped.map(({ org, workspaces }, index) => (
           <div key={org.accountId}>
