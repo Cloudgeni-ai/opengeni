@@ -591,7 +591,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
           );
         }
         const persisted = await maybePersistWarmWorkspaceSnapshot(
-          { db, settings },
+          { db, settings, objectStorage },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

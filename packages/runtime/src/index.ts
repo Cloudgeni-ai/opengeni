@@ -214,6 +214,7 @@ import {
   isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
+  setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
   withCodemodeTokenClient,
@@ -462,6 +463,9 @@ export type {
 // diff semantics; without this, `createEditor()` throws a clear "not injected" error
 // rather than mis-editing. Runs at import time, before any turn binds a capability.
 setSelfhostedApplyDiff(
+  applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string,
+);
+setOpenSandboxApplyDiff(
   applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string,
 );
 

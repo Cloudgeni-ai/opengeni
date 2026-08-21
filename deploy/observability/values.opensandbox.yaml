@@ -1,0 +1,11 @@
+# Opt-in OpenSandbox control-plane and bounded Pool monitoring. BatchSandbox and
+# workload-Pod state is aggregated at source by the OpenGeni control worker;
+# kube-state-metrics must never expose per-sandbox UUID-labelled series.
+opengeni:
+  opensandbox:
+    enabled: true
+
+kube-prometheus-stack:
+  kube-state-metrics:
+    customResourceState:
+      enabled: true

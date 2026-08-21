@@ -74,6 +74,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
+  renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -85,11 +86,11 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
-import { withCachedController } from "../controller-data-plane";
+import { controllerCacheAllowsHostFetch, controllerCachedUrlIsUsable, shouldPersistControllerDataPlaneUrl, withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
-import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
+import { createInteractionFrameProxyAttachment, placementUsesInteractionFrameProxy } from "../interaction-frame-proxy";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -600,22 +601,29 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                       request.targetId,
                       request.stream,
                     );
-                const attachment =
-                  placement.lease?.backend === "docker"
-                    ? createInteractionFrameProxyAttachment({
-                        requestUrl: context.req.url,
-                        publicBaseUrl: deps.settings.publicBaseUrl,
-                        webBaseUrl: deps.settings.webBaseUrl,
-                        forwardedProto: context.req.header("x-forwarded-proto"),
-                        forwardedHost:
-                          context.req.header("x-forwarded-host") ?? context.req.header("host"),
-                        rootSecret: controllerAuthorityRoot(deps),
-                        upstreamUrl,
-                        upstreamProtocols: protocols,
-                        origin,
-                        expiresAt,
-                      })
-                    : { url: upstreamUrl, protocols };
+                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                    ? {
+                        openSandboxInteractionFrameProxy:
+                          deps.settings.openSandboxInteractionFrameProxy,
+                      }
+                    : {}),
+                })
+                  ? createInteractionFrameProxyAttachment({
+                      requestUrl: context.req.url,
+                      publicBaseUrl: deps.settings.publicBaseUrl,
+                      webBaseUrl: deps.settings.webBaseUrl,
+                      forwardedProto: context.req.header("x-forwarded-proto"),
+                      forwardedHost:
+                        context.req.header("x-forwarded-host") ?? context.req.header("host"),
+                      rootSecret: controllerAuthorityRoot(deps),
+                      upstreamUrl,
+                      upstreamProtocols: protocols,
+                      origin,
+                      expiresAt,
+                    })
+                  : { url: upstreamUrl, protocols };
                 return rfb
                   ? { kind: "direct_rfb" as const, ...attachment }
                   : { kind: "direct_websocket" as const, ...attachment };
@@ -1000,7 +1008,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       !lease ||
       (lease.liveness !== "warm" && lease.liveness !== "draining") ||
       lease.instanceId !== binding.placementInstanceId ||
-      !lease.controllerDataPlaneUrl
+      !lease.controllerDataPlaneUrl ||
+      (lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) ||
+      !controllerCachedUrlIsUsable(lease.controllerDataPlaneUrl)
     ) {
       return null;
     }
@@ -1024,8 +1034,32 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     ) {
       return placement;
     }
+    if (
+      placement.lease.backend === "opensandbox" &&
+      deps.settings.openSandboxSignedEndpoints
+    ) {
+      if (!placement.lease.controllerDataPlaneUrl) return placement;
+      const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId: placement.placement.sandboxGroupId,
+        expectedEpoch: placement.lease.leaseEpoch,
+        expectedInstanceId: placement.lease.instanceId,
+        controllerDataPlaneUrl: null,
+      });
+      return lease ? { ...placement, lease } : placement;
+    }
     const endpoint = await placement.session.resolveExposedPort(BROWSER_CONTROL_PORT);
     const url = buildStreamUrl(endpoint);
+    if (
+      !shouldPersistControllerDataPlaneUrl({
+        backend: placement.lease.backend,
+        signedEndpoints: deps.settings.openSandboxSignedEndpoints,
+        url,
+      })
+    ) {
+      return placement;
+    }
     const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -1035,6 +1069,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       controllerDataPlaneUrl: url,
     });
     if (!lease) return placement;
+    if (!controllerCacheAllowsHostFetch(url)) {
+      return { ...placement, lease };
+    }
     return { ...placement, session: controllerOnlySession(url), lease };
   }
 
@@ -1050,7 +1087,16 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     const sandboxGroupId =
       placement.placement.kind === "sandbox_group" ? placement.placement.sandboxGroupId : null;
     return await withCachedController({
-      cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
+      cachedUrl:
+        sandboxGroupId &&
+        cachedUrl &&
+        !(
+          placement.lease?.backend === "opensandbox" &&
+          deps.settings.openSandboxSignedEndpoints
+        ) &&
+        controllerCachedUrlIsUsable(cachedUrl)
+          ? cachedUrl
+          : null,
       createCachedClient: (url) =>
         new BrowserControlClient(controllerOnlySession(url), { adminToken }),
       prepareCachedClient: async (client) => {
@@ -1249,6 +1295,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       ).catch(() => undefined);
       throw new ComputerSessionStateError("ComputerSession placement fence changed; retry");
     }
+    await renewSandboxProviderExpiration({
+      backend: acquired.lease.backend as ApiRouteDeps["settings"]["sandboxBackend"],
+      settings: deps.settings,
+      instanceId: acquired.lease.instanceId,
+    }).catch(() => false);
     return true;
   }
 

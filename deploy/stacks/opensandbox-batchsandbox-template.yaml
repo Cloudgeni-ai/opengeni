@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensandbox-batchsandbox-template
+  namespace: opensandbox-system
+  labels:
+    app.kubernetes.io/name: opensandbox
+    app.kubernetes.io/component: sandbox-template
+    app.kubernetes.io/part-of: opensandbox
+data:
+  batchsandbox-template.yaml: |
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: opensandbox
+        opengeni.ai/compute-class: sandbox
+    spec:
+      replicas: 1
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false

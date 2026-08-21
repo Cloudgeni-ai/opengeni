@@ -736,6 +736,48 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.origin).toBe("created");
   });
 
+  test("an OpenSandbox create throttle records the failed create and bounded API signal", async () => {
+    const createMetrics: Array<{ backend: string; outcome: "completed" | "failed" }> = [];
+    const throttles: Array<{ backend: string; operation: "create" | "renew" }> = [];
+
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        testSettings({
+          sandboxBackend: "opensandbox",
+          openSandboxBaseUrl: "https://opensandbox.example.test",
+          openSandboxApiKey: "test-key",
+          openSandboxImage: `registry.example.test/sandbox@sha256:${"a".repeat(64)}`,
+        }),
+        null,
+        {
+          sessionId: "sess-opensandbox-create-throttle",
+          recovery: "create-or-restore",
+          environment: {},
+          backendOverride: "opensandbox",
+          clientFactory: () => ({
+            backendId: "opensandbox",
+            async create() {
+              throw { statusCode: 429 };
+            },
+          }),
+          metrics: {
+            onSandboxCreate(input) {
+              createMetrics.push(input);
+            },
+            onSandboxProviderApiThrottle(input) {
+              throttles.push(input);
+            },
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 429 });
+
+    expect(createMetrics).toEqual([
+      expect.objectContaining({ backend: "opensandbox", outcome: "failed" }),
+    ]);
+    expect(throttles).toEqual([{ backend: "opensandbox", operation: "create" }]);
+  });
+
   test("native archive mode remains pinned through logical image fallback", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;

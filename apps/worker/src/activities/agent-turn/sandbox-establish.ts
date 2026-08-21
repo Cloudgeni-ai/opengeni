@@ -277,6 +277,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     settings,
     db,
     bus,
+    objectStorage,
     observability,
     runtimeCancellationSignal,
     sandboxResumeSignal,
@@ -536,6 +537,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
+                objectStorage,
               },
               {
                 accountId: input.accountId,
@@ -610,6 +612,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
+                objectStorage,
               },
               {
                 accountId: input.accountId,

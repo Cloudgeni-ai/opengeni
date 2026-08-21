@@ -59,6 +59,68 @@ describe("observability series projection", () => {
     }
   });
 
+  test("retains bounded OpenSandbox Pool signals without per-workload exporter series", () => {
+    for (const metric of [
+      "opensandbox_pool_spec_buffer_min",
+      "opensandbox_pool_spec_pool_max",
+      "opensandbox_pool_status_allocated",
+      "opensandbox_pool_status_available",
+    ]) {
+      expect(retainedByProfile("kube-state-metrics", { __name__: metric }, values)).toBe(true);
+    }
+    expect(
+      retainedByProfile(
+        "kube-state-metrics",
+        {
+          __name__: "kube_pod_status_phase",
+          namespace: "opensandbox",
+          pod: "sandbox-00000000-0000-0000-0000-000000000000",
+        },
+        values,
+      ),
+    ).toBe(false);
+    expect(
+      retainedByProfile(
+        "kube-state-metrics",
+        { __name__: "opensandbox_batchsandbox_status_phase" },
+        values,
+      ),
+    ).toBe(false);
+    expect(
+      retainedByProfile(
+        "kubelet",
+        {
+          __name__: "container_cpu_usage_seconds_total",
+          metrics_path: "/metrics/cadvisor",
+          namespace: "opensandbox",
+        },
+        values,
+      ),
+    ).toBe(false);
+    expect(
+      retainedByProfile(
+        "kubelet",
+        {
+          __name__: "prober_probe_total",
+          metrics_path: "/metrics/probes",
+          namespace: "opensandbox",
+        },
+        values,
+      ),
+    ).toBe(false);
+    expect(
+      retainedByProfile(
+        "kubelet",
+        {
+          __name__: "container_cpu_usage_seconds_total",
+          metrics_path: "/metrics/cadvisor",
+          namespace: "opengeni",
+        },
+        values,
+      ),
+    ).toBe(true);
+  });
+
   test("compares like-for-like instantaneous series instead of stale head state", () => {
     expect(MIN_INSTANT_SERIES_REDUCTION).toBe(4);
     expect(reductionRatio(80_000, 20_000)).toBe(4);

@@ -172,6 +172,10 @@ import {
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
+  workspaceArchivePayloadPresent,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
+  type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
@@ -34493,11 +34497,11 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
     resume?.sessionState && typeof resume.sessionState === "object"
       ? (resume.sessionState as Record<string, unknown>)
       : undefined;
-  const currentArchivePresent =
-    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const currentArchivePresent = workspaceArchivePayloadPresent(sessionState);
   const previousArchivePresent =
-    typeof sessionState?.workspaceArchivePrev === "string" &&
-    sessionState.workspaceArchivePrev.length > 0;
+    (typeof sessionState?.workspaceArchivePrev === "string" &&
+      sessionState.workspaceArchivePrev.length > 0) ||
+    parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef) !== null;
   const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
   const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
   const archiveStatus: SandboxArchiveAvailability = currentArchivePresent
@@ -34650,8 +34654,10 @@ function resumeStateWithRecovery(
 const WORKSPACE_ARCHIVE_SESSION_KEYS = [
   "workspaceArchive",
   "workspaceArchiveMeta",
+  "workspaceArchiveRef",
   "workspaceArchivePrev",
   "workspaceArchivePrevMeta",
+  "workspaceArchivePrevRef",
   "workspaceArchiveAt",
 ] as const;
 
@@ -34680,7 +34686,10 @@ function resumeStateWithPreservedArchives(
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
-    sessionState: { ...targetSession, ...archiveFields },
+    sessionState: omitInlineWorkspaceArchiveWhenObjectRefPresent({
+      ...targetSession,
+      ...archiveFields,
+    }),
   };
 }
 
@@ -34700,12 +34709,16 @@ function archiveOnlyResumeState(
       sessionState[key] = currentSession[key];
     }
   }
+  const durableSession =
+    Object.keys(sessionState).length > 0
+      ? omitInlineWorkspaceArchiveWhenObjectRefPresent(sessionState)
+      : sessionState;
   return {
     backendId:
       typeof current?.backendId === "string"
         ? current.backendId
         : (row.resume_backend_id ?? row.backend),
-    ...(Object.keys(sessionState).length > 0 ? { sessionState } : {}),
+    ...(Object.keys(durableSession).length > 0 ? { sessionState: durableSession } : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -34806,11 +34819,11 @@ function archiveProjectionFromResumeState(
     resumeState?.sessionState && typeof resumeState.sessionState === "object"
       ? (resumeState.sessionState as Record<string, unknown>)
       : undefined;
-  const currentPresent =
-    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const currentPresent = workspaceArchivePayloadPresent(sessionState);
   const previousPresent =
-    typeof sessionState?.workspaceArchivePrev === "string" &&
-    sessionState.workspaceArchivePrev.length > 0;
+    (typeof sessionState?.workspaceArchivePrev === "string" &&
+      sessionState.workspaceArchivePrev.length > 0) ||
+    parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef) !== null;
   const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
   const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
   return {
@@ -37128,11 +37141,19 @@ function evaluateColdLostSnapshot(
   const treeDescriptor = descriptor?.version === 1 ? descriptor : null;
   const sessionState = archiveSessionState(row);
   const base64 = sessionState?.workspaceArchive;
-  const bytes = decodeCanonicalBase64(base64);
-  const referenceBytes = bytes?.length ?? null;
-  const referenceSha256 = bytes ? sha256String(bytes) : null;
+  const objectRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchiveRef);
+  const inlineBytes = decodeCanonicalBase64(base64);
+  const inlineObjectMismatch = Boolean(
+    inlineBytes &&
+      objectRef &&
+      (sha256String(inlineBytes) !== objectRef.sha256 || inlineBytes.length !== objectRef.bytes),
+  );
+  const bytes = inlineBytes;
+  const referenceBytes = inlineBytes?.length ?? objectRef?.bytes ?? null;
+  const referenceSha256 = inlineBytes ? sha256String(inlineBytes) : (objectRef?.sha256 ?? null);
   const referenceVerified =
     descriptor !== null &&
+    !inlineObjectMismatch &&
     referenceBytes === descriptor.archiveBytes &&
     referenceSha256 === descriptor.archiveSha256;
   const archiveObject = modalProviderObject(bytes);
@@ -37155,7 +37176,7 @@ function evaluateColdLostSnapshot(
         archiveGeneration !== Number(row.workspace_generation) ||
         !archiveComplete),
   );
-  add("archive_base64_invalid", row !== null && bytes === null);
+  add("archive_base64_invalid", row !== null && bytes === null && objectRef === null);
   add("archive_bytes_mismatch", descriptor !== null && !referenceVerified);
   add(
     "archive_descriptor_version_mismatch",
@@ -42619,18 +42640,24 @@ export async function claimWorkspaceArchiveCapture(
               )
               .limit(1)
           : [];
+        if (!turnAttempt) return { status: "attempt_fenced" as const };
+        const attemptIsCurrent = turnAttempt.activeAttemptId === input.warmAttempt.attemptId;
+        const attemptLive =
+          (turnAttempt.state === "claimed" || turnAttempt.state === "running") &&
+          turnAttempt.outcome === null &&
+          attemptIsCurrent;
+        const attemptSettledForTurnEnd =
+          turnAttempt.state === "closed" &&
+          (turnAttempt.outcome === "completed" ||
+            turnAttempt.outcome === "failed" ||
+            turnAttempt.outcome === "requires_action") &&
+          (turnAttempt.activeAttemptId === null || attemptIsCurrent);
         const attemptMayCapture =
           turnAttempt !== undefined &&
           turnAttempt.accountId === input.accountId &&
           turnAttempt.sandboxGroupId === input.sandboxGroupId &&
-          turnAttempt.activeAttemptId === input.warmAttempt.attemptId &&
           !interruption &&
-          (turnAttempt.state === "claimed" || turnAttempt.state === "running"
-            ? turnAttempt.outcome === null
-            : turnAttempt.state === "closed" &&
-              (turnAttempt.outcome === "completed" ||
-                turnAttempt.outcome === "failed" ||
-                turnAttempt.outcome === "requires_action"));
+          (attemptLive || attemptSettledForTurnEnd);
         if (!attemptMayCapture) return { status: "attempt_fenced" as const };
       }
 
@@ -43693,6 +43720,34 @@ export async function adoptLegacyModalCheckpointArtifact(
   );
 }
 
+function publishedWorkspaceArchiveFields(input: {
+  workspaceArchive?: string | null;
+  workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
+}): {
+  workspaceArchive?: string;
+  workspaceArchiveRef?: WorkspaceArchiveObjectRef;
+} {
+  const ref = parseWorkspaceArchiveObjectRef(input.workspaceArchiveRef) ?? undefined;
+  const inline =
+    typeof input.workspaceArchive === "string" && input.workspaceArchive.length > 0
+      ? input.workspaceArchive
+      : undefined;
+  if (!ref && !inline) {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
+  if (inline && ref) {
+    const bytes = decodeCanonicalBase64(inline);
+    if (!bytes || sha256String(bytes) !== ref.sha256 || bytes.length !== ref.bytes) {
+      throw new Error("inline workspace archive and object-storage ref disagree");
+    }
+  }
+  if (ref) return { workspaceArchiveRef: ref };
+  if (!inline) {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
+  return { workspaceArchive: inline };
+}
+
 export async function persistDrainSnapshot(
   db: Database,
   input: {
@@ -43715,10 +43770,13 @@ export async function persistDrainSnapshot(
         checkpointArtifactId?: never;
       }
     | {
-        /** Base64 provider receipt or tar archive from the verified runtime capture. */
-        workspaceArchive: string;
+        /** Base64 provider receipt or tar archive from the verified runtime capture.
+         *  Omit when `workspaceArchiveRef` locates object-storage bytes. */
+        workspaceArchive?: string;
         /** Exact descriptor is mandatory for every new publication. */
         workspaceArchiveMeta: SandboxArchiveRevision;
+        /** Object-storage locator for tar bytes. When set, inline bytes are omitted. */
+        workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
         /** Required for Modal-native descriptors; absent for actual tar archives. */
         checkpointArtifactId?: string | null;
       }
@@ -43840,6 +43898,11 @@ export async function persistDrainSnapshot(
       }
       const priorArchive = row.prior_archive ?? null;
       const priorArchivePrev = row.prior_archive_prev ?? null;
+      const priorSessionState =
+        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+          ? (row.resume_state.sessionState as Record<string, unknown>)
+          : null;
+      const priorRef = parseWorkspaceArchiveObjectRef(priorSessionState?.workspaceArchiveRef);
       // null workspaceArchive = pure CAS-check. Keep the drain's exact capture
       // claim intact: it is also the durable teardown claim and must fence new
       // holders until provider termination commits cold or recovery replaces it.
@@ -43849,16 +43912,13 @@ export async function persistDrainSnapshot(
           archiveRevision: null,
         };
       }
-      const priorMeta = parseArchiveRevision(
-        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
-          ? (row.resume_state.sessionState as Record<string, unknown>).workspaceArchiveMeta
-          : null,
-      );
+      const published = publishedWorkspaceArchiveFields(input);
+      const priorMeta = parseArchiveRevision(priorSessionState?.workspaceArchiveMeta);
       if (activePublication && row.archive_capture_published_at !== null) {
         // A predecessor and its successor may receive the same provider result.
         // Publication is already durable; treat this as an idempotent ownership
         // gate and hand any distinct unused Modal candidate to GC.
-        if (priorArchive === null || priorMeta === null) {
+        if ((priorArchive === null && priorRef === null) || priorMeta === null) {
           throw new Error("Published workspace capture has no durable verified archive");
         }
         if (
@@ -43885,12 +43945,13 @@ export async function persistDrainSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
-      const previousCheckpointArtifactId =
-        rotation.previousArchive === priorArchive
-          ? row.current_checkpoint_artifact_id
-          : rotation.previousArchive === priorArchivePrev
-            ? row.previous_checkpoint_artifact_id
-            : null;
+      const previousCheckpointArtifactId = previousCheckpointArtifactIdForRotation({
+        previousArchive: rotation.previousArchive,
+        priorArchive,
+        priorArchivePrev,
+        currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
+        previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
+      });
       const resumeState = coldLatePublication
         ? archiveOnlyResumeState(row, {
             provider: recovery.provider,
@@ -43919,12 +43980,14 @@ export async function persistDrainSnapshot(
         ...(coldLatePublication && input.providerRequestId !== undefined
           ? { providerRequestId: input.providerRequestId }
           : {}),
-        workspaceArchive: input.workspaceArchive,
+        ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
+        ...(published.workspaceArchiveRef ? { workspaceArchiveRef: published.workspaceArchiveRef } : {}),
         resumeState,
         livenessGuard: coldLatePublication ? "cold_late" : "draining",
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
+        previousArchiveRef: rotation.previousArchiveRef,
         checkpointArtifactId: input.checkpointArtifactId ?? null,
         previousCheckpointArtifactId,
         priorCurrentCheckpointArtifactId: row.current_checkpoint_artifact_id,
@@ -43969,12 +44032,15 @@ export function rotateWorkspaceArchives(input: {
 }): {
   previousArchive: string | null;
   previousArchiveMeta: SandboxArchiveRevision | null;
+  previousArchiveRef: WorkspaceArchiveObjectRef | null;
 } {
   const sessionState =
     input.resumeState?.sessionState && typeof input.resumeState.sessionState === "object"
       ? (input.resumeState.sessionState as Record<string, unknown>)
       : {};
   const previousMeta = parseArchiveRevision(sessionState.workspaceArchivePrevMeta);
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef);
+  const currentRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
   const recovery =
     input.resumeState?.opengeniRecovery && typeof input.resumeState.opengeniRecovery === "object"
       ? (input.resumeState.opengeniRecovery as Record<string, unknown>)
@@ -43986,19 +44052,38 @@ export function rotateWorkspaceArchives(input: {
   const verifiedRevision =
     typeof workspace.verifiedRevision === "string" ? workspace.verifiedRevision : null;
   const preserveVerifiedPrevious =
-    input.priorPreviousArchive !== null &&
+    (input.priorPreviousArchive !== null || previousRef !== null) &&
     previousMeta !== null &&
     previousMeta.revision === verifiedRevision;
 
   return preserveVerifiedPrevious
     ? {
-        previousArchive: input.priorPreviousArchive,
+        previousArchive: previousRef ? null : input.priorPreviousArchive,
         previousArchiveMeta: previousMeta,
+        previousArchiveRef: previousRef,
       }
     : {
-        previousArchive: input.priorCurrentArchive,
+        previousArchive: currentRef ? null : input.priorCurrentArchive,
         previousArchiveMeta: parseArchiveRevision(sessionState.workspaceArchiveMeta),
+        previousArchiveRef: currentRef,
       };
+}
+
+function previousCheckpointArtifactIdForRotation(input: {
+  previousArchive: string | null;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+  currentCheckpointArtifactId: string | null;
+  previousCheckpointArtifactId: string | null;
+}): string | null {
+  // Object-storage rotation nulls inline bytes when a ref exists. `null === null`
+  // must not promote the current Modal checkpoint into the previous slot.
+  if (input.previousArchive === null) return null;
+  if (input.previousArchive === input.priorArchive) return input.currentCheckpointArtifactId;
+  if (input.previousArchive === input.priorArchivePrev) {
+    return input.previousCheckpointArtifactId;
+  }
+  return null;
 }
 
 async function foldWorkspaceArchiveOntoLease(
@@ -44011,12 +44096,14 @@ async function foldWorkspaceArchiveOntoLease(
     expectedWorkspaceGeneration: number;
     captureId: string | null;
     providerRequestId?: string | null;
-    workspaceArchive: string;
+    workspaceArchive?: string;
     workspaceArchiveMeta: SandboxArchiveRevision | null;
+    workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
     resumeState: Record<string, unknown> | null;
     livenessGuard: "draining" | "warm" | "cold_late";
     previousArchive: string | null;
     previousArchiveMeta: SandboxArchiveRevision | null;
+    previousArchiveRef?: WorkspaceArchiveObjectRef | null;
     checkpointArtifactId: string | null;
     previousCheckpointArtifactId: string | null;
     priorCurrentCheckpointArtifactId: string | null;
@@ -44062,9 +44149,17 @@ async function foldWorkspaceArchiveOntoLease(
       : {};
   const sessionState: Record<string, unknown> = {
     ...currentSession,
-    workspaceArchive: input.workspaceArchive,
     workspaceArchiveAt: archiveAtIso,
   };
+  if (input.workspaceArchiveRef) {
+    sessionState.workspaceArchiveRef = input.workspaceArchiveRef;
+    delete sessionState.workspaceArchive;
+  } else if (typeof input.workspaceArchive === "string" && input.workspaceArchive.length > 0) {
+    sessionState.workspaceArchive = input.workspaceArchive;
+    delete sessionState.workspaceArchiveRef;
+  } else {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
   if (input.workspaceArchiveMeta) {
     sessionState.workspaceArchiveMeta = input.workspaceArchiveMeta;
   } else {
@@ -44079,6 +44174,11 @@ async function foldWorkspaceArchiveOntoLease(
     sessionState.workspaceArchivePrevMeta = input.previousArchiveMeta;
   } else {
     delete sessionState.workspaceArchivePrevMeta;
+  }
+  if (input.previousArchiveRef) {
+    sessionState.workspaceArchivePrevRef = input.previousArchiveRef;
+  } else {
+    delete sessionState.workspaceArchivePrevRef;
   }
   const folded: Record<string, unknown> = { ...base, sessionState };
   const explicitRecovery =
@@ -44271,10 +44371,13 @@ export async function persistWarmSnapshot(
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
     captureId: string;
-    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
-    workspaceArchive: string;
+    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
+     *  Omit when `workspaceArchiveRef` locates object-storage bytes. */
+    workspaceArchive?: string;
     /** Exact verified archive/tree descriptor produced by the runtime capture. */
     workspaceArchiveMeta: SandboxArchiveRevision;
+    /** Object-storage locator for tar bytes. When set, inline bytes are omitted. */
+    workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
     checkpointArtifactId?: string | null;
     /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
     minIntervalMs: number;
@@ -44296,6 +44399,7 @@ export async function persistWarmSnapshot(
   if (!workspaceArchiveMeta) {
     throw new Error("Invalid verified workspace archive descriptor");
   }
+  const published = publishedWorkspaceArchiveFields(input);
   if (
     workspaceArchiveMeta?.version === 2 &&
     (workspaceArchiveMeta.provider === "modal_snapshot_filesystem" ||
@@ -44380,6 +44484,7 @@ export async function persistWarmSnapshot(
         previous_checkpoint_artifact_id: string | null;
         archive_generation: number | string | null;
         resume_state: Record<string, unknown> | null;
+        liveness: "warm" | "draining" | "cold" | "warming";
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
@@ -44388,11 +44493,12 @@ export async function persistWarmSnapshot(
           current_checkpoint_artifact_id,
           previous_checkpoint_artifact_id,
           archive_generation,
-          resume_state
+          resume_state,
+          liveness
         from sandbox_leases as lease
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
-          and lease.liveness = 'warm'
+          and lease.liveness in ('warm', 'draining')
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
@@ -44464,12 +44570,23 @@ export async function persistWarmSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
-      const previousCheckpointArtifactId =
-        rotation.previousArchive === priorArchive
-          ? guard[0]!.current_checkpoint_artifact_id
-          : rotation.previousArchive === priorArchivePrev
-            ? guard[0]!.previous_checkpoint_artifact_id
-            : null;
+      const previousCheckpointArtifactId = previousCheckpointArtifactIdForRotation({
+        previousArchive: rotation.previousArchive,
+        priorArchive,
+        priorArchivePrev,
+        currentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
+        previousCheckpointArtifactId: guard[0]!.previous_checkpoint_artifact_id,
+      });
+      const rowLiveness = guard[0]!.liveness;
+      if (rowLiveness !== "warm" && rowLiveness !== "draining") {
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: false,
+          archiveRevision: null,
+        };
+      }
+      const livenessGuard: "warm" | "draining" = rowLiveness;
       const folded = await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -44477,12 +44594,14 @@ export async function persistWarmSnapshot(
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
         captureId: input.captureId,
-        workspaceArchive: input.workspaceArchive,
+        ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
+        ...(published.workspaceArchiveRef ? { workspaceArchiveRef: published.workspaceArchiveRef } : {}),
         resumeState: guard[0]!.resume_state,
-        livenessGuard: "warm",
+        livenessGuard,
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
+        previousArchiveRef: rotation.previousArchiveRef,
         checkpointArtifactId: input.checkpointArtifactId ?? null,
         previousCheckpointArtifactId,
         priorCurrentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,

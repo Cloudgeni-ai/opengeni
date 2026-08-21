@@ -11,6 +11,7 @@ import {
   SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   SandboxBackend,
 } from "@opengeni/contracts";
+import type { RuntimeMetricsHooks } from "../../metrics";
 import { assertDescriptorRegistryInvariants } from "../capabilities";
 import { blaxelProvider } from "./blaxel";
 import { cloudflareProvider } from "./cloudflare";
@@ -20,6 +21,7 @@ import { e2bProvider } from "./e2b";
 import { localProvider } from "./local";
 import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
+import { opensandboxProvider } from "./opensandbox";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
 import type {
@@ -41,6 +43,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   cloudflare: cloudflareProvider,
   vercel: vercelProvider,
   selfhosted: selfhostedProvider,
+  opensandbox: opensandboxProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the
@@ -61,6 +64,10 @@ const ASSERTION_STUB_SETTINGS = {
   cloudflareWorkerUrl: "https://stub.example.com",
   vercelToken: "stub",
   vercelProjectId: "stub",
+  openSandboxBaseUrl: "https://opensandbox.example.test",
+  openSandboxApiKey: "stub",
+  openSandboxImage:
+    "ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 } as unknown as Settings;
 
 /**
@@ -166,6 +173,60 @@ export function providerSupportsImmutableImageBuild(backend: SandboxBackend): bo
   return typeof PROVIDER_REGISTRY[backend].buildImmutableImage === "function";
 }
 
+export async function renewSandboxProviderExpiration(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  instanceId: string;
+  metrics?: RuntimeMetricsHooks;
+}): Promise<boolean> {
+  const registration = PROVIDER_REGISTRY[input.backend];
+  const renew = registration.renewExpiration;
+  if (!renew) return false;
+  registration.validateCredentials(input.settings);
+  try {
+    await renew({ settings: input.settings, instanceId: input.instanceId });
+    recordProviderRenewalMetric(input.metrics, input.backend, "completed");
+    return true;
+  } catch (error) {
+    recordProviderRenewalMetric(input.metrics, input.backend, "failed");
+    if (isProviderApiThrottleError(error)) {
+      try {
+        input.metrics?.onSandboxProviderApiThrottle?.({
+          backend: input.backend,
+          operation: "renew",
+        });
+      } catch {
+        // Metrics emission must not affect provider lifecycle.
+      }
+    }
+    throw error;
+  }
+}
+
+export function isProviderApiThrottleError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+  };
+  return (
+    candidate.status === 429 || candidate.statusCode === 429 || candidate.response?.status === 429
+  );
+}
+
+function recordProviderRenewalMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: SandboxBackend,
+  outcome: "completed" | "failed",
+): void {
+  try {
+    metrics?.onSandboxTtlRenewal?.({ backend, outcome });
+  } catch {
+    // Metrics emission must not affect provider lifecycle.
+  }
+}
+
 export async function buildImmutableProviderImage(input: {
   backend: SandboxBackend;
   settings: Settings;
@@ -197,6 +258,7 @@ export type {
   ProviderExactResumeMode,
   ProviderImmutableImageBuildInput,
   ProviderImmutableImageBuildResult,
+  ProviderExpirationRenewalInput,
   ProviderWorkspaceCapturePolicy,
   ProviderWorkspaceCaptureTakeover,
 } from "./types";

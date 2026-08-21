@@ -45,6 +45,8 @@ RUN bun install --frozen-lockfile
 COPY --chown=bun:bun . .
 
 ENV NODE_ENV=production
+USER root
+RUN install -d -o bun -g bun -m 0755 /workspace
 USER bun
 
 # Most workloads share the same network/source-control tools. Keep that stable
@@ -56,6 +58,29 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
   && rm -rf /var/lib/apt/lists/*
 USER bun
+
+# Keep worker before artifact-runtime stages so legacy remote Docker builders
+# do not execute unrelated API/materializer prerequisites when targeting it.
+FROM source-base AS worker
+# The docker sandbox backend needs the Docker CLI to talk to the mounted host
+# daemon socket. Interactive/cancellable commands use the Agents SDK's
+# host-side Python PTY bridge, so Python must live in this worker image rather
+# than only inside the sandbox. The daemon remains outside this image.
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
+  && install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends docker-ce-cli \
+  && /usr/bin/python3 -c 'import pty' \
+  && rm -rf /var/lib/apt/lists/*
+ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
+USER bun
+RUN bun scripts/build-runtime-processes.ts worker
+CMD ["bun", "apps/worker/dist/process/index.js"]
 
 FROM base AS northstar-demo-build
 RUN bun run --cwd examples/northstar-support build
@@ -121,27 +146,6 @@ RUN bun scripts/build-runtime-processes.ts api
 # needed to switch between the two: it is purely whether the baked files are present.
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
-
-FROM source-base AS worker
-# The docker sandbox backend needs the Docker CLI to talk to the mounted host
-# daemon socket. Interactive/cancellable commands use the Agents SDK's
-# host-side Python PTY bridge, so Python must live in this worker image rather
-# than only inside the sandbox. The daemon remains outside this image.
-USER root
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
-  && install -m 0755 -d /etc/apt/keyrings \
-  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-  && chmod a+r /etc/apt/keyrings/docker.asc \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends docker-ce-cli \
-  && /usr/bin/python3 -c 'import pty' \
-  && rm -rf /var/lib/apt/lists/*
-ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
-USER bun
-RUN bun scripts/build-runtime-processes.ts worker
-CMD ["bun", "apps/worker/dist/process/index.js"]
 
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.

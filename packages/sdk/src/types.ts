@@ -226,7 +226,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
 export type SandboxBackend =
@@ -240,7 +240,8 @@ export type SandboxBackend =
   | "blaxel"
   | "cloudflare"
   | "vercel"
-  | "selfhosted";
+  | "selfhosted"
+  | "opensandbox";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -6649,7 +6650,7 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted";
+export type MachineKind = "modal" | "selfhosted" | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";

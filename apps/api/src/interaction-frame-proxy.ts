@@ -32,6 +32,25 @@ export type InteractionFrameProxyAttachment = Readonly<{
   protocols: readonly string[];
 }>;
 
+/** Docker boxes cannot carry browserd's WebSocket subprotocol grant to the
+ * viewer. Unsigned OpenSandbox Channel B still uses the lifecycle proxy, so
+ * it needs the same hatch. Signed URI-mode ingress keeps native subprotocols;
+ * `openSandboxInteractionFrameProxy` is an emergency override only. */
+export function placementUsesInteractionFrameProxy(
+  backend: string | null | undefined,
+  options?: {
+    openSandboxSignedEndpoints?: boolean;
+    openSandboxInteractionFrameProxy?: boolean;
+  },
+): boolean {
+  if (backend === "docker") return true;
+  if (backend !== "opensandbox") return false;
+  if (typeof options?.openSandboxInteractionFrameProxy === "boolean") {
+    return options.openSandboxInteractionFrameProxy;
+  }
+  return options?.openSandboxSignedEndpoints !== true;
+}
+
 /** Public origin the browser can open. TLS-terminating reverse proxies make
  * `requestUrl` `http://127.0.0.1` / the API container; that would mint `ws://`
  * and Chrome blocks it from an `https://` console. */

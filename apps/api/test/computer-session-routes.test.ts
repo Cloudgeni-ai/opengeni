@@ -43,7 +43,7 @@ describe("ComputerSession route discipline", () => {
     expect(attachment).toContain('record.session.platform === "linux"');
     expect(attachment).toContain("client.computerRfbStreamUrl");
     expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
-    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend)");
     expect(attachment).toContain("createInteractionFrameProxyAttachment");
     expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
     expect(attachment).toContain('context.req.header("x-forwarded-proto")');

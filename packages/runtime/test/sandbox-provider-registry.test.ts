@@ -19,6 +19,7 @@ import {
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
   providerWorkspaceCapturePolicy,
+  renewSandboxProviderExpiration,
   sandboxBackendForSdkBackendId,
   sdkBackendIdForSandboxBackend,
   selectBackend,
@@ -27,6 +28,10 @@ import {
   dockerContinuityResumeStateForImage,
   dockerInspectProvesMissing,
 } from "../src/sandbox/providers/docker";
+import {
+  OPENSANDBOX_DIRECT_RESOURCE_LIMITS,
+  OPENSANDBOX_DIRECT_RESOURCE_REQUESTS,
+} from "../src/sandbox/providers/opensandbox";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -44,6 +49,12 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
   // selfhosted needs no per-box creds (the user's own machine over the agent's
   // enrollment) — validateCredentials is a no-op.
   selfhosted: {},
+  opensandbox: {
+    openSandboxBaseUrl: "https://opensandbox.example.test",
+    openSandboxApiKey: "k",
+    openSandboxImage:
+      "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
 };
 
 describe("provider registry — descriptor invariants + backendId assertion", () => {
@@ -56,7 +67,7 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     expect(() => assertProviderRegistryInvariants()).not.toThrow();
   });
 
-  test("registry covers exactly the 11 backends, each self-consistent", () => {
+  test("registry covers every backend, each self-consistent", () => {
     expect(Object.keys(PROVIDER_REGISTRY).sort()).toEqual([...SandboxBackend.options].sort());
     for (const backend of SandboxBackend.options) {
       const reg = PROVIDER_REGISTRY[backend];
@@ -73,6 +84,33 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
       if (backend === "modal") continue;
       expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
     }
+  });
+
+  test("renewal metrics classify one exact OpenSandbox throttle without changing failure semantics", async () => {
+    const original = PROVIDER_REGISTRY.opensandbox.renewExpiration;
+    const renewals: Array<{ backend: string; outcome: "completed" | "failed" }> = [];
+    const throttles: Array<{ backend: string; operation: "create" | "renew" }> = [];
+    try {
+      PROVIDER_REGISTRY.opensandbox.renewExpiration = async () => {
+        throw { statusCode: 429 };
+      };
+      await expect(
+        renewSandboxProviderExpiration({
+          backend: "opensandbox",
+          settings: testSettings(CREDS.opensandbox),
+          instanceId: "sandbox-1",
+          metrics: {
+            onSandboxTtlRenewal: (input) => renewals.push(input),
+            onSandboxProviderApiThrottle: (input) => throttles.push(input),
+          },
+        }),
+      ).rejects.toMatchObject({ statusCode: 429 });
+    } finally {
+      PROVIDER_REGISTRY.opensandbox.renewExpiration = original;
+    }
+
+    expect(renewals).toEqual([{ backend: "opensandbox", outcome: "failed" }]);
+    expect(throttles).toEqual([{ backend: "opensandbox", operation: "renew" }]);
   });
 
   test("product and SDK backend identities round-trip through one canonical mapping", () => {
@@ -133,6 +171,11 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     }
     expect(providerWorkspaceCapturePolicy("none", {})).toBeNull();
     expect(providerWorkspaceCapturePolicy("selfhosted", {})).toBeNull();
+    expect(providerWorkspaceCapturePolicy("opensandbox", {})).toEqual({
+      takeover: "parallel_read",
+      strategy: "portable_tar",
+      liveInstance: "preserved",
+    });
     expect(providerWorkspaceCapturePolicy("unknown", {})).toBeNull();
   });
 
@@ -473,6 +516,26 @@ describe("createSandboxClient — browser controller port merge", () => {
     ) as { options?: { exposedPorts?: number[] } };
     expect(client.options?.exposedPorts).toBeUndefined();
   });
+
+  test("OpenSandbox stays on-demand and does not pre-declare 6080 or 7682", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "opensandbox",
+        ...CREDS.opensandbox,
+        sandboxDesktopEnabled: true,
+      }),
+    ) as {
+      options?: {
+        exposedPorts?: number[];
+        resourceLimits?: Record<string, string>;
+        resourceRequests?: Record<string, string>;
+      };
+    };
+    expect(client.options?.exposedPorts ?? []).not.toContain(DESKTOP_STREAM_PORT);
+    expect(client.options?.exposedPorts ?? []).not.toContain(BROWSER_CONTROL_PORT);
+    expect(client.options?.resourceLimits).toEqual(OPENSANDBOX_DIRECT_RESOURCE_LIMITS);
+    expect(client.options?.resourceRequests).toEqual(OPENSANDBOX_DIRECT_RESOURCE_REQUESTS);
+  });
 });
 
 describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
@@ -514,6 +577,16 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.requiresAcknowledgment).toBe(true);
     expect(caps.Recording.available).toBe(true);
     expect(caps.Terminal.transport).toBe("pty-ws"); // modal has real pty
+  });
+
+  test("opensandbox warm+desktop: ttyd pty-ws + vnc-ws, tar-only persistence", () => {
+    const caps = negotiateCapabilities({ ...base, backend: "opensandbox" });
+    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.client).toBe("novnc");
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.Recording.available).toBe(true);
+    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Git.available).toBe(true);
   });
 
   test("headless backend → desktop unavailable with tier_headless reason", () => {

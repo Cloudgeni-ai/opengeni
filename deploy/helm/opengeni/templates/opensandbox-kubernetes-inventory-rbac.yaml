@@ -1,0 +1,35 @@
+{{- $enabled := and .Values.worker.enabled (eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox") .Values.opensandbox.kubernetesInventory.enabled }}
+{{- if $enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "opengeni.fullname" . }}-opensandbox-inventory
+  namespace: {{ .Values.opensandbox.kubernetesInventory.namespace | quote }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-inventory
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["sandbox.opensandbox.io"]
+    resources: ["batchsandboxes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "opengeni.fullname" . }}-opensandbox-inventory
+  namespace: {{ .Values.opensandbox.kubernetesInventory.namespace | quote }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: opensandbox-inventory
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opengeni.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "opengeni.fullname" . }}-opensandbox-inventory
+{{- end }}

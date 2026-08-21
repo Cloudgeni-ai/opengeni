@@ -63,13 +63,13 @@ import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 
 const LazyBrowserViewer = lazy(async () => {
-  const viewers = await import("./interactive-workbench-viewers");
-  return { default: viewers.BrowserViewer };
+  const { BrowserViewer } = await import("./browser-viewer");
+  return { default: BrowserViewer };
 });
 
 const LazyComputerViewer = lazy(async () => {
-  const viewers = await import("./interactive-workbench-viewers");
-  return { default: viewers.ComputerViewer };
+  const { ComputerViewer } = await import("./computer-viewer");
+  return { default: ComputerViewer };
 });
 
 /** A host-routed notification (replaces the app-only `sonner` toast coupling). */

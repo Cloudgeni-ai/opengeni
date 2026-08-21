@@ -22,6 +22,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   acquireLease,
   advanceWorkspaceGeneration,
@@ -51,6 +52,8 @@ import {
   establishSandboxSessionFromEnvelope,
   SandboxResumeStateUnavailableError,
 } from "@opengeni/runtime";
+import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
+import type { ObjectStorage } from "@opengeni/storage";
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
@@ -1127,6 +1130,296 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       await dropSession(resumed.established);
     }
   }, 60_000);
+
+  test("object-storage archive refs fail closed when storage is not configured", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const capturedAtMs = 1_900_000_000_000;
+    const capturedAt = new Date(capturedAtMs).toISOString();
+    const sha256 = "a".repeat(64);
+    const revision = `wa1:${String(capturedAtMs).padStart(13, "0")}:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: {
+          version: 1,
+          revision,
+          archiveSha256: sha256,
+          archiveBytes: 12,
+          capturedAt,
+          workspace: {
+            algorithm: "sha256",
+            sha256,
+            entryCount: 1,
+            fileCount: 1,
+            totalFileBytes: 12,
+          },
+        },
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 3, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+
+    let recoveryError: unknown;
+    try {
+      await resumeBoxForTurn(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-no-storage"),
+      );
+    } catch (error) {
+      recoveryError = error;
+    }
+    expect(recoveryError).toBeInstanceOf(WorkspaceArchiveIntegrityError);
+    expect(recoveryError).toMatchObject({
+      message: "workspace archive object storage is not configured",
+    });
+  }, 60_000);
+
+  test("object-storage archive refs fail closed when the object is missing", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const capturedAtMs = 1_900_000_000_001;
+    const capturedAt = new Date(capturedAtMs).toISOString();
+    const sha256 = "b".repeat(64);
+    const revision = `wa1:${String(capturedAtMs).padStart(13, "0")}:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: {
+          version: 1,
+          revision,
+          archiveSha256: sha256,
+          archiveBytes: 12,
+          capturedAt,
+          workspace: {
+            algorithm: "sha256",
+            sha256,
+            entryCount: 1,
+            fileCount: 1,
+            totalFileBytes: 12,
+          },
+        },
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 4, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+    const objectStorage = {
+      backend: "s3-compatible",
+      async putObject() {
+        return;
+      },
+      async getObjectBytes() {
+        return null;
+      },
+      async deleteObject() {
+        return;
+      },
+    } as unknown as ObjectStorage;
+
+    let recoveryError: unknown;
+    try {
+      await resumeBoxForTurn(
+        { db, settings, objectStorage },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-missing"),
+      );
+    } catch (error) {
+      recoveryError = error;
+    }
+    expect(recoveryError).toBeInstanceOf(WorkspaceArchiveIntegrityError);
+    expect(String(recoveryError)).toContain("is missing");
+  }, 60_000);
+
+  test.skipIf(process.platform !== "linux")(
+    "object-storage archive refs rematerialize without inline base64",
+    async () => {
+      if (!available) return;
+      const settings = settingsFor(true);
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+      const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+        sessionId: groupId,
+        recovery: "create-or-restore",
+        backendOverride: "local",
+      });
+      let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>;
+      try {
+        const write = await (
+          seed.session as {
+            exec: (args: { cmd: string }) => Promise<{ exitCode: number }>;
+          }
+        ).exec({
+          cmd: "printf 'object-storage-rematerialize-ok' > /workspace/object-ref-proof.txt",
+        });
+        expect(write.exitCode).toBe(0);
+        verifiedArchive = await captureVerifiedWorkspaceArchive(seed.session);
+      } finally {
+        await dropSession(seed);
+      }
+
+      const ref = {
+        schema: "sandbox_archive_object_v1" as const,
+        key: workspaceArchiveObjectKey({
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          revision: verifiedArchive.descriptor.revision,
+        }),
+        sha256: verifiedArchive.descriptor.archiveSha256,
+        bytes: verifiedArchive.descriptor.archiveBytes,
+        backend: "s3-compatible",
+      };
+      const objects = new Map<string, Uint8Array>([[ref.key, verifiedArchive.bytes]]);
+      const objectStorage = {
+        backend: "s3-compatible",
+        async putObject() {
+          return;
+        },
+        async getObjectBytes(key: string) {
+          const bytes = objects.get(key);
+          return bytes ? { bytes } : null;
+        },
+        async deleteObject() {
+          return;
+        },
+      } as unknown as ObjectStorage;
+      const archiveEnvelopeJson = JSON.stringify({
+        backendId: "unix_local",
+        sessionState: {
+          workspaceArchiveRef: ref,
+          workspaceArchiveMeta: verifiedArchive.descriptor,
+        },
+      });
+      await admin.unsafe(
+        `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 9, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+        [accountId, workspaceId, groupId, archiveEnvelopeJson],
+      );
+
+      const resumed = await resumeBoxForTurn(
+        { db, settings, objectStorage },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-restore"),
+      );
+      try {
+        expect(resumed.established.origin).toBe("restored");
+        const read = await (
+          resumed.established.session as {
+            exec: (args: { cmd: string }) => Promise<{ stdout: string; exitCode: number }>;
+          }
+        ).exec({ cmd: "cat /workspace/object-ref-proof.txt" });
+        expect(read).toMatchObject({
+          exitCode: 0,
+          stdout: "object-storage-rematerialize-ok",
+        });
+        expect(JSON.stringify(resumed.established)).not.toContain(verifiedArchive.base64);
+        const lease = await readLease(db, workspaceId, groupId);
+        const sessionState =
+          lease?.resumeState &&
+          typeof lease.resumeState === "object" &&
+          lease.resumeState !== null &&
+          "sessionState" in lease.resumeState
+            ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
+            : undefined;
+        expect(sessionState?.workspaceArchive).toBeUndefined();
+        expect(sessionState?.workspaceArchiveRef).toEqual(ref);
+        expect(JSON.stringify(lease?.resumeState ?? {})).not.toContain(verifiedArchive.base64);
+      } finally {
+        await resumed.release();
+        await dropSession(resumed.established);
+      }
+    },
+    60_000,
+  );
 
   test("(4) FLAG-OFF: the gate condition is false -> resumeBoxForTurn is NEVER invoked, so NO lease row is materialized", async () => {
     if (!available) return;

@@ -20,7 +20,10 @@ Canonical implementation sources:
 
 ## Enablement and connection
 
-`OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` enables the rail. OAuth material
+`OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` enables the rail. The config
+library stays fail-closed (`false` when unset); `bun run dev` enables the rail
+for local development when the variable is absent, matching Codex. Production
+and Helm still require an explicit true. OAuth material
 is authenticated-encrypted at rest, so a stable
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` is required before connection or runtime
 materialization can succeed.

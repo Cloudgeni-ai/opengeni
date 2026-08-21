@@ -164,6 +164,11 @@ export type ChannelASession = {
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
+  /** Provider-native directory listing. Channel A uses this for depth-1 Files
+   *  trees when present so a slow exec data plane cannot stall the dock. */
+  listDir?(args: { path: string; runAs?: string }): Promise<
+    Array<{ name: string; path: string; type: "file" | "dir" | "other" }>
+  >;
 };
 
 export type WorkspaceFileImportRequest = {
@@ -504,6 +509,14 @@ export class SandboxChannelAService {
   ): Promise<FsListResponse> {
     const root = assertSafeRelPathOrRoot(req.path);
     const pruneNames = [...new Set(pruneDirectoryNames)].map(assertSafePruneDirectoryName);
+    if (pruneNames.length === 0 && this.session.listDir && Math.max(req.depth, 1) === 1) {
+      try {
+        return await this.fsListFromNativeListDir(req);
+      } catch {
+        // Native listing is an accelerator. The find/exec path remains the
+        // authoritative Channel-A contract when the provider listing fails.
+      }
+    }
     // A single bounded command (NUL-delimited) builds the whole subtree in one
     // round-trip. Prefer GNU find's -printf on the Ubuntu-based images; on
     // macOS/BSD, use a depth-bounded Bash glob walker because their find has no
@@ -1495,28 +1508,22 @@ export class SandboxChannelAService {
           "Workspace Git data is temporarily unavailable. Retry the operation.",
         );
       }
-      const headerEnd = chunk.stdout.indexOf("\n");
-      const trailer = `\n${GIT_CHUNK_FRAME_END}`;
-      if (headerEnd < 0 || !chunk.stdout.endsWith(trailer)) {
-        throw new ChannelAUnavailableError(
-          "Workspace Git data is temporarily unavailable. Retry the operation.",
-        );
-      }
-      const header = chunk.stdout.slice(0, headerEnd).split("\t");
+      const parsed = parseGitChunkCapture(chunk.stdout);
       if (
-        header.length !== 6 ||
-        header[0] !== GIT_CHUNK_FRAME ||
-        header[1] !== "0" ||
-        header[2] !== String(measurement.sizeBytes) ||
-        header[3] !== measurement.sha256 ||
-        header[4] !== String(offset) ||
-        header[5] !== String(expected)
+        !parsed ||
+        parsed.producerStatus !== "0" ||
+        parsed.sizeBytes !== String(measurement.sizeBytes) ||
+        parsed.sha256 !== measurement.sha256 ||
+        parsed.offset !== String(offset) ||
+        parsed.capturedBytes !== String(expected)
       ) {
         throw new ChannelAUnavailableError(
-          "Workspace Git data changed during capture. Retry the operation.",
+          parsed
+            ? "Workspace Git data changed during capture. Retry the operation."
+            : "Workspace Git data is temporarily unavailable. Retry the operation.",
         );
       }
-      const encoded = chunk.stdout.slice(headerEnd + 1, -trailer.length);
+      const encoded = parsed.encoded;
       const bytes = Buffer.from(encoded, "base64");
       if (bytes.byteLength !== expected || bytes.toString("base64") !== encoded) {
         throw new ChannelAUnavailableError(
@@ -1557,24 +1564,15 @@ export class SandboxChannelAService {
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
     }
-    const headerEnd = captured.stdout.indexOf("\n");
-    const trailer = `\n${GIT_CHUNK_FRAME_END}`;
-    if (headerEnd < 0 || !captured.stdout.endsWith(trailer)) {
-      throw new ChannelAUnavailableError(
-        "Workspace Git data is temporarily unavailable. Retry the operation.",
-      );
-    }
-    const header = captured.stdout.slice(0, headerEnd).split("\t");
-    const sizeBytes = Number(header[2]);
-    const capturedBytes = Number(header[5]);
+    const parsed = parseGitChunkCapture(captured.stdout);
+    const sizeBytes = parsed ? Number(parsed.sizeBytes) : Number.NaN;
+    const capturedBytes = parsed ? Number(parsed.capturedBytes) : Number.NaN;
     if (
-      header.length !== 6 ||
-      header[0] !== GIT_CHUNK_FRAME ||
-      header[1] !== "0" ||
+      !parsed ||
+      parsed.producerStatus !== "0" ||
       !Number.isSafeInteger(sizeBytes) ||
       sizeBytes < 0 ||
-      !/^[0-9a-f]{64}$/.test(header[3] ?? "") ||
-      header[4] !== "0" ||
+      parsed.offset !== "0" ||
       !Number.isSafeInteger(capturedBytes) ||
       capturedBytes < 0 ||
       capturedBytes !== (sizeBytes > maxBytes ? 0 : Math.min(sizeBytes, GIT_COMMAND_CHUNK_BYTES))
@@ -1583,7 +1581,7 @@ export class SandboxChannelAService {
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
     }
-    const encoded = captured.stdout.slice(headerEnd + 1, -trailer.length);
+    const encoded = parsed.encoded;
     const initialBytes = Buffer.from(encoded, "base64");
     if (initialBytes.byteLength !== capturedBytes || initialBytes.toString("base64") !== encoded) {
       throw new ChannelAUnavailableError(
@@ -1593,7 +1591,7 @@ export class SandboxChannelAService {
     if (sizeBytes > maxBytes) {
       return { bytes: Buffer.alloc(0), sizeBytes, truncated: true };
     }
-    const measurement = { sizeBytes, sha256: header[3]! };
+    const measurement = { sizeBytes, sha256: parsed.sha256 };
     return {
       bytes: await this.readConfinedCommandPrefix(
         repo,
@@ -2373,6 +2371,53 @@ export class SandboxChannelAService {
     return rel === "" ? this.workspaceRoot : `${this.workspaceRoot}/${rel}`;
   }
 
+  private async fsListFromNativeListDir(req: FsListRequest): Promise<FsListResponse> {
+    const listDir = this.session.listDir;
+    if (!listDir) {
+      throw new ChannelAUnavailableError("Workspace files are temporarily unavailable. Retry the file list.");
+    }
+    const root = assertSafeRelPathOrRoot(req.path);
+    const listed = await listDir({
+      path: this.joinRoot(root),
+      ...(this.runAs ? { runAs: this.runAs } : {}),
+    });
+    const children: FsTreeNode[] = [];
+    let truncated = false;
+    for (const entry of listed) {
+      const relPath = stripDotSlash(entry.path, root);
+      const name = entry.name || basename(relPath);
+      if (!req.includeHidden && name.startsWith(".")) continue;
+      if (children.length >= req.maxEntries) {
+        truncated = true;
+        break;
+      }
+      const type: FsTreeNode["type"] =
+        entry.type === "dir" ? "dir" : entry.type === "file" ? "file" : "other";
+      children.push({
+        name,
+        path: relPath || name,
+        type,
+        sizeBytes: null,
+        mtimeMs: null,
+        mode: null,
+        ...(type === "dir" ? { children: [] as FsTreeNode[] } : {}),
+        truncated: false,
+      });
+    }
+    const rootNode: FsTreeNode = {
+      name: basename(root) || (root === "" ? "" : root),
+      path: root,
+      type: "dir",
+      sizeBytes: null,
+      mtimeMs: null,
+      mode: null,
+      children,
+      truncated,
+    };
+    sortTree(rootNode);
+    return { root: rootNode, revision: this.revision, truncated };
+  }
+
   /** Validate and enter an FS/Git directory in the same remote command that
    * performs the operation. This preserves confinement without adding a full
    * provider round-trip to every tree expansion or Git query. */
@@ -2434,29 +2479,14 @@ export class SandboxChannelAService {
           "Workspace files are temporarily unavailable. Retry after the current file operation finishes.",
         );
       }
-      const successIndex = result.stdout.indexOf(successPrefix);
-      if (successIndex >= 0) {
-        const payloadStart = successIndex + successPrefix.length;
-        const suffixIndex = result.stdout.lastIndexOf(successSuffixPrefix);
-        if (suffixIndex >= payloadStart) {
-          const suffixEnd = result.stdout.indexOf(
-            successSuffixTerminator,
-            suffixIndex + successSuffixPrefix.length,
-          );
-          const statusText =
-            suffixEnd < 0
-              ? null
-              : result.stdout.slice(suffixIndex + successSuffixPrefix.length, suffixEnd);
-          if (statusText && /^(?:0|[1-9][0-9]{0,2})$/.test(statusText)) {
-            const operationStatus = Number(statusText);
-            if (operationStatus > 255) continue;
-            return {
-              ...result,
-              stdout: result.stdout.slice(payloadStart, suffixIndex),
-              exitCode: operationStatus,
-            };
-          }
-        }
+      const framed = parseConfinedCommandStdout(result.stdout, frameId);
+      if (framed) {
+        if (framed.exitCode > 255) continue;
+        return {
+          ...result,
+          stdout: framed.payload,
+          exitCode: framed.exitCode,
+        };
       }
       if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
         throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
@@ -2747,6 +2777,61 @@ const PORTABLE_REALPATH_EXISTING_FUNCTION = [
  * marker protocol is private control data; profile output must not corrupt it. */
 function internalBashCommand(script: string): string {
   return `env -u BASH_ENV bash --noprofile --norc -c ${shellQuote(script)}`;
+}
+
+/** Some provider exec streams drop newline bytes. Header, base64 body, and
+ * trailer remain authoritative without the `printf` separators. */
+function parseGitChunkCapture(stdout: string): {
+  producerStatus: string;
+  sizeBytes: string;
+  sha256: string;
+  offset: string;
+  capturedBytes: string;
+  encoded: string;
+} | null {
+  const start = stdout.indexOf(GIT_CHUNK_FRAME);
+  const end = stdout.lastIndexOf(GIT_CHUNK_FRAME_END);
+  if (start < 0 || end < 0 || start >= end) return null;
+  let body = stdout.slice(start, end);
+  if (body.endsWith("\r\n")) body = body.slice(0, -2);
+  else if (body.endsWith("\n")) body = body.slice(0, -1);
+  const header = new RegExp(
+    `^${GIT_CHUNK_FRAME}\\t(\\d+)\\t(\\d+)\\t([0-9a-f]{64})\\t(\\d+)\\t(\\d+)(?:\\r?\\n)?`,
+  ).exec(body);
+  if (!header) return null;
+  return {
+    producerStatus: header[1]!,
+    sizeBytes: header[2]!,
+    sha256: header[3]!,
+    offset: header[4]!,
+    capturedBytes: header[5]!,
+    encoded: body.slice(header[0].length),
+  };
+}
+
+/** Some provider exec streams drop newline bytes. The OK marker is still
+ * authoritative without the trailing newline from `printf`. */
+function parseConfinedCommandStdout(
+  stdout: string,
+  frameId: string,
+): { payload: string; exitCode: number } | null {
+  const marker = `__OPENGENI_FS_CONFINED_${frameId}_OK__`;
+  const successIndex = stdout.indexOf(marker);
+  if (successIndex < 0) return null;
+  let payloadStart = successIndex + marker.length;
+  if (stdout.startsWith("\r\n", payloadStart)) payloadStart += 2;
+  else if (stdout.startsWith("\n", payloadStart)) payloadStart += 1;
+  const suffixPrefix = `__OPENGENI_FS_CONFINED_${frameId}_END__:`;
+  const suffixTerminator = "__";
+  const suffixIndex = stdout.lastIndexOf(suffixPrefix);
+  if (suffixIndex < payloadStart) return null;
+  const suffixEnd = stdout.indexOf(suffixTerminator, suffixIndex + suffixPrefix.length);
+  if (suffixEnd < 0) return null;
+  const statusText = stdout.slice(suffixIndex + suffixPrefix.length, suffixEnd);
+  if (!/^(?:0|[1-9][0-9]{0,2})$/.test(statusText)) return null;
+  const exitCode = Number(statusText);
+  if (exitCode > 255) return null;
+  return { payload: stdout.slice(payloadStart, suffixIndex), exitCode };
 }
 
 function assertSafePruneDirectoryName(name: string): string {

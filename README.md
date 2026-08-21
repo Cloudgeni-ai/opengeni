@@ -233,6 +233,19 @@ rollback compatibility. The registry Secret lookup uses the configured `OPENGENI
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
 
+For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private
+`OPENGENI_OPENSANDBOX_BASE_URL`, `OPENGENI_OPENSANDBOX_API_KEY`, an
+immutable `OPENGENI_OPENSANDBOX_IMAGE` digest, and configured object storage.
+Kubernetes deployments can use the optional pinned upstream platform wrapper
+under `deploy/stacks`; it keeps the lifecycle service private and its lifecycle
+routes Secret-backed. Exec and files stay on that ClusterIP server-proxy.
+Channel B uses signed URI-mode ingress when
+`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (default off: lifecycle proxy,
+in-box curl, and API frame-proxy). OpenSandbox v1 uses exact ID-addressed
+attach, renewable provider TTL, and portable `/workspace` tar archives in
+object storage. A desktop-class image advertises ttyd PTY and
+desktop/recording; native OpenSandbox snapshots and `runAs` stay unavailable.
+
 ## Deployment
 
 The operator guide is in `docs/deployment.md`.

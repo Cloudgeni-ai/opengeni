@@ -19,6 +19,15 @@ describe("sandbox create image-source metrics", () => {
       outcome: "completed",
       durationSeconds: 18,
     });
+    hooks.onSandboxCreate?.({
+      backend: "opensandbox",
+      imageSource: "logical",
+      outcome: "failed",
+      durationSeconds: 2,
+    });
+    hooks.onSandboxProviderApiThrottle?.({ backend: "opensandbox", operation: "create" });
+    hooks.onSandboxTtlRenewal?.({ backend: "opensandbox", outcome: "completed" });
+    hooks.onSandboxTtlRenewal?.({ backend: "opensandbox", outcome: "failed" });
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
@@ -29,6 +38,18 @@ describe("sandbox create image-source metrics", () => {
     );
     expect(metrics).toMatch(
       /opengeni_sandbox_create_duration_seconds_sum\{[^}]*backend="modal"[^}]*image_source="logical"[^}]*\} 18\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_creates_total\{[^}]*backend="opensandbox"[^}]*image_source="logical"[^}]*outcome="failed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provider_api_throttles_total\{[^}]*backend="opensandbox"[^}]*operation="create"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_ttl_renewals_total\{[^}]*backend="opensandbox"[^}]*outcome="completed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_ttl_renewals_total\{[^}]*backend="opensandbox"[^}]*outcome="failed"[^}]*\} 1\b/,
     );
     expect(metrics).not.toMatch(/image_id|rig_version_id|workspace_id|session_id/);
   });

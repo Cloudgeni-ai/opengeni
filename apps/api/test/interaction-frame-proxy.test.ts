@@ -7,6 +7,7 @@ import type {
 import {
   createInteractionFrameProxyAttachment,
   InteractionFrameProxyTransport,
+  placementUsesInteractionFrameProxy,
 } from "../src/interaction-frame-proxy";
 
 const rootSecret = "test-root-secret-with-enough-entropy-for-proxy-tests";
@@ -18,6 +19,43 @@ afterEach(() => {
 });
 
 describe("interaction frame proxy", () => {
+  test("proxies Docker and unsigned OpenSandbox, not native or signed tunnels", () => {
+    expect(placementUsesInteractionFrameProxy("docker")).toBe(true);
+    expect(placementUsesInteractionFrameProxy("opensandbox")).toBe(true);
+    expect(
+      placementUsesInteractionFrameProxy("opensandbox", { openSandboxSignedEndpoints: true }),
+    ).toBe(false);
+    expect(
+      placementUsesInteractionFrameProxy("opensandbox", {
+        openSandboxSignedEndpoints: true,
+        openSandboxInteractionFrameProxy: true,
+      }),
+    ).toBe(true);
+    expect(placementUsesInteractionFrameProxy("modal")).toBe(false);
+    expect(placementUsesInteractionFrameProxy("blaxel")).toBe(false);
+    expect(placementUsesInteractionFrameProxy(null)).toBe(false);
+  });
+
+  test("collapses computer RFB grants to the two viewer protocols the proxy exposes", () => {
+    const attachment = createInteractionFrameProxyAttachment({
+      requestUrl: `${publicOrigin}/v1/workspaces/workspace/computer-sessions/session/attachments`,
+      rootSecret,
+      upstreamUrl: "ws://127.0.0.1:18090/v1/sandboxes/box/proxy/7682/v1/computer-sessions/cs/targets/screen%3A0/rfb",
+      upstreamProtocols: [
+        "binary",
+        "opengeni.computer.rfb.v1",
+        "opengeni.auth.super-secret-view-grant",
+      ],
+      origin: publicOrigin,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(attachment.protocols).toHaveLength(2);
+    expect(attachment.protocols[0]).toBe("binary");
+    expect(attachment.protocols[1]?.startsWith("opengeni-frame-proxy.")).toBe(true);
+    expect(JSON.stringify(attachment)).not.toContain("opengeni.computer.rfb.v1");
+    expect(JSON.stringify(attachment)).not.toContain("opengeni.auth.super-secret-view-grant");
+  });
+
   test("hides and relays a Docker-only controller URL through the public API", async () => {
     let upstreamOrigin: string | null = null;
     const upstream = Bun.serve<{ kind: "upstream" }>({

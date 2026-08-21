@@ -52,6 +52,81 @@ export type NativeSnapshotDescriptor = {
 
 export type WorkspaceArchiveDescriptor = TarWorkspaceArchiveDescriptor | NativeSnapshotDescriptor;
 
+export const WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA = "sandbox_archive_object_v1" as const;
+
+/** Compact object-storage locator for portable tar bytes. The SHA-256/size in
+ * `workspaceArchiveMeta` remain the verification authority. */
+export type WorkspaceArchiveObjectRef = {
+  schema: typeof WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA;
+  key: string;
+  sha256: string;
+  bytes: number;
+  backend: string;
+};
+
+const OBJECT_KEY =
+  /^sandbox-archives\/v1\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/wa1:[0-9]{13}:[0-9a-f]{64}\.tar$/i;
+
+export function parseWorkspaceArchiveObjectRef(value: unknown): WorkspaceArchiveObjectRef | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<WorkspaceArchiveObjectRef>;
+  if (
+    candidate.schema !== WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA ||
+    typeof candidate.key !== "string" ||
+    !OBJECT_KEY.test(candidate.key) ||
+    typeof candidate.sha256 !== "string" ||
+    !SHA256.test(candidate.sha256) ||
+    !nonnegativeInteger(candidate.bytes) ||
+    candidate.bytes <= 0 ||
+    typeof candidate.backend !== "string" ||
+    candidate.backend.length === 0 ||
+    candidate.backend.length > 64
+  ) {
+    return null;
+  }
+  return {
+    schema: WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA,
+    key: candidate.key,
+    sha256: candidate.sha256,
+    bytes: candidate.bytes,
+    backend: candidate.backend,
+  };
+}
+
+export function workspaceArchiveObjectKey(input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  revision: string;
+}): string {
+  return `sandbox-archives/v1/${input.accountId}/${input.workspaceId}/${input.sandboxGroupId}/${input.revision}.tar`;
+}
+
+export function workspaceArchivePayloadPresent(
+  sessionState: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!sessionState) return false;
+  if (typeof sessionState.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0) {
+    return true;
+  }
+  return parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef) !== null;
+}
+
+/** Restore may inline object bytes in memory for hydrate. That copy must never
+ *  be published onto a lease when a durable object-storage ref exists. */
+export function omitInlineWorkspaceArchiveWhenObjectRefPresent(
+  sessionState: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...sessionState };
+  if (parseWorkspaceArchiveObjectRef(next.workspaceArchiveRef)) {
+    delete next.workspaceArchive;
+  }
+  if (parseWorkspaceArchiveObjectRef(next.workspaceArchivePrevRef)) {
+    delete next.workspaceArchivePrev;
+  }
+  return next;
+}
+
 export const NATIVE_SNAPSHOT_PREFIXES: ReadonlyArray<{
   provider: NativeSnapshotProvider;
   prefix: string;

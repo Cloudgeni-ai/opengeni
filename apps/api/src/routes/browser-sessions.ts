@@ -161,10 +161,12 @@ import {
   buildStreamUrl,
   exposedPortEndpointFromUrl,
   buildSelfhostedBackendSession,
+  ensureDisplayStack,
   mintStreamToken,
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
+  renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
   type PlacementBrowserStateCaptureReceipt,
   type PlacementBrowserNetworkRoute,
@@ -182,7 +184,7 @@ import {
   deriveBrowserViewGrantToken,
   deriveComputerSessionControllerTokens,
 } from "../browser-controller-authority";
-import { withCachedController } from "../controller-data-plane";
+import { controllerCacheAllowsHostFetch, controllerCachedUrlIsUsable, shouldPersistControllerDataPlaneUrl, withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -199,7 +201,7 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
-import { createInteractionFrameProxyAttachment } from "../interaction-frame-proxy";
+import { createInteractionFrameProxyAttachment, placementUsesInteractionFrameProxy } from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -466,8 +468,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                       resourceId: preparedSession.id,
                       controllerGeneration,
                     },
-                    async () =>
-                      await client.createSession({
+                    async () => {
+                      await ensureHeadedBrowserDisplayStack(
+                        placement.session,
+                        preparedSession.headless,
+                      );
+                      return await client.createSession({
                         browserSessionId: preparedSession.id,
                         controllerGeneration,
                         tokenGeneration: record.tokenGeneration,
@@ -478,7 +484,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                         ...(networkRoute ? { networkRoute } : {}),
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                         ...(restore ? { restore } : {}),
-                      }),
+                      });
+                    },
                   );
                 },
               );
@@ -1787,22 +1794,29 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   request.targetId,
                   request.stream,
                 );
-                const attachment =
-                  placement.lease?.backend === "docker"
-                    ? createInteractionFrameProxyAttachment({
-                        requestUrl: context.req.url,
-                        publicBaseUrl: deps.settings.publicBaseUrl,
-                        webBaseUrl: deps.settings.webBaseUrl,
-                        forwardedProto: context.req.header("x-forwarded-proto"),
-                        forwardedHost:
-                          context.req.header("x-forwarded-host") ?? context.req.header("host"),
-                        rootSecret,
-                        upstreamUrl,
-                        upstreamProtocols: protocols,
-                        origin,
-                        expiresAt,
-                      })
-                    : { url: upstreamUrl, protocols };
+                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                    ? {
+                        openSandboxInteractionFrameProxy:
+                          deps.settings.openSandboxInteractionFrameProxy,
+                      }
+                    : {}),
+                })
+                  ? createInteractionFrameProxyAttachment({
+                      requestUrl: context.req.url,
+                      publicBaseUrl: deps.settings.publicBaseUrl,
+                      webBaseUrl: deps.settings.webBaseUrl,
+                      forwardedProto: context.req.header("x-forwarded-proto"),
+                      forwardedHost:
+                        context.req.header("x-forwarded-host") ?? context.req.header("host"),
+                      rootSecret,
+                      upstreamUrl,
+                      upstreamProtocols: protocols,
+                      origin,
+                      expiresAt,
+                    })
+                  : { url: upstreamUrl, protocols };
                 return {
                   kind: "direct_websocket" as const,
                   ...attachment,
@@ -2404,8 +2418,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   resourceId: browserSessionId,
                   controllerGeneration,
                 },
-                async () =>
-                  await client.createSession({
+                async () => {
+                  await ensureHeadedBrowserDisplayStack(
+                    placement.session,
+                    prepared.session.headless,
+                  );
+                  return await client.createSession({
                     browserSessionId,
                     controllerGeneration,
                     tokenGeneration: record.tokenGeneration,
@@ -2415,7 +2433,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                     ...(linkedComputer ? { linkedComputer } : {}),
                     ...(networkRoute ? { networkRoute } : {}),
                     restore: restore!,
-                  }),
+                  });
+                },
               );
             } catch (error) {
               if (!isDefiniteBrowserControllerFailure(error)) throw error;
@@ -2849,7 +2868,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       !lease ||
       (lease.liveness !== "warm" && lease.liveness !== "draining") ||
       lease.instanceId !== binding.placementInstanceId ||
-      !lease.controllerDataPlaneUrl
+      !lease.controllerDataPlaneUrl ||
+      (lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) ||
+      !controllerCachedUrlIsUsable(lease.controllerDataPlaneUrl)
     ) {
       return null;
     }
@@ -2875,8 +2896,32 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
       return placement;
     }
+    if (
+      placement.lease.backend === "opensandbox" &&
+      deps.settings.openSandboxSignedEndpoints
+    ) {
+      if (!placement.lease.controllerDataPlaneUrl) return placement;
+      const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId,
+        expectedEpoch: placement.lease.leaseEpoch,
+        expectedInstanceId: placement.lease.instanceId,
+        controllerDataPlaneUrl: null,
+      });
+      return lease ? { ...placement, lease } : placement;
+    }
     const endpoint = await placement.session.resolveExposedPort(BROWSER_CONTROL_PORT);
     const url = buildStreamUrl(endpoint);
+    if (
+      !shouldPersistControllerDataPlaneUrl({
+        backend: placement.lease.backend,
+        signedEndpoints: deps.settings.openSandboxSignedEndpoints,
+        url,
+      })
+    ) {
+      return placement;
+    }
     const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -2886,6 +2931,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       controllerDataPlaneUrl: url,
     });
     if (!lease) return placement;
+    if (!controllerCacheAllowsHostFetch(url)) {
+      return { ...placement, lease };
+    }
     return { ...placement, session: controllerOnlySession(url), lease };
   }
 
@@ -2901,7 +2949,16 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const sandboxGroupId = placement.controllerHostSandboxGroupId;
     const cachedUrl = placement.lease?.controllerDataPlaneUrl;
     return await withCachedController({
-      cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
+      cachedUrl:
+        sandboxGroupId &&
+        cachedUrl &&
+        !(
+          placement.lease?.backend === "opensandbox" &&
+          routeDeps.settings.openSandboxSignedEndpoints
+        ) &&
+        controllerCachedUrlIsUsable(cachedUrl)
+          ? cachedUrl
+          : null,
       createCachedClient: (url) =>
         new BrowserControlClient(controllerOnlySession(url), { adminToken }),
       prepareCachedClient: async (client) => {
@@ -3086,6 +3143,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       placement: placement.placement,
     });
     try {
+      await ensureHeadedBrowserDisplayStack(placement.session, record.session.headless);
       await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
@@ -3304,6 +3362,17 @@ function assertCreateReplay(
       "BrowserSession create operation is bound to another ComputerSession",
     );
   }
+}
+
+async function ensureHeadedBrowserDisplayStack(
+  session: BrowserControlPlacementSession,
+  headless: boolean,
+): Promise<void> {
+  if (headless) return;
+  if (typeof session.exec !== "function" && typeof session.execCommand !== "function") return;
+  await ensureDisplayStack(session, {
+    telemetryContext: { callerKind: "viewer" },
+  });
 }
 
 async function ensureLinkedComputerController(
@@ -3617,6 +3686,11 @@ async function ensureInteractionHolder(
     ).catch(() => undefined);
     throw new BrowserSessionStateError("BrowserSession placement fence changed; retry");
   }
+  await renewSandboxProviderExpiration({
+    backend: acquired.lease.backend as ApiRouteDeps["settings"]["sandboxBackend"],
+    settings: deps.settings,
+    instanceId: acquired.lease.instanceId,
+  }).catch(() => false);
   return true;
 }
 

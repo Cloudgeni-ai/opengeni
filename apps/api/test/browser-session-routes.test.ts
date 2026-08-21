@@ -101,7 +101,7 @@ describe("BrowserSession route discipline", () => {
     );
     expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
-    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend)");
     expect(attachment).toContain("createInteractionFrameProxyAttachment");
     expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
     expect(attachment).toContain('context.req.header("x-forwarded-proto")');

@@ -38,3 +38,19 @@ object_storage = {
   #   cors_allowed_origins = ["https://staging.app.opengeni.ai", "https://geni-staging.app.opengeni.ai"]
   cors_allowed_origins = ["https://opengeni.example.com"]
 }
+
+# Optional dedicated user pool for the OpenSandbox provider. Leave disabled for
+# the default Modal deployment. Scale-to-zero is the ordinary cold-capacity
+# posture; preview/load profiles should set a reviewed hard maximum from their
+# sandbox resource requests, max Pods/IPs, regional quota, and cost envelope.
+sandbox_node_pool = {
+  enabled         = false
+  name            = "sandbox"
+  vm_size         = "Standard_D4ds_v5"
+  min_count       = 0
+  max_count       = 20
+  max_pods        = 110
+  zones           = ["1", "2", "3"]
+  os_disk_size_gb = 128
+  os_disk_type    = "Ephemeral"
+}
