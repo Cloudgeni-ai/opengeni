@@ -4116,6 +4116,25 @@ export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
   providerPrincipalId: string;
   requestedConnectionId?: string;
   requestedConnectionVersion?: number;
+  /**
+   * Require this exact subject to retain live workspace authority in the same
+   * transaction that persists the credential. This is only a consistency
+   * fence: the caller must separately prove that the subject is the
+   * authenticated managed human before opting in.
+   */
+  requireLiveUserAuthority?: boolean;
+  /** Permission that must remain present while the owner row is locked. */
+  requiredLiveUserPermission?: "connections:write";
+  /**
+   * Permit the canonical managed-human personal-workspace exception when no
+   * ordinary membership row exists. The caller must have authenticated that
+   * exact human before opting in.
+   */
+  allowCanonicalPersonalWorkspaceOwner?: boolean;
+  /** Keep at most one non-revoked provider principal for this owner/family. */
+  exclusiveProviderPrincipalPerOwner?: boolean;
+  /** Existing values for these metadata keys survive exact-principal convergence. */
+  preserveExistingMetadataKeys?: readonly string[];
 };
 
 export type UpdateSlackBotDocumentDestinationInput = {
@@ -8099,6 +8118,72 @@ export async function persistProviderOAuthConnection(
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const ownerKey = input.subjectId ?? "workspace";
+        if (input.requireLiveUserAuthority) {
+          if (!input.subjectId) {
+            throw new Error("Live user authority requires a subject-owned connection");
+          }
+          // Serialize with organization-membership lifecycle commands before
+          // deriving authority and firing the connection-authority trigger.
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+          );
+          const [membership] = await tx
+            .select({
+              accountId: schema.workspaceMemberships.accountId,
+              permissions: schema.workspaceMemberships.permissions,
+            })
+            .from(schema.workspaceMemberships)
+            .where(
+              and(
+                eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+                eq(schema.workspaceMemberships.subjectId, input.subjectId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const hasLiveAuthority = await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+          });
+          if (!hasLiveAuthority) {
+            throw new Error("Connection owner no longer has live workspace authority");
+          }
+          if (membership) {
+            if (
+              membership.accountId !== input.accountId ||
+              (input.requiredLiveUserPermission &&
+                !membership.permissions.includes(input.requiredLiveUserPermission) &&
+                !membership.permissions.includes("workspace:admin"))
+            ) {
+              throw new Error("Connection owner no longer has the required workspace permission");
+            }
+          } else if (!input.allowCanonicalPersonalWorkspaceOwner) {
+            throw new Error("Connection owner has no lockable workspace membership");
+          }
+        }
+        if (input.exclusiveProviderPrincipalPerOwner) {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-owner:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}`}, 0))`,
+          );
+          const [conflict] = await tx
+            .select({ id: schema.connections.id })
+            .from(schema.connections)
+            .where(
+              and(
+                eq(schema.connections.workspaceId, input.workspaceId),
+                connectionExactSubject(input.subjectId ?? null),
+                eq(schema.connections.providerDomain, input.providerDomain),
+                eq(schema.connections.kind, "oauth2"),
+                ne(schema.connections.status, "revoked"),
+                sql`${schema.connections.metadata} ->> 'credentialRole' = ${input.credentialRole}`,
+                sql`${schema.connections.metadata} ->> 'providerFamily' = ${input.providerFamily}`,
+                sql`${schema.connections.metadata} ->> 'providerPrincipalId' is distinct from ${input.providerPrincipalId}`,
+              ),
+            )
+            .limit(1);
+          if (conflict) return null;
+        }
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
@@ -8153,7 +8238,11 @@ export async function persistProviderOAuthConnection(
               .limit(1)
           )[0];
         if (!existing) {
-          return await createConnectionInScope(tx, input);
+          const created = await createConnectionInScope(tx, input);
+          if (input.requireLiveUserAuthority && !created.authorityId) {
+            throw new Error("Connection owner authority was not bound");
+          }
+          return created;
         }
         if (
           !input.requestedConnectionId &&
@@ -8171,7 +8260,12 @@ export async function persistProviderOAuthConnection(
               (value): value is string => typeof value === "string",
             )
           : [];
-        return await updateConnectionInScope(tx, {
+        const preservedMetadata = Object.fromEntries(
+          (input.preserveExistingMetadataKeys ?? [])
+            .filter((key) => Object.prototype.hasOwnProperty.call(existing.metadata, key))
+            .map((key) => [key, existing.metadata[key]]),
+        );
+        const updated = await updateConnectionInScope(tx, {
           workspaceId: input.workspaceId,
           connectionId: existing.id,
           visibleToSubjectId: input.visibleToSubjectId,
@@ -8186,6 +8280,7 @@ export async function persistProviderOAuthConnection(
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
+            ...preservedMetadata,
             ...(existingDefinitionIds.length > 0 || incomingDefinitionIds.length > 0
               ? {
                   authorizedDefinitionIds: [
@@ -8196,6 +8291,10 @@ export async function persistProviderOAuthConnection(
           },
           updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
         });
+        if (input.requireLiveUserAuthority && updated && !updated.authorityId) {
+          throw new Error("Connection owner authority was not bound");
+        }
+        return updated;
       });
     },
   );
@@ -11800,6 +11899,7 @@ export async function recordConnectionTokenRefresh(
     credentialEncrypted: string;
     expiresAt: Date | null;
     grantedScopes?: string[];
+    metadata?: Record<string, unknown>;
     lastRefreshAt: Date;
     subjectId?: string | null;
   },
@@ -11818,6 +11918,7 @@ export async function recordConnectionTokenRefresh(
         version: sql`${schema.connections.version} + 1`,
         updatedAt: new Date(),
         ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       };
       const updated = await scopedDb
         .update(schema.connections)

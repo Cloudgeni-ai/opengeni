@@ -94,6 +94,7 @@ import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
+import { registerPersonalGitHubRoutes } from "./routes/personal-github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
@@ -689,6 +690,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
+  registerPersonalGitHubRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
@@ -1721,6 +1723,18 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/github$/,
+    label: "/v1/workspaces/:workspaceId/connections/github",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/github\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/connections/github/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/reconnect$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
     label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
   },
@@ -1752,6 +1766,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
     label: "/v1/integrations/provider-oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/github-personal\/oauth\/callback$/,
+    label: "/v1/integrations/github-personal/oauth/callback",
   },
   {
     pattern: /^\/v1\/integrations\/google-drive\/callback$/,

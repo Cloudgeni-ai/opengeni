@@ -173,6 +173,10 @@ import type {
   CompactSessionContextResult,
   CompleteFileUploadResponse,
   ConnectionMetadata,
+  PersonalGitHubConnectionStatusResponse,
+  PersonalGitHubDisconnectRequest,
+  PersonalGitHubOAuthStartRequest,
+  PersonalGitHubOAuthStartResponse,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
@@ -5927,6 +5931,53 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections`,
     );
     return response.connections;
+  }
+
+  /** Secret-free status for the caller's exact personal GitHub connection. */
+  async personalGitHubStatus(workspaceId: string): Promise<PersonalGitHubConnectionStatusResponse> {
+    return await this.requestJson<PersonalGitHubConnectionStatusResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/github`,
+    );
+  }
+
+  /** Start the dedicated personal GitHub authorization-code + PKCE flow. */
+  async startPersonalGitHubOAuth(
+    workspaceId: string,
+    request: Omit<PersonalGitHubOAuthStartRequest, "connectionId"> = {},
+  ): Promise<PersonalGitHubOAuthStartResponse> {
+    return await this.requestJson<PersonalGitHubOAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/github/oauth/start`,
+      request,
+    );
+  }
+
+  /** Re-authorize one exact personal GitHub Connection generation in place. */
+  async reconnectPersonalGitHub(
+    workspaceId: string,
+    connectionId: string,
+    request: Omit<PersonalGitHubOAuthStartRequest, "connectionId"> = {},
+  ): Promise<PersonalGitHubOAuthStartResponse> {
+    return await this.requestJson<PersonalGitHubOAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/github/reconnect`,
+      request,
+    );
+  }
+
+  /** Revoke one exact generation through an idempotent owner-only disconnect. */
+  async disconnectPersonalGitHub(
+    workspaceId: string,
+    connectionId: string,
+    request: PersonalGitHubDisconnectRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
+      request,
+    );
+    return response.connection;
   }
 
   /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
