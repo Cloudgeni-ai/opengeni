@@ -39,8 +39,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     onConfirm: () => unknown;
     open: boolean;
     title: ReactNode;
-  }) =>
-    open ? (
+  }) => {
+    return open ? (
       <div role="dialog">
         <span>{title}</span>
         <span>{description}</span>
@@ -48,7 +48,31 @@ mock.module("@/components/ui/confirm-dialog", () => ({
           {confirmLabel}
         </button>
       </div>
-    ) : null,
+    ) : null;
+  },
+}));
+
+// Keep mutation/reconciliation tests independent of Radix portal geometry.
+// The production module remains Radix-backed; this semantic stand-in exposes
+// the same trigger/menuitem interaction in the test document.
+mock.module("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
+  DropdownMenuItem: ({
+    children,
+    onSelect,
+    "aria-label": ariaLabel,
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    "aria-label"?: string;
+  }) => (
+    <button type="button" role="menuitem" aria-label={ariaLabel} onClick={onSelect}>
+      {children}
+    </button>
+  ),
+  DropdownMenuSeparator: () => <hr />,
 }));
 
 const { SessionTenancyControl } = await import("./session-tenancy-control");
@@ -138,6 +162,20 @@ function dialogButton(container: HTMLElement, label: string): HTMLButtonElement 
   return button(dialog, label);
 }
 
+async function chooseAccessAction(container: HTMLElement, label: string): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label$="Manage session access"]',
+  );
+  if (!trigger) throw new Error("Missing session access menu trigger");
+  await act(async () => trigger.click());
+  const item = Array.from(container.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+    (candidate) =>
+      candidate.getAttribute("aria-label") === label || candidate.textContent?.trim() === label,
+  );
+  if (!item) throw new Error(`Missing session access action: ${label}`);
+  await act(async () => item.click());
+}
+
 async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -196,8 +234,8 @@ describe("SessionTenancyControl", () => {
       );
     });
     expect(container.textContent).toContain("Workspace");
-    expect(container.textContent).not.toContain("Make private");
-    expect(container.textContent).not.toContain("Private copy");
+    expect(container.querySelector('[aria-label^="Workspace session access"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label$="Manage session access"]')).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();
@@ -258,20 +296,20 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
       "Close active Files, Terminal, Desktop, and viewer access first.",
     );
-    expect(container.textContent).toContain("Retry make private");
+    expect(container.textContent).toContain("Retry limit to me");
 
-    await act(async () => dialogButton(container, "Retry make private").click());
+    await act(async () => dialogButton(container, "Retry limit to me").click());
     await flush();
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
     expect(getSession).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("Only me");
+    expect(container.textContent).toContain("Private");
 
     await act(async () => root.unmount());
     container.remove();
@@ -303,8 +341,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(getSession).toHaveBeenCalledTimes(1);
@@ -352,8 +390,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(container.textContent).toContain("Visible to people in Engineering.");
@@ -399,8 +437,8 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
 
     expect(container.textContent).toBe("");
@@ -461,16 +499,16 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     let root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     await act(async () => root.unmount());
 
     root = createRoot(container);
     await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Make private").click());
-    expect(container.textContent).toContain("Retry make private");
-    await act(async () => dialogButton(container, "Retry make private").click());
+    await chooseAccessAction(container, "Retry: Limit this session to me…");
+    expect(container.textContent).toContain("Retry limit to me");
+    await act(async () => dialogButton(container, "Retry limit to me").click());
     await flush();
 
     expect(keys).toHaveLength(2);
@@ -525,242 +563,18 @@ describe("SessionTenancyControl", () => {
         />,
       );
     });
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(container.textContent).toContain(
       "Session access changed in another tab. The latest state has been loaded.",
     );
 
-    await act(async () => button(container, "Make private").click());
-    await act(async () => dialogButton(container, "Make private").click());
+    await chooseAccessAction(container, "Limit this session to me…");
+    await act(async () => dialogButton(container, "Limit to me").click());
     await flush();
     expect(epochs).toEqual([4, 5]);
     expect(keys[1]).not.toBe(keys[0]);
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("retries an unknown fork with the exact key and navigates only from its receipt", async () => {
-    const keys: string[] = [];
-    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
-      keys.push(request.idempotencyKey);
-      if (keys.length === 1) {
-        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
-      }
-      return {
-        operationId: crypto.randomUUID(),
-        eventId: crypto.randomUUID(),
-        eventSequence: 9,
-        sessionId: "session-fork",
-        workspaceId: "workspace-a",
-        visibility: "private" as const,
-        authorityEpoch: 1 as const,
-        copiedHistoryItemCount: 4,
-        replay: true,
-      };
-    });
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "private" as const,
-        authorityEpoch: 1,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => true}
-          {...operationAuthority()}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await act(async () => button(container, "Private copy").click());
-    expect(container.textContent).toContain("independent private session in the same workspace");
-    await act(async () => button(container, "Create private copy").click());
-    await flush();
-
-    expect(keys).toHaveLength(2);
-    expect(keys[1]).toBe(keys[0]);
-    expect(getSession).toHaveBeenCalledTimes(1);
-    expect(openSession).toHaveBeenCalledTimes(1);
-    expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("does not navigate a replayed fork whose fresh session is no longer private", async () => {
-    const controller = new SessionTenancyOperationController();
-    const authority = operationAuthority(controller);
-    const forkSession = mock(async () => ({
-      operationId: crypto.randomUUID(),
-      eventId: crypto.randomUUID(),
-      eventSequence: 9,
-      sessionId: "session-fork",
-      workspaceId: "workspace-a",
-      visibility: "private" as const,
-      authorityEpoch: 1 as const,
-      copiedHistoryItemCount: 4,
-      replay: true,
-    }));
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "workspace" as const,
-        authorityEpoch: 2,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => true}
-          {...authority}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
-    await flush();
-
-    expect(openSession).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      "The fork is no longer an owned private session in this workspace.",
-    );
-    expect(controller.snapshot(authority.operationScope).fork).toBeNull();
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("reuses an outcome-unknown fork key after an actual unmount and remount", async () => {
-    const keys: string[] = [];
-    const controller = new SessionTenancyOperationController();
-    const authority = operationAuthority(controller);
-    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
-      keys.push(request.idempotencyKey);
-      if (keys.length <= 2) {
-        throw apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true });
-      }
-      return {
-        operationId: crypto.randomUUID(),
-        eventId: crypto.randomUUID(),
-        eventSequence: 9,
-        sessionId: "session-fork",
-        workspaceId: "workspace-a",
-        visibility: "private" as const,
-        authorityEpoch: 1 as const,
-        copiedHistoryItemCount: 4,
-        replay: true,
-      };
-    });
-    const getSession = mock(async () => ({
-      ...baseSession,
-      id: "session-fork",
-      tenancy: {
-        visibility: "private" as const,
-        authorityEpoch: 1,
-        ownedByCurrentUser: true,
-        fork: null,
-      },
-    }));
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const props = {
-      session: baseSession,
-      client: { forkSession, getSession } as unknown as OpenGeniCoreClient,
-      managedSession: true,
-      scopeLabel: "Engineering",
-      captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
-      ownsWorkspaceInvocation: () => true,
-      ...authority,
-      onRefreshSession: async () => undefined,
-      onOpenSession: openSession,
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    let root = createRoot(container);
-    await act(async () => root.render(<SessionTenancyControl {...props} />));
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
-    await flush();
-    await act(async () => root.unmount());
-
-    root = createRoot(container);
-    await act(async () => root.render(<SessionTenancyControl {...props} />));
-    expect(container.textContent).toContain("Retry private copy");
-    await act(async () => button(container, "Retry private copy").click());
-    await act(async () => dialogButton(container, "Retry private copy").click());
-    await flush();
-
-    expect(keys).toHaveLength(3);
-    expect(new Set(keys).size).toBe(1);
-    expect(openSession).toHaveBeenCalledWith("workspace-a", "session-fork");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("does not replay an unknown fork after the principal transition becomes stale", async () => {
-    let current = true;
-    const pending = deferred<never>();
-    const forkSession = mock(async () => await pending.promise);
-    const openSession = mock((_workspaceId: string, _sessionId: string) => undefined);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <SessionTenancyControl
-          session={baseSession}
-          client={{ forkSession } as unknown as OpenGeniCoreClient}
-          managedSession
-          scopeLabel="Engineering"
-          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
-          ownsWorkspaceInvocation={() => current}
-          {...operationAuthority()}
-          onRefreshSession={async () => undefined}
-          onOpenSession={openSession}
-        />,
-      );
-    });
-    await act(async () => button(container, "Private copy").click());
-    await act(async () => button(container, "Create private copy").click());
-    current = false;
-    pending.reject(apiError({ status: 503, code: "upstream_unavailable", outcomeUnknown: true }));
-    await flush();
-
-    expect(forkSession).toHaveBeenCalledTimes(1);
-    expect(openSession).not.toHaveBeenCalled();
-    expect(toastSuccess).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
     container.remove();
@@ -799,8 +613,8 @@ describe("SessionTenancyControl", () => {
           />,
         );
       });
-      await act(async () => button(container, "Make private").click());
-      await act(async () => dialogButton(container, "Make private").click());
+      await chooseAccessAction(container, "Limit this session to me…");
+      await act(async () => dialogButton(container, "Limit to me").click());
       current = false;
       pending.resolve({
         operationId: crypto.randomUUID(),

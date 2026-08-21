@@ -16,7 +16,8 @@ import type { SessionSummary } from "@opengeni/sdk";
 import {
   CalendarClockIcon,
   LockIcon,
-  PanelRightIcon,
+  PanelRightCloseIcon,
+  PanelRightOpenIcon,
   PauseIcon,
   PencilIcon,
   PinIcon,
@@ -55,6 +56,7 @@ export function SessionHeader({
   onPin,
   sandboxSlot,
   codexSlot,
+  accessSlot,
   leading,
   lastStartedModel,
   lastStartedReasoningEffort,
@@ -88,6 +90,8 @@ export function SessionHeader({
    * clickable for account status/switch. Absent for host-credit sessions.
    */
   codexSlot?: ReactNode;
+  /** Compact session access state/menu, lazy-mounted by the route shell. */
+  accessSlot?: ReactNode;
   /** Leading control (the mobile hamburger); absent on desktop. */
   leading?: ReactNode;
   /**
@@ -163,7 +167,10 @@ export function SessionHeader({
             </button>
           ) : null}
         </div>
-        <SessionTitleEditor session={session} onRename={onRename} />
+        <div className="flex min-w-0 items-center gap-1.5">
+          <SessionTitleEditor session={session} onRename={onRename} />
+          {accessSlot}
+        </div>
       </div>
       <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5 sm:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -228,10 +235,15 @@ export function SessionHeader({
           variant={inspectorOpen ? "secondary" : "ghost"}
           size="icon-sm"
           onClick={onToggleInspector}
-          aria-label={inspectorOpen ? "Hide session panel" : "Show session panel"}
+          aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
+          title={inspectorOpen ? "Hide workspace" : "Open workspace"}
           className="pointer-coarse:size-11"
         >
-          <PanelRightIcon className="size-4" />
+          {inspectorOpen ? (
+            <PanelRightCloseIcon className="size-4" />
+          ) : (
+            <PanelRightOpenIcon className="size-4" />
+          )}
         </Button>
       </div>
     </header>

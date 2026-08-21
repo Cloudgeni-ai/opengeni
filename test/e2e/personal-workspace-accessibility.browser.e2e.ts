@@ -7,6 +7,7 @@ import { renderPersonalWorkspaceAccessibilityFixture } from "../../apps/web/test
 describe("Personal workspace accessibility in Chromium", () => {
   let browser: Browser;
   let page: Page;
+  let tenancyPage: Page;
   let switcherPage: Page;
   let web: StartedProcess;
 
@@ -42,6 +43,10 @@ describe("Personal workspace accessibility in Chromium", () => {
     await page.setContent(renderPersonalWorkspaceAccessibilityFixture());
     switcherPage = await browser.newPage();
     await switcherPage.goto(`${baseUrl}/test/active-organization-switcher.html`, {
+      waitUntil: "networkidle",
+    });
+    tenancyPage = await browser.newPage();
+    await tenancyPage.goto(`${baseUrl}/test/session-tenancy-control.html`, {
       waitUntil: "networkidle",
     });
   }, 60_000);
@@ -119,23 +124,45 @@ describe("Personal workspace accessibility in Chromium", () => {
   });
 
   test("activated private-session controls expose exact state and keyboard actions", async () => {
-    const surface = page.locator("#personal-session-tenancy");
-    const region = surface.getByRole("region", { name: "Session access", exact: true });
-    const snapshot = await region.ariaSnapshot();
+    const region = tenancyPage.getByRole("region", { name: "Session access", exact: true });
+    const trigger = region.getByRole("button", {
+      name: "Private session access. Manage session access",
+      exact: true,
+    });
 
-    expect(snapshot).toContain("Only me");
-    expect(snapshot).toContain("Only you can open this session.");
-    expect(snapshot).toContain('button "Share with workspace"');
-    expect(snapshot).not.toContain("Private copy");
+    for (const viewport of [
+      { width: 1100, height: 760 },
+      { width: 320, height: 740 },
+    ]) {
+      await tenancyPage.setViewportSize(viewport);
+      await trigger.focus();
+      await trigger.press("Enter");
+      const menu = tenancyPage.getByRole("menu");
+      await menu.waitFor();
+      expect(await menu.textContent()).toContain("Private session");
+      expect(await menu.textContent()).toContain("Only you can open this session.");
+      expect(
+        await menu.getByRole("menuitem", { name: "Share this session with workspace…" }).count(),
+      ).toBe(1);
+      expect(await menu.getByRole("menuitem", { name: "Private copy" }).count()).toBe(0);
+      expect(await menu.getByRole("menuitem", { name: /Fork session/ }).count()).toBe(0);
+      await tenancyPage.keyboard.press("Escape");
+      await menu.waitFor({ state: "hidden" });
+    }
 
-    await page.setViewportSize({ width: 320, height: 740 });
-    expect(await region.getAttribute("class")).toContain("flex-wrap");
-    expect(await surface.getByRole("button", { name: "Share with workspace" }).count()).toBe(1);
-    expect(await surface.getByRole("button", { name: "Private copy" }).count()).toBe(0);
-
-    await page.locator("body").press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Share");
-  });
+    await trigger.press("Enter");
+    await tenancyPage.getByRole("menuitem", { name: "Share this session with workspace…" }).click();
+    const dialog = tenancyPage.getByRole("dialog", {
+      name: "Share this session with Roadmap Personal workspace?",
+    });
+    await dialog.waitFor();
+    expect(await dialog.getByRole("button", { name: "Share with workspace" }).count()).toBe(1);
+    await tenancyPage.keyboard.press("Escape");
+    await tenancyPage.waitForFunction(
+      (element) => element === document.activeElement,
+      await trigger.elementHandle(),
+    );
+  }, 15_000);
 
   test("a suspended membership never labels the workspace Personal", async () => {
     const menuitem = page.locator("#suspended-personal-menuitem");

@@ -758,7 +758,9 @@ function Notice({
           </span>
         ) : null}
         {title ? <p className="font-medium text-og-fg">{title}</p> : null}
-        <div className="leading-5">{children}</div>
+        <div data-contrast-audited className="leading-5">
+          {children}
+        </div>
       </div>
     </div>
   );

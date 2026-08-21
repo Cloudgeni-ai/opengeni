@@ -1,13 +1,27 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import type { Session, SessionEvent, SessionVisibility } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
-import { CopyPlusIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CircleAlertIcon,
+  Loader2Icon,
+  LockKeyholeIcon,
+  UsersIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Notice } from "@/components/ui/notice";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProblemPanel } from "@/components/common";
 import { useAppContext } from "@/context";
 import { isApiErrorStatus } from "@/api";
@@ -30,7 +44,7 @@ import {
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
 
-type Confirmation = { kind: "visibility"; visibility: SessionVisibility } | { kind: "fork" };
+type Confirmation = { kind: "visibility"; visibility: SessionVisibility };
 
 export default function SessionRouteAuxiliary(
   props:
@@ -81,33 +95,31 @@ export function SessionTenancyRouteControl({
     : (workspace?.name ?? "this workspace");
 
   return (
-    <div className="shrink-0 px-4 pt-2 sm:px-6">
-      <SessionTenancyControl
-        key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
-        session={session}
-        events={events}
-        client={context.client}
-        managedSession={
-          context.clientConfig.auth.mode === "managedSession" && context.authSession !== null
-        }
-        scopeLabel={scopeLabel}
-        captureWorkspaceInvocation={context.captureWorkspaceInvocation}
-        ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
-        operationController={sessionTenancyOperationController}
-        operationScope={{
-          principalId: context.accessContext.subjectId,
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          workspaceTransitionRevision: transition.revision,
-        }}
-        onOpenSession={(workspaceId, sessionId) =>
-          void navigate({
-            to: "/workspaces/$workspaceId/sessions/$sessionId",
-            params: { workspaceId, sessionId },
-          })
-        }
-      />
-    </div>
+    <SessionTenancyControl
+      key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
+      session={session}
+      events={events}
+      client={context.client}
+      managedSession={
+        context.clientConfig.auth.mode === "managedSession" && context.authSession !== null
+      }
+      scopeLabel={scopeLabel}
+      captureWorkspaceInvocation={context.captureWorkspaceInvocation}
+      ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
+      operationController={sessionTenancyOperationController}
+      operationScope={{
+        principalId: context.accessContext.subjectId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        workspaceTransitionRevision: transition.revision,
+      }}
+      onOpenSession={(workspaceId, sessionId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId },
+        })
+      }
+    />
   );
 }
 
@@ -121,7 +133,6 @@ export function SessionTenancyControl({
   ownsWorkspaceInvocation,
   operationController,
   operationScope,
-  onOpenSession,
 }: {
   session: Session;
   events?: SessionEvent[] | undefined;
@@ -146,13 +157,13 @@ export function SessionTenancyControl({
   const visibilityEventSequenceRef = useRef(0);
   const operationSnapshot = operationController.snapshot(operationScope);
   const pendingVisibility = operationSnapshot.visibility;
-  const pendingFork = operationSnapshot.fork;
   const [override, setOverride] = useState(session.tenancy);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [, setControllerRevision] = useState(0);
+  const accessTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -411,93 +422,6 @@ export function SessionTenancyControl({
     ],
   );
 
-  const createPrivateFork = useCallback(async (): Promise<boolean> => {
-    if (!displayedTenancy || !mayManage) return true;
-    const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
-    if (!acceptedTransition) return true;
-    const operationSequence = operationSequenceRef.current + 1;
-    operationSequenceRef.current = operationSequence;
-    const attempt = operationController.prepareFork(operationScope, () => crypto.randomUUID());
-    setBusy(true);
-    setFailure(null);
-    let receiptConfirmed = false;
-
-    const invoke = async () =>
-      await runCurrentTransitionInvocation({
-        isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
-        request: async () =>
-          await client.forkSession(target.workspaceId, target.sessionId, {
-            idempotencyKey: attempt.idempotencyKey,
-          }),
-      });
-
-    try {
-      let result;
-      try {
-        result = await invoke();
-      } catch (error) {
-        const classified = classifySessionTenancyFailure(error);
-        if (classified.kind !== "outcome_unknown") throw error;
-        if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-        // The first request may have committed. Repeating the exact key is the
-        // only authoritative reconciliation because the destination id is not
-        // knowable from the source session alone.
-        result = await invoke();
-      }
-      if (result.status === "stale") return true;
-      const fork = result.value;
-      receiptConfirmed = true;
-      if (fork.workspaceId !== target.workspaceId) {
-        throw new Error("The private copy response did not match this workspace.");
-      }
-      const destination = await runCurrentTransitionInvocation({
-        isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
-        request: async () =>
-          await client.getSession(fork.workspaceId, fork.sessionId, { fresh: true }),
-      });
-      if (destination.status === "stale") return true;
-      if (
-        destination.value.workspaceId !== target.workspaceId ||
-        destination.value.tenancy?.visibility !== "private" ||
-        destination.value.tenancy.ownedByCurrentUser !== true
-      ) {
-        throw new Error("The fork is no longer an owned private session in this workspace.");
-      }
-      operationController.settleFork(operationScope, attempt);
-      setAnnouncement("Private copy created in this workspace.");
-      toast.success("Private copy created");
-      onOpenSession(fork.workspaceId, fork.sessionId);
-      return true;
-    } catch (error) {
-      if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-      const classified = classifySessionTenancyFailure(error);
-      if (classified.reconcile && classified.kind !== "outcome_unknown") {
-        await reconcileSource(target, acceptedTransition, operationSequence).catch(() => null);
-      }
-      if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
-      const retainAttempt =
-        classified.retainAttempt ||
-        (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
-      if (!retainAttempt) operationController.settleFork(operationScope, attempt);
-      setFailure(classified.message);
-      setAnnouncement(classified.message);
-      return !retainAttempt;
-    } finally {
-      if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
-    }
-  }, [
-    captureWorkspaceInvocation,
-    client,
-    displayedTenancy,
-    isCurrentInvocation,
-    mayManage,
-    onOpenSession,
-    operationController,
-    operationScope,
-    reconcileSource,
-    target,
-  ]);
-
   if (!displayedTenancy) return null;
 
   const privateSession = displayedTenancy.visibility === "private";
@@ -505,72 +429,90 @@ export function SessionTenancyControl({
   const retryingVisibility =
     pendingVisibility?.visibility === alternateVisibility &&
     pendingVisibility.expectedAuthorityEpoch === displayedTenancy.authorityEpoch;
-  const visibilityAction = privateSession ? "Share with workspace" : "Make private";
+  const visibilityAction = privateSession
+    ? "Share this session with workspace…"
+    : "Limit this session to me…";
   const visibilityConfirmLabel = retryingVisibility
-    ? `Retry ${visibilityAction.toLowerCase()}`
-    : visibilityAction;
+    ? privateSession
+      ? "Retry share with workspace"
+      : "Retry limit to me"
+    : privateSession
+      ? "Share with workspace"
+      : "Limit to me";
+  const stateLabel = privateSession ? "Private" : "Workspace";
+  const stateDescription = privateSession
+    ? "Only you can open this session."
+    : `Visible to people in ${scopeLabel}.`;
+  const stateChip = (
+    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium text-fg pointer-coarse:min-h-11">
+      {privateSession ? (
+        <LockKeyholeIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
+      ) : (
+        <UsersIcon className="size-3.5 shrink-0 text-fg-muted" aria-hidden="true" />
+      )}
+      <span className="hidden sm:inline">{stateLabel}</span>
+      {failure ? <CircleAlertIcon className="size-3.5 text-status-waiting" aria-hidden /> : null}
+      {mayManage ? <ChevronDownIcon className="size-3.5 text-fg-muted" aria-hidden /> : null}
+    </span>
+  );
 
   return (
-    <>
-      <section
-        aria-label="Session access"
-        className="mx-auto mb-1 flex w-full max-w-3xl flex-wrap items-center justify-end gap-1.5 text-sm"
-      >
-        <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 font-medium text-fg">
-          {privateSession ? (
-            <LockKeyholeIcon className="size-4 shrink-0 text-brand" aria-hidden="true" />
-          ) : (
-            <UsersIcon className="size-4 shrink-0 text-fg-muted" aria-hidden="true" />
-          )}
-          <span>{privateSession ? "Only me" : "Workspace"}</span>
-          <span className="sr-only">
-            {privateSession
-              ? "Only you can open this session."
-              : `Visible to people in ${scopeLabel}.`}
-          </span>
-        </span>
+    <TooltipProvider delayDuration={300}>
+      <section aria-label="Session access" className="flex shrink-0 items-center">
         {mayManage ? (
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label={privateSession ? "Share with workspace" : visibilityAction}
-              className="min-h-9 pointer-coarse:min-h-11"
-              disabled={busy}
-              onClick={() =>
-                setConfirmation({ kind: "visibility", visibility: alternateVisibility })
-              }
-            >
-              {busy && confirmation?.kind === "visibility" ? (
-                <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
-              ) : null}
-              {privateSession ? "Share" : visibilityAction}
-            </Button>
-            {!privateSession ? (
-              <Button
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild disabled={busy}>
+              <button
+                ref={accessTriggerRef}
                 type="button"
-                variant="ghost"
-                size="sm"
-                className="min-h-9 pointer-coarse:min-h-11"
-                disabled={busy}
-                onClick={() => setConfirmation({ kind: "fork" })}
+                aria-label={`${stateLabel} session access. Manage session access`}
+                aria-busy={busy}
+                className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {busy && confirmation?.kind === "fork" ? (
-                  <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                {busy ? (
+                  <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium pointer-coarse:min-h-11">
+                    <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                    <span className="hidden sm:inline">Updating</span>
+                  </span>
                 ) : (
-                  <CopyPlusIcon className="size-3.5" />
+                  stateChip
                 )}
-                {pendingFork ? "Retry private copy" : "Private copy"}
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-        {failure ? (
-          <Notice className="basis-full" tone="waiting" title="Access change needs attention">
-            {failure}
-          </Notice>
-        ) : null}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-72">
+              <div className="px-2 py-1.5">
+                <p className="text-sm font-medium">{stateLabel} session</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">{stateDescription}</p>
+              </div>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() =>
+                  setConfirmation({ kind: "visibility", visibility: alternateVisibility })
+                }
+              >
+                {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
+                {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
+              </DropdownMenuItem>
+              {failure ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <div className="px-2 py-1.5 text-xs text-status-waiting">
+                    <span className="font-medium">Access change needs attention.</span> {failure}
+                  </div>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span tabIndex={0} aria-label={`${stateLabel} session access. ${stateDescription}`}>
+                {stateChip}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{stateDescription}</TooltipContent>
+          </Tooltip>
+        )}
         <span className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
         </span>
@@ -582,34 +524,21 @@ export function SessionTenancyControl({
           if (!open) setConfirmation(null);
         }}
         title={
-          confirmation?.kind === "fork"
-            ? "Create a private copy?"
-            : confirmation?.visibility === "workspace"
-              ? `Share this session with ${scopeLabel}?`
-              : "Make this session private?"
+          confirmation?.visibility === "workspace"
+            ? `Share this session with ${scopeLabel}?`
+            : "Limit this session to you?"
         }
         description={
-          confirmation?.kind === "fork"
-            ? "This creates an independent private session in the same workspace. Current work, access grants, connections, and sandbox state stay with the original."
-            : confirmation?.visibility === "workspace"
-              ? "People who can access this workspace will be able to open the session after all current work has settled."
-              : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+          confirmation?.visibility === "workspace"
+            ? "People who can access this workspace will be able to open the session after all current work has settled."
+            : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
         }
-        confirmLabel={
-          confirmation?.kind === "fork"
-            ? pendingFork
-              ? "Retry private copy"
-              : "Create private copy"
-            : visibilityConfirmLabel
-        }
-        destructive={confirmation?.kind !== "fork" && confirmation?.visibility === "workspace"}
+        confirmLabel={visibilityConfirmLabel}
+        destructive={confirmation?.visibility === "workspace"}
         cancelAutoFocus
+        restoreFocusRef={accessTriggerRef}
         onConfirm={() =>
-          confirmation?.kind === "fork"
-            ? createPrivateFork()
-            : confirmation?.kind === "visibility"
-              ? changeVisibility(confirmation.visibility)
-              : true
+          confirmation?.kind === "visibility" ? changeVisibility(confirmation.visibility) : true
         }
       >
         {failure ? (
@@ -618,6 +547,6 @@ export function SessionTenancyControl({
           </Notice>
         ) : null}
       </ConfirmDialog>
-    </>
+    </TooltipProvider>
   );
 }
