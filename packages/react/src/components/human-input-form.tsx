@@ -368,6 +368,7 @@ function HumanInputRequestForm({
                     <QuestionControls
                       question={question}
                       questionNumber={null}
+                      labelledBy={titleId}
                       draft={drafts[question.id] ?? emptyDraft()}
                       fieldId={`${formId}-${index}`}
                       error={validationErrors[question.id]}
@@ -391,6 +392,7 @@ function HumanInputRequestForm({
                   <QuestionControls
                     question={question}
                     questionNumber={index + 1}
+                    labelledBy={undefined}
                     draft={drafts[question.id] ?? emptyDraft()}
                     fieldId={`${formId}-${index}`}
                     error={validationErrors[question.id]}
@@ -455,6 +457,7 @@ function HumanInputRequestForm({
 function QuestionControls({
   question,
   questionNumber,
+  labelledBy,
   draft,
   fieldId,
   error,
@@ -468,6 +471,7 @@ function QuestionControls({
 }: {
   question: HumanInputQuestion;
   questionNumber: number | null;
+  labelledBy: string | undefined;
   draft: HumanInputAnswerDraft;
   fieldId: string;
   error: string | undefined;
@@ -483,7 +487,11 @@ function QuestionControls({
   const helpId = `${fieldId}-help`;
   const labelId = `${fieldId}-label`;
   const promptId = `${fieldId}-prompt`;
+  const otherChoiceId = `${fieldId}-other-choice`;
+  const otherLabelId = `${fieldId}-other-label`;
+  const otherTextId = `${fieldId}-other-text`;
   const visibleLabel = question.label ?? question.prompt;
+  const controlLabelId = showPromptChrome ? labelId : labelledBy;
   const hint =
     question.kind === "multi_select"
       ? messages.selectionHint(
@@ -571,6 +579,7 @@ function QuestionControls({
             }))
           }
           aria-invalid={Boolean(error)}
+          aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
           autoFocus={autoFocus}
           rows={2}
@@ -579,7 +588,7 @@ function QuestionControls({
       ) : (
         <div
           role={question.kind === "single_select" ? "radiogroup" : "group"}
-          aria-labelledby={showPromptChrome ? labelId : undefined}
+          aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
           className="flex flex-col gap-0.5"
         >
@@ -629,7 +638,7 @@ function QuestionControls({
               </label>
             );
           })}
-          <label
+          <div
             className={cn(
               "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
               draft.otherSelected
@@ -638,8 +647,10 @@ function QuestionControls({
             )}
           >
             <input
+              id={otherChoiceId}
               type={question.kind === "single_select" ? "radio" : "checkbox"}
               name={question.kind === "single_select" ? fieldId : undefined}
+              aria-labelledby={otherLabelId}
               checked={draft.otherSelected}
               autoFocus={autoFocus && firstOption && question.options.length === 0}
               onChange={(event) =>
@@ -654,8 +665,18 @@ function QuestionControls({
               className="mt-2 accent-og-accent"
             />
             <span className="min-w-0 flex-1">
-              <span className="block text-og-sm font-medium">{messages.other}</span>
+              <label
+                id={otherLabelId}
+                htmlFor={otherChoiceId}
+                className="block text-og-sm font-medium"
+              >
+                {messages.other}
+              </label>
+              <label htmlFor={otherTextId} className="sr-only">
+                {messages.other} answer for {visibleLabel}
+              </label>
               <input
+                id={otherTextId}
                 type="text"
                 value={draft.other}
                 disabled={!draft.otherSelected || busy}
@@ -669,7 +690,7 @@ function QuestionControls({
                 className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
               />
             </span>
-          </label>
+          </div>
         </div>
       )}
       {error ? (

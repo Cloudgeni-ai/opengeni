@@ -302,10 +302,19 @@ describe("HumanInputForm async host boundary", () => {
     );
     const group = mounted.container.querySelector('[data-human-input-question="environment"]');
     expect(group?.textContent).toContain("Other");
+    const choiceGroup = group?.querySelector('[role="radiogroup"]');
+    const choiceGroupLabelId = choiceGroup?.getAttribute("aria-labelledby");
+    expect(choiceGroupLabelId).toBeTruthy();
+    expect(document.getElementById(choiceGroupLabelId!)?.textContent).toContain(
+      "Where should this run?",
+    );
     const otherInput = group?.querySelector<HTMLInputElement>('input[type="text"]');
     expect(otherInput).not.toBeNull();
     expect(otherInput?.disabled).toBe(true);
-    expect(otherInput?.closest("label")?.textContent).toContain("Other");
+    expect(otherInput?.labels).toHaveLength(1);
+    expect(otherInput?.labels?.[0]?.textContent).toContain(
+      "Other answer for Where should this run?",
+    );
   });
 
   test("supports complete host copy and autofocus", async () => {

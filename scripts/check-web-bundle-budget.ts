@@ -88,8 +88,8 @@ const budgets = {
   // The chat-native structured human-input exchange keeps pending and resolved
   // multi-question decisions in the direct session graph. Combined with the
   // current main graph, the configured macOS/arm64 production build measures
-  // 1,520,528 initial raw / 414,080 initial gzip bytes and 2,111,778 raw /
-  // 588,171 gzip bytes on a direct session load. Advance only those four
+  // 1,520,528 initial raw / 414,073 initial gzip bytes and 2,112,063 raw /
+  // 588,276 gzip bytes on a direct session load. Advance only those four
   // aggregate envelopes to the next whole KiB; all per-file and unrelated
   // graph limits stay fixed.
   initialRaw: 1485 * kib,

@@ -2457,7 +2457,7 @@ function UserMessageRow({
 
 function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   const enter = useEntranceAnimation();
-  const multipleQuestions = item.questions.length > 1;
+  const multipleQuestions = Math.max(item.questions.length, item.answers.length) > 1;
   const questionNumberById = new Map(
     item.questions.map((question, index) => [question.id, index + 1]),
   );

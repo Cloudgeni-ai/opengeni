@@ -143,6 +143,35 @@ describe("structured human-input history", () => {
     expect(r.container.querySelector('[data-human-input-history="request-1"]')).not.toBeNull();
     await r.unmount();
   });
+
+  test("keeps fallback multi-answer labels visible when the request is outside the page", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-before-window",
+            response: {
+              outcome: "answered",
+              answers: [
+                { questionId: "release_channel", values: ["canary"] },
+                { questionId: "verification_plan", values: ["Run the smoke suite"] },
+              ],
+            },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+
+    const history = r.container.querySelector('[data-human-input-history="request-before-window"]');
+    const text = history?.textContent ?? "";
+    expect(text).toMatch(/1\.\s*Release Channel/);
+    expect(text).toContain("canary");
+    expect(text).toMatch(/2\.\s*Verification Plan/);
+    expect(text).toContain("Run the smoke suite");
+    await r.unmount();
+  });
 });
 
 describe("durable generated-video timeline", () => {
