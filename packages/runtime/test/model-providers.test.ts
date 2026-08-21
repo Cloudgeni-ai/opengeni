@@ -41,6 +41,7 @@ import {
   MultiProviderModelProvider,
   resolveTurnModel,
   summarizeForCompaction,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
   vercelGatewayRoutingFetch,
   XaiSubscriptionUnavailableError,
 } from "../src/index";
@@ -1113,6 +1114,165 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     expect(model).not.toBeInstanceOf(OpenAIChatCompletionsModel);
   });
 
+  test("an unknown Chat Completions finish reason fails before response_done", async () => {
+    const streamClient = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async () =>
+        new Response(
+          [
+            `data: ${JSON.stringify({
+              id: "chatcmpl-unknown",
+              object: "chat.completion.chunk",
+              created: 0,
+              model: FIREWORKS_MODEL,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: "assistant", content: "partial" },
+                  finish_reason: null,
+                },
+              ],
+            })}`,
+            `data: ${JSON.stringify({
+              id: "chatcmpl-unknown",
+              object: "chat.completion.chunk",
+              created: 0,
+              model: FIREWORKS_MODEL,
+              choices: [{ index: 0, delta: {}, finish_reason: "unknown" }],
+              usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+            })}`,
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const provider: ResolvedModelProvider = {
+      id: "fireworks",
+      label: "Fireworks AI",
+      kind: "api-key",
+      api: "chat",
+      builtin: false,
+    };
+    const model = buildModelInstance(provider, streamClient, FIREWORKS_MODEL);
+    const events: Array<{ type?: unknown }> = [];
+    let observed: unknown;
+    try {
+      for await (const event of model.getStreamedResponse({
+        input: "test",
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      } as never)) {
+        events.push(event);
+      }
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(events.some((event) => event.type === "response_done")).toBe(false);
+    expect(observed).toMatchObject({ code: UNKNOWN_MODEL_FINISH_REASON_CODE });
+  });
+
+  test("an unknown non-streaming Chat Completions finish reason is not accepted", async () => {
+    const completionClient = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            id: "chatcmpl-unknown",
+            object: "chat.completion",
+            created: 0,
+            model: FIREWORKS_MODEL,
+            choices: [
+              {
+                index: 0,
+                finish_reason: "unknown",
+                message: { role: "assistant", content: "partial" },
+              },
+            ],
+            usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    const provider: ResolvedModelProvider = {
+      id: "fireworks",
+      label: "Fireworks AI",
+      kind: "api-key",
+      api: "chat",
+      builtin: false,
+    };
+    const model = buildModelInstance(provider, completionClient, FIREWORKS_MODEL);
+
+    await expect(
+      getOrCreateTrace(() =>
+        model.getResponse({
+          input: "test",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never),
+      ),
+    ).rejects.toMatchObject({ code: UNKNOWN_MODEL_FINISH_REASON_CODE });
+  });
+
+  test("a normal Chat Completions stop still produces response_done", async () => {
+    const streamClient = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async () =>
+        new Response(
+          [
+            `data: ${JSON.stringify({
+              id: "chatcmpl-stop",
+              object: "chat.completion.chunk",
+              created: 0,
+              model: FIREWORKS_MODEL,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: "assistant", content: "complete" },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+            })}`,
+            "data: [DONE]",
+            "",
+          ].join("\n\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const provider: ResolvedModelProvider = {
+      id: "fireworks",
+      label: "Fireworks AI",
+      kind: "api-key",
+      api: "chat",
+      builtin: false,
+    };
+    const model = buildModelInstance(provider, streamClient, FIREWORKS_MODEL);
+    const events: Array<{ type?: unknown }> = [];
+    for await (const event of model.getStreamedResponse({
+      input: "test",
+      modelSettings: {},
+      tools: [],
+      handoffs: [],
+      outputType: "text",
+      tracing: false,
+    } as never)) {
+      events.push(event);
+    }
+
+    expect(events.filter((event) => event.type === "response_done")).toHaveLength(1);
+  });
+
   test("normalizes a subscription request at the owned object stage and strips internal handoff headers", async () => {
     let capturedBody: Record<string, unknown> | null = null;
     let capturedHeaders = new Headers();
@@ -1528,6 +1688,65 @@ describe("buildProviderClient", () => {
     expect(client.maxRetries).toBe(settings.openaiMaxRetries);
     // One client per provider id (module-level cache).
     expect(buildProviderClient(provider, settings)).toBe(client);
+  });
+
+  test("an anonymous provider sends no authentication or ambient OpenAI identity headers", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedHeaders = new Headers();
+    globalThis.fetch = (async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl-anonymous-test",
+          object: "chat.completion",
+          created: 0,
+          model: "x-preview-f-free",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: "ok" },
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const settings = multiProviderSettings();
+      const provider: ResolvedModelProvider = {
+        id: "anonymous-provider-header-test",
+        label: "Anonymous provider",
+        kind: "anonymous",
+        api: "chat",
+        builtin: false,
+        baseUrl: "https://public.example/v1",
+        defaultHeaders: {
+          Authorization: "Bearer must-not-leak",
+          "Api-Key": "must-not-leak",
+          "X-Api-Key": "must-not-leak",
+          "OpenAI-Organization": "must-not-leak",
+          "OpenAI-Project": "must-not-leak",
+        },
+        credentialSource: { kind: "deployment", mechanism: "none" },
+        billing: { upstreamPayer: "deployment", metering: "external" },
+      };
+      const client = buildProviderClient(provider, settings);
+      await client.chat.completions.create({
+        model: "x-preview-f-free",
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+      expect(capturedHeaders.get("authorization")).toBeNull();
+      expect(capturedHeaders.get("api-key")).toBeNull();
+      expect(capturedHeaders.get("x-api-key")).toBeNull();
+      expect(capturedHeaders.get("openai-organization")).toBeNull();
+      expect(capturedHeaders.get("openai-project")).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("Codex disables blind SDK retries and leaves timeout ownership to its transport", () => {

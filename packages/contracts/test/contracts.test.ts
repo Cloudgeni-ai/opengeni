@@ -1389,6 +1389,21 @@ describe("contracts", () => {
     expect(without.shortLabel).toBeUndefined();
   });
 
+  test("accepts an externally metered model with no deployment credential", () => {
+    const model = ClientModel.parse({
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      source: "external",
+      api: "chat",
+      credentialSource: { kind: "deployment", mechanism: "none" },
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    expect(model.source).toBe("external");
+    expect(model.credentialSource).toEqual({ kind: "deployment", mechanism: "none" });
+  });
+
   test("accepts additive normalized model definitions and authenticated availability", () => {
     const normalized = ClientModel.parse({
       id: "xai/grok-4.5",

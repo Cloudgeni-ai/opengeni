@@ -348,7 +348,10 @@ export {
 export {
   CodexSubscriptionUnavailableError,
   MultiProviderModelProvider,
+  OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
+  UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,

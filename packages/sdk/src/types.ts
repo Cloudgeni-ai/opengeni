@@ -2814,7 +2814,7 @@ export type ModelCapabilitiesV1 = {
 };
 
 export type ModelCredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
@@ -2855,7 +2855,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
-  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | undefined;
+  source?: "opengeni" | "external" | "codex" | "supergrok" | "workspace_gateway" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;

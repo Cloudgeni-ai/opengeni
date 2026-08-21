@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
+  advancedSourceSummary,
   billingClassForModel,
   coerceReasoningEffortForModel,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
+  payerSummaryForModel,
   projectPickerRows,
 } from "../src/model-policy";
 
@@ -72,6 +74,23 @@ describe("model-policy", () => {
       }),
     ]);
     expect(rows[0]).toMatchObject({ billingClass: "byok", billingClassLabel: "Your Gateway" });
+  });
+
+  test("labels an anonymous deployment route as External", () => {
+    const model = catalogModel({
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      source: "external",
+      credentialSource: { kind: "deployment", mechanism: "none" },
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    expect(billingClassForModel(model)).toBe("external");
+    expect(projectPickerRows([model])[0]).toMatchObject({
+      billingClass: "external",
+      billingClassLabel: "External",
+    });
+    expect(advancedSourceSummary(model)).toBe("Deployment route · no authentication");
+    expect(payerSummaryForModel(model)).toBe("External provider · no OpenGeni credits");
   });
 
   test("projects curated shortLabel into picker rows", () => {

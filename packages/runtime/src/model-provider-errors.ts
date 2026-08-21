@@ -7,6 +7,24 @@ export class WorkspaceGatewayUnavailableError extends Error {
   }
 }
 
+export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
+
+/**
+ * A Chat Completions provider emitted a syntactically valid terminal chunk but
+ * labelled the stop reason as unknown. Treating that as ordinary completion can
+ * commit a truncated answer. The model adapter throws before `response_done`,
+ * so tools are not executed and the worker can recover the same accepted turn
+ * from durable history instead of accepting ambiguous output as final.
+ */
+export class UnknownModelFinishReasonError extends Error {
+  readonly code = UNKNOWN_MODEL_FINISH_REASON_CODE;
+
+  constructor() {
+    super("The model provider ended its response with an unknown finish reason");
+    this.name = "UnknownModelFinishReasonError";
+  }
+}
+
 /**
  * A `codex/<slug>` turn reached the model router but the workspace has no active
  * Codex subscription connected (the worker overlay never injected the synthetic

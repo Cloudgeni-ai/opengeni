@@ -37,21 +37,25 @@ export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 /** Static, client-safe definition projection. No provider secret is reachable. */
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const source =
-    model.credentialSource.kind === "connected_subscription"
-      ? model.credentialSource.provider === "xai"
-        ? "supergrok"
-        : "codex"
-      : model.credentialSource.kind === "workspace_connection"
-        ? "workspace_gateway"
-        : "opengeni";
+    model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none"
+      ? "external"
+      : model.credentialSource.kind === "connected_subscription"
+        ? model.credentialSource.provider === "xai"
+          ? "supergrok"
+          : "codex"
+        : model.credentialSource.kind === "workspace_connection"
+          ? "workspace_gateway"
+          : "opengeni";
   const publicProvider =
-    source === "codex"
-      ? { provider: "codex", providerLabel: "Codex" }
-      : source === "supergrok"
-        ? { provider: "supergrok", providerLabel: "SuperGrok" }
-        : source === "workspace_gateway"
-          ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-          : { provider: "opengeni", providerLabel: "OpenGeni" };
+    source === "external"
+      ? { provider: model.providerId, providerLabel: model.providerLabel }
+      : source === "codex"
+        ? { provider: "codex", providerLabel: "Codex" }
+        : source === "supergrok"
+          ? { provider: "supergrok", providerLabel: "SuperGrok" }
+          : source === "workspace_gateway"
+            ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+            : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
@@ -164,6 +168,9 @@ function credentialReadinessFor(input: {
           basis: "connection",
           checkedAt: null,
         };
+  }
+  if (source.kind === "deployment" && source.mechanism === "none") {
+    return { status: "ready", reason: null, basis: "configuration", checkedAt: null };
   }
   if (source.kind === "deployment" && source.mechanism === "api_key") {
     return input.provider?.apiKey

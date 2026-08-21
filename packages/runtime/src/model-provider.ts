@@ -12,6 +12,8 @@ import { MultiProviderModelProvider } from "./model-provider-routing";
 
 export {
   CodexSubscriptionUnavailableError,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
+  UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
@@ -30,6 +32,7 @@ export {
 export { vercelGatewayRoutingFetch } from "./model-provider-transport";
 export {
   MultiProviderModelProvider,
+  OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
   buildModelInstance,
   resolveTurnModel,

@@ -83,6 +83,19 @@ export function buildOpenAIClientFromSettings(
  */
 const providerClientCache = new Map<string, OpenAI>();
 
+function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    headers.delete("authorization");
+    headers.delete("api-key");
+    headers.delete("x-api-key");
+    headers.delete("openai-organization");
+    headers.delete("openai-project");
+    return await inner(input, { ...init, headers });
+  }) as typeof fetch;
+}
+
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
@@ -93,6 +106,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   if (workspaceGateway && !provider.apiKey) {
     throw new WorkspaceGatewayUnavailableError();
   }
+  const anonymousProvider = provider.kind === "anonymous";
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -140,19 +154,34 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
           // is passed straight through here rather than re-resolved.
           new ReplayableJsonOpenAI(
             {
-              ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+              ...(anonymousProvider
+                ? {
+                    // The OpenAI SDK requires a constructor credential. It must
+                    // never reach the wire for an explicitly anonymous provider.
+                    apiKey: "opengeni-anonymous-provider",
+                    adminAPIKey: null,
+                    organization: null,
+                    project: null,
+                  }
+                : provider.apiKey
+                  ? { apiKey: provider.apiKey }
+                  : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
               // Gateway routing is deliberately fail-closed. Avoid SDK replay after
               // a request may have reached the one pinned endpoint.
               maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-              fetch: gatewayProvider
-                ? vercelGatewayRoutingFetch(
-                    provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+              fetch: anonymousProvider
+                ? withoutAuthenticationHeaders(
                     instrumentedModelFetch(provider.id, globalThis.fetch),
                   )
-                : instrumentedModelFetch(provider.id, globalThis.fetch),
+                : gatewayProvider
+                  ? vercelGatewayRoutingFetch(
+                      provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                      instrumentedModelFetch(provider.id, globalThis.fetch),
+                    )
+                  : instrumentedModelFetch(provider.id, globalThis.fetch),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
           );

@@ -2,6 +2,7 @@ import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@
 
 export type PickerBillingClass =
   | "opengeni_credits"
+  | "external"
   | "codex_subscription"
   | "supergrok_subscription"
   | "byok";
@@ -24,6 +25,7 @@ export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_ORDER: PickerBillingClass[] = [
   "opengeni_credits",
+  "external",
   "codex_subscription",
   "supergrok_subscription",
   "byok",
@@ -31,6 +33,7 @@ const BILLING_CLASS_ORDER: PickerBillingClass[] = [
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
+  external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
   byok: "Your Gateway",
@@ -47,6 +50,12 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (
+    model.source === "external" ||
+    (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment")
+  ) {
+    return "external";
+  }
   if (model.source === "supergrok") {
     return "supergrok_subscription";
   }
@@ -153,7 +162,7 @@ export function payerSummaryForModel(model: ClientModel): string {
   if (billing.upstreamPayer === "workspace") {
     return "Billed to your AI Gateway";
   }
-  return "Deployment route · external billing";
+  return "External provider · no OpenGeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
@@ -170,8 +179,11 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     return "Workspace AI Gateway";
   }
   if (source.kind === "deployment") {
-    return source.mechanism === "azure_ad_bearer"
-      ? "Deployment Azure identity"
+    if (source.mechanism === "azure_ad_bearer") {
+      return "Deployment Azure identity";
+    }
+    return source.mechanism === "none"
+      ? "Deployment route · no authentication"
       : "Deployment API key";
   }
   return null;

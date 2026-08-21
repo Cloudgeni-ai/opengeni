@@ -6,6 +6,47 @@ import { testSettings } from "@opengeni/testing";
 import { buildWorkspaceModelCatalog } from "../src/model-catalog";
 
 describe("workspace model catalog availability", () => {
+  test("projects anonymous providers as ready external routes", () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: false,
+      modelProvidersJson: JSON.stringify([
+        {
+          kind: "anonymous",
+          id: "opencode-zen",
+          label: "OpenCode Zen",
+          api: "chat",
+          baseUrl: "https://opencode.ai/zen/v1",
+          models: [
+            {
+              id: "opencode/x-preview-f-free",
+              upstreamModelId: "x-preview-f-free",
+              label: "OpenCode Ox Alpha",
+            },
+          ],
+        },
+      ]),
+    });
+    const model = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+    }).models.find((candidate) => candidate.id === "opencode/x-preview-f-free")!;
+
+    expect(model).toMatchObject({
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      source: "external",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      credentialReadiness: {
+        status: "ready",
+        reason: null,
+        basis: "configuration",
+        checkedAt: null,
+      },
+      availability: { status: "unknown", selectable: true, reason: null },
+    });
+  });
+
   test("SuperGrok definitions use a distinct public rail and workspace readiness", () => {
     const settings = testSettings({ supergrokSubscriptionEnabled: true });
     const unavailable = buildWorkspaceModelCatalog({
