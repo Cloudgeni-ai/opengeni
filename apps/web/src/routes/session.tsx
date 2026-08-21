@@ -271,6 +271,7 @@ export function SessionRoute({
     sessionEventFeedStore,
   } = context;
   const acknowledgedProjectionRef = useRef<string | null>(null);
+  const retriedProjectionRef = useRef<string | null>(null);
   const [foreground, setForeground] = useState(() => ({
     documentVisible: document.visibilityState === "visible",
     windowFocused: document.hasFocus(),
@@ -347,13 +348,16 @@ export function SessionRoute({
           );
         })
         .catch(() => {
-          // A foreground/focus transition or the next durable event can retry.
-          // Reading a chat should never interrupt the user with an error.
+          // Retry one transient failure for this exact frontier. Keeping the
+          // receipt after the second failure prevents a permanent 4xx/5xx from
+          // becoming an unbounded request and log loop.
           if (
             !cancelled &&
             ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
-            acknowledgedProjectionRef.current === projectionKey
+            acknowledgedProjectionRef.current === projectionKey &&
+            retriedProjectionRef.current !== projectionKey
           ) {
+            retriedProjectionRef.current = projectionKey;
             acknowledgedProjectionRef.current = null;
             setAttentionRetryRevision((revision) => revision + 1);
           }

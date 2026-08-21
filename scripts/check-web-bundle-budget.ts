@@ -64,7 +64,7 @@ const budgets = {
   // Foreground read reconciliation now follows each active chat's durable
   // event frontier and composes with the landed same-tab rail projection. The
   // exact configured production graph measures 1,499,526 initial raw bytes and
-  // 2,083,190 direct-session raw bytes on macOS/arm64; their next whole-KiB
+  // 2,083,239 direct-session raw bytes on macOS/arm64; their next whole-KiB
   // envelopes are 1,465 and 2,035 KiB. Every gzip, file, lazy, and CSS cap
   // remains unchanged.
   initialRaw: 1465 * kib,
