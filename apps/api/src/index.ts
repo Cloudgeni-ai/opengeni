@@ -294,6 +294,7 @@ export async function startApi() {
   // strategy.
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
+    max: 32,
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
