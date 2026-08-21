@@ -25,9 +25,8 @@ describe("production session rail delivery attention", () => {
 
     const existingOuterClass = rendered.container.firstElementChild?.className;
     const existingGridClass = rendered.container.firstElementChild?.firstElementChild?.className;
-    const existingSlotClass = rendered.container.firstElementChild?.firstElementChild?.children.item(
-      1,
-    )?.className;
+    const existingSlotClass =
+      rendered.container.firstElementChild?.firstElementChild?.children.item(1)?.className;
 
     const sendFailed: RailAggregateStatus = {
       kind: "send_failed",
