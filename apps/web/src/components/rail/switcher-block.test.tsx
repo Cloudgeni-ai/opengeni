@@ -21,11 +21,12 @@ const workspace = {
 } as Workspace;
 
 describe("WorkspaceSwitcherTrigger", () => {
-  test("forwards the Radix asChild ref onto the native button", async () => {
+  test("forwards the Radix asChild ref and rest handlers onto the native button", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
     const ref: RefObject<HTMLButtonElement | null> = createRef();
+    let pointerDown = 0;
     await act(async () => {
       root.render(
         <WorkspaceSwitcherTrigger
@@ -34,11 +35,16 @@ describe("WorkspaceSwitcherTrigger", () => {
           activeOrganizationLabel="Org 049d0b24"
           personal={false}
           collapsed={false}
+          onPointerDown={() => {
+            pointerDown += 1;
+          }}
         />,
       );
     });
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
     expect(ref.current?.getAttribute("aria-label")).toContain("Switch workspace");
+    ref.current?.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(pointerDown).toBe(1);
     await act(async () => {
       root.unmount();
     });

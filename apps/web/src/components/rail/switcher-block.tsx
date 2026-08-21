@@ -14,7 +14,7 @@ import {
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
-import { forwardRef, useState, type ReactNode } from "react";
+import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
@@ -306,46 +306,47 @@ export const WorkspaceSwitcherTrigger = forwardRef<
     activeOrganizationLabel: string;
     personal: boolean;
     collapsed: boolean;
-  }
->(function WorkspaceSwitcherTrigger(props, ref) {
-  const workspaceLabel =
-    props.activeWorkspace?.name ?? (props.collapsed ? "switch workspace" : "none");
-  const accessibleLabel = `${props.activeOrganizationLabel}. ${
-    props.personal ? "Personal workspace" : "Workspace"
+  } & ButtonHTMLAttributes<HTMLButtonElement>
+>(function WorkspaceSwitcherTrigger(
+  { activeWorkspace, activeOrganizationLabel, personal, collapsed, ...rest },
+  ref,
+) {
+  const workspaceLabel = activeWorkspace?.name ?? (collapsed ? "switch workspace" : "none");
+  const accessibleLabel = `${activeOrganizationLabel}. ${
+    personal ? "Personal workspace" : "Workspace"
   }: ${workspaceLabel}. Switch workspace`;
 
-  if (props.collapsed) {
+  if (collapsed) {
     return (
       <button
-        ref={ref}
         type="button"
         aria-label={accessibleLabel}
         className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+        {...rest}
+        ref={ref}
       >
-        {workspaceInitial(props.activeWorkspace)}
+        {workspaceInitial(activeWorkspace)}
       </button>
     );
   }
 
   return (
     <button
-      ref={ref}
       type="button"
       aria-label={accessibleLabel}
       className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
+      {...rest}
+      ref={ref}
     >
       <Avatar size="sm" className="rounded-md">
         <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-          {workspaceInitial(props.activeWorkspace)}
+          {workspaceInitial(activeWorkspace)}
         </AvatarFallback>
       </Avatar>
-      <span
-        className="min-w-0 flex-1 truncate text-sm font-medium"
-        title={props.activeWorkspace?.name}
-      >
-        {props.activeWorkspace?.name ?? "Select workspace"}
+      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
+        {activeWorkspace?.name ?? "Select workspace"}
       </span>
-      {props.personal ? <PersonalWorkspaceBadge decorative /> : null}
+      {personal ? <PersonalWorkspaceBadge decorative /> : null}
       <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
     </button>
   );
