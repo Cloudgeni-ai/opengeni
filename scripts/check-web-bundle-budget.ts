@@ -61,7 +61,13 @@ const budgets = {
   // 2,081,360 raw / 578,755 gzip bytes on a direct session load on
   // macOS/arm64. Only these three graph envelopes advance to the next whole
   // KiB; file, lazy, CSS, and all other caps remain unchanged.
-  initialRaw: 1464 * kib,
+  // Foreground read reconciliation now follows each active chat's durable
+  // event frontier and composes with the landed same-tab rail projection. The
+  // exact configured production graph measures 1,499,526 initial raw bytes and
+  // 2,083,190 direct-session raw bytes on macOS/arm64; their next whole-KiB
+  // envelopes are 1,465 and 2,035 KiB. Every gzip, file, lazy, and CSS cap
+  // remains unchanged.
+  initialRaw: 1465 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -69,18 +75,13 @@ const budgets = {
   // next full-KiB envelope is 2,030 KiB (2,078,720 bytes). The 1,450 KiB
   // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
   // graph and per-file cap, stay fixed.
-  // Foreground read reconciliation now follows each active chat's durable
-  // event frontier instead of acknowledging only its first render. The exact
-  // configured production graph measures 2,082,545 raw bytes on macOS/arm64;
-  // its next whole-KiB envelope is 2,034 KiB. Every gzip, file, lazy, initial,
-  // and CSS cap remains unchanged.
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2034 * kib,
+  directSessionRaw: 2035 * kib,
   directSessionGzip: 566 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

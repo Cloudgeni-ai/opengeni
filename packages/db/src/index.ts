@@ -28293,9 +28293,9 @@ export async function setSessionPin(
 }
 
 /**
- * Idempotently update one member's explicit follow-up state. Opening a route is
- * intentionally absent from this protocol: acknowledgment is a deliberate
- * action, and the next durable session event makes the session unread again.
+ * Idempotently update one member's explicit follow-up state. Route reads remain
+ * side-effect free: a foreground client acknowledges its exact rendered event
+ * frontier through this mutation, and later durable events remain unread.
  */
 export async function setSessionAttention(
   db: Database,

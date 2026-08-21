@@ -146,14 +146,33 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         "Unread active chat",
       );
       const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
+      let acknowledgementAttempts = 0;
+      await page.route(`**${attentionPath}`, async (route) => {
+        acknowledgementAttempts += 1;
+        if (acknowledgementAttempts === 1) {
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ message: "transient acknowledgement failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
       const firstAcknowledgement = page.waitForResponse(
         (response) =>
           response.request().method() === "PUT" &&
-          new URL(response.url()).pathname === attentionPath,
+          new URL(response.url()).pathname === attentionPath &&
+          response.status() === 200,
         { timeout: 10_000 },
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
-      expect((await firstAcknowledgement).status()).toBe(200);
+      const firstAcknowledgementResponse = await firstAcknowledgement;
+      const firstReadThrough = Number(
+        firstAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence,
+      );
+      expect(acknowledgementAttempts).toBeGreaterThanOrEqual(2);
+      expect(Number.isSafeInteger(firstReadThrough)).toBe(true);
       // Let every initial tail/load projection settle so the next mutation can
       // only be caused by the event appended below, not by a second initial
       // render of the same chat.
@@ -188,7 +207,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
       );
       expect(sendResponse).toEqual({ status: 202, body: expect.any(String) });
-      expect((await laterAcknowledgement).status()).toBe(200);
+      const laterAcknowledgementResponse = await laterAcknowledgement;
+      expect(laterAcknowledgementResponse.status()).toBe(200);
+      expect(
+        Number(laterAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence),
+      ).toBeGreaterThan(firstReadThrough);
       await page
         .locator(`a[data-session-row="${target.id}"]`)
         .waitFor({ state: "visible", timeout: 10_000 });
