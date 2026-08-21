@@ -70,9 +70,9 @@ state never needs to cross onto the UI thread.
 Run from this directory:
 
 ```sh
-cargo test --locked --features noop
-cargo clippy --locked --all-targets --features noop -- -D warnings
-cargo build --locked --release
+bun ../../../../../scripts/artifact-kernel-rust.ts cargo test --locked --features noop
+bun ../../../../../scripts/artifact-kernel-rust.ts cargo clippy --locked --all-targets --features noop -- -D warnings
+bun ../../../../../scripts/artifact-kernel-rust.ts cargo build --locked --release
 ```
 
 Then package/rename the native library as a `.node` addon and run the real Bun

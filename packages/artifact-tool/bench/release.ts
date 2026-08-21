@@ -16,6 +16,7 @@ if (process.env.OPENGENI_ARTIFACT_BENCH_PINNED !== "1") {
 
 const packageDirectory = resolve(import.meta.dir, "..");
 const kernelDirectory = resolve(packageDirectory, "kernel");
+const rustRunner = resolve(packageDirectory, "../../scripts/artifact-kernel-rust.ts");
 const budgets = await loadBudgets();
 const platformEvidence = await Bun.file(
   new URL("./platform-evidence.json", import.meta.url),
@@ -25,27 +26,47 @@ const measurements: JsonRecord[] = [];
 
 try {
   measurements.push(
-    ...(await runJsonLines(["cargo", "bench", "--bench", "kernel"], kernelDirectory, {
-      OPENGENI_ARTIFACT_BENCH_DEEP: "1",
-      OPENGENI_ARTIFACT_BENCH_FILTER: "core",
-    })),
+    ...(await runJsonLines(
+      ["bun", rustRunner, "cargo", "bench", "--bench", "kernel"],
+      kernelDirectory,
+      {
+        OPENGENI_ARTIFACT_BENCH_DEEP: "1",
+        OPENGENI_ARTIFACT_BENCH_FILTER: "core",
+      },
+    )),
   );
   for (const filter of ["sparse", "dense", "collaboration"]) {
     measurements.push(
-      ...(await runJsonLines(["cargo", "bench", "--bench", "kernel"], kernelDirectory, {
-        OPENGENI_ARTIFACT_BENCH_DEEP: "1",
-        OPENGENI_ARTIFACT_BENCH_FILTER: filter,
-      })),
+      ...(await runJsonLines(
+        ["bun", rustRunner, "cargo", "bench", "--bench", "kernel"],
+        kernelDirectory,
+        {
+          OPENGENI_ARTIFACT_BENCH_DEEP: "1",
+          OPENGENI_ARTIFACT_BENCH_FILTER: filter,
+        },
+      )),
     );
   }
   measurements.push(
     ...(await runJsonLines(
-      ["cargo", "bench", "--manifest-path", "bindings/protocol/Cargo.toml", "--bench", "session"],
+      [
+        "bun",
+        rustRunner,
+        "cargo",
+        "bench",
+        "--manifest-path",
+        "bindings/protocol/Cargo.toml",
+        "--bench",
+        "session",
+      ],
       kernelDirectory,
     )),
   );
   measurements.push(
-    ...(await runJsonLines(["cargo", "bench", "--bench", "formula"], kernelDirectory)),
+    ...(await runJsonLines(
+      ["bun", rustRunner, "cargo", "bench", "--bench", "formula"],
+      kernelDirectory,
+    )),
   );
 
   const wasmDirectory = resolve(kernelDirectory, "bindings/wasm");

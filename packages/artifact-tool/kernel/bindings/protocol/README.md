@@ -44,7 +44,7 @@ unbounded worker stall; a future kernel-maintained bounds index can raise this
 without changing the wire format.
 
 ```bash
-cargo test --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml
-cargo clippy --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml --all-targets -- -D warnings
-cargo bench --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml --bench session
+bun scripts/artifact-kernel-rust.ts cargo test --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml
+bun scripts/artifact-kernel-rust.ts cargo clippy --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml --all-targets -- -D warnings
+bun scripts/artifact-kernel-rust.ts cargo bench --locked --manifest-path packages/artifact-tool/kernel/bindings/protocol/Cargo.toml --bench session
 ```

@@ -929,10 +929,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Install pinned artifact-kernel build toolchain
-        working-directory: packages/artifact-tool/kernel
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup show active-toolchain
+        run: bun scripts/artifact-kernel-rust.ts ensure
 
       - name: Production native artifact contracts
         env:
