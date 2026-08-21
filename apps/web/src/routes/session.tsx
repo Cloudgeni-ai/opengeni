@@ -619,6 +619,7 @@ export function SessionRoute({
   useEffect(() => {
     setSandboxFileRequest(null);
   }, [sessionId]);
+  const setInspectorOpen = context.setInspectorOpen;
   const openSandboxFileAtLine = useCallback(
     (path: string, line: number) => {
       sandboxFileRequestSeq.current += 1;
@@ -627,9 +628,9 @@ export function SessionRoute({
         line,
         requestId: sandboxFileRequestSeq.current,
       });
-      context.setInspectorOpen(true);
+      setInspectorOpen(true);
     },
-    [context.setInspectorOpen],
+    [setInspectorOpen],
   );
 
   if (!session) {
@@ -1035,15 +1036,16 @@ function SessionChatPane(props: {
     },
     [context.client, props.session.id, props.session.workspaceId],
   );
+  const onOpenSandboxFile = props.onOpenSandboxFile;
   const handleSandboxFile = useCallback(
     async (path: string, line?: number) => {
       if (line != null && line > 0) {
-        props.onOpenSandboxFile(path, line);
+        onOpenSandboxFile(path, line);
         return;
       }
       await downloadSandboxFile(path);
     },
-    [downloadSandboxFile, props.onOpenSandboxFile],
+    [downloadSandboxFile, onOpenSandboxFile],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {

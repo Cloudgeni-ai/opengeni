@@ -511,12 +511,9 @@ function LineNumberedFile({
               data-opengeni-file-line={lineNumber}
               {...(focused ? { "data-opengeni-focus-line": "" } : {})}
               aria-current={focused ? "location" : undefined}
-              className={cn(
-                "flex gap-3 px-2 py-0.5 leading-6",
-                focused && "bg-og-accent-soft ring-1 ring-inset ring-og-accent/50",
-              )}
+              className={cn("flex gap-3 px-2 py-0.5 leading-6", focused && "bg-og-accent-soft")}
             >
-              <span className="w-10 shrink-0 select-none text-right tabular-nums text-og-fg-subtle">
+              <span className="w-11 shrink-0 select-none text-right tabular-nums text-og-fg-subtle">
                 {lineNumber}
               </span>
               <pre className="min-w-0 flex-1 whitespace-pre-wrap break-words">{text || " "}</pre>
