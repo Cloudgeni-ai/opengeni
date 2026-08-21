@@ -2141,7 +2141,7 @@ export function buildOpenGeniAgent(
       : agentTool({
           name: HUMAN_INPUT_TOOL_NAME,
           description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
           parameters: RequestHumanInputToolInput,
           needsApproval: true,
           inputGuardrails: [

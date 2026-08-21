@@ -1596,6 +1596,21 @@ function SessionChatPane(props: {
               loadingOldest={props.loadingOldest}
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
+              trailingState={
+                props.humanInput.requests.length > 0 &&
+                props.session.status === "requires_action" ? (
+                  <div className="pb-1" data-human-input-timeline-surface="">
+                    <HumanInputSurface
+                      requests={props.humanInput.requests}
+                      respondingRequestId={props.humanInput.respondingRequestId}
+                      error={props.humanInput.mutationError?.message}
+                      onSubmit={(requestId, response) =>
+                        props.humanInput.respond(requestId, response).then(() => undefined)
+                      }
+                    />
+                  </div>
+                ) : undefined
+              }
               emptyState={
                 props.queue.stoppingPreviousAttempt ? (
                   <EmptyState
@@ -1688,23 +1703,6 @@ function SessionChatPane(props: {
               );
             })}
           </div>
-        </div>
-      ) : null}
-
-      {/* Structured questions are tool output, not approvals: answer/skip
-          resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger.
-          Parallel requests step one-at-a-time inside HumanInputSurface. */}
-      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
-          <HumanInputSurface
-            requests={props.humanInput.requests}
-            respondingRequestId={props.humanInput.respondingRequestId}
-            error={props.humanInput.mutationError?.message}
-            onSubmit={(requestId, response) =>
-              props.humanInput.respond(requestId, response).then(() => undefined)
-            }
-          />
         </div>
       ) : null}
 

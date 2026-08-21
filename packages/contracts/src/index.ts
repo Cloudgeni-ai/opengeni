@@ -12724,6 +12724,9 @@ export const HumanInputQuestion = z
     helpText: z.string().max(2048).nullable().optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
+    // Retained on the wire for older hosts. OpenGeni's stock runtime and
+    // surfaces always expose Other for choice questions, including requests
+    // that were persisted before that became the default behavior.
     allowOther: z.boolean().default(false),
     // Selection bounds only — agents invent useless text char mins/maxes.
     // Answer strings stay platform-capped on HumanInputAnswer (~8192).

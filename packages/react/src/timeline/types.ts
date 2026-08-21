@@ -1,4 +1,6 @@
 import type {
+  HumanInputQuestion,
+  HumanInputResponse,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
@@ -56,6 +58,29 @@ export type UserMessageItem = {
         onRemove?: (() => void) | undefined;
       }
     | undefined;
+};
+
+export type HumanInputAnswerSummary = {
+  questionId: string;
+  label: string;
+  prompt: string;
+  values: string[];
+};
+
+/**
+ * One resolved structured question in the conversation. The live pending form
+ * is rendered at the timeline tip by the host; after settlement this item keeps
+ * both the agent's question and the human's answer visible as chat history.
+ */
+export type HumanInputItem = {
+  kind: "human-input";
+  id: string;
+  turnId: string | null;
+  requestId: string;
+  questions: HumanInputQuestion[];
+  response: HumanInputResponse;
+  answers: HumanInputAnswerSummary[];
+  occurredAt: string;
 };
 
 export type AgentMessageItem = {
@@ -407,6 +432,7 @@ export type TurnEndItem = {
 
 export type TimelineItem =
   | UserMessageItem
+  | HumanInputItem
   | AgentMessageItem
   | ReasoningItem
   | ToolCallItem

@@ -1439,6 +1439,7 @@ describe("session realtime ledger", () => {
     });
     expect(question?.text).toContain("<prompt>Which environment should I deploy to?</prompt>");
     expect(question?.text).toContain("<label>Staging</label>");
+    expect(question?.text).toContain("<allow_other>true</allow_other>");
     expect(question?.text).toContain("delegate exactly once");
     expect(question?.text).not.toContain("Steer");
   });

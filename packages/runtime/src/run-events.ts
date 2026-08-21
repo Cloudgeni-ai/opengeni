@@ -670,9 +670,17 @@ export function serializeHumanInputRequests(
       if (!toolCallId) {
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
+      const input = RequestHumanInputToolInput.parse(interruptionArguments(item));
       return {
         toolCallId,
-        input: RequestHumanInputToolInput.parse(interruptionArguments(item)),
+        input: {
+          ...input,
+          questions: input.questions.map((question) =>
+            question.kind === "text" || question.allowOther
+              ? question
+              : { ...question, allowOther: true },
+          ),
+        },
       };
     });
 }
