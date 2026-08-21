@@ -162,6 +162,11 @@ maintain an independent request state machine: access control stays at the
 host/OpenGeni API boundary, while the OpenGeni row, turn checkpoint, workflow
 timer, and response event remain the durable truth.
 
+After an answered response is accepted, the React timeline projects its values
+as a normal human-authored message outside the collapsed activity rail. When the
+matching request event is available, question and option labels replace their
+wire ids; a readable id-based fallback keeps paginated history understandable.
+
 ## Acceptance boundary
 
 Structured input counts as supported only when the contracts, persisted owner,

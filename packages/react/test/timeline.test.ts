@@ -847,6 +847,93 @@ describe("buildTimeline", () => {
     expect(message.tools).toEqual([]);
   });
 
+  test("projects answered structured input as a visible user message", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.humanInput.requested", {
+        request: {
+          id: "request-1",
+          questions: [
+            {
+              id: "repository",
+              kind: "text",
+              label: "Repository",
+              prompt: "Which repository?",
+              options: [],
+            },
+            {
+              id: "github_access",
+              kind: "single_select",
+              label: "GitHub access",
+              prompt: "How should access be provided?",
+              options: [{ id: "connect_workspace", label: "Connect the workspace integration" }],
+            },
+            {
+              id: "regions",
+              kind: "multi_select",
+              label: "Regions",
+              prompt: "Where should this run?",
+              options: [{ id: "eu_north", label: "EU North" }],
+              allowOther: true,
+            },
+          ],
+        },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-1",
+        response: {
+          outcome: "answered",
+          answers: [
+            { questionId: "repository", values: ["https://github.com/acme/widget"] },
+            { questionId: "github_access", values: ["connect_workspace"] },
+            { questionId: "regions", values: ["eu_north"], other: "On-premises" },
+          ],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: [
+        "**Repository**",
+        "",
+        "https://github.com/acme/widget",
+        "",
+        "**GitHub access**",
+        "",
+        "Connect the workspace integration",
+        "",
+        "**Regions**",
+        "",
+        "- EU North",
+        "- On-premises",
+      ].join("\n"),
+      resources: [],
+      tools: [],
+    });
+    expect((items[0] as UserMessageItem).text).not.toContain("connect_workspace");
+  });
+
+  test("keeps structured answers visible when the request event is outside the loaded page", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.humanInputResponse", {
+        requestId: "request-before-window",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "release_channel", values: ["canary"] }],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "**Release Channel**\n\ncanary",
+    });
+  });
+
   test("projects realtime voice text while retaining expandable execution context", () => {
     reset();
     const context = [

@@ -126,6 +126,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  const humanInputRequests = humanInputRequestsById(events);
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
@@ -322,6 +323,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
+      case "user.humanInputResponse": {
+        // A structured answer resumes an existing logical turn and is not a
+        // synthetic user.message in model history. It is still a human-authored
+        // contribution to the visible conversation, so keep it outside the
+        // collapsed activity rail as a normal right-aligned message.
+        const text = humanInputResponseText(payload, humanInputRequests);
+        if (!text) break;
+        closeStreamingTail();
+        items.push({
+          kind: "user-message",
+          id: event.id,
+          text,
+          resources: [],
+          tools: [],
           occurredAt: event.occurredAt,
         });
         break;
@@ -1026,6 +1046,67 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
       : null;
   }
   return null;
+}
+
+function humanInputRequestsById(events: SessionEvent[]): Map<string, Record<string, unknown>> {
+  const requests = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    if (event.type !== "session.humanInput.requested") continue;
+    const request = asRecord(asRecord(event.payload).request);
+    const requestId = stringValue(request.id);
+    if (requestId) requests.set(requestId, request);
+  }
+  return requests;
+}
+
+function humanInputResponseText(
+  payload: Record<string, unknown>,
+  requests: Map<string, Record<string, unknown>>,
+): string | null {
+  const response = asRecord(payload.response);
+  if (response.outcome !== "answered" || !Array.isArray(response.answers)) return null;
+
+  const request = requests.get(stringValue(payload.requestId));
+  const questions = Array.isArray(request?.questions) ? request.questions.map(asRecord) : [];
+  const questionsById = new Map(questions.map((question) => [stringValue(question.id), question]));
+  const answers = response.answers
+    .map(asRecord)
+    .map((answer) =>
+      humanInputAnswerSection(answer, questionsById.get(stringValue(answer.questionId))),
+    )
+    .filter((section): section is string => Boolean(section));
+  return answers.length > 0 ? answers.join("\n\n") : null;
+}
+
+function humanInputAnswerSection(
+  answer: Record<string, unknown>,
+  question: Record<string, unknown> | undefined,
+): string | null {
+  const rawValues = Array.isArray(answer.values)
+    ? answer.values.filter((value): value is string => typeof value === "string")
+    : [];
+  const options = Array.isArray(question?.options) ? question.options.map(asRecord) : [];
+  const optionLabels = new Map(
+    options.map((option) => [stringValue(option.id), stringValue(option.label)]),
+  );
+  const values = rawValues.map((value) => optionLabels.get(value) || value);
+  if (typeof answer.other === "string" && answer.other) values.push(answer.other);
+  if (values.length === 0) return null;
+
+  const questionId = stringValue(answer.questionId);
+  const label = stringValue(question?.label) || stringValue(question?.prompt);
+  const valueText =
+    values.length === 1 ? values[0]! : values.map((value) => `- ${value}`).join("\n");
+  if (!label) return responseFallbackLabel(questionId, valueText);
+  return `**${label}**\n\n${valueText}`;
+}
+
+function responseFallbackLabel(questionId: string, valueText: string): string {
+  if (!questionId) return valueText;
+  const label = questionId
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+  return `**${label}**\n\n${valueText}`;
 }
 
 function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {

@@ -67,6 +67,60 @@ describe("context compaction rendering", () => {
   });
 });
 
+describe("structured human-input history", () => {
+  test("keeps an answered request visible outside the collapsed steps", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: "human-input-call",
+            name: "request_human_input",
+            arguments: {
+              questions: [{ id: "environment", kind: "single_select", prompt: "Where?" }],
+            },
+          }),
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-1",
+              questions: [
+                {
+                  id: "environment",
+                  kind: "single_select",
+                  label: "Environment",
+                  prompt: "Where?",
+                  options: [{ id: "staging", label: "Staging" }],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-1",
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "environment", values: ["staging"] }],
+            },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "human-input-call",
+            output: JSON.stringify({ requestId: "request-1", outcome: "answered" }),
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Environment");
+    expect(text).toContain("Staging");
+    const steps = turnSummaryTrigger(r.container);
+    expect(steps).not.toBeNull();
+    expect(steps?.getAttribute("aria-expanded")).toBe("false");
+    await r.unmount();
+  });
+});
+
 describe("durable generated-video timeline", () => {
   test("renders the terminal system update with native zero-copy playback", async () => {
     const artifactId = "55555555-5555-4555-8555-555555555555";
