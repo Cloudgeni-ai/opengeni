@@ -67,7 +67,11 @@ const budgets = {
   // 2,083,239 direct-session raw bytes on macOS/arm64; their next whole-KiB
   // envelopes are 1,465 and 2,035 KiB. Every gzip, file, lazy, and CSS cap
   // remains unchanged.
-  initialRaw: 1465 * kib,
+  // The personal GitHub lifecycle adds four typed SDK methods to the shared
+  // client, measuring 1,500,166 initial raw bytes and 2,083,879 direct-session
+  // raw bytes on macOS/arm64. Advance only those raw envelopes by one KiB;
+  // every compressed, file-count, lazy-chunk, and CSS cap remains unchanged.
+  initialRaw: 1466 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
   // macOS/arm64. The final uncertain-Send reconciliation repair measured
@@ -81,7 +85,7 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2035 * kib,
+  directSessionRaw: 2036 * kib,
   directSessionGzip: 566 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
