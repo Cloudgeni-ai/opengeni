@@ -451,23 +451,34 @@ Migration `0313_unregistered_organization_invitations.sql` lets an owner or
 administrator record an invitation before its target has an OpenGeni login.
 The durable row keeps the normalized email, optional display name, role, and a
 bounded set of initial shared-workspace ids, while `target_subject_id` stays
-null. The public response states whether the target is registered without
-turning the route into a user-enumeration oracle: organization administration
-is authorized before the server performs the global email lookup.
+null. The public response never reveals whether that email is registered, and
+the create route deliberately performs no global user lookup. Registered and
+unregistered targets therefore receive the same invitation representation.
 
 A pending invitation binds only after the exact Better Auth `user:<uuid>` has
 verified the matching normalized email. Binding is performed by a
 PUBLIC-revoked SECURITY DEFINER capability under the existing organization
-lifecycle policy, serializes on the canonical per-organization advisory lock,
-and never accepts a caller-asserted verification fact. Until acceptance, the
+lifecycle policy, serializes first on a normalized-email advisory fence and
+then on canonical per-organization advisory locks, and never accepts a
+caller-asserted verification fact. Invitation creation takes the same email
+fence before its organization lock. Because managed-access convergence keeps
+the transaction-scoped email fence through its pending check and fallback
+provisioning decision, it cannot snapshot an absent invitation while a matching
+create commits. Until acceptance, the
 verified user receives an empty managed access context sufficient for the
 managed invitation surface; the fallback `better-auth:user` organization and
 workspace are not provisioned. Acceptance then uses the existing exact-subject,
 revision-fenced 0263 lifecycle to create the organization membership and
 personal workspace, and atomically adds the selected shared-workspace grants.
 Consequently a newly provisioned invited user joins the inviting organization
-without also creating a redundant personal organization. Existing registered-
-user invitations retain their prior exact-subject path.
+without also creating a redundant personal organization. Self-invitation reads
+and acceptance bind through the same database-attested verified-email seam.
+
+0313 is a drained maintenance cutover, not a rolling migration. Old callers can
+accept an invitation without applying its initial workspace grants and can run
+fallback provisioning before verified-email convergence. Stop every API,
+control worker, and turn worker; provide the exact old/new application database
+role list to the migrator; apply 0313; and never restart a pre-0313 image.
 
 The Better Auth create hook no longer provisions access before required email
 verification. Email verification and later canonical managed-cookie access

@@ -166,6 +166,11 @@ describe("release schema contract", () => {
     }
     expect(
       completeSourceContract.migrations.find(
+        (migration) => migration.path === "0313_unregistered_organization_invitations.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+    expect(
+      completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",
       ),
     ).toMatchObject({

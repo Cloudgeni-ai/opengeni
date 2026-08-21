@@ -346,10 +346,15 @@ one deterministic personal-workspace lifecycle pointer in every organization
 they join, while stable user-resource authority still belongs to the
 organization membership rather than that workspace. A self-service user with
 no membership or pending invitation receives the legacy `better-auth:user`
-organization. Migration 0313 binds pending invitations only after the exact
-Better Auth email is verified, suppresses that fallback while an invitation is
-pending, and accepts the invited user directly into the inviting organization
-with any selected shared-workspace grants.
+organization. Maintenance migration 0313 binds pending invitations only after
+the exact Better Auth email is verified, suppresses that fallback while an
+invitation is pending, and accepts the invited user directly into the inviting
+organization with any selected shared-workspace grants. Invitation creation
+and signup convergence share one normalized-email advisory fence before the
+canonical organization locks, so a committing invitation cannot race the
+fallback organization decision. Public invitation projections never expose
+target registration state. All API/control/turn-worker database sessions must
+be drained before 0313, and a pre-0313 image must never restart after it commits.
 The four tenancy tables remain FORCE-RLS with no direct `opengeni_app` table
 DML; the only runtime write path is the target-schema-local,
 PUBLIC-revoked `ensure_managed_human_personal_workspace` SECURITY DEFINER

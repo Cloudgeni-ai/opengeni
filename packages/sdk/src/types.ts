@@ -3552,7 +3552,6 @@ export type OrganizationInvitation = {
   organizationId: string;
   targetEmail: string;
   targetName: string | null;
-  targetRegistrationStatus: "registered" | "unregistered";
   initialWorkspaceIds: string[];
   role: OrganizationMembershipRole;
   status: "pending" | "accepted" | "revoked" | "expired";

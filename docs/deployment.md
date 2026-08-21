@@ -392,6 +392,27 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Pre-registration invitation cutover (0313)
+
+`0313_unregistered_organization_invitations.sql` is a drained application
+protocol cutover. Old API binaries can accept an invitation without its initial
+workspace grants and old authentication hooks can provision a fallback
+organization before verified-email binding. Before applying 0313:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact old/new runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+   `applicationDatabaseRoles` for a programmatic migration);
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0313 from the exact new image and require it in `schema_migrations`;
+5. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration checks the explicit role list before and after exclusive locks
+on the invitation and organization membership writer tables. A live listed
+session rejects the cutover with SQLSTATE `55000`. After commit, never restart
+a pre-0313 image; remain in maintenance and fix forward.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one

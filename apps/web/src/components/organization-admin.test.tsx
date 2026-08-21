@@ -97,7 +97,6 @@ function invitation(role: OrganizationInvitation["role"]): OrganizationInvitatio
     organizationId: identityA.organizationId,
     targetEmail: `${role}@example.test`,
     targetName: null,
-    targetRegistrationStatus: "registered",
     initialWorkspaceIds: [],
     role,
     status: "pending",

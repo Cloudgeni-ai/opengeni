@@ -170,14 +170,31 @@ describe("organization membership routes", () => {
       id: string;
       revision: number;
     };
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedBeforeBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedBeforeBinding?.targetSubjectId).toBeNull();
     const targetInvitations = await targetApp.request("http://x/v1/organization-invitations", {
       headers: { cookie: "session=present" },
     });
     expect(targetInvitations.status).toBe(200);
-    expect(await targetInvitations.json()).toMatchObject({
-      invitations: [expect.objectContaining({ id: invitation.id })],
-      nextCursor: null,
-    });
+    const targetInvitationsBody = (await targetInvitations.json()) as {
+      invitations: Array<{ id: string; revision: number }>;
+      nextCursor: string | null;
+    };
+    expect(targetInvitationsBody.nextCursor).toBeNull();
+    const listedInvitation = targetInvitationsBody.invitations.find(
+      (candidate) => candidate.id === invitation.id,
+    );
+    expect(listedInvitation).toBeDefined();
+    expect(listedInvitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedAfterBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedAfterBinding?.targetSubjectId).toBe(`user:${targetUserId}`);
     expect(
       (
         await targetApp.request("http://x/v1/organization-invitations?limit=101", {
@@ -195,7 +212,7 @@ describe("organization membership routes", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          expectedRevision: invitation.revision,
+          expectedRevision: listedInvitation!.revision,
           operationId: crypto.randomUUID(),
         }),
       },
@@ -309,13 +326,14 @@ describe("organization membership routes", () => {
       }),
     });
     expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({
+    const invitation = await response.json();
+    expect(invitation).toMatchObject({
       targetEmail: email,
       targetName: "Future teammate",
-      targetRegistrationStatus: "unregistered",
       initialWorkspaceIds: [],
       status: "pending",
     });
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
   });
 
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {

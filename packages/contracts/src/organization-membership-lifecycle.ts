@@ -11,7 +11,6 @@ export const OrganizationInvitation = z.object({
   organizationId: z.string().uuid(),
   targetEmail: z.string().email(),
   targetName: z.string().trim().min(1).max(120).nullable().default(null),
-  targetRegistrationStatus: z.enum(["registered", "unregistered"]).default("registered"),
   initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
   role: OrganizationMembershipRole,
   status: OrganizationInvitationStatus,

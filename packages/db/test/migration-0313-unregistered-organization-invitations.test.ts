@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
@@ -37,6 +38,29 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
     failure = error;
   }
   expect(nestedPostgresSqlState(failure)).toBe(state);
+}
+
+async function waitForAdvisoryWaiterHeldBy(holderPid: number): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await shared.admin<Array<{ matching: number }>>`
+      select count(*)::int as matching
+      from pg_locks waiting
+      join pg_stat_activity waiter on waiter.pid = waiting.pid
+      join pg_locks held
+        on held.locktype = 'advisory'
+        and held.granted
+        and held.classid = waiting.classid
+        and held.objid = waiting.objid
+        and held.objsubid = waiting.objsubid
+      where waiting.locktype = 'advisory'
+        and not waiting.granted
+        and waiter.datname = current_database()
+        and held.pid = ${holderPid}`;
+    if ((row?.matching ?? 0) > 0) return;
+    await Bun.sleep(25);
+  }
+  throw new Error("verified convergence did not park on the invitation email fence");
 }
 
 describe("migration 0313 unregistered organization invitations", () => {
@@ -148,7 +172,6 @@ describe("migration 0313 unregistered organization invitations", () => {
     });
     expect(invitation).toMatchObject({
       targetName: "New teammate",
-      targetRegistrationStatus: "unregistered",
       initialWorkspaceIds: [initialWorkspaceId],
       revision: 1,
     });
@@ -205,7 +228,6 @@ describe("migration 0313 unregistered organization invitations", () => {
     expect(selfInvitations.invitations).toEqual([
       expect.objectContaining({
         id: invitation.id,
-        targetRegistrationStatus: "registered",
         revision: 2,
       }),
     ]);
@@ -253,17 +275,143 @@ describe("migration 0313 unregistered organization invitations", () => {
     expect(stillNoFallbackAccount).toBeUndefined();
   }, 180_000);
 
+  test("serializes verified signup convergence behind a committing email invitation", async () => {
+    if (!shared || !client) return;
+    const ownerId = `invite-race-owner-${crypto.randomUUID()}`;
+    const ownerSubject = `user:${ownerId}`;
+    await ensureManagedAccessForUser(client.db, {
+      userId: ownerId,
+      email: `${ownerId}@example.test`,
+      name: "Invitation race owner",
+    });
+    const [ownerMembership] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    expect(ownerMembership).toBeDefined();
+    const organizationId = ownerMembership!.organizationId;
+    const targetUserId = crypto.randomUUID();
+    const targetSubject = `user:${targetUserId}`;
+    const targetEmail = `invite-race-${targetUserId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${targetUserId}, 'Invitation race target', ${targetEmail}, true)`;
+
+    let releaseCreator!: () => void;
+    const creatorGate = new Promise<void>((resolve) => {
+      releaseCreator = resolve;
+    });
+    let markInvitationInserted!: (holderPid: number) => void;
+    let rejectInvitationInserted!: (error: unknown) => void;
+    const invitationInserted = new Promise<number>((resolve, reject) => {
+      markInvitationInserted = resolve;
+      rejectInvitationInserted = reject;
+    });
+    const creator = postgres(shared.appUrl, { max: 1, prepare: false });
+    const command = {
+      action: "invite",
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail,
+      initialWorkspaceIds: [],
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    };
+    let creatorOperation: Promise<unknown> | undefined;
+    try {
+      creatorOperation = creator
+        .begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${organizationId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', '', true)`;
+          await tx`select set_config('opengeni.subject_id', ${ownerSubject}, true)`;
+          const [authority] = await tx<
+            Array<{ accountId: string | null; subjectId: string | null }>
+          >`
+            select opengeni_private.current_account_id()::text as "accountId",
+                   opengeni_private.current_subject_id() as "subjectId"`;
+          expect(authority).toEqual({ accountId: organizationId, subjectId: ownerSubject });
+          const [backend] = await tx<Array<{ pid: number }>>`
+            select pg_backend_pid()::int as pid`;
+          const [parsedCommand] = await tx<
+            Array<{
+              accountId: string | null;
+              actorSubjectId: string | null;
+              operationId: string | null;
+            }>
+          >`
+            select command ->> 'organizationId' as "accountId",
+                   command ->> 'actorSubjectId' as "actorSubjectId",
+                   command ->> 'operationId' as "operationId"
+            from (select ${tx.json(command)}::jsonb as command) candidate`;
+          expect(parsedCommand).toEqual({
+            accountId: organizationId,
+            actorSubjectId: ownerSubject,
+            operationId: command.operationId,
+          });
+          await tx`select create_organization_invitation_v2(${tx.json(command)}::jsonb)`;
+          markInvitationInserted(backend!.pid);
+          await creatorGate;
+        })
+        .catch((error: unknown) => {
+          rejectInvitationInserted(error);
+          throw error;
+        });
+      const holderPid = await invitationInserted;
+      let convergenceSettled = false;
+      const convergence = ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+        userId: targetUserId,
+        email: targetEmail,
+        name: "Invitation race target",
+        emailVerified: true,
+      }).finally(() => {
+        convergenceSettled = true;
+      });
+
+      await waitForAdvisoryWaiterHeldBy(holderPid);
+      expect(convergenceSettled).toBe(false);
+      releaseCreator();
+      await creatorOperation;
+      const access = await convergence;
+      expect(access.accessContext).toMatchObject({
+        accountGrants: [],
+        workspaceGrants: [],
+        defaultAccountId: null,
+        defaultWorkspaceId: null,
+      });
+      const [fallbackAccount] = await shared.admin<{ id: string }[]>`
+        select id from managed_accounts
+        where external_source = 'better-auth:user' and external_id = ${targetUserId}`;
+      expect(fallbackAccount).toBeUndefined();
+      expect(
+        (
+          await listSelfOrganizationInvitations(client.db, {
+            subjectId: targetSubject,
+            limit: 10,
+          })
+        ).invitations,
+      ).toHaveLength(1);
+    } finally {
+      releaseCreator();
+      await creatorOperation?.catch(() => undefined);
+      await creator.end({ timeout: 5 }).catch(() => undefined);
+    }
+  }, 180_000);
+
   test("declares bounded fields, exact verified binding and runtime-only capabilities", async () => {
     const source = await Bun.file(
       new URL("../drizzle/0313_unregistered_organization_invitations.sql", import.meta.url),
     ).text();
-    expect(source).toStartWith("-- deployment-mode: rolling");
+    expect(source).toStartWith("-- deployment-mode: maintenance");
+    expect(source).toContain("requires an explicit application database role list");
+    expect(source).toContain(
+      "requires all configured OpenGeni application database sessions to be stopped",
+    );
     expect(source).toContain("ALTER COLUMN target_subject_id DROP NOT NULL");
     expect(source).toContain("initial_workspace_ids uuid[] NOT NULL");
     expect(source).toContain("auth_user.email_verified IS TRUE");
     expect(source).toContain("invitation.target_email = normalized_email");
     expect(source).toContain("has_pending_organization_invitation_for_subject");
     expect(source).toContain("organization-membership:");
+    expect(source).toContain("organization-invitation-email:");
     expect(source).toContain("FOR KEY SHARE");
     expect(source).toContain("REVOKE ALL ON FUNCTION create_organization_invitation_v2");
     expect(source).not.toContain("GRANT SELECT ON organization_membership_invitations");

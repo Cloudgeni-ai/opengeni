@@ -1,10 +1,94 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Permit an organization invitation to exist before its target has an
 -- OpenGeni login. A verified Better Auth email binds the invitation to the
 -- canonical user subject before the existing acceptance lifecycle runs.
+-- This is a one-way application protocol cutover: stop every API, control
+-- worker, and turn worker before applying it, and never restart a pre-0313
+-- image. Old callers can accept without initial workspace grants and can
+-- provision a fallback organization before verified invitation convergence.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+
+DO $organization_invitation_writer_drain_before_lock$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0313 organization invitation activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0313 organization invitation activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0313 organization invitation activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0313 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$organization_invitation_writer_drain_before_lock$;
+
+LOCK TABLE organization_membership_invitations IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE organization_membership_operation_receipts IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE organization_memberships IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE workspaces IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE workspace_memberships IN ACCESS EXCLUSIVE MODE;
+
+DO $organization_invitation_writer_drain_after_lock$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0313 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$organization_invitation_writer_drain_after_lock$;
 
 ALTER TABLE organization_membership_invitations
   ALTER COLUMN target_subject_id DROP NOT NULL,
@@ -51,10 +135,6 @@ AS $body$
     'organizationId', p_invitation.account_id,
     'targetEmail', p_invitation.target_email,
     'targetName', p_invitation.target_name,
-    'targetRegistrationStatus', CASE
-      WHEN p_invitation.target_subject_id IS NULL THEN 'unregistered'
-      ELSE 'registered'
-    END,
     'initialWorkspaceIds', p_invitation.initial_workspace_ids,
     'role', p_invitation.role,
     'status', CASE
@@ -127,6 +207,14 @@ BEGIN
     RAISE EXCEPTION 'organization invitation input is invalid' USING ERRCODE = '22023';
   END IF;
 
+  -- Email-first is the canonical ordering shared with verified signup
+  -- convergence. It makes invitation creation and fallback organization
+  -- provisioning mutually exclusive for one normalized identity.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'organization-invitation-email:' || target_email_value, 0
+    )
+  );
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended('organization-membership:' || account_id_value::text, 0)
   );
@@ -269,6 +357,15 @@ BEGIN
     RAISE EXCEPTION 'verified managed human authority required' USING ERRCODE = '42501';
   END IF;
 
+  -- Hold this transaction-scoped fence through the caller's subsequent
+  -- pending-invitation check and fallback provisioning decision. Creation
+  -- takes the same fence before any organization lock, so neither path can
+  -- snapshot an absence while a matching invitation is committing.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'organization-invitation-email:' || normalized_email, 0
+    )
+  );
   PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle',
     'organization_membership_lifecycle', true
