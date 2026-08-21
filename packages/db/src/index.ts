@@ -26936,13 +26936,28 @@ export type ListSessionsOptions = {
   parentSessionId?: string | null;
 };
 
-export type SessionListCursor = {
+export type SessionListSnapshotCursor = {
+  kind: "snapshot";
   snapshotId: string;
   offset: number;
   parentSessionFilter: string;
   search: string | null;
   archiveMode: "active" | "archived";
 };
+
+export type SessionListKeysetCursor = {
+  kind: "keyset";
+  /** Decimal committed workspace activity revision frozen on page one. */
+  snapshotRevision: string;
+  /** Exact PostgreSQL timestamp text, including microseconds. */
+  sortAt: string;
+  id: string;
+  parentSessionFilter: string;
+  search: string | null;
+  archiveMode: "active" | "archived";
+};
+
+export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   subjectId: string;
@@ -26952,7 +26967,7 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   pinsOnly?: boolean | undefined;
   /** List personally archived chats instead of active chats. */
   archivedOnly?: boolean | undefined;
-  /** Materialize a continuation snapshot. Disable for legacy one-page array reads. */
+  /** Return a continuation cursor. Disable for legacy one-page array reads. */
   materializeSnapshot?: boolean | undefined;
   authorizationScope?: SessionAuthorizationListScope | undefined;
   /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
@@ -27022,13 +27037,6 @@ export class SessionListAccessError extends Error {
   constructor(message = "workspace access denied") {
     super(message);
     this.name = "SessionListAccessError";
-  }
-}
-
-export class SessionListSnapshotLimitError extends Error {
-  constructor(message = "session list snapshot capacity exceeded") {
-    super(message);
-    this.name = "SessionListSnapshotLimitError";
   }
 }
 
@@ -27532,10 +27540,6 @@ async function sessionIdsCoveredByAuthorizationRoots(
   return new Set(rows.map((row) => row.id));
 }
 
-const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
-const SESSION_LIST_SNAPSHOT_REUSE_MS = 5_000;
-export const SESSION_LIST_SNAPSHOT_MAX_IDS = 5_000;
-export const SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT = 32;
 /**
  * The reserved slot a session-visibility transition leaves behind when it strips
  * a now-`user_private` session identity out of another subject's cached page
@@ -27561,30 +27565,28 @@ function sessionSearchFilter(search: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-function sessionListSnapshotLockKey(workspaceId: string, subjectId: string): string {
-  return `session-list-snapshot:${workspaceId}:${subjectId}`;
-}
-
-async function lockSessionListSnapshotCreation(
-  db: Database,
-  workspaceId: string,
-  subjectId: string,
-): Promise<void> {
-  await db.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${sessionListSnapshotLockKey(workspaceId, subjectId)}, 0))`,
-  );
-}
-
-/** Opaque, URL-safe cursor encoding for a server-owned activity snapshot. */
+/** Opaque, URL-safe cursor encoding for bounded session-list pagination. */
 export function encodeSessionListCursor(cursor: SessionListCursor): string {
   return Buffer.from(
-    JSON.stringify({
-      snapshotId: cursor.snapshotId,
-      offset: cursor.offset,
-      parentSessionFilter: cursor.parentSessionFilter,
-      search: cursor.search,
-      archiveMode: cursor.archiveMode,
-    }),
+    JSON.stringify(
+      cursor.kind === "keyset"
+        ? {
+            version: 2,
+            snapshotRevision: cursor.snapshotRevision,
+            sortAt: cursor.sortAt,
+            id: cursor.id,
+            parentSessionFilter: cursor.parentSessionFilter,
+            search: cursor.search,
+            archiveMode: cursor.archiveMode,
+          }
+        : {
+            snapshotId: cursor.snapshotId,
+            offset: cursor.offset,
+            parentSessionFilter: cursor.parentSessionFilter,
+            search: cursor.search,
+            archiveMode: cursor.archiveMode,
+          },
+    ),
   ).toString("base64url");
 }
 
@@ -27592,31 +27594,63 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
 export function decodeSessionListCursor(value: string): SessionListCursor | null {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      version?: unknown;
       snapshotId?: unknown;
       offset?: unknown;
+      snapshotRevision?: unknown;
+      sortAt?: unknown;
+      id?: unknown;
       parentSessionFilter?: unknown;
       search?: unknown;
       archiveMode?: unknown;
     };
     const parentSessionFilter = parsed.parentSessionFilter;
     const search = parsed.search;
-    const offset = parsed.offset;
     const archiveMode = parsed.archiveMode ?? "active";
+    const filtersAreValid =
+      (parentSessionFilter === "all" ||
+        parentSessionFilter === "null" ||
+        (typeof parentSessionFilter === "string" && UUID_PATTERN.test(parentSessionFilter))) &&
+      (search === null || (typeof search === "string" && search.length <= 200)) &&
+      (archiveMode === "active" || archiveMode === "archived");
+    if (!filtersAreValid) return null;
+
+    if (parsed.version === 2) {
+      if (
+        typeof parsed.snapshotRevision !== "string" ||
+        typeof parsed.sortAt !== "string" ||
+        !Number.isFinite(Date.parse(parsed.sortAt)) ||
+        typeof parsed.id !== "string" ||
+        !UUID_PATTERN.test(parsed.id)
+      ) {
+        return null;
+      }
+      return {
+        kind: "keyset",
+        snapshotRevision: normalizeSessionActivityRevision(
+          parsed.snapshotRevision,
+          "cursor snapshot revision",
+        ),
+        sortAt: parsed.sortAt,
+        id: parsed.id,
+        parentSessionFilter: parentSessionFilter as string,
+        search: search as string | null,
+        archiveMode,
+      };
+    }
+
+    const offset = parsed.offset;
     if (
       typeof parsed.snapshotId !== "string" ||
       !UUID_PATTERN.test(parsed.snapshotId) ||
       typeof offset !== "number" ||
       !Number.isSafeInteger(offset) ||
-      offset < 0 ||
-      (parentSessionFilter !== "all" &&
-        parentSessionFilter !== "null" &&
-        (typeof parentSessionFilter !== "string" || !UUID_PATTERN.test(parentSessionFilter))) ||
-      (search !== null && (typeof search !== "string" || search.length > 200)) ||
-      (archiveMode !== "active" && archiveMode !== "archived")
+      offset < 0
     ) {
       return null;
     }
     return {
+      kind: "snapshot",
       snapshotId: parsed.snapshotId,
       offset,
       parentSessionFilter: parentSessionFilter as string,
@@ -27640,10 +27674,11 @@ export async function reapExpiredSessionListSnapshots(db: Database, limit = 500)
 /**
  * Server-authoritative member-specific page. Pinned rows are returned separately
  * and omitted from ordinary pages, so list pagination cannot duplicate a
- * session. The first page materializes the complete ordinary activity order in
- * a short-lived, subject-scoped snapshot; continuation cursors carry only that
- * snapshot id and offset, while the page joins live session rows for current
- * lifecycle/title data.
+ * session. New pages use a bounded activity-revision keyset: page one freezes
+ * the committed workspace revision and every continuation reads only `limit +
+ * 1` candidate ids. Legacy short-lived snapshot cursors remain readable during
+ * rolling upgrades, while hydration always joins live rows for current
+ * lifecycle/title and authorization data.
  */
 export async function listSessionsForSubject(
   db: Database,
@@ -27744,7 +27779,7 @@ export async function listSessionsForSubject(
           // its root page. Do not turn that cheap projection into an O(N)
           // ordinary-session scan or a throwaway continuation snapshot.
           pageIds = [];
-        } else if (options.cursor) {
+        } else if (options.cursor?.kind === "snapshot") {
           const cursor = options.cursor;
           if (
             cursor.parentSessionFilter !== parentFilter ||
@@ -27823,6 +27858,7 @@ export async function listSessionsForSubject(
           }
           if (nextOffset !== null) {
             nextCursor = encodeSessionListCursor({
+              kind: "snapshot",
               snapshotId: snapshot.id,
               offset: nextOffset,
               parentSessionFilter: snapshot.parentSessionFilter,
@@ -27847,118 +27883,61 @@ export async function listSessionsForSubject(
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
         } else {
-          // Coalesce concurrent first-page requests for this subject before the
-          // expensive ordered-ID read. A short reuse window preserves live-list
-          // behavior while bounding authenticated request amplification. The
-          // separate lock domain does not serialize pin writes or other members.
-          await lockSessionListSnapshotCreation(tx, workspaceId, options.subjectId);
-          await tx
-            .delete(schema.sessionListSnapshots)
-            .where(
-              and(
-                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
-                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
-                lte(schema.sessionListSnapshots.expiresAt, now),
-              ),
-            );
-          const snapshotSearchFilter = searchFilter
-            ? eq(schema.sessionListSnapshots.search, searchFilter)
-            : isNull(schema.sessionListSnapshots.search);
-          const [reusableSnapshot] = await tx
-            .select()
-            .from(schema.sessionListSnapshots)
-            .where(
-              and(
-                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
-                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
-                eq(schema.sessionListSnapshots.parentSessionFilter, parentFilter),
-                eq(schema.sessionListSnapshots.archiveMode, archiveMode),
-                snapshotSearchFilter,
-                gt(
-                  schema.sessionListSnapshots.createdAt,
-                  new Date(now.getTime() - SESSION_LIST_SNAPSHOT_REUSE_MS),
-                ),
-              ),
-            )
-            .orderBy(
-              desc(schema.sessionListSnapshots.createdAt),
-              desc(schema.sessionListSnapshots.id),
-            )
-            .limit(1);
-
-          let ordinaryIds = reusableSnapshot?.ordinarySessionIds;
-          if (!ordinaryIds) {
-            const ordinaryIdRows = await tx
-              .select({ id: schema.sessions.id })
-              .from(schema.sessions)
-              .leftJoin(
-                schema.sessionPins,
+          const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
+          if (
+            cursor &&
+            (cursor.parentSessionFilter !== parentFilter ||
+              cursor.search !== searchFilter ||
+              cursor.archiveMode !== archiveMode)
+          ) {
+            throw new SessionListCursorError("session list cursor does not match its filters");
+          }
+          const snapshotRevision = cursor
+            ? normalizeSessionActivityRevision(cursor.snapshotRevision, "cursor snapshot revision")
+            : await readWorkspaceSessionActivityRevision(tx, workspaceId);
+          const cursorPredicate = cursor
+            ? or(
+                sql`${schema.sessions.updatedAt} < ${cursor.sortAt}::text::timestamptz`,
                 and(
-                  eq(schema.sessionPins.workspaceId, workspaceId),
-                  eq(schema.sessionPins.subjectId, options.subjectId),
-                  eq(schema.sessionPins.sessionId, schema.sessions.id),
+                  sql`${schema.sessions.updatedAt} = ${cursor.sortAt}::text::timestamptz`,
+                  lt(schema.sessions.id, cursor.id),
                 ),
               )
-              .where(and(...filters, ordinaryPinFilter))
-              .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
-              .limit(SESSION_LIST_SNAPSHOT_MAX_IDS + 1);
-            if (ordinaryIdRows.length > SESSION_LIST_SNAPSHOT_MAX_IDS) {
-              throw new SessionListSnapshotLimitError(
-                `session list exceeds the ${SESSION_LIST_SNAPSHOT_MAX_IDS}-row stable pagination limit`,
-              );
-            }
-            ordinaryIds = ordinaryIdRows.map((row) => row.id);
-          }
-          pageIds = ordinaryIds.slice(0, limit);
-          if (ordinaryIds.length > limit) {
-            let snapshot = reusableSnapshot;
-            if (!snapshot) {
-              // Creation is serialized by the subject advisory lock above.
-              // Retain only the newest N-1 before inserting so polling and
-              // search identity churn cannot turn this bounded cache into a
-              // user-visible 429. A continuation for an evicted row retains
-              // the existing typed expiry/410 + client rebase contract.
-              await tx.execute(sql`
-                delete from ${schema.sessionListSnapshots} snapshot
-                where snapshot.workspace_id = ${workspaceId}
-                  and snapshot.subject_id = ${options.subjectId}
-                  and snapshot.id in (
-                    select evicted.id
-                    from ${schema.sessionListSnapshots} evicted
-                    where evicted.workspace_id = ${workspaceId}
-                      and evicted.subject_id = ${options.subjectId}
-                    order by evicted.created_at desc, evicted.id desc
-                    offset ${SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT - 1}
-                  )
-              `);
-              const [workspace] = await tx
-                .select({ accountId: schema.workspaces.accountId })
-                .from(schema.workspaces)
-                .where(eq(schema.workspaces.id, workspaceId))
-                .limit(1);
-              if (!workspace) {
-                throw new Error("session list workspace disappeared while creating a snapshot");
-              }
-              [snapshot] = await tx
-                .insert(schema.sessionListSnapshots)
-                .values({
-                  accountId: workspace.accountId,
-                  workspaceId,
-                  subjectId: options.subjectId,
-                  parentSessionFilter: parentFilter,
-                  search: searchFilter,
-                  archiveMode,
-                  ordinarySessionIds: ordinaryIds,
-                  expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
-                })
-                .returning();
-              if (!snapshot) {
-                throw new Error("session list snapshot was not created");
-              }
-            }
+            : undefined;
+          const ordinaryIdRows = await tx
+            .select({
+              id: schema.sessions.id,
+              sortAt: sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+            })
+            .from(schema.sessions)
+            .leftJoin(
+              schema.sessionPins,
+              and(
+                eq(schema.sessionPins.workspaceId, workspaceId),
+                eq(schema.sessionPins.subjectId, options.subjectId),
+                eq(schema.sessionPins.sessionId, schema.sessions.id),
+              ),
+            )
+            .where(
+              and(
+                ...filters,
+                ordinaryPinFilter,
+                sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`,
+                cursorPredicate,
+              ),
+            )
+            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .limit(limit + 1);
+          const hasMore = ordinaryIdRows.length > limit;
+          const page = ordinaryIdRows.slice(0, limit);
+          pageIds = page.map((row) => row.id);
+          const last = page.at(-1);
+          if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
-              snapshotId: snapshot.id,
-              offset: limit,
+              kind: "keyset",
+              snapshotRevision,
+              sortAt: last.sortAt,
+              id: last.id,
               parentSessionFilter: parentFilter,
               search: searchFilter,
               archiveMode,

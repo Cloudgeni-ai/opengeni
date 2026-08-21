@@ -128,7 +128,7 @@ function boundedCorrelationId(value: unknown): string | undefined {
   return value;
 }
 
-/** A short-lived session-list snapshot cursor can no longer be continued. */
+/** A legacy short-lived session-list snapshot cursor can no longer be continued. */
 export class OpenGeniSessionListCursorError extends OpenGeniApiError {}
 
 /** The browser bundle and API disagree about their state-changing wire contract. */
