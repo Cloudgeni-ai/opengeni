@@ -224,19 +224,29 @@ async function ensureBuilder(policy: DevelopmentSandboxDiskPolicy): Promise<void
   if (existing.exitCode !== 0 || !builderNodeNames(existing.stdout).has(node)) {
     await mkdir(MAINTENANCE_ROOT, { recursive: true });
     await writeFile(BUILDER_CONFIG_FILE, builderGcConfig(policy));
-    await command([
-      "docker",
-      "buildx",
-      "create",
-      "--name",
-      DEFAULT_BUILDER,
-      "--node",
-      node,
-      "--driver",
-      "docker-container",
-      "--buildkitd-config",
-      BUILDER_CONFIG_FILE,
-    ]);
+    const create = (configFlag: string) =>
+      commandResult([
+        "docker",
+        "buildx",
+        "create",
+        "--name",
+        DEFAULT_BUILDER,
+        "--node",
+        node,
+        "--driver",
+        "docker-container",
+        configFlag,
+        BUILDER_CONFIG_FILE,
+      ]);
+    // buildx renamed `--config` to `--buildkitd-config` in v0.13; accept both so
+    // older distro-packaged plugins still get the explicit GC policy.
+    let created = await create("--buildkitd-config");
+    if (created.exitCode !== 0 && /unknown flag: --buildkitd-config/u.test(created.stderr)) {
+      created = await create("--config");
+    }
+    if (created.exitCode !== 0) {
+      throw new Error(`docker failed: ${created.stderr.trim() || `exit ${created.exitCode}`}`);
+    }
   }
   await command(["docker", "buildx", "inspect", DEFAULT_BUILDER, "--bootstrap"]);
 }

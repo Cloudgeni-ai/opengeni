@@ -244,6 +244,19 @@ case "$*" in image\\ inspect\\ --format\\ {{.Id}}\\ opengeni-sandbox:*) printf '
     expect(create).toBeGreaterThan(removal);
   });
 
+  test("falls back to the legacy --config flag on older buildx plugins", async () => {
+    const { exitCode, stderr, calls } = await runPrepare(
+      `${fakeMetadataBuild}
+case "$*" in buildx\\ create\\ *--buildkitd-config\\ *) echo "unknown flag: --buildkitd-config" >&2; exit 125 ;; esac`,
+    );
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    const modern = calls.indexOf("--buildkitd-config");
+    const legacy = calls.indexOf("--driver docker-container --config ");
+    expect(modern).toBeGreaterThan(-1);
+    expect(legacy).toBeGreaterThan(modern);
+  });
+
   test("renders one explicit GC policy equal to the cap and parses go-units sizes", () => {
     const config = builderGcConfig({ cacheLimit: "24gb", imageRetention: 3 });
     expect(config).toContain("[worker.oci]");
