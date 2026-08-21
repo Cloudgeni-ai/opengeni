@@ -1,0 +1,115 @@
+{{- if .Values.garage.enabled }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.garage.priorityClassName "tier" "durable") }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "opengeni.fullname" . }}-garage
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+spec:
+  serviceName: {{ include "opengeni.fullname" . }}-garage
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: garage
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: garage
+      {{- if not .Values.garage.auth.existingSecret }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/garage-secret.yaml") . | sha256sum }}
+      {{- end }}
+    spec:
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      containers:
+        - name: garage
+          image: {{ if .Values.garage.image.digest }}{{ printf "%s:%s@%s" .Values.garage.image.repository .Values.garage.image.tag .Values.garage.image.digest | quote }}{{ else }}{{ printf "%s:%s" .Values.garage.image.repository .Values.garage.image.tag | quote }}{{ end }}
+          imagePullPolicy: {{ .Values.garage.image.pullPolicy }}
+          command:
+            - /garage
+            - server
+            - --single-node
+            - --default-bucket
+          ports:
+            - name: api
+              containerPort: {{ .Values.garage.service.apiPort }}
+          env:
+            - name: GARAGE_DEFAULT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.garageSecretName" . }}
+                  key: {{ .Values.garage.auth.accessKeyKey }}
+            - name: GARAGE_DEFAULT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.garageSecretName" . }}
+                  key: {{ .Values.garage.auth.secretKeyKey }}
+            - name: GARAGE_DEFAULT_BUCKET
+              value: {{ .Values.garage.bucket | quote }}
+          readinessProbe:
+            tcpSocket:
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- with .Values.garage.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+              readOnly: true
+            - name: meta
+              mountPath: /var/lib/garage/meta
+            - name: data
+              mountPath: /var/lib/garage/data
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "opengeni.garageSecretName" . }}
+            items:
+              - key: garage.toml
+                path: garage.toml
+        {{- if not .Values.garage.persistence.enabled }}
+        - name: meta
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.garage.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: meta
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.garage.persistence.storageClassName }}
+        storageClassName: {{ .Values.garage.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.garage.persistence.metaSize | quote }}
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.garage.persistence.storageClassName }}
+        storageClassName: {{ .Values.garage.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.garage.persistence.size | quote }}
+  {{- end }}
+{{- end }}

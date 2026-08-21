@@ -66,7 +66,7 @@ async function withNarrowViewport(run: () => Promise<void>): Promise<void> {
 }
 
 describe("WorkspaceDock", () => {
-  test("gives tabs a full row when the desktop dock itself is narrow", async () => {
+  test("uses an icon-first vertical rail when the desktop dock itself is narrow", async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
     const originalMatchMedia = window.matchMedia;
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
@@ -104,19 +104,40 @@ describe("WorkspaceDock", () => {
           primary={<div>Chat pane</div>}
           headerAccessory={<div>Offline — as of just now</div>}
           tabs={[
-            { id: "changes", label: "Changes", content: <div>Changes content</div> },
-            { id: "files", label: "Files", content: <div>Files content</div> },
-            { id: "terminal", label: "Terminal", content: <div>Terminal content</div> },
-            { id: "browser", label: "Browser", content: <div>Browser content</div> },
+            {
+              id: "changes",
+              label: "Changes",
+              icon: <span>C</span>,
+              content: <div>Changes content</div>,
+            },
+            {
+              id: "files",
+              label: "Files",
+              icon: <span>F</span>,
+              content: <div>Files content</div>,
+            },
+            {
+              id: "terminal",
+              label: "Terminal",
+              icon: <span>T</span>,
+              content: <div>Terminal content</div>,
+            },
+            {
+              id: "browser",
+              label: "Browser",
+              icon: <span>B</span>,
+              content: <div>Browser content</div>,
+            },
           ]}
         />,
       );
       const chrome = rendered.container.querySelector<HTMLElement>("[data-dock-chrome]");
       expect(chrome?.dataset.compact).toBe("true");
+      expect(
+        rendered.container.querySelector('[role="tablist"]')?.getAttribute("aria-orientation"),
+      ).toBe("vertical");
 
-      const browserTab = [...rendered.container.querySelectorAll('[role="tab"]')].find(
-        (tab) => tab.textContent === "Browser",
-      );
+      const browserTab = rendered.container.querySelector('[role="tab"][aria-label="Browser"]');
       await click(browserTab ?? null);
       expect(browserTab?.getAttribute("aria-selected")).toBe("true");
 
@@ -125,6 +146,11 @@ describe("WorkspaceDock", () => {
         for (const callback of callbacks) callback([], {} as ResizeObserver);
       });
       expect(chrome?.dataset.compact).toBeUndefined();
+      expect(
+        [...rendered.container.querySelectorAll('[role="tab"]')].find((tab) =>
+          tab.textContent?.includes("Browser"),
+        ),
+      ).not.toBeUndefined();
     } finally {
       await rendered?.unmount();
       globalThis.ResizeObserver = originalResizeObserver;
@@ -161,7 +187,8 @@ describe("WorkspaceDock", () => {
     expect(panelFor(tabs[0])?.hidden).toBe(false);
 
     tabs[0]?.focus();
-    await press(tabs[0] ?? null, "ArrowRight");
+    expect(tabs[0]?.closest('[role="tablist"]')?.getAttribute("aria-orientation")).toBe("vertical");
+    await press(tabs[0] ?? null, "ArrowDown");
     expect(document.activeElement).toBe(tabs[1] ?? null);
     expect(rendered.container.textContent ?? "").toContain("Files content");
     expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0, -1]);
@@ -172,7 +199,7 @@ describe("WorkspaceDock", () => {
     expect(document.activeElement).toBe(tabs[2] ?? null);
     expect(rendered.container.textContent ?? "").toContain("Terminal content");
 
-    await press(tabs[2] ?? null, "ArrowRight");
+    await press(tabs[2] ?? null, "ArrowDown");
     expect(document.activeElement).toBe(tabs[0] ?? null);
     expect(rendered.container.textContent ?? "").toContain("Changes content");
 
@@ -214,7 +241,7 @@ describe("WorkspaceDock", () => {
     await click(findTab("Files"));
     expect(rendered.container.textContent ?? "").toContain("File state 1");
 
-    await click(rendered.container.querySelector('[title="Collapse"]'));
+    await click(rendered.container.querySelector('[title="Hide workspace"]'));
     await click(rendered.container.querySelector('[title="Open workspace"]'));
     expect(rendered.container.textContent ?? "").toContain("File state 1");
 
@@ -257,16 +284,30 @@ describe("WorkspaceDock", () => {
     await rendered.unmount();
   });
 
-  test("a host-controlled dock offers no built-in open/close controls", async () => {
-    // The host's own toggle is the ONE open/close affordance: no chrome
-    // Collapse button (it duplicated the host toggle) and no re-open rail.
+  test("a host-controlled dock keeps a panel-local hide action and no duplicate reopen rail", async () => {
     const rendered = await renderComponent(<ControlledDock onCollapsedChange={() => {}} />);
 
     expect(rendered.container.textContent ?? "").toContain("Run content");
-    expect(rendered.container.querySelector('[title="Collapse"]')).toBeNull();
+    expect(rendered.container.querySelector('[title="Hide workspace"]')).not.toBeNull();
     expect(rendered.container.querySelector('[title="Open workspace"]')).toBeNull();
     // Maximize remains: a distinct mode, not an open/close duplicate.
     expect(rendered.container.querySelector('[title="Maximize"]')).not.toBeNull();
+
+    await rendered.unmount();
+  });
+
+  test("an initially open controlled dock restores focus outside its hidden surface", async () => {
+    const rendered = await renderComponent(<ControlledDock onCollapsedChange={() => {}} />);
+    const hide = rendered.container.querySelector<HTMLElement>('[title="Hide workspace"]');
+    hide?.focus();
+
+    await click(hide ?? null);
+    await flush(20);
+
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Host open workspace");
+    expect(
+      rendered.container.querySelector("[data-workspace-surface]")?.getAttribute("aria-hidden"),
+    ).toBe("true");
 
     await rendered.unmount();
   });
@@ -282,7 +323,7 @@ describe("WorkspaceDock", () => {
 
     expect(rendered.container.textContent ?? "").toContain("Run content");
 
-    await click(rendered.container.querySelector('[title="Collapse"]'));
+    await click(rendered.container.querySelector('[title="Hide workspace"]'));
     await flush(20);
 
     expect(
@@ -317,7 +358,7 @@ describe("WorkspaceDock", () => {
       );
 
     const first = await renderDock();
-    await click(first.container.querySelector('[title="Collapse"]'));
+    await click(first.container.querySelector('[title="Hide workspace"]'));
     await flush(20);
     expect(JSON.parse(window.localStorage.getItem(storageKey) ?? "null")).toEqual(expandedLayout);
     await first.unmount();
@@ -379,7 +420,7 @@ describe("WorkspaceDock", () => {
       expect(primary?.getAttribute("aria-hidden")).toBe("true");
 
       // The overlay's own close control drives the same collapsed contract.
-      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      await click(rendered.container.querySelector('[aria-label="Hide workspace"]'));
       expect(changes.at(-1)).toBe(true);
       expect(
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
@@ -405,7 +446,7 @@ describe("WorkspaceDock", () => {
       expect(primary?.getAttribute("aria-hidden")).toBe("true");
       expect(document.activeElement?.getAttribute("role")).toBe("tab");
 
-      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      await click(rendered.container.querySelector('[aria-label="Hide workspace"]'));
       await flush(20);
       expect(document.activeElement).toBe(hostOpen ?? null);
 
@@ -426,7 +467,7 @@ describe("WorkspaceDock", () => {
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
       ).not.toBeNull();
 
-      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      await click(rendered.container.querySelector('[aria-label="Hide workspace"]'));
       await flush(20);
       const reopen = rendered.container.querySelector<HTMLElement>('[title="Open workspace"]');
       expect(reopen).not.toBeNull();

@@ -4,6 +4,7 @@ import {
   createScheduledTask,
   getSession,
   listSessionEvents,
+  updateSessionTitle,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -98,6 +99,11 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
       const session = await getSession(client.db, workspace!.id, result.sessionId);
       expect(session).toMatchObject({
         id: result.sessionId,
+        // The scheduler names the session after the task, with no run-specific
+        // fact frozen into it. titleSource stays "agent" so the running agent
+        // can still rename through set_session_title and a human rename wins.
+        title: "scheduled nested policy",
+        titleSource: "agent",
         parentSessionId: null,
         rootSessionId: result.sessionId,
         nestedAgentDepth: 0,
@@ -108,13 +114,50 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
       });
       // A generated scheduled session starts through the atomic deferred path:
       // session.created carries the public "queued" status directly, so no
-      // separate session.status.changed event is emitted before the wake.
+      // separate session.status.changed event is emitted before the wake. The
+      // scheduler's own title lands right after it, on the same shared
+      // session.title_set the manual rename and set_session_title emit, so a
+      // live subscriber patches the title instead of holding the stale one.
       const events = await listSessionEvents(client.db, workspace!.id, result.sessionId, 0, 10);
       expect(events.map((event) => event.type)).toEqual([
         "session.created",
+        "session.title_set",
         "system.update.pending",
       ]);
       expect(events[0]?.payload).toMatchObject({ status: "queued" });
+      expect(events[1]?.payload).toMatchObject({
+        title: "scheduled nested policy",
+        source: "agent",
+      });
+      // The scheduler's title must not become a lock on the session. An agent
+      // set_session_title is an "agent" write (apps/api/src/mcp/server.ts), and
+      // the db clobber guard pins only a "user" title, so the agent renames over
+      // the scheduler freely. A human rename then pins it permanently and the
+      // next agent write is skipped.
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          title: "agent chosen title",
+          source: "agent",
+        }),
+      ).toMatchObject({ updated: true, title: "agent chosen title" });
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          title: "human chosen title",
+          source: "user",
+        }),
+      ).toMatchObject({ updated: true, title: "human chosen title" });
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          title: "agent tries again",
+          source: "agent",
+        }),
+      ).toMatchObject({ updated: false, title: "human chosen title" });
       expect(wakeups).toEqual([
         {
           accountId: account!.id,

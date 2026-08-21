@@ -4,6 +4,10 @@ const scriptPath = new URL("./dev-stack.sh", import.meta.url);
 const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
 const envExamplePath = new URL("../.env.example", import.meta.url);
 const relaySupervisorPath = new URL("./run-development-relay.sh", import.meta.url);
+const sandboxImagePreparationPath = new URL(
+  "./prepare-development-sandbox-image.ts",
+  import.meta.url,
+);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -206,13 +210,13 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain(">.env.runtime");
   });
 
-  test("host services use selected loopback MinIO while sandboxes keep compose DNS", async () => {
+  test("host services use selected loopback Garage while sandboxes keep compose DNS", async () => {
     const source = await Bun.file(scriptPath).text();
     const hostInternalEndpoint =
       'export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT}"';
-    const sandboxEndpoint = 'export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"';
+    const sandboxEndpoint = 'export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://garage:3900"';
 
-    expect(source).toContain('default_internal_object_endpoint="http://minio:9000"');
+    expect(source).toContain('default_internal_object_endpoint_garage="http://garage:3900"');
     expect(source).toContain(hostInternalEndpoint);
     expect(source).toContain(sandboxEndpoint);
     expect(source).toContain(
@@ -220,8 +224,8 @@ describe("local artifact runtime stack contract", () => {
     );
     expect(source.indexOf(hostInternalEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source.indexOf(sandboxEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
-    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=minioadmin");
-    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin");
+    expect(source).toContain('GARAGE_FIXTURE_ACCESS_KEY_ID="GK0123456789abcdef0123456789abcdef"');
+    expect(source).toContain("docker compose up -d postgres nats temporal garage garage-init");
   });
 
   test("keeps worker MCP on worktree loopback while Modal may use a public edge", async () => {
@@ -237,18 +241,52 @@ describe("local artifact runtime stack contract", () => {
   });
 
   test("admits only an exact-head runtime in a source-tagged local image", async () => {
-    const source = await Bun.file(scriptPath).text();
+    const [source, imagePreparation] = await Promise.all([
+      Bun.file(scriptPath).text(),
+      Bun.file(sandboxImagePreparationPath).text(),
+    ]);
     expect(source).toContain("bun scripts/resolve-development-sandbox-runtime.ts");
     expect(source).toContain('sandbox_source_tag="$(git rev-parse --short=12 HEAD)"');
     expect(source).toContain(
-      'OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"',
+      'OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}-${COMPOSE_PROJECT_NAME}"',
     );
     expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true");
     expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false");
     expect(source).toContain("OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME");
+    expect(source).toContain("bun scripts/prepare-development-sandbox-image.ts");
+    expect(source).toContain('--runtime-bundle "${sandbox_runtime_bundle}"');
+    expect(source).toContain('--lease-id "${COMPOSE_PROJECT_NAME}"');
+    expect(source).toContain('--lease-pid "$$"');
+    expect(source).toContain('--lease-token "${opengeni_dev_stack_token}"');
+    // A copied pre-measurement 6gb cap is below one build's working set and
+    // would make every start rebuild the image; the launcher treats it as unset.
+    expect(source).toContain('if [ "${OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX:-}" = "6gb" ]; then');
+    // Opt-in shared Cargo target cache: absolute path only, and one distinct
+    // subdirectory per Cargo workspace so the kernel and relay never mix.
+    expect(source).toContain('if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then');
+    expect(source).toContain('echo "OPENGENI_DEV_CARGO_TARGET_DIR must be an absolute path." >&2');
     expect(source).toContain(
-      '--build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}"',
+      'artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")',
     );
+    expect(source).toContain(
+      'relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")',
+    );
+    expect(source).toContain(
+      'env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}"',
+    );
+    expect(source).toContain('env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}"');
+    expect(source).toContain("unset OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX");
+    expect(imagePreparation).toContain('"buildx"');
+    expect(imagePreparation).toContain('"build"');
+    expect(imagePreparation).toContain('"--bootstrap"');
+    expect(imagePreparation).toContain('"--max-used-space"');
+    expect(imagePreparation).toContain("planDevelopmentSandboxImageRetention");
+    expect(imagePreparation).toContain("withMaintenanceLock");
+    expect(imagePreparation).toContain("loadFlockLibrary");
+    expect(imagePreparation).toContain("activeLeasedImages");
+    expect(imagePreparation).toContain('const DEFAULT_BUILDER = "opengeni-development-sandbox"');
+    expect(imagePreparation).not.toContain("OPENGENI_DEV_SANDBOX_BUILDER");
+    expect(imagePreparation).not.toContain("Reusing existing local sandbox image");
     expect(source).not.toContain("-t opengeni-sandbox:local .");
   });
 

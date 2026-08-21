@@ -39,6 +39,8 @@ import {
   CapabilityDiscoveryControls,
   EnabledCapabilitiesSection,
 } from "@/components/capabilities/capability-catalog-sections";
+import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
+import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
 import {
   CapabilityDetailSheet,
   type ConnectAction,
@@ -101,7 +103,6 @@ import {
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
-  sortFeaturedFirst,
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
@@ -303,7 +304,10 @@ export function CapabilitiesRoute({
     [filtered, featuredIds],
   );
   const browseItems = useMemo(
-    () => sortFeaturedFirst(filtered.filter((item) => !item.enabled && !featuredIds.has(item.id))),
+    () =>
+      sortConnectorsForPresentation(
+        filtered.filter((item) => !item.enabled && !featuredIds.has(item.id)),
+      ),
     [filtered, featuredIds],
   );
   const visibleBrowse = browseItems.slice(0, visibleCount);
@@ -315,7 +319,8 @@ export function CapabilitiesRoute({
   );
 
   const logoUrl = useCallback(
-    (item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath),
+    (item: CapabilityCatalogItem) =>
+      capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
     [client],
   );
   const connectionsLoaded = connections !== null;

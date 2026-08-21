@@ -147,7 +147,6 @@ export function functionCallResultItem(input: {
   callId: string;
   name: string;
   output: unknown;
-  status?: "completed" | "incomplete";
 }): Record<string, unknown> {
   const text =
     typeof input.output === "string" ? input.output : JSON.stringify(input.output ?? null);
@@ -155,7 +154,6 @@ export function functionCallResultItem(input: {
     type: "function_call_result",
     name: input.name,
     callId: input.callId,
-    status: input.status ?? "completed",
     output: { type: "text", text },
   };
 }

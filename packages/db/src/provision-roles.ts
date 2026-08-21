@@ -489,6 +489,8 @@ async function grantAppRoleIfSchemaExists(
     "get_self_organization_invitation(text,uuid)",
     "list_organization_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
+    "get_organization_administration_overview(uuid,text)",
+    "update_organization_name(uuid,text,text,timestamptz,uuid)",
     "organization_membership_command(jsonb)",
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
@@ -568,6 +570,25 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0301 creates this target-schema capability before
+    -- opengeni_app exists on a fresh migrate-then-provision installation. Its
+    -- policy is evaluated for ordinary session-list snapshot writes, so the
+    -- runtime role must be able to execute the predicate even when no
+    -- visibility-transition capability is active. Re-converge the exact ACL
+    -- here and keep PUBLIC revoked.
+    IF to_regprocedure(
+      format('%I.session_visibility_lifecycle_capability_held()', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_visibility_lifecycle_capability_held() FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_visibility_lifecycle_capability_held() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
     -- yet exist, and these three live in the data schema rather than
@@ -1149,34 +1170,100 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
-        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)',
+        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) FROM PUBLIC',
+        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer) FROM PUBLIC',
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) TO %I',
+        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
     END IF;
     IF to_regprocedure(
       format(
-        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text)',
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) FROM PUBLIC',
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer) FROM PUBLIC',
         ${literal(schema)}
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) TO %I',
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer) TO %I',
         ${literal(schema)},
         ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.session_tenancy_product_activated(uuid,integer)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_tenancy_product_activated(uuid, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_tenancy_product_activated(uuid, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_tenancy_any_product_activation() FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_tenancy_any_product_activation() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.open_private_session_create_capability(uuid, uuid, uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.close_private_session_create_capability(uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.close_private_session_create_capability(uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer) TO %I',
+        ${literal(schema)}, ${literal(role)}
       );
     END IF;
     IF to_regprocedure(
@@ -1265,25 +1352,47 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid)', ${literal(schema)}))
+    IF to_regprocedure(
+      format(
+        '%I.accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)', ${literal(schema)}))
       IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_user_resource_authorities(uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid, uuid, text, uuid, integer) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_user_resource_authorities(uuid, uuid, text, uuid, integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
       IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_self_connection_authorities(uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
       IF to_regprocedure(format('%I.resolve_personal_connection_authority_selection(uuid,uuid,text,uuid,jsonb)', ${literal(schema)})) IS NOT NULL THEN

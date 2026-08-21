@@ -1,20 +1,22 @@
 // The left-rail shell that wraps every workspace-scoped route. It owns the
-// fixed full-height rail (expanded 260px / collapsed 56px), the responsive
+// fixed full-height rail (expanded 244px / collapsed 56px), the responsive
 // overlay drawer (<1024px), and the slim canvas top strip that carries
 // session-contextual actions on session routes. The rail itself is composed
 // from the brand, switcher, workspace nav, session list, and footer sections.
 import { findPickerRow, useLastStartedTurnPolicy, useSessionLineage } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon, XIcon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import {
   useCallback,
   useEffect,
+  lazy,
   useRef,
   useState,
   useSyncExternalStore,
+  Suspense,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
@@ -22,6 +24,7 @@ import {
 
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SessionHeader } from "@/components/rail/session-header";
+import { scheduledTaskIdOf } from "@/lib/sessions-group";
 import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
@@ -29,7 +32,7 @@ import {
   useRail,
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
-import { ForYouLink } from "@/components/rail/for-you-link";
+import { PrimaryNav } from "@/components/rail/primary-nav";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
   SessionSandboxSwitcher,
@@ -47,6 +50,12 @@ import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
+
+const LazySessionTenancyRouteControl = lazy(() =>
+  import("@/components/session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
+    default: SessionTenancyRouteControl,
+  })),
+);
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
 function RailBody() {
@@ -161,6 +170,7 @@ function RailBody() {
               aria-labelledby="mobile-nav-tab-sessions"
               className="mt-2 flex min-h-0 flex-1 flex-col"
             >
+              <PrimaryNav />
               <SessionList />
             </div>
           ) : (
@@ -179,7 +189,7 @@ function RailBody() {
         <>
           {/* Sessions are the primary object. Workspace administration remains
               secondary on desktop and becomes its own screen on phones. */}
-          <ForYouLink />
+          <PrimaryNav />
           <div className="mt-2 flex min-h-0 flex-1 flex-col">
             {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
           </div>
@@ -482,14 +492,28 @@ function SessionRouteHeader({
   // can be a different rail than the newest admitted turn.
   const policyReady = !lastStarted.loading;
   const displayModelId = policyReady ? lastStartedModel || session.model : session.model;
+  const navigate = useNavigate();
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
 
+  // A session the scheduler started carries the task id in its metadata; that is
+  // the only link back, since the run -> session mapping lives on the run row.
+  const scheduledTaskId = scheduledTaskIdOf(session);
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
+      onOpenSchedule={
+        scheduledTaskId
+          ? () =>
+              void navigate({
+                to: "/workspaces/$workspaceId/schedules",
+                params: { workspaceId: session.workspaceId },
+                search: { taskId: scheduledTaskId },
+              })
+          : null
+      }
       lineageLoading={lineageLoading}
       lineageError={lineageError}
       connectionState={context.connectionState}
@@ -512,6 +536,13 @@ function SessionRouteHeader({
       billingClass={selectedRow?.billingClass}
       modelLabel={selectedRow?.label}
       policyLoading={policyLoading}
+      accessSlot={
+        session.tenancy ? (
+          <Suspense fallback={null}>
+            <LazySessionTenancyRouteControl session={session} events={events} />
+          </Suspense>
+        ) : null
+      }
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
           <SessionSandboxSwitcher

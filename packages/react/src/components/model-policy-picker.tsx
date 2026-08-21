@@ -91,6 +91,8 @@ export type ModelPolicyPickerProps = {
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
+  /** Hide latency controls on surfaces whose saved policy does not include latency. */
+  allowLatencyMode?: boolean | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
@@ -433,7 +435,7 @@ export function ModelPolicyPickerMenu(
           icon={<BillingClassMark billingClass={focusModel.billingClass} />}
           onBack={() => go({ level: "models", rail: focusModel.billingClass, modelId: null }, -1)}
           trailing={
-            supportsFast ? (
+            supportsFast && props.allowLatencyMode !== false ? (
               <button
                 type="button"
                 disabled={!focusModel.selectable}

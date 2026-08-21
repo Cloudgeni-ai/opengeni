@@ -465,8 +465,19 @@ export function createSandboxLeaseActivities(
       const { db, settings, observability } = await services();
       const timing = sandboxDrainTiming(settings);
       if (!settings.sandboxOwnershipEnabled) {
+        // Turns skip leases when the flag is off, but Computer/Browser attach
+        // still acquire them. Leaving drainable rows untouched strands Desktop
+        // behind rotation_in_progress forever. Inventory and drain those rows;
+        // do not request NEW deadline rotations or meter warm time.
+        const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
+          viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
+          turnHolderTtlMs: settings.sandboxLeaseTtlMs,
+          interactionHolderTtlMs: settings.sandboxInteractionHolderTtlMs,
+          idleGraceMs: settings.sandboxIdleGraceMs,
+        });
+        const drainable = drainableInventory.slice(0, SANDBOX_REAPER_CHILD_DISPATCH_LIMIT);
         return {
-          drainable: [],
+          drainable,
           timeoutClass: timing.timeoutClass,
           snapshotTimeoutMs: timing.snapshotTimeoutMs,
           captureTimeoutMs: timing.captureTimeoutMs,
@@ -539,7 +550,6 @@ export function createSandboxLeaseActivities(
     });
     try {
       const { db, settings, observability, objectStorage } = await services();
-      if (!settings.sandboxOwnershipEnabled) return { status: "skipped" };
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs

@@ -5,26 +5,18 @@ import { join } from "node:path";
 // ---------------------------------------------------------------------------
 // Session-visibility contract stabilization (organization-tenancy slice 10).
 //
-// Migration 0225 shipped two privileged SECURITY DEFINER lifecycle surfaces -
+// Migration 0303 activates the hardened database prerequisite behind two
+// privileged SECURITY DEFINER lifecycle surfaces -
 // `transition_session_visibility` and `fork_session_content` - plus a matching
 // `@opengeni/db/session-tenancy` adapter, two `SessionAuthorizationOperation`
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE. The two lifecycle functions are deliberately NOT: no API route, core
-// domain function, worker activity, MCP tool, SDK call, or UI reaches them, so
-// no production session ever leaves `workspace_shared`.
-//
-// That is a decision, not an accident. Personal visibility cannot be exposed to
-// humans until the remaining activation work in `docs/organization-tenancy.md`
-// ("Session-visibility and fork surfaces: shipped, deliberately inert") lands -
-// most concretely the paginated session-list snapshot cache, which stores bare
-// `uuid[]` session ids with no foreign key and therefore receives none of the
-// 70 restrictive visibility policies.
-//
-// These tests pin that boundary so a future caller has to arrive through that
-// decision on purpose. If you are adding the first real caller, update the doc
-// section and this file in the same change.
+// ACTIVE for organizations carrying the durable activation receipt. The first
+// public caller is deliberately narrow: one core application service reached
+// by the two HTTP routes and the framework-neutral SDK. Worker, MCP, runtime,
+// React, web UI, cross-workspace, attachment, and personal-grant callers remain
+// forbidden.
 // ---------------------------------------------------------------------------
 
 const repo = join(import.meta.dir, "..");
@@ -32,6 +24,11 @@ const repo = join(import.meta.dir, "..");
 const SQL_ENTRY_POINTS = ["transition_session_visibility", "fork_session_content"] as const;
 const ADAPTER_ENTRY_POINTS = ["transitionSessionVisibility", "forkSessionContent"] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
+const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
+const AUTHORIZATION_CALLER_ALLOWLIST = new Set([
+  "packages/core/src/application/session-tenancy.ts",
+  "apps/api/src/routes/sessions.ts",
+]);
 
 /** Files allowed to name the SQL entry points: origin definition, later body
  * replacements that only copy newly required session columns, grants, posture,
@@ -39,6 +36,7 @@ const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.crea
 const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
   "packages/db/drizzle/0289_session_composer_policy_authority.sql",
+  "packages/db/drizzle/0303_session_tenancy_product_activation.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
@@ -52,8 +50,8 @@ async function sourceFiles(root: string, pattern = "**/*.{ts,tsx}"): Promise<str
   return files.sort();
 }
 
-describe("session visibility and fork surfaces are shipped but deliberately inert", () => {
-  test("no product package reaches either lifecycle entry point", async () => {
+describe("session visibility and fork product activation stays on its exact public boundary", () => {
+  test("only the core application boundary reaches the database adapter", async () => {
     const roots = [
       "apps/api/src",
       "apps/worker/src",
@@ -67,11 +65,12 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
     const forbidden = [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS];
     for (const root of roots) {
       for (const file of await sourceFiles(root)) {
+        if (ADAPTER_CALLER_ALLOWLIST.has(file)) continue;
         const content = await readFile(join(repo, file), "utf8");
         for (const marker of forbidden) {
           expect(
             content.includes(marker),
-            `${file} must not reach ${marker}: session visibility mutation and independent fork are shipped but unactivated. See docs/organization-tenancy.md "Session-visibility and fork surfaces: shipped, deliberately inert".`,
+            `${file} must not reach ${marker}; the first product activation is API/core/SDK-only and packages/core/src/application/session-tenancy.ts is the sole adapter caller.`,
           ).toBe(false);
         }
       }
@@ -88,7 +87,7 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
       for (const marker of SQL_ENTRY_POINTS) {
         expect(
           content.includes(marker),
-          `${file} must not name ${marker}; 0225 remains the origin definition, later allowlisted migrations may replace only the copied session-column list, and packages/db/src/session-tenancy.ts remains the sole adapter.`,
+          `${file} must not name ${marker}; 0225 remains the origin definition, allowlisted migrations may replace the fenced database contract, and packages/db/src/session-tenancy.ts remains the sole adapter.`,
         ).toBe(false);
       }
     }
@@ -103,9 +102,21 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);
     }
+    expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
+    // One probe plus the exact version supplied to both lifecycle functions.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(3);
   });
 
-  test("the two authorization operations remain declarations with no enforcement", async () => {
+  test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {
+    const regression = await readFile(
+      join(repo, "packages/db/test/migration-0241-atomic-personal-resource-delegation.test.ts"),
+      "utf8",
+    );
+    expect(regression).toContain("insert into session_tenancy_activations");
+    expect(regression).toMatch(/transition_session_visibility\([\s\S]*?'a{64}',\s*1\s*\)/u);
+  });
+
+  test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {
     const contracts = await readFile(join(repo, "packages/contracts/src/index.ts"), "utf8");
     for (const operation of AUTHORIZATION_OPERATIONS) {
       expect(contracts).toContain(operation);
@@ -121,11 +132,12 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
     ];
     for (const root of roots) {
       for (const file of await sourceFiles(root)) {
+        if (AUTHORIZATION_CALLER_ALLOWLIST.has(file)) continue;
         const content = await readFile(join(repo, file), "utf8");
         for (const operation of AUTHORIZATION_OPERATIONS) {
           expect(
             content.includes(operation),
-            `${file} must not authorize ${operation} while the surface is inert.`,
+            `${file} must not authorize ${operation}; worker, MCP, runtime, SDK implementation, React, and web remain out of scope.`,
           ).toBe(false);
         }
       }
@@ -134,7 +146,7 @@ describe("session visibility and fork surfaces are shipped but deliberately iner
 
   test("the decision stays recorded next to the tenancy activation phases", async () => {
     const doc = await readFile(join(repo, "docs/organization-tenancy.md"), "utf8");
-    expect(doc).toContain("## Session-visibility and fork surfaces: shipped, deliberately inert");
+    expect(doc).toContain("## Session-visibility and private-fork public activation");
     expect(doc).toContain("transition_session_visibility");
     expect(doc).toContain("fork_session_content");
     expect(doc).toContain("session_list_snapshots");

@@ -62,6 +62,11 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
     name: "Task note owner",
   });
   const grant = access.workspaceGrants[0]!;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   const root = await withSessionRlsActorContext(
     { subjectId: ownerSubjectId },
     async () =>
@@ -79,16 +84,6 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
         createdByContext: {},
       }),
   );
-  if (options.privateRoot) {
-    await transitionSessionVisibility(client.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: root.id,
-      actorSubjectId: ownerSubjectId,
-      targetVisibility: "user_private",
-      expectedAuthorityEpoch: 1,
-      operationKey: `private-${suffix}`,
-    });
-  }
   const child = options.child
     ? await withSessionRlsActorContext(
         { subjectId: ownerSubjectId },
@@ -109,6 +104,26 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
           }),
       )
     : null;
+  if (options.privateRoot) {
+    await transitionSessionVisibility(client.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: root.id,
+      actorSubjectId: ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `private-root-${suffix}`,
+    });
+    if (child) {
+      await transitionSessionVisibility(client.db, {
+        workspaceId: grant.workspaceId,
+        sessionId: child.id,
+        actorSubjectId: ownerSubjectId,
+        targetVisibility: "user_private",
+        expectedAuthorityEpoch: 1,
+        operationKey: `private-child-${suffix}`,
+      });
+    }
+  }
   return { grant, ownerSubjectId, root, child };
 }
 

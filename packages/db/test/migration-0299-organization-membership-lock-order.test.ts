@@ -105,6 +105,11 @@ async function provisionOrganization() {
   });
   const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
   const organizationId = owner!.organizationId;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   const invitation = await createOrganizationInvitation(client.db, {
     organizationId,
     actorSubjectId: ownerSubject,

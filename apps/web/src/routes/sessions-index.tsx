@@ -17,6 +17,7 @@
 // lightweight local opt-in.
 import {
   FILE_ONLY_MESSAGE_TEXT,
+  useChannels,
   useRigs,
   useVariableSets,
   useWorkspaceSessions,
@@ -33,18 +34,33 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
   CheckIcon,
+  ChevronDownIcon,
   FolderIcon,
   MonitorOffIcon,
+  PlusIcon,
   ServerCogIcon,
   ServerIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
+import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
+import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
+import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
@@ -67,6 +83,7 @@ import {
   type PickerModelRow,
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import {
   useWorkspaceModelCatalog,
@@ -91,12 +108,16 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
+import {
+  usePersonalResourceAttachment,
+  type PersonalResourceAttachmentController,
+} from "@/lib/use-personal-resource-attachment";
 import { cn } from "@/lib/utils";
 import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
-import type { Session } from "@/types";
+import type { Channel, Session } from "@/types";
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -128,11 +149,70 @@ function SessionsIndexRouteContent({
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
+  const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
+    launch.channelId ?? null,
+  );
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(firstPartyMcpToolPolicy.default),
   );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [tenancyCapabilities, setTenancyCapabilities] = useState<{
+    activated: boolean;
+    canCreatePrivate: boolean;
+    reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+  } | null>(null);
+  const tenancyCapabilityGeneration = useRef(0);
+  useEffect(() => {
+    const generation = ++tenancyCapabilityGeneration.current;
+    if (personalWorkspace) {
+      setTenancyCapabilities({ activated: true, canCreatePrivate: true, reason: "available" });
+      return;
+    }
+    setTenancyCapabilities(null);
+    void context.client
+      .getSessionTenancyCreateCapabilities(workspaceId)
+      .then((capabilities) => {
+        if (tenancyCapabilityGeneration.current !== generation) return;
+        setTenancyCapabilities(capabilities);
+        if (!capabilities.canCreatePrivate) {
+          setDraft((current) =>
+            current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+          );
+        }
+      })
+      .catch(() => {
+        if (tenancyCapabilityGeneration.current !== generation) return;
+        setTenancyCapabilities({
+          activated: false,
+          canCreatePrivate: false,
+          reason: "unavailable",
+        });
+        setDraft((current) =>
+          current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+        );
+      });
+  }, [context.client, personalWorkspace, workspaceId]);
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    enabled: draft.compute.kind === "sandbox",
+    fixed: {
+      variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
+      rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    createVisibility: personalWorkspace ? "private" : draft.visibility,
+  });
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
@@ -145,6 +225,35 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
+
+  // Folder-launch links preselect their destination, while the ordinary New
+  // session entry starts in Recents. Keep the selection local so choosing a
+  // folder does not turn the composer URL into application state.
+  useEffect(() => {
+    setSelectedChannelId(launch.channelId ?? null);
+  }, [launch.channelId]);
+
+  useEffect(() => {
+    if (
+      selectedChannelId !== null &&
+      !channelsQuery.loading &&
+      !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
+    ) {
+      setSelectedChannelId(null);
+    }
+  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId]);
+  const createProject = useCallback(async () => {
+    const name = projectNameDraft.trim();
+    if (!name) return;
+    const project = await channelsQuery.create({ name });
+    if (!project) {
+      toast.error("Couldn't create the project. The name may already be in use.");
+      return;
+    }
+    setSelectedChannelId(project.id);
+    setProjectDialogOpen(false);
+    setProjectNameDraft("");
+  }, [channelsQuery, projectNameDraft]);
 
   useEffect(() => {
     const onRequest = () => setCreateComposerFocusGen((current) => current + 1);
@@ -195,7 +304,9 @@ function SessionsIndexRouteContent({
     ],
   );
   const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
-    rehydrateRepositoryResources(resources, context.githubRepos),
+    rehydrateRepositoryResources(resources, context.githubRepos, {
+      catalogReady: context.githubCatalogReady,
+    }),
   );
   const setModel = context.setModel;
   const setReasoningEffort = context.setReasoningEffort;
@@ -247,9 +358,15 @@ function SessionsIndexRouteContent({
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
     hydrateResources,
-    resourceHydrationReady: context.githubCatalogReady && context.workspaceMcpCatalogReady,
+    // Tool policy needs the MCP catalog. GitHub is optional: an unreadied
+    // catalog must not keep the create composer disabled / unsendable.
+    resourceHydrationReady: context.workspaceMcpCatalogReady,
   });
   const busy = context.busy || submitting;
+  const privateCreateUnavailable =
+    !personalWorkspace &&
+    draft.visibility === "private" &&
+    tenancyCapabilities?.canCreatePrivate !== true;
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
@@ -291,7 +408,16 @@ function SessionsIndexRouteContent({
         : attachments.readyResources.length > 0
           ? FILE_ONLY_MESSAGE_TEXT
           : "";
-      if (busy || newSessionDraft.loading || newSessionDraft.conflict || !newSessionPolicyValid)
+      if (
+        busy ||
+        newSessionDraft.loading ||
+        newSessionDraft.conflict ||
+        !newSessionPolicyValid ||
+        privateCreateUnavailable ||
+        (createdSessionAuthority === null && personalAttachment.requiresDecision) ||
+        (createdSessionAuthority === null && personalAttachment.loading) ||
+        (createdSessionAuthority === null && personalAttachment.refreshing)
+      )
         return false;
       if (
         createdSessionAuthority === null &&
@@ -313,7 +439,15 @@ function SessionsIndexRouteContent({
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
               const flushed = await newSessionDraft.flush();
-              if (!flushed) return null;
+              if (!flushed) {
+                toast.error("Couldn't save the draft", {
+                  description:
+                    newSessionDraft.error?.message ??
+                    newSessionDraft.conflict?.message ??
+                    "Resolve the draft conflict, then try again.",
+                });
+                return null;
+              }
               const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
               const created = await context.startSession(
                 workspaceId,
@@ -329,8 +463,10 @@ function SessionsIndexRouteContent({
                 {
                   targetSandboxId: submission.options.targetSandboxId,
                   workingDir: submission.options.workingDir,
+                  channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
+                  visibility: personalWorkspace ? "workspace" : submission.options.visibility,
                 },
               );
               if (!created) return null;
@@ -342,8 +478,20 @@ function SessionsIndexRouteContent({
 
             const submittedResources = persistedValue.resources;
             const flushed = await newSessionDraft.flush();
-            if (!flushed) return null;
-            const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
+            if (!flushed) {
+              toast.error("Couldn't save the draft", {
+                description:
+                  newSessionDraft.error?.message ??
+                  newSessionDraft.conflict?.message ??
+                  "Resolve the draft conflict, then try again.",
+              });
+              return null;
+            }
+            const submission = submissionFromSessionDraft(
+              draft,
+              firstPartyMcpToolPolicy.default,
+              personalAttachment.intent,
+            );
             const created = await context.startSession(
               workspaceId,
               {
@@ -358,8 +506,12 @@ function SessionsIndexRouteContent({
               {
                 targetSandboxId: submission.options.targetSandboxId,
                 workingDir: submission.options.workingDir,
+                channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
+                visibility: personalWorkspace ? "workspace" : submission.options.visibility,
+                onFailure: ({ error, request }) =>
+                  personalAttachment.onDeliveryError(error, request, "create"),
               },
             );
             if (!created) return null;
@@ -423,7 +575,7 @@ function SessionsIndexRouteContent({
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId },
-        search: {},
+        search: launch.channelId ? { channelId: launch.channelId } : {},
         replace: true,
       });
       return;
@@ -455,6 +607,7 @@ function SessionsIndexRouteContent({
     launchModel,
     launchRealtime,
     launchKey,
+    launch.channelId,
     navigate,
     newSessionDraft.conflict,
     newSessionDraft.loading,
@@ -485,6 +638,9 @@ function SessionsIndexRouteContent({
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
+      (createdSessionAuthority !== null || !personalAttachment.requiresDecision) &&
+      (createdSessionAuthority !== null || !personalAttachment.loading) &&
+      (createdSessionAuthority !== null || !personalAttachment.refreshing) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -593,46 +749,55 @@ function SessionsIndexRouteContent({
               />
             }
             actions={
-              <NewSessionRealtimeControl
-                client={context.client}
-                workspaceId={workspaceId}
-                codexConnected={codexConnected}
-                models={voiceSelection.models}
-                selectedModel={voiceSelection.selectedModel}
-                onSelectModel={voiceSelection.selectModel}
-                modelMenu="split-desktop"
-                disabled={
-                  busy ||
-                  newSessionDraft.loading ||
-                  newSessionDraft.conflict !== null ||
-                  attachments.hasUnresolved ||
-                  !newSessionPolicyValid ||
-                  !computeReady ||
-                  !context.workspaceMcpCatalogReady
-                }
-                disabledReason={
-                  newSessionDraft.conflict
-                    ? "Resolve the draft conflict before starting voice."
-                    : attachments.hasUnresolved
-                      ? "Wait for attachments to finish before starting voice."
-                      : !newSessionPolicyValid
-                        ? "Choose supported model settings before starting voice."
-                        : !computeReady
-                          ? "Choose where this session should run first."
-                          : !context.workspaceMcpCatalogReady
-                            ? "Wait for session tools to finish loading."
-                            : null
-                }
-                onStart={async (model) => await submitNewSession(model)}
-              />
+              <>
+                <SessionModelControl
+                  modelCatalog={modelCatalog}
+                  policyError={newSessionPolicyError}
+                  disabled={busy || newSessionDraft.loading}
+                />
+                <NewSessionRealtimeControl
+                  client={context.client}
+                  workspaceId={workspaceId}
+                  codexConnected={codexConnected}
+                  models={voiceSelection.models}
+                  selectedModel={voiceSelection.selectedModel}
+                  onSelectModel={voiceSelection.selectModel}
+                  modelMenu="split-desktop"
+                  disabled={
+                    busy ||
+                    newSessionDraft.loading ||
+                    newSessionDraft.conflict !== null ||
+                    attachments.hasUnresolved ||
+                    !newSessionPolicyValid ||
+                    !computeReady ||
+                    !context.workspaceMcpCatalogReady
+                  }
+                  disabledReason={
+                    newSessionDraft.conflict
+                      ? "Resolve the draft conflict before starting voice."
+                      : attachments.hasUnresolved
+                        ? "Wait for attachments to finish before starting voice."
+                        : !newSessionPolicyValid
+                          ? "Choose supported model settings before starting voice."
+                          : !computeReady
+                            ? "Choose where this session should run first."
+                            : !context.workspaceMcpCatalogReady
+                              ? "Wait for session tools to finish loading."
+                              : null
+                  }
+                  onStart={async (model) => await submitNewSession(model)}
+                />
+              </>
             }
-            controls={
-              <SessionControlStrip
+            header={
+              <SessionSetupStrip
                 workspaceId={workspaceId}
-                modelCatalog={modelCatalog}
-                policyError={newSessionPolicyError}
                 disabled={busy || newSessionDraft.loading}
                 showRepos={draft.compute.kind === "sandbox"}
+                channels={channelsQuery.channels}
+                selectedChannelId={selectedChannelId}
+                onChannelChange={setSelectedChannelId}
+                onCreateProject={() => setProjectDialogOpen(true)}
                 selection={{
                   mcpServerIds: context.selectedCapabilityToolIds,
                   firstPartyToolIds: draft.firstPartyMcpTools,
@@ -649,16 +814,43 @@ function SessionsIndexRouteContent({
             }
           />
 
+          <SessionVisibilityPicker
+            id="new-session"
+            personalWorkspace={personalWorkspace}
+            value={personalWorkspace ? "private" : draft.visibility}
+            capabilities={tenancyCapabilities}
+            disabled={busy || newSessionDraft.loading}
+            onChange={(visibility) => setDraft((current) => ({ ...current, visibility }))}
+          />
+
           <ComputeTargetControl
             workspaceId={workspaceId}
             draft={draft}
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
+            personalAttachment={personalAttachment}
           />
+          {draft.compute.kind === "sandbox" ? (
+            <PersonalResourceAttachmentControl
+              controller={personalAttachment}
+              disabled={busy || newSessionDraft.loading}
+            />
+          ) : null}
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
       </div>
+      <ChannelCreateDialog
+        open={projectDialogOpen}
+        name={projectNameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setProjectNameDraft}
+        onOpenChange={(open) => {
+          setProjectDialogOpen(open);
+          if (!open) setProjectNameDraft("");
+        }}
+        onSubmit={() => void createProject()}
+      />
     </div>
   );
 }
@@ -787,23 +979,27 @@ function RecentSessionRow({
   );
 }
 
-// Composer footer pills: model, tools, and (for managed sandbox) repos — same
-// compact control language. Repo stays out of the compute band so that band
-// only shows when rigs / variable sets exist. On mobile, tools move under “+”.
-function SessionControlStrip({
+// Setup selections sit above the prompt so the footer remains an action row.
+// Repo stays out of the compute band so that band only shows when rigs /
+// variable sets exist. On mobile, tools and repos remain under “+”.
+function SessionSetupStrip({
   workspaceId,
-  modelCatalog,
-  policyError,
   disabled,
   showRepos,
+  channels,
+  selectedChannelId,
+  onChannelChange,
+  onCreateProject,
   selection,
   onToolSelectionChange,
 }: {
   workspaceId: string;
-  modelCatalog: WorkspaceModelCatalogState;
-  policyError: string | null;
   disabled: boolean;
   showRepos: boolean;
+  channels: Channel[];
+  selectedChannelId: string | null;
+  onChannelChange: (channelId: string | null) => void;
+  onCreateProject: () => void;
   selection: SessionToolSelection;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
@@ -812,35 +1008,114 @@ function SessionControlStrip({
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
   );
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
-      <ModelPicker
-        rows={modelCatalog.rows}
-        model={context.model}
-        effort={context.reasoningEffort}
-        latencyMode={context.latencyMode}
-        disabled={disabled}
-        loading={modelCatalog.loading}
-        error={modelCatalog.error ?? policyError}
-        onModelChange={context.setModel}
-        onEffortChange={context.setReasoningEffort}
-        onLatencyModeChange={context.setLatencyMode}
-      />
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
       <SessionToolPicker
         servers={context.toolMcpServers}
         firstPartyTools={firstPartyToolOptions}
         selection={selection}
-        triggerClassName="max-sm:hidden"
+        triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
         disabled={disabled}
         onChange={onToolSelectionChange}
+      />
+      <SessionFolderPicker
+        channels={channels}
+        selectedChannelId={selectedChannelId}
+        disabled={disabled}
+        onChange={onChannelChange}
+        onCreateProject={onCreateProject}
       />
       {showRepos ? (
         <WorkspaceRepositoryPicker
           workspaceId={workspaceId}
           disabled={disabled}
-          triggerClassName="max-sm:hidden"
+          triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
         />
       ) : null}
     </div>
+  );
+}
+
+/** Keep model policy adjacent to voice/send in the bottom action row. */
+function SessionModelControl({
+  modelCatalog,
+  policyError,
+  disabled,
+}: {
+  modelCatalog: WorkspaceModelCatalogState;
+  policyError: string | null;
+  disabled: boolean;
+}) {
+  const context = useAppContext();
+  return (
+    <ModelPicker
+      rows={modelCatalog.rows}
+      model={context.model}
+      effort={context.reasoningEffort}
+      latencyMode={context.latencyMode}
+      disabled={disabled}
+      loading={modelCatalog.loading}
+      error={modelCatalog.error ?? policyError}
+      className="max-w-[8.5rem] shrink sm:max-w-[13rem] sm:shrink-0"
+      onModelChange={context.setModel}
+      onEffortChange={context.setReasoningEffort}
+      onLatencyModeChange={context.setLatencyMode}
+    />
+  );
+}
+
+function SessionFolderPicker({
+  channels,
+  selectedChannelId,
+  disabled,
+  onChange,
+  onCreateProject,
+}: {
+  channels: Channel[];
+  selectedChannelId: string | null;
+  disabled: boolean;
+  onChange: (channelId: string | null) => void;
+  onCreateProject: () => void;
+}) {
+  const selected = channels.find((channel) => channel.id === selectedChannelId) ?? null;
+  const label = selected?.name ?? "Default";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={disabled}
+          aria-label={`Project: ${label}`}
+          title={label}
+          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
+        >
+          <FolderIcon className="size-3.5 shrink-0" />
+          <span className="min-w-0 truncate">{label}</span>
+          <ChevronDownIcon className="size-3 shrink-0" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-56">
+        <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onChange(null)}>
+          <FolderIcon className="size-4" />
+          <span className="min-w-0 flex-1 truncate">Default</span>
+          {selectedChannelId === null ? <CheckIcon className="size-4" /> : null}
+        </DropdownMenuItem>
+        {channels.map((channel) => (
+          <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
+            <FolderIcon className="size-4" />
+            <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+            {channel.id === selectedChannelId ? <CheckIcon className="size-4" /> : null}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onCreateProject}>
+          <PlusIcon className="size-4" />
+          New project
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -938,6 +1213,7 @@ function ComputeTargetControl(props: {
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
+  personalAttachment: PersonalResourceAttachmentController;
 }) {
   const { draft, onChange } = props;
   // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
@@ -1013,12 +1289,24 @@ function ComputeTargetControl(props: {
     if (fleetLoadFailed) {
       return (
         <section className="mt-5 grid gap-2">
-          <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
+          <ManagedSandboxFields
+            draft={draft}
+            onChange={onChange}
+            disabled={props.disabled}
+            personalAttachment={props.personalAttachment}
+          />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
       );
     }
-    return <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />;
+    return (
+      <ManagedSandboxFields
+        draft={draft}
+        onChange={onChange}
+        disabled={props.disabled}
+        personalAttachment={props.personalAttachment}
+      />
+    );
   }
 
   return (
@@ -1054,7 +1342,12 @@ function ComputeTargetControl(props: {
       {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields draft={draft} onChange={onChange} disabled={props.disabled} />
+        <ManagedSandboxFields
+          draft={draft}
+          onChange={onChange}
+          disabled={props.disabled}
+          personalAttachment={props.personalAttachment}
+        />
       ) : (
         <ConnectedMachineFields
           draft={draft}
@@ -1126,12 +1419,21 @@ function ManagedSandboxFields(props: {
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
+  personalAttachment: PersonalResourceAttachmentController;
 }) {
   const { draft, onChange } = props;
   const variableSets = useVariableSets();
   const rigs = useRigs();
-  const showRigs = rigs.rigs.length > 0;
-  const showVariableSets = variableSets.variableSets.length > 0;
+  const personalRigs = props.personalAttachment.catalog?.rigs ?? [];
+  const personalVariableSets = props.personalAttachment.catalog?.variableSets ?? [];
+  const personalRigIds = new Set(personalRigs.map((resource) => resource.id));
+  const personalVariableSetIds = new Set(personalVariableSets.map((resource) => resource.id));
+  const workspaceRigs = rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
+  const workspaceVariableSets = variableSets.variableSets.filter(
+    (resource) => !personalVariableSetIds.has(resource.id),
+  );
+  const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
+  const showVariableSets = workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
   if (!showRigs && !showVariableSets) {
     return null;
   }
@@ -1155,8 +1457,9 @@ function ManagedSandboxFields(props: {
             disabled={props.disabled}
             onChange={(event) => {
               const rigId = event.target.value;
-              const picked = rigs.rigs.find((rig) => rig.id === rigId);
+              const picked = [...workspaceRigs, ...personalRigs].find((rig) => rig.id === rigId);
               const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
+              props.personalAttachment.setMode(null);
               onChange({
                 ...draft,
                 rigId,
@@ -1168,12 +1471,22 @@ function ManagedSandboxFields(props: {
             className="h-8 w-auto max-w-56 text-xs"
           >
             <option value="">Workspace default</option>
-            {rigs.rigs.map((rig) => (
+            {workspaceRigs.map((rig) => (
               <option key={rig.id} value={rig.id}>
                 {rig.name}
                 {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
               </option>
             ))}
+            {personalRigs.length > 0 ? (
+              <optgroup label="Only me">
+                {personalRigs.map((rig) => (
+                  <option key={rig.id} value={rig.id}>
+                    {rig.name}
+                    {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </Select>
         </div>
       ) : null}
@@ -1194,15 +1507,27 @@ function ManagedSandboxFields(props: {
           <Select
             value={draft.variableSetId}
             disabled={props.disabled}
-            onChange={(event) => onChange({ ...draft, variableSetId: event.target.value })}
+            onChange={(event) => {
+              props.personalAttachment.setMode(null);
+              onChange({ ...draft, variableSetId: event.target.value });
+            }}
             className="h-8 w-auto max-w-56 text-xs"
           >
             <option value="">No variable set</option>
-            {variableSets.variableSets.map((variableSet) => (
+            {workspaceVariableSets.map((variableSet) => (
               <option key={variableSet.id} value={variableSet.id}>
                 {variableSet.name} ({variableSet.variables.length} vars)
               </option>
             ))}
+            {personalVariableSets.length > 0 ? (
+              <optgroup label="Only me">
+                {personalVariableSets.map((variableSet) => (
+                  <option key={variableSet.id} value={variableSet.id}>
+                    {variableSet.name} ({variableSet.variables.length} vars)
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </Select>
         </div>
       ) : null}

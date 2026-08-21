@@ -1,5 +1,9 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
+  createLocalMcpBridgeFromAdapters,
+  type LocalMcpBridgeAdapter,
+} from "@opengeni/capabilities";
+import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
@@ -83,13 +87,31 @@ import {
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
-import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+import {
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  type GmailRestMcpBridgeConfig,
+  type GmailRestMcpBridgeContext,
+} from "./gmail-rest-mcp";
+
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
 } from "./connector-attachments";
+import {
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
+export {
+  modelToolResultOverflowError,
+  projectAttemptToolResultForCaller,
+  spilledModelToolResult,
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
 export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
@@ -559,6 +581,10 @@ export type {
 
 ensureReadableStreamFrom();
 
+const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
+  GmailRestMcpBridgeConfig,
+  GmailRestMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2119,7 +2145,7 @@ export function buildOpenGeniAgent(
       : agentTool({
           name: HUMAN_INPUT_TOOL_NAME,
           description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
           parameters: RequestHumanInputToolInput,
           needsApproval: true,
           inputGuardrails: [
@@ -2380,9 +2406,11 @@ export function buildOpenGeniAgent(
  * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
  * exact MCP objects may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
- * that catalog is ready. Generic providers receive only stable ordinary
- * tool_search/tool_invoke schemas; a valid dispatcher call is renamed to the
- * real tool and bound by the same hook before approval and execution.
+ * that catalog is ready. Classification is origin, not transport: the same
+ * always-visible base set and eager MCP tools are in the first request on
+ * every path. Generic providers add stable ordinary tool_search/tool_invoke
+ * schemas; a valid dispatcher call is renamed to the real tool and bound by
+ * the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -3164,6 +3192,11 @@ export type PrepareToolsOptions = {
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
   /**
+   * Persist an oversized *model-visible* tool result as a workspace File and
+   * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
+   */
+  spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
    */
@@ -3411,6 +3444,10 @@ export async function prepareAgentTools(
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
+  const attemptToolDefinitions = wrapAttemptToolDefinitions(
+    options.attemptToolDefinitions ?? [],
+    options.spillOversizedModelToolResult,
+  );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
@@ -3517,57 +3554,66 @@ export async function prepareAgentTools(
         // auth misses are still published as actionable state because the
         // workspace catalog explicitly told the user that the surface existed.
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
-        // Every official-Gmail-resource turn executes through OpenGeni's own
-        // REST bridge, never Google's Developer Preview MCP endpoint directly:
-        // the bridge is the sole Gmail path (see gmail-rest-mcp.ts).
-        const useGmailRestAdapter = isOfficialGmailMcpConfig(config.url, config.connectionRef);
-        const innerServer = useGmailRestAdapter
-          ? new GmailRestMcpServer({
-              workspaceId: options.workspaceId ?? "",
-              ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
-              serverId: config.id,
-              connectionRef: config.connectionRef!,
-              resolveCredential: async (request) =>
-                await resolveConnectionForRequest(
-                  options,
-                  request.serverId,
-                  request.connectionRef,
-                  request.destinationUrl,
-                  request.toolName,
-                  request.forceRefresh === true,
-                ),
-              onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
-              onResolvedConnectionId: (connectionId) =>
-                recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
-              fetchImpl: mcpFetchImpl,
-            })
-          : new MCPServerStreamableHttp({
-              url,
-              name: config.name ?? config.id,
-              cacheToolsList: config.cacheToolsList,
-              // The upstream transport logger receives raw thrown errors, whose
-              // messages may contain response bodies, URLs, headers, or echoed
-              // credentials. Keep its diagnostic surface structural only.
-              logger: mcpTransportLogger(config.id, {
-                // Codex Apps setup is a read-only initialize/tools-list handshake.
-                // A statusless transport failure is safe to retry, while auth
-                // responses remain non-retryable and publish their specific
-                // reconnect reason through codexAppsAuthFetch.
-                recoverySafeSetup: isCodexAppsMcpServer(config),
-              }),
-              // codex_apps returns connector tools with empty `outputSchema: {}` that the
-              // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-              // sanitize the response on the wire before validation. The namespace Set
-              // also captures each tool's original connector namespace (P4 Part B.1).
-              fetch: fetchImpl,
-              ...(await mcpServerRequestInit(settings, config)),
-              ...(config.timeoutMs
-                ? {
-                    timeout: config.timeoutMs,
-                    clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-                  }
-                : {}),
-            });
+        // First-party bridges are ordinary in-process MCP servers selected by
+        // adapter-owned matchers. Adding another provider extends this registry;
+        // generic transport/catalog code never branches on provider identity.
+        const bridge = createLocalMcpBridgeFromAdapters<
+          GmailRestMcpBridgeConfig,
+          GmailRestMcpBridgeContext
+        >(
+          BUILT_IN_MCP_BRIDGE_ADAPTERS,
+          {
+            url: config.url,
+            ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+          },
+          {
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          },
+        );
+        const innerServer =
+          bridge ??
+          new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
         const server = new PrefixedMcpServer(
           innerServer,
           config.id,
@@ -3680,9 +3726,9 @@ export async function prepareAgentTools(
   warnBestEffortFailures(connectedEagerBestEffort);
   let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
   let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
-  let localToolServer: AttemptDefinitionMcpServer | null = options.attemptToolDefinitions?.length
+  let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
-        options.attemptToolDefinitions,
+        attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
       )
@@ -3693,7 +3739,7 @@ export async function prepareAgentTools(
       createAttemptToolEnvironment({
         scope: localScope,
         generation: options.attemptToolCatalogGeneration ?? 1,
-        definitions: [...(options.attemptToolDefinitions ?? [])],
+        definitions: [...attemptToolDefinitions],
         ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
       }),
     );
@@ -3902,18 +3948,21 @@ async function prepareAttemptToolEnvironment(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
-          execute: async (args, context) =>
-            await server.executeCatalogTool(
-              toolName,
-              args,
-              {
-                ...(context.transportMeta ?? {}),
-                opengeniOperationId: context.operationId,
-              },
-              {
-                ...(context.signal ? { signal: context.signal } : {}),
-              },
-            ),
+          execute: wrapAttemptToolExecute(
+            async (args, context) =>
+              await server.executeCatalogTool(
+                toolName,
+                args,
+                {
+                  ...(context.transportMeta ?? {}),
+                  opengeniOperationId: context.operationId,
+                },
+                {
+                  ...(context.signal ? { signal: context.signal } : {}),
+                },
+              ),
+            options.spillOversizedModelToolResult,
+          ),
         };
       });
     },
@@ -3921,7 +3970,13 @@ async function prepareAttemptToolEnvironment(
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions: [...perServerDefinitions.flat(), ...(options.attemptToolDefinitions ?? [])],
+    definitions: [
+      ...perServerDefinitions.flat(),
+      ...wrapAttemptToolDefinitions(
+        options.attemptToolDefinitions ?? [],
+        options.spillOversizedModelToolResult,
+      ),
+    ],
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
   });
   const subjectId = options.subjectId ?? "worker:mcp-model";
@@ -5714,17 +5769,20 @@ export class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
-    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
-      this.attemptToolEnvironment
-        ? this.attemptToolEnvironment.callModel({
-            modelName: toolName,
-            arguments: cleanArgs ?? {},
-            subjectId: this.attemptToolSubjectId,
-            ...(meta === undefined ? {} : { transportMeta: meta }),
-            ...(options?.signal ? { signal: options.signal } : {}),
-          })
-        : this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options),
-    );
+    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) => {
+      if (this.attemptToolEnvironment) {
+        return await this.attemptToolEnvironment.callModel({
+          modelName: toolName,
+          arguments: cleanArgs ?? {},
+          subjectId: this.attemptToolSubjectId,
+          ...(meta === undefined ? {} : { transportMeta: meta }),
+          ...(options?.signal ? { signal: options.signal } : {}),
+        });
+      }
+      const result = await this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options);
+      assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+      return result;
+    });
   }
 
   async executeCatalogTool(
@@ -5777,7 +5835,6 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       const result = AttemptToolResult.parse(output);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       return result;

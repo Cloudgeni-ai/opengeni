@@ -1805,6 +1805,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 })
                   ? createInteractionFrameProxyAttachment({
                       requestUrl: context.req.url,
+                      publicBaseUrl: deps.settings.publicBaseUrl,
+                      webBaseUrl: deps.settings.webBaseUrl,
+                      forwardedProto: context.req.header("x-forwarded-proto"),
+                      forwardedHost:
+                        context.req.header("x-forwarded-host") ?? context.req.header("host"),
                       rootSecret,
                       upstreamUrl,
                       upstreamProtocols: protocols,

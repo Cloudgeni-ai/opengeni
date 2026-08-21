@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createSessionGoal,
   createSession,
   getSessionHistoryItems,
   getSession,
@@ -478,6 +479,13 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     async () => {
       const grant = await testGrant(dbClient.db, "lost-wake");
       const session = await createDurableSession(dbClient.db, grant, "repair a lost Temporal wake");
+      await createSessionGoal(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        text: "consume every child result before completing",
+        createdBy: "api",
+      });
       const taskQueue = `durable-lost-wake-${crypto.randomUUID()}`;
       const model = new ScriptedModel("repaired wake consumed once");
       const settings = testSettings({

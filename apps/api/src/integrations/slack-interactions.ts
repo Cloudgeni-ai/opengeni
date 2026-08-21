@@ -3623,7 +3623,14 @@ function humanInputResponse(questions: HumanInputQuestion[], text: string) {
   const matches = question.options.filter(
     (option) => option.id.toLowerCase() === normalized || option.label.toLowerCase() === normalized,
   );
-  if (matches.length !== 1) return null;
+  if (matches.length !== 1) {
+    const other = text.trim();
+    if (!other) return null;
+    return {
+      outcome: "answered" as const,
+      answers: [{ questionId: question.id, values: [], other }],
+    };
+  }
   return {
     outcome: "answered" as const,
     answers: [{ questionId: question.id, values: [matches[0]!.id] }],
@@ -3638,7 +3645,9 @@ function formatQuestions(questions: HumanInputQuestion[]) {
         .slice(0, 10)
         .map((option) => option.label)
         .join(", ");
-      return `${index + 1}. ${boundedOutput(question.prompt)}${options ? ` (${options})` : ""}`;
+      return `${index + 1}. ${boundedOutput(question.prompt)}${
+        options ? ` (${options}, or reply with another value)` : ""
+      }`;
     })
     .join("\n");
 }

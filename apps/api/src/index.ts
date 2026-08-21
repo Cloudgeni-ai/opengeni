@@ -294,6 +294,7 @@ export async function startApi() {
   // strategy.
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
+    max: 32,
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
@@ -306,6 +307,8 @@ export async function startApi() {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
+    organizationTenancyCanonicalActivationEnabled:
+      settings.organizationTenancyCanonicalActivationEnabled,
   } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to

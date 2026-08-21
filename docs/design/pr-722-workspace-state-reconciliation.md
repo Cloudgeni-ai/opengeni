@@ -50,7 +50,7 @@ surface instead of adding the changed file's proposed authority.
 | 9 | `apps/web/src/routes/workspace-settings.tsx` | **Replace with authoritative existing API** | Workspace State deep-links to existing settings. It does not add charter/sweep toggles or duplicate policy administration. |
 | 10 | `apps/web/src/types.ts` | **Replace with authoritative existing API** | Use the SDK's dedicated `WorkspaceStateResponse`; do not create route-local Knowledge Bank authority types. |
 | 11 | `apps/worker/src/activities.ts` | **Reject** | No background inventory or synthesis activity is registered. |
-| 12 | `apps/worker/src/activities/agent-turn.ts` | **Reject** | No generated charter block or Workspace State data enters normal or compaction prompts. A later runtime-composition slice owns that behavior. |
+| 12 | `apps/worker/src/activities/agent-turn/` | **Reject** | No generated charter block or Workspace State data enters normal or compaction prompts. A later runtime-composition slice owns that behavior. |
 | 13 | `apps/worker/src/activities/knowledge-bank.ts` | **Reject** | AI/heuristic purpose, goal, gap, and charter synthesis is outside this slice and cannot create active policy. |
 | 14 | `apps/worker/src/index.ts` | **Reject** | No worker registration or task queue change. |
 | 15 | `apps/worker/src/workflows.ts` | **Reject** | No Temporal workflow export. |

@@ -300,23 +300,8 @@ export async function assertAgentCommandAuthorityInTransaction(
   if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
     throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }
-  const targetsSelf = targetSession.id === callerSession.id;
-  const targetsDirectParent = callerSession.parentSessionId === targetSession.id;
-  const targetsDirectChild = targetSession.parentSessionId === callerSession.id;
-  const verticalTargetAllowed =
-    input.action === "goal"
-      ? targetsSelf
-      : input.action === "message"
-        ? targetsSelf || targetsDirectParent || targetsDirectChild
-        : targetsDirectChild;
-  if (!verticalTargetAllowed) {
-    throw new AgentCommandAuthorityError(
-      "TARGET_NOT_VERTICAL",
-      input.action === "message"
-        ? "An agent may message only its own session, direct parent, or direct child"
-        : "An agent may control only a direct child session",
-    );
-  }
+  // Peer, parent, child, and unrelated-root targets are allowed here. Slack-private
+  // and user_private denies remain in requireSessionAuthorization.
 }
 
 function asSafeRevision(value: number | string | null, label: string): number | null {
@@ -434,6 +419,11 @@ export type SessionEventWriteLocks = {
  * this helper and may discover exact turn IDs only after locking the session.
  * They use the explicit `already_locked` stages, while retaining the same
  * monotonic table order. New event writers should prefer one complete call.
+ *
+ * Retained-screenshot prepare is not an event writer, but its INSERT still
+ * KEY SHAREs the turn and attempt through FKs. It must take this same prefix
+ * first: PostgreSQL fires those FK checks in catalog name/OID order, which can
+ * be attempt-then-turn and otherwise deadlocks against this helper.
  */
 export async function lockSessionEventWriteRows(
   db: Database,
@@ -523,6 +513,7 @@ export async function registerSessionTurnAttemptClaim(
     authorityEpoch: number;
     authorityVisibility: "user_private" | "workspace_shared";
     authorityOwnerOrganizationMembershipId: string | null;
+    personalResourceProtocolVersion: number;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
     connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
@@ -577,6 +568,7 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
+    existing.personalResourceProtocolVersion !== input.personalResourceProtocolVersion ||
     JSON.stringify(existing.connectorActionPolicies) !==
       JSON.stringify(input.connectorActionPolicies) ||
     existing.state === "closed"

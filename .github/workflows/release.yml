@@ -1,10 +1,9 @@
 name: Release
 
-# A push to main may open/update the changesets Version PR, but it can NEVER
-# publish. Publication is a separate, explicit workflow_dispatch after the
-# exact source revision has passed staging, production, and the production
-# canary window described in docs/workbench-acceptance.md. The dispatch is bound
-# to the selected git ref and records the retained acceptance evidence.
+# A push to main does not open a Version PR unless VERSION_PR_ON_PUSH=true.
+# Cut official by opening a Version PR manually (or that variable), merging it,
+# promoting main to production, then workflow_dispatch publication. Publication
+# never happens on push. The 72-hour production soak is not a publish gate.
 #
 # Release images are built once by release-candidate.yml before staging. The
 # final OCI job only promotes the exact accepted manifests to release tags and
@@ -18,8 +17,9 @@ name: Release
 #      automation/granular token with publish rights (provenance via OIDC).
 #   3. Enable Settings -> Actions -> General -> "Allow GitHub Actions to create
 #      and approve pull requests". The scoped per-run GITHUB_TOKEN deliberately
-#      authors Version PRs as github-actions[bot], leaving exact-head approval to
-#      a distinct trusted human reviewer.
+#      authors Version PRs as github-actions[bot]. GitHub branch protection may
+#      still require a human review to merge; ordinary publication admission binds
+#      the merged associated PR, not a later GitHub APPROVE or structured PASS.
 #   4. Configure OPENGENI_RELEASE_OCI_PREFIX and
 #      OPENGENI_RELEASE_REGISTRY_AUTH when the public registry is not the
 #      default GHCR namespace. The generic Azure OIDC mode also requires the
@@ -87,9 +87,10 @@ jobs:
   version:
     name: Open or update Version PR
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Dormant until opted in: skips cleanly (no red) on pushes to main until the
     # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
-    if: ${{ github.event_name == 'push' && vars.RELEASE_ENABLED == 'true' }}
+    if: ${{ github.event_name == 'push' && vars.VERSION_PR_ON_PUSH == 'true' }}
     permissions:
       contents: write # changesets commits package versions to its release branch
       pull-requests: write # changesets opens/updates the Version PR
@@ -161,6 +162,7 @@ jobs:
     name: Publish verified release
     needs: admission
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: ${{ github.event_name == 'workflow_dispatch' && vars.RELEASE_ENABLED == 'true' }}
     env:
       OPENGENI_RELEASE_OCI_PREFIX: ${{ vars.OPENGENI_RELEASE_OCI_PREFIX || 'ghcr.io/cloudgeni-ai' }}
@@ -168,7 +170,7 @@ jobs:
     permissions:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
-      pull-requests: read # verify exact-head native approval before publication
+      pull-requests: read # verify the merged associated PR before publication
       actions: read # resolve canonical producer runs and immutable artifact digests
     outputs:
       releaseReady: ${{ steps.registry.outputs.release_ready }}
@@ -241,9 +243,9 @@ jobs:
             echo "release controller checkout differs from controller_sha" >&2
             exit 1
           }
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
-            echo "source_sha must be reachable from origin/main" >&2
+          git fetch --no-tags origin production
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/production || {
+            echo "source_sha must be reachable from origin/production; promote main first" >&2
             exit 1
           }
           [ "$CONFIRM_ZERO_GAPS" = "true" ] || {
@@ -540,6 +542,7 @@ jobs:
   images:
     name: Promote accepted OCI images
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Image bytes were already built and accepted through release-candidate.yml.
     # This job creates release aliases for those exact manifests, verifies every
     # alias resolves to the accepted digest, and writes the final BOM.

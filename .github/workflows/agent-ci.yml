@@ -18,6 +18,7 @@ on:
   push:
     branches:
       - main
+      - production
     paths:
       - "agent/**"
       - ".github/workflows/agent-ci.yml"
@@ -40,6 +41,7 @@ jobs:
   msrv:
     name: Rust 1.82 compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -60,6 +62,7 @@ jobs:
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -125,6 +128,7 @@ jobs:
   install-smoke:
     name: install-smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

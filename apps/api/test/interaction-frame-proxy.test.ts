@@ -89,6 +89,50 @@ describe("interaction frame proxy", () => {
     expect(JSON.stringify(attachment)).not.toContain(internalUrl);
     expect(JSON.stringify(attachment)).not.toContain("secret-view-grant");
 
+    const behindTlsTerminator = createInteractionFrameProxyAttachment({
+      requestUrl: "http://127.0.0.1:8000/v1/workspaces/workspace/attachments",
+      publicBaseUrl: publicOrigin,
+      rootSecret,
+      upstreamUrl: internalUrl,
+      upstreamProtocols: ["binary", "secret-view-grant"],
+      origin: publicOrigin,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(behindTlsTerminator.url).toBe("wss://opengeni.example/v1/interaction/frame-proxy");
+
+    const webBaseHttps = createInteractionFrameProxyAttachment({
+      requestUrl: "http://127.0.0.1:8000/v1/workspaces/workspace/attachments",
+      webBaseUrl: "https://console.example",
+      rootSecret,
+      upstreamUrl: internalUrl,
+      upstreamProtocols: ["binary", "secret-view-grant"],
+      origin: "https://console.example",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(webBaseHttps.url).toBe("wss://console.example/v1/interaction/frame-proxy");
+
+    const forwardedHttps = createInteractionFrameProxyAttachment({
+      requestUrl: "http://127.0.0.1:8000/v1/workspaces/workspace/attachments",
+      forwardedProto: "https, http",
+      forwardedHost: "console.example",
+      rootSecret,
+      upstreamUrl: internalUrl,
+      upstreamProtocols: ["binary", "secret-view-grant"],
+      origin: "https://console.example",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(forwardedHttps.url).toBe("wss://console.example/v1/interaction/frame-proxy");
+
+    const localHttp = createInteractionFrameProxyAttachment({
+      requestUrl: "http://127.0.0.1:8000/v1/workspaces/workspace/attachments",
+      rootSecret,
+      upstreamUrl: internalUrl,
+      upstreamProtocols: ["binary", "secret-view-grant"],
+      origin: "http://127.0.0.1:3000",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(localHttp.url).toBe("ws://127.0.0.1:8000/v1/interaction/frame-proxy");
+
     let connection: ApiWebSocketConnection | null = null;
     const upgradeServer: ApiWebSocketUpgradeServer = {
       upgrade(_request, options) {

@@ -54,6 +54,28 @@ export default defineConfig({
               priority: 4,
             },
             {
+              // The hierarchy rail is substantial and belongs to the lazy
+              // workspace shell. Its channel, browse, pin, and row-action
+              // expansion must not turn route-shared helpers into startup
+              // dependencies for signed-out and non-workspace pages.
+              name: "session-rail",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]session-list\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 192 * 1024,
+              priority: 3,
+            },
+            {
+              // A few tiny primitives are shared by the initial composer and
+              // the active-session route. Pin that boundary so entry-aware
+              // merging cannot use an icon or label helper to pull the full
+              // session workbench into startup.
+              name: "session-shared-primitives",
+              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:git-branch|rotate-cw|server)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.

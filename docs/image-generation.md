@@ -9,7 +9,7 @@ Canonical sources:
 
 - tool contract: `packages/contracts/src/image-generation.ts`
 - provider selection and turn integration:
-  `apps/worker/src/activities/agent-turn.ts`
+  `apps/worker/src/activities/agent-turn/agent-build.ts`
 - media validation, retention, and model projections:
   `apps/worker/src/activities/generated-images.ts`
 - adapter operation fence:
@@ -113,7 +113,9 @@ Generated pixels are artifacts, not conversation memory.
 
 After retention, the worker materializes the exact file at
 `/workspace/generated-images/generated-image-<artifact-id>.<ext>` when the
-creating turn has a sandbox. The object write is already durable, so a transient
+creating turn has a sandbox (cwd-relative `generated-images/...` in
+model-facing facts, because Connected Machines have no `/workspace` directory).
+The object write is already durable, so a transient
 sandbox copy failure cannot replay generation. Later turns keep the receipt and
 do not eagerly inspect or restore historical images; an agent that needs the
 bytes retrieves the permanent workspace file explicitly.

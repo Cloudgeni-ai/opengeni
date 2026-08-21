@@ -25,6 +25,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 
@@ -1126,39 +1127,122 @@ export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceReten
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
 
 export const UserResourceAuthorityScope = z.literal("user");
+export const UserResourceKind = z.enum([
+  "connection",
+  "document",
+  "variable_set",
+  "rig",
+  "connected_machine",
+]);
+export type UserResourceKind = z.infer<typeof UserResourceKind>;
+
+export const USER_RESOURCE_ACTION_BY_KIND = {
+  connection: "connection.use",
+  document: "document.read",
+  variable_set: "variable_set.use",
+  rig: "rig.use",
+  connected_machine: "connected_machine.use",
+} as const satisfies Record<UserResourceKind, string>;
+
 export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+/**
+ * Owner-authored issuance intent for the fixed personal Variable Set/Rig
+ * closure selected by one session. The server derives every resource,
+ * authority and action from the locked session; callers never nominate grants.
+ */
+export const PersonalResourceAttachmentIntent = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    expectedAuthorityEpoch: z.number().int().positive().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
+
+function requireEstablishedPersonalResourceEpoch(
+  value: { personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.personalResourceAttachment !== undefined &&
+    value.personalResourceAttachment.expectedAuthorityEpoch === undefined
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "established-session attachment requires expectedAuthorityEpoch",
+    });
+  }
+}
+
+/** Credential-free accepted-work projection. Resource ids remain private. */
+export const PersonalResourceAttachmentSummary = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    resourceCount: z.number().int().positive(),
+    resourceKinds: z
+      .array(z.enum(["variable_set", "rig"]))
+      .min(1)
+      .max(2),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentSummary = z.infer<typeof PersonalResourceAttachmentSummary>;
+/** Public owner-management deliberately excludes race-prone standalone `once`. */
+export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
 export const UserResourceAuthorityGrant = z.object({
   grantId: z.string().uuid(),
   targetWorkspaceId: z.string().uuid(),
   targetSessionId: z.string().uuid().nullable(),
-  action: z.string().min(1).max(64),
+  action: z.enum([
+    "connection.use",
+    "document.read",
+    "variable_set.use",
+    "rig.use",
+    "connected_machine.use",
+  ]),
   mode: UserResourceLifecycleGrantMode,
   context: SessionTenancyVisibility,
+  authorityEpoch: z.number().int().positive().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "consumed", "revoked", "expired"]),
   expiresAt: z.string().datetime().nullable(),
+  delegation: z.lazy(() => UserResourceDelegation),
 });
 export const UserResourceAuthoritySummary = z.object({
   authorityId: z.string().uuid(),
-  resourceKind: z.string().min(1).max(64),
+  resourceKind: UserResourceKind,
+  resourceId: z.string().uuid(),
+  originWorkspaceId: z.string().uuid().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "retained", "revoked"]),
   grants: z.array(UserResourceAuthorityGrant),
 });
 export const ListUserResourceAuthoritiesQuery = z.object({
   scope: UserResourceAuthorityScope,
+  resourceKind: UserResourceKind,
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export const ListUserResourceAuthoritiesResponse = z.object({
   scope: UserResourceAuthorityScope,
   authorities: z.array(UserResourceAuthoritySummary),
+  nextCursor: z.string().uuid().nullable(),
 });
 export const IssueUserResourceGrantRequest = z
   .object({
     scope: UserResourceAuthorityScope,
-    action: z.string().min(1).max(64),
-    mode: UserResourceLifecycleGrantMode,
+    resourceKind: UserResourceKind,
+    mode: ManagedUserResourceGrantMode,
     context: SessionTenancyVisibility,
     sessionId: z.string().uuid().nullable().optional(),
+    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
     workspaceSharedAcknowledged: z.boolean().default(false),
   })
   .superRefine((value, context) => {
@@ -1169,18 +1253,18 @@ export const IssueUserResourceGrantRequest = z
         message: "workspace_shared requires durable shared-output acknowledgement",
       });
     }
-    if (value.mode === "always" && value.sessionId) {
+    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "always is unbound",
+        message: "always is unbound from session authority",
       });
     }
-    if (value.mode !== "always" && !value.sessionId) {
+    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "once/session require a target session",
+        message: "session grants require a target session and expectedAuthorityEpoch",
       });
     }
   });
@@ -1188,9 +1272,29 @@ export const UserResourceGrantMutationResponse = z.object({
   scope: UserResourceAuthorityScope,
   grant: UserResourceAuthorityGrant,
 });
+export const UserResourceGrantRevocationResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  grant: z.object({
+    grantId: z.string().uuid(),
+    generation: z.number().int().positive(),
+    status: z.literal("revoked"),
+    revokedAt: z.string().datetime(),
+  }),
+});
 export const RevokeUserResourceGrantQuery = z.object({
   scope: UserResourceAuthorityScope,
 });
+export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
+export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
+export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
+export type ListUserResourceAuthoritiesResponse = z.infer<
+  typeof ListUserResourceAuthoritiesResponse
+>;
+export type IssueUserResourceGrantRequest = z.infer<typeof IssueUserResourceGrantRequest>;
+export type UserResourceGrantMutationResponse = z.infer<typeof UserResourceGrantMutationResponse>;
+export type UserResourceGrantRevocationResponse = z.infer<
+  typeof UserResourceGrantRevocationResponse
+>;
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
@@ -1411,6 +1515,89 @@ export const SessionTenancyPublicProjection = z.object({
     .nullable(),
 });
 export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
+
+export const SessionTenancyBlocker = z.enum([
+  "nonterminal_turn",
+  "nonterminal_attempt",
+  "unsettled_interruption",
+  "pending_system_update",
+  "pending_human_input",
+  "pending_tool_receipt",
+  "run_state",
+  "active_goal",
+  "capacity_waiter",
+  "active_realtime",
+  "active_scheduled_task",
+  "workspace_mutation_admission",
+  "retained_process",
+  "active_sandbox_access",
+  "shared_sandbox_group",
+]);
+export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
+
+export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
+const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+
+export const UpdateSessionVisibilityRequest = z
+  .object({
+    visibility: SessionVisibility,
+    expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+
+export const UpdateSessionVisibilityResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid().nullable(),
+    eventSequence: z.number().int().positive().nullable(),
+    visibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    changed: z.boolean(),
+    replay: z.boolean(),
+    revokedGrantCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["changed"],
+        message: "changed must match the presence of the durable event receipt",
+      });
+    }
+    if ((value.eventId === null) !== (value.eventSequence === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["eventId"],
+        message: "eventId and eventSequence must be present or absent together",
+      });
+    }
+  });
+export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibilityResponse>;
+
+export const ForkSessionRequest = z
+  .object({
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type ForkSessionRequest = z.infer<typeof ForkSessionRequest>;
+
+export const ForkSessionResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid(),
+    eventSequence: z.number().int().positive(),
+    sessionId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    visibility: z.literal("private"),
+    authorityEpoch: z.literal(1),
+    copiedHistoryItemCount: z.number().int().nonnegative(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type ForkSessionResponse = z.infer<typeof ForkSessionResponse>;
 
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
@@ -1759,6 +1946,15 @@ export const WorkspaceVoiceInputSettings = z
   .strict();
 export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
 
+/** Model policy inherited by newly created chats and scheduled tasks. */
+export const WorkspaceSessionDefaults = z
+  .object({
+    model: z.string().trim().min(1).max(256),
+    reasoningEffort: ReasoningEffort,
+  })
+  .strict();
+export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
   .object({
@@ -1881,6 +2077,7 @@ export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -1908,6 +2105,14 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Explicit defaults for new chats/schedules, or null for deployment defaults. */
+export function resolveWorkspaceSessionDefaults(
+  settings: unknown,
+): WorkspaceSessionDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.sessionDefaults ?? null) : null;
 }
 
 /**
@@ -1992,6 +2197,7 @@ export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -4142,6 +4348,25 @@ export function defaultRepositoryMountPath(
   );
 }
 
+/** Virtual SDK/UI workspace root. Provisioned boxes mount this path; Connected Machines do not. */
+export const VIRTUAL_WORKSPACE_ROOT = "/workspace" as const;
+
+/**
+ * Cwd-relative path for shell/exec prompts. Durable receipts and `sandbox:` UI
+ * links keep the virtual `/workspace/...` form. Every backend already starts the
+ * shell in that frame (provisioned boxes at `/workspace`, Connected Machines at
+ * `sessions.working_dir`), so advertising the absolute virtual root ENOENTs on a
+ * machine and is redundant on a box.
+ */
+export function sandboxShellPath(virtualPath: string): string {
+  if (virtualPath === VIRTUAL_WORKSPACE_ROOT) return ".";
+  if (virtualPath.startsWith(`${VIRTUAL_WORKSPACE_ROOT}/`)) {
+    const relative = virtualPath.slice(VIRTUAL_WORKSPACE_ROOT.length + 1);
+    return relative.length > 0 ? relative : ".";
+  }
+  return virtualPath;
+}
+
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
 export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
 
@@ -5256,6 +5481,40 @@ export const UpdateSessionPinRequest = z.object({
 });
 export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
 
+/**
+ * A member's durable follow-up state for one session. Reading the session does
+ * not acknowledge it: `unread` changes only through this explicit mutation.
+ * A foreground reader may provide `acknowledgedThroughSequence` with
+ * `unread: false` so later server events remain unread instead of being
+ * consumed by a delayed acknowledgement request.
+ * `activelyWorking` is an independent personal label that survives read state.
+ */
+export const UpdateSessionAttentionRequest = z
+  .object({
+    unread: z.boolean().optional(),
+    acknowledgedThroughSequence: z.number().int().nonnegative().optional(),
+    activelyWorking: z.boolean().optional(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
+    message: "unread or activelyWorking is required",
+  })
+  .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
+    message: "acknowledgedThroughSequence requires unread false",
+    path: ["acknowledgedThroughSequence"],
+  });
+export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
+
+/** A member's personal archive state for a root chat. */
+export const UpdateSessionArchiveRequest = z
+  .object({
+    archived: z.boolean(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
+
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
 // the human↔agent channel stays plain chat. Both require `sessions:control`.
@@ -5692,6 +5951,9 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.attention.write",
+  "session.archive.write",
+  "session.delete",
   "session.codex_account.write",
   "session.realtime.start",
   "session.realtime.control",
@@ -5708,6 +5970,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.child.create",
   "session.visibility.write",
   "session.fork.create",
+  "session.personal_resource.grant",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 
@@ -6116,6 +6379,8 @@ export const SessionTurn = z
     initiatorContext: TurnInitiatorContext,
     /** Secret-safe projection of the exact personal authority frozen on this turn. */
     personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+    /** Safe summary only; opaque resource/grant identity remains private. */
+    personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
     cancelledBy: z.string().nullable(),
     cancelReason: z.string().nullable(),
     startedAt: z.string().nullable(),
@@ -6180,7 +6445,6 @@ export const EffectiveSessionControl = z.object({
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
-export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
 const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const SessionCommandReceipt = z.object({
@@ -6262,15 +6526,18 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
-}).extend({
-  expectedDraftRevision: z.number().int().positive(),
-  clientEventId: SessionOperationKey,
-  delivery: z.enum(["send", "steer"]),
-  controlEtag: z.string().min(1).optional(),
-  modelContext: z.string().trim().min(1).max(32768).optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-});
+})
+  .extend({
+    expectedDraftRevision: z.number().int().positive(),
+    clientEventId: SessionOperationKey,
+    delivery: z.enum(["send", "steer"]),
+    controlEtag: z.string().min(1).optional(),
+    modelContext: z.string().trim().min(1).max(32768).optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+  })
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
 
 /**
@@ -6279,6 +6546,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
  */
 export const NewSessionDraftOptions = z.object({
+  visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),
   workingDir: z.string().min(1).optional(),
@@ -7072,6 +7340,8 @@ export const Channel = z.object({
   workspaceId: z.string().uuid(),
   name: z.string(),
   description: z.string().nullable(),
+  pinned: z.boolean(),
+  sortOrder: z.number().int().nonnegative(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -7087,8 +7357,15 @@ export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
 export const UpdateChannelRequest = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   description: z.string().max(2000).nullable().optional(),
+  pinned: z.boolean().optional(),
 });
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export const ReorderChannelsRequest = z
+  .object({ channelIds: z.array(z.string().uuid()).min(1).max(200) })
+  .strict();
+export type ReorderChannelsRequest = z.infer<typeof ReorderChannelsRequest>;
 
 // Re-files one session (rail organization only). null moves it back to the
 // unfiled inbox.
@@ -9968,6 +10245,17 @@ export const Session = z.object({
   pinnedAt: z.string().nullable().default(null),
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion: z.number().int().nonnegative().default(0),
+  /** Personal explicit acknowledgment state; opening the session never clears it. */
+  unread: z.boolean().default(false),
+  /** Personal power-user label for work the member intends to continue. */
+  activelyWorking: z.boolean().default(false),
+  /** Optimistic revision for unread/actively-working state. */
+  attentionVersion: z.number().int().nonnegative().default(0),
+  /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
+  archived: z.boolean().default(false),
+  archivedAt: z.string().nullable().default(null),
+  /** Optimistic archive-state revision; zero represents an absent personal relation. */
+  archiveVersion: z.number().int().nonnegative().default(0),
   /**
    * Server-authoritative hierarchy summary populated on session-list reads.
    * Detail reads may omit it. The rail uses this instead of guessing a tree
@@ -9982,6 +10270,8 @@ export const Session = z.object({
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       failedDescendants: z.number().int().nonnegative(),
+      unreadDescendants: z.number().int().nonnegative().optional(),
+      activelyWorkingDescendants: z.number().int().nonnegative().optional(),
       /** Counts are lower bounds rather than exact totals when true. */
       truncated: z.boolean().default(false),
     })
@@ -10094,6 +10384,7 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.personal_resources.attached",
   "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
   // oversized retained event envelope. The original row stays durable; this
@@ -12278,6 +12569,12 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
+    /** Top-level omission is workspace-visible. Agent-child omission inherits
+     * the exact parent visibility; cross-visibility child creation is rejected.
+     * Top-level private creation is an activated managed-cookie owning-human
+     * capability, while a private child uses an exact live-parent-attempt
+     * database capability. Both commit atomically. */
+    visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or
     // starting an underlying agent turn. Realtime can then become the first
@@ -12380,6 +12677,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
     /** Explicit personal-connection grants for the initial accepted turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
     // inside a session → "shared" with the creator's box, top-level → "new"),
@@ -12435,8 +12734,30 @@ export const CreateSessionRequest = withVariableSetIdAlias(
         "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
     });
   }
+  if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment"],
+      message:
+        "personalResourceAttachment requires an accepted initial turn and is not supported by realtime session staging",
+    });
+  }
+  if (value.personalResourceAttachment?.expectedAuthorityEpoch !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "new-session attachment authority epoch is derived by the server",
+    });
+  }
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
+
+export const SessionTenancyCreateCapabilities = z.object({
+  activated: z.boolean(),
+  canCreatePrivate: z.boolean(),
+  reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+});
+export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 
 // Generic, host-neutral structured human input. One model tool call creates one
 // request containing one or more questions; the durable response resumes that
@@ -12461,6 +12782,9 @@ export const HumanInputQuestion = z
     helpText: z.string().max(2048).nullable().optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
+    // Retained on the wire for older hosts. OpenGeni's stock runtime and
+    // surfaces always expose Other for choice questions, including requests
+    // that were persisted before that became the default behavior.
     allowOther: z.boolean().default(false),
     // Selection bounds only — agents invent useless text char mins/maxes.
     // Answer strings stay platform-capped on HumanInputAnswer (~8192).
@@ -12635,9 +12959,11 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
 
 export const ClientSessionEvent = z.discriminatedUnion("type", [
@@ -12682,9 +13008,11 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({

@@ -1841,6 +1841,50 @@ describe("OpenGeniClient connections", () => {
     });
   });
 
+  test("uses only the dedicated personal GitHub lifecycle routes", async () => {
+    const connection = fakeConnection({
+      subjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+    });
+    const oauth = {
+      authorizationUrl: "https://github.com/login/oauth/authorize?state=signed",
+      expiresAt: "2026-06-12T00:10:00.000Z",
+    };
+    const { client, requests } = makeClient((request) => {
+      if (request.method === "GET") {
+        return jsonResponse({ enabled: true, connection, reviewUrl: "https://github.com/review" });
+      }
+      if (request.method === "DELETE") return jsonResponse({ connection });
+      return jsonResponse(oauth);
+    });
+
+    expect(await client.personalGitHubStatus(WORKSPACE_ID)).toMatchObject({
+      enabled: true,
+      connection,
+    });
+    expect(await client.startPersonalGitHubOAuth(WORKSPACE_ID)).toEqual(oauth);
+    expect(
+      await client.reconnectPersonalGitHub(WORKSPACE_ID, connection.id, {
+        returnPath: `/workspaces/${WORKSPACE_ID}/capabilities`,
+      }),
+    ).toEqual(oauth);
+    expect(
+      await client.disconnectPersonalGitHub(WORKSPACE_ID, connection.id, {
+        expectedVersion: 1,
+        idempotencyKey: "github-disconnect-1",
+      }),
+    ).toEqual(connection);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/connections/github`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/connections/github/oauth/start`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}/github/reconnect`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+      ],
+    );
+  });
+
   test("listSlackInstallationBindings returns the secret-free routing authority", async () => {
     const binding = {
       id: "binding-1",

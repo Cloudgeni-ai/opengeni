@@ -48,7 +48,7 @@ Machine-primary Connected Machine turns are not lazy. They still establish the `
 
 Canonical code:
 
-- `apps/worker/src/activities/agent-turn.ts`
+- `apps/worker/src/activities/agent-turn/sandbox-establish.ts`
 - `apps/worker/src/activities/environment.ts`
 - `apps/worker/src/sandbox-routing.ts`
 - `packages/runtime/src/index.ts`

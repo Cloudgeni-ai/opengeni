@@ -1,6 +1,8 @@
 // Wire shapes come from @opengeni/sdk (pinned to @opengeni/contracts by the
 // SDK's contract-parity tests) — the console does not mirror them. Only the
 // console-local shapes (managed auth session and drafts) live here.
+import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+
 export type {
   AccessContext,
   AtlassianBrowseItem,
@@ -103,7 +105,9 @@ export type {
   SkillUninstallPreview,
   Permission as SdkPermission,
   LatencyMode,
+  ManagedOrganizationMembership,
   ReasoningEffort,
+  ResourceAuthorityScope,
   ResourceRef,
   Rig,
   RigChange,
@@ -143,6 +147,25 @@ export type {
   WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
 
+// These lifecycle methods are already part of OpenGeniCoreClient, while their
+// leaf response aliases are intentionally not re-exported from the SDK barrel.
+// Infer the UI types from that public client rather than mirroring wire shapes.
+export type OrganizationInvitation = Awaited<
+  ReturnType<OpenGeniCoreClient["listOrganizationInvitations"]>
+>["invitations"][number];
+export type OrganizationMember = Awaited<
+  ReturnType<OpenGeniCoreClient["listOrganizationMembers"]>
+>["members"][number];
+export type OrganizationMembershipRole = OrganizationMember["role"];
+export type OrganizationAdministrationOverview = Awaited<
+  ReturnType<OpenGeniCoreClient["getOrganizationAdministrationOverview"]>
+>;
+export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
+export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];
+export type OrganizationRetentionPolicy = Awaited<
+  ReturnType<OpenGeniCoreClient["getOrganizationRetentionPolicy"]>
+>;
+
 export type WorkspaceVariableSet = VariableSet;
 export type WorkspaceVariableSetSecret = VariableSetSecret;
 export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
@@ -176,6 +199,7 @@ export type TurnSubmission = {
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
   firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
+  personalResourceAttachment?: import("@opengeni/sdk").PersonalResourceAttachmentIntent;
 };
 
 export type AuthSession = {

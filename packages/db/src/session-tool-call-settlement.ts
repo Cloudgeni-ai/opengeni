@@ -1,5 +1,5 @@
 import type { SessionEvent } from "@opengeni/contracts";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { canonicalizePersistedHistoryItem, omitOutputOnlyHistoryItemFields } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
@@ -251,7 +251,7 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: resolution.call.callItem,
+        item: omitOutputOnlyHistoryItemFields(resolution.call.callItem),
         itemCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         active: true,
       });
@@ -275,7 +275,7 @@ export async function closePendingSessionToolCallsInTransaction(
         sessionId: input.sessionId,
         turnId: input.turnId,
         position: nextPosition++,
-        item: boundModelToolOutputItem(
+        item: canonicalizePersistedHistoryItem(
           resolution.result,
           resolution.call.modelToolOutputTruncationTokens ?? undefined,
         ),

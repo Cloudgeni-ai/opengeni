@@ -19,7 +19,7 @@ Then inspect:
 - Contracts: `packages/contracts/src/index.ts` for allowed backend names, the per-backend `CAPABILITY_DESCRIPTORS` metadata table, and resource shapes.
 - Config: `packages/config/src/index.ts` and `.env.example` for env var parsing/defaults/validation (including the `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` gate).
 - Core: domain/access/billing helpers moved to `@opengeni/core` under `packages/core/src`; API routes adapt over that package.
-- Connected Machine (`selfhosted`): `apps/worker/src/activities/agent-turn.ts` (the machine-primary turn branch + `resolveActiveSandboxBackend`), `packages/runtime/src/sandbox/selfhosted/session.ts` (`toMachinePath`, per-session `workingDir`), `repositoryUsesSandboxClone` in `packages/runtime/src/index.ts` (the clone-guard), the routes/services `apps/api/src/routes/{machines,enrollments}.ts` and `apps/api/src/sandbox/{machines,enrollment}.ts`, and the `agent/` Rust crate.
+- Connected Machine (`selfhosted`): `apps/worker/src/activities/agent-turn/sandbox-establish.ts` (the machine-primary turn branch + `resolveActiveSandboxBackend`), `packages/runtime/src/sandbox/selfhosted/session.ts` (`toMachinePath`, per-session `workingDir`), `repositoryUsesSandboxClone` in `packages/runtime/src/index.ts` (the clone-guard), the routes/services `apps/api/src/routes/{machines,enrollments}.ts` and `apps/api/src/sandbox/{machines,enrollment}.ts`, and the `agent/` Rust crate.
 - Runtime: `packages/runtime/src/index.ts` for sandbox client creation, agent construction, manifest entries, resume behavior, resource mounts, and sandbox lifecycle hooks.
 - Worker env: `apps/worker/src/activities/environment.ts` for per-run sandbox env, GitHub App token injection, git identity, and cloud credential behavior.
 - Files: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`, and file resource handling in runtime code.
@@ -81,7 +81,8 @@ Typical shape:
 OPENGENI_SANDBOX_BACKEND=modal
 OPENGENI_MODAL_APP_NAME=opengeni-sandbox
 OPENGENI_MODAL_TIMEOUT_SECONDS=900
-# OPENGENI_MODAL_IMAGE_REF=ghcr.io/YOUR_ORG/opengeni-sandbox:dev
+# Computer/Browser: digest-pin docker/desktop.Dockerfile, never headless opengeni-sandbox
+# OPENGENI_MODAL_IMAGE_REF=ghcr.io/YOUR_ORG/opengeni-desktop@sha256:...
 # OPENGENI_MODAL_TOKEN_ID=...
 # OPENGENI_MODAL_TOKEN_SECRET=...
 # OPENGENI_MODAL_ENVIRONMENT=...
@@ -111,7 +112,7 @@ unaffected either way.
 
 The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class *primary* compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — OpenGeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
 
-A machine-targeted turn is materially different from a cloud turn. The effective compute backend is resolved once at turn start (`resolveActiveSandboxBackend`); when it is `selfhosted`, the `machinePrimary` branch in `apps/worker/src/activities/agent-turn.ts` takes over:
+A machine-targeted turn is materially different from a cloud turn. The effective compute backend is resolved once at turn start (`resolveActiveSandboxBackend`); when it is `selfhosted`, the `machinePrimary` branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` takes over:
 
 - **No phantom cloud box.** The worker establishes a `SelfhostedSession` directly (`establishSelfhostedTurnSession`) and does NOT call `resumeBoxForTurn` — no Modal box is created, leased, or billed. The warm-seconds meter keys off the *effective* backend, so a machine accrues zero cloud warm-time (`selfhosted` has no configured warm rate).
 - **No OpenGeni-minted token on the machine.** `sandboxEnvironmentForRun` is called with `skipGitHubToken` for a selfhosted-effective turn (`apps/worker/src/activities/environment.ts`), so the platform mints no GitHub App installation token and injects no git auth env. The machine uses its OWN git credentials. The token also never structurally crosses the wire — selfhosted exec does not forward the run environment onto the machine.

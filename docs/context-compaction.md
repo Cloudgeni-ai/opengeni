@@ -28,7 +28,7 @@ The implementation lives in:
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
   bounded remote overflow retry, remote fail-closed path, fenced durable replacement.
-- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery;
+- `apps/worker/src/activities/agent-turn/compaction-prep.ts`: pre-call and same-turn recovery;
   Codex ALS beta/turn-metadata headers for remote v2.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
@@ -48,7 +48,8 @@ If a model has no explicit automatic limit, OpenGeni uses
 window, matching Codex core.
 
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
-has:
+has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
+triple instead of the 1.05M deployment fallback:
 
 | quantity | tokens |
 | --- | ---: |
@@ -117,7 +118,11 @@ may remove active history.
 
 The compaction model receives:
 
-1. a bounded, protocol-valid temporary copy of the current active model history;
+1. a bounded, protocol-valid temporary copy of the current active model history.
+   Portable compaction omits opaque `encrypted_content` from that copy
+   (plaintext reasoning stays; `{ type: "compaction" }` blobs are dropped)
+   so a SuperGrok-origin session can compact on Codex. Durable rows stay.
+   Remote v2 still sends Codex blobs.
 2. one final user message containing Codex's checkpoint prompt;
 3. the same system instructions as the running agent;
 4. no tools and no provider-side context-management policy.

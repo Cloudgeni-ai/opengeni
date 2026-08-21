@@ -7,9 +7,14 @@
 //   - strip max_output_tokens / max_completion_tokens
 //   - reasoning effort minimal -> low
 //   - normalize the model slug (longest-prefix against the live catalog)
-//   - strip every item `id` but PRESERVE `call_id`
+//   - strip every item `id` and `status` but PRESERVE `call_id`
 // We do NOT filter item_reference (the SDK never emits it) and do NOT convert
 // orphaned tool outputs (the SDK's runner already prunes by call_id).
+//
+// `status` is an output annotation SuperGrok (and some Responses items) persist
+// on messages / function_call / function_call_output. Codex's strict input
+// schema 400s `Unknown parameter: 'input[N].status'` — observed live on a
+// portable SuperGrok → Codex switch. Pairing uses `call_id`, never `status`.
 
 const MINIMAL = "minimal";
 
@@ -66,10 +71,13 @@ export function normalizeCodexRequestBody(
     body.model = resolveModel(body.model);
   }
 
-  // strip every item id; PRESERVE call_id. spec §1.6 / verdict §0(b)
+  // strip every item id and status; PRESERVE call_id. spec §1.6 / verdict §0(b)
   // (This also covers tool_search items: the backend accepts an id-less
   // tool_search_call/output pair correlated by call_id — verified live — and
   // stripping the provider-stored `tsc_…` id here sanitizes BOTH replay paths.)
+  // `status` is output-only on Codex input items. New rows omit it at persist;
+  // this wire strip remains defense for already-stored SuperGrok rows and
+  // mid-turn SDK items.
   if (Array.isArray(body.input)) {
     for (const item of body.input as unknown[]) {
       if (!item || typeof item !== "object") {
@@ -78,6 +86,9 @@ export function normalizeCodexRequestBody(
       const record = item as Record<string, unknown>;
       if ("id" in record) {
         delete record.id;
+      }
+      if ("status" in record) {
+        delete record.status;
       }
       // A replayed tool_search_call must carry `arguments` as an OBJECT — the
       // backend 400s a string ("Invalid type for 'input[N].arguments': expected
@@ -133,6 +144,7 @@ export function normalizedCodexRequestBody(
       if (!item || typeof item !== "object" || Array.isArray(item)) return item;
       const record = item as Record<string, unknown>;
       return "id" in record ||
+        "status" in record ||
         (record.type === "tool_search_call" && typeof record.arguments === "string")
         ? { ...record }
         : item;

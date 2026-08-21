@@ -446,13 +446,15 @@ const SettingsSchema = z.object({
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
-  // The model family's real context window in tokens. OpenGeni always performs
-  // one durable, portable plaintext compaction transition; there is no
-  // provider/server/off mode ladder.
+  // Deployment fallback for models that do not declare their own window.
+  // Built-in billed GPT-5.6 Sol/Terra/Luna pin Codex's 272k catalog instead.
+  // OpenGeni always performs one durable, portable plaintext compaction
+  // transition; there is no provider/server/off mode ladder.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
-  // Optional model-catalog effective input ceiling. Codex models expose this as
-  // raw context_window * effective_context_window_percent; when absent, retain
-  // the deployment-level window-minus-reserved-output behavior.
+  // Optional model-catalog effective input ceiling. Codex and billed GPT-5.6
+  // models expose this as raw context_window * effective_context_window_percent;
+  // when absent, retain the deployment-level window-minus-reserved-output
+  // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
@@ -1160,6 +1162,9 @@ const SettingsSchema = z.object({
   githubAppId: z.string().optional(),
   githubClientId: z.string().optional(),
   githubClientSecret: z.string().optional(),
+  githubPersonalOauthEnabled: EnvBoolean.default(false),
+  githubPersonalOauthClientId: z.string().optional(),
+  githubPersonalOauthClientSecret: z.string().optional(),
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
@@ -1262,6 +1267,12 @@ export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string
 export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
   const origin = canonicalPublicOrigin(publicBaseUrl);
   return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
+}
+
+/** Exact callback registered on the environment-specific personal GitHub OAuth App. */
+export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
+  const origin = canonicalPublicOrigin(publicBaseUrl);
+  return origin ? `${origin}/v1/integrations/github-personal/oauth/callback` : null;
 }
 
 /** Declarative voice-input transcription provider ids. */
@@ -2462,6 +2473,9 @@ export function getSettings(): Settings {
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
+    githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
+    githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
+    githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
@@ -3117,18 +3131,37 @@ export function productShortLabelForModelId(modelId: string): string | null {
   }
 }
 
+const BUILTIN_GPT56_MODEL_IDS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
+
+function isBuiltinGpt56ModelId(modelId: string): boolean {
+  return (BUILTIN_GPT56_MODEL_IDS as readonly string[]).includes(modelId);
+}
+
+/** Billed GPT-5.6 uses the same raw/effective/auto-compact catalog as Codex. */
+function builtinContextLimitsForModel(
+  settings: Settings,
+  modelId: string,
+): Pick<
+  ConfiguredModel,
+  "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
+> {
+  if (isBuiltinGpt56ModelId(modelId)) {
+    return {
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    };
+  }
+  return { contextWindowTokens: settings.contextWindowTokens };
+}
+
 function builtinLatencyModesForModel(modelId: string): Array<{
   id: z.infer<typeof ModelLatencyModeV1>;
   upstream: "supported" | "unsupported" | "unknown";
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (
-    modelId === "gpt-5.6-sol" ||
-    modelId === "gpt-5.6-terra" ||
-    modelId === "gpt-5.6-luna" ||
-    modelId.startsWith("codex/gpt-5.6-")
-  ) {
+  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -3158,7 +3191,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(modelId)
+    isBuiltinGpt56ModelId(modelId)
   );
 }
 
@@ -3707,7 +3740,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         billing: builtinProvider.billing,
         capabilities,
         ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
-        contextWindowTokens: settings.contextWindowTokens,
+        ...builtinContextLimitsForModel(settings, id),
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
         reasoningEffort: capabilities.reasoning.runnable,
         hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
@@ -5046,6 +5079,16 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/files`;
 }
 
+const MODAL_DESKTOP_IMAGE_DIGEST_REF = /@sha256:[0-9a-f]{64}$/i;
+
+function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
+  if (settings.modalImageId) return true;
+  return (
+    typeof settings.modalImageRef === "string" &&
+    MODAL_DESKTOP_IMAGE_DIGEST_REF.test(settings.modalImageRef)
+  );
+}
+
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   const allowedFirstPartyMcpTools = new Set(
@@ -5135,6 +5178,59 @@ function validateSettings(settings: Settings): void {
     throw new Error(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  }
+  if (
+    Boolean(settings.githubPersonalOauthClientId) !==
+    Boolean(settings.githubPersonalOauthClientSecret)
+  ) {
+    throw new Error(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.githubPersonalOauthEnabled) {
+    if (!settings.integrationsEnabled) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_ENABLED=true is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (settings.productAccessMode !== "managed") {
+      throw new Error(
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    if (!settings.githubPersonalOauthClientId || !settings.githubPersonalOauthClientSecret) {
+      throw new Error(
+        "personal GitHub OAuth requires OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      );
+    }
+    if (settings.githubPersonalOauthClientId === settings.githubClientId) {
+      throw new Error(
+        "personal GitHub OAuth must use a different OAuth App client from the OpenGeni GitHub App",
+      );
+    }
+    if (!personalGitHubOAuthCallbackUrl(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when personal GitHub OAuth is enabled",
+      );
+    }
+    if (
+      !settings.publicBaseUrl?.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when personal GitHub OAuth is enabled outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (!settings.environmentsEncryptionKey) {
+      throw new Error(
+        "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required when personal GitHub OAuth is enabled",
+      );
+    }
   }
   if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
     throw new Error(
@@ -5538,6 +5634,20 @@ function validateSettings(settings: Settings): void {
   // negotiateCapabilities degrades the desktop cell). This keeps a desktop-
   // configured deployment bootable (headless + Channel-A still work) instead of
   // crashing the whole API on a missing secret.
+  if (
+    settings.sandboxDesktopEnabled &&
+    settings.sandboxBackend === "modal" &&
+    !["local", "test"].includes(settings.environment)
+  ) {
+    if (!isDigestPinnedModalDesktopImage(settings)) {
+      throw new Error(
+        "OPENGENI_MODAL_IMAGE_REF must be digest-pinned (registry/name@sha256:…) when " +
+          "OPENGENI_SANDBOX_BACKEND=modal and OPENGENI_SANDBOX_DESKTOP_ENABLED=true. " +
+          "Computer/Browser need docker/desktop.Dockerfile, not the official headless " +
+          "opengeni-sandbox image. Helm desktop.imageRef writes this pin.",
+      );
+    }
+  }
   if (settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined) {
     console.warn(
       "[opengeni] OPENGENI_SANDBOX_DESKTOP_ENABLED=true but neither OPENGENI_STREAM_TOKEN_SECRET nor " +

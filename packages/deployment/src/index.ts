@@ -151,8 +151,8 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
 //     artifacts carry explicit operator values in the runtime Secret; the
 //     Secret is the authoritative managed-production source because it is the
 //     final envFrom source for API and worker workloads.
-//   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; it
-//     is injected at deploy time (--set) when a desktop image ref is built.
+//   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; Helm
+//     desktop.imageRef is the digest pin that overwrites it for Modal Computer/Browser.
 export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_STREAM_TOKEN_SECRET",
   "OPENGENI_STREAM_CONTROL_ENABLED",
@@ -1461,6 +1461,15 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
     );
+    if (env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED === "true") {
+      vars.push(
+        "OPENGENI_INTEGRATIONS_ENABLED",
+        "OPENGENI_INTEGRATIONS_STATE_SECRET",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      );
+    }
   } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
   }
@@ -1646,14 +1655,14 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
       "optional Cloud SQL PostgreSQL",
     );
   } else if (contract.profile === "single-node-kubernetes") {
-    out.push("persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes");
+    out.push("persistent single-node Postgres/Temporal/NATS/Garage services and local volumes");
   } else if (
     contract.database.mode === "inCluster" ||
     contract.temporal.mode === "inCluster" ||
     contract.nats.mode === "inCluster" ||
     contract.objectStorage.mode === "inCluster"
   ) {
-    out.push("disposable in-cluster Postgres/Temporal/NATS/MinIO fixtures");
+    out.push("disposable in-cluster Postgres/Temporal/NATS/Garage fixtures");
   }
   if (usesOfficialPlatformChart(contract, "nats")) {
     out.push("official NATS Helm release in opengeni-platform namespace");
@@ -1708,7 +1717,7 @@ function deployCommands(
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
       `kubectl -n ${namespace} create secret generic opengeni-postgres --from-env-file=.agent/generated/single-node/secrets/postgres.env --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${namespace} create secret generic opengeni-minio --from-env-file=.agent/generated/single-node/secrets/minio.env --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-garage --from-env-file=.agent/generated/single-node/secrets/garage.env --from-file=garage.toml=.agent/generated/single-node/secrets/garage.toml --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-migrations --from-env-file=.agent/generated/single-node/secrets/migrations.env --dry-run=client -o yaml | kubectl apply -f -`,
       ...platformDependencies.flatMap((dependency) => dependency.installCommands),
@@ -2053,7 +2062,7 @@ function planNotes(contract: DeploymentContract): string[] {
     notes.push(
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
-      "Create the runtime, migration, Postgres, and MinIO Secrets before the two-phase Helm bootstrap.",
+      "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
     );
   }
   return notes;
@@ -2085,8 +2094,10 @@ function profileRequiredSecretKeys(contract: DeploymentContract): string[] {
   }
   return [
     "opengeni-postgres/POSTGRES_PASSWORD",
-    "opengeni-minio/MINIO_ROOT_USER",
-    "opengeni-minio/MINIO_ROOT_PASSWORD",
+    "opengeni-garage/GARAGE_ACCESS_KEY_ID",
+    "opengeni-garage/GARAGE_SECRET_ACCESS_KEY",
+    "opengeni-garage/GARAGE_RPC_SECRET",
+    "opengeni-garage/garage.toml",
     "opengeni-runtime/OPENGENI_DATABASE_URL",
     "opengeni-runtime/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
     "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",
@@ -2169,6 +2180,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
+    valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
+    valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||
     (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")
@@ -2207,6 +2220,18 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_GITHUB_CLIENT_SECRET", env.OPENGENI_GITHUB_CLIENT_SECRET),
           requiredEnv("OPENGENI_GITHUB_APP_SLUG", env.OPENGENI_GITHUB_APP_SLUG),
           requiredEnv("OPENGENI_GITHUB_APP_PRIVATE_KEY", env.OPENGENI_GITHUB_APP_PRIVATE_KEY),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET,
+          ),
         ]
       : []),
     ...(contract.product.billingMode === "stripe"

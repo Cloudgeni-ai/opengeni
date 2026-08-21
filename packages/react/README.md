@@ -678,7 +678,8 @@ capability document so every surface degrades to a reason instead of crashing.
   firehose and the real interactive PTY over the minted `pty-ws` cell.
 - `useDesktopStream` — the noVNC socket, hot-swapped on box rollover via
   `stream.url.rotated`.
-- Components: `WorkspaceDock` (the resizable/collapsible right-hand dock),
+- Components: `WorkspaceDock` (the resizable/collapsible right-hand dock with a
+  vertical activity rail, persistent visited panels, and a panel-local Hide action),
   `FileBrowser` / `SandboxFiles`, `DiffView` / `PierreDiff` / `PierreFile`,
   `CodeEditor`, `SandboxTerminal`, and `DesktopViewer`.
 

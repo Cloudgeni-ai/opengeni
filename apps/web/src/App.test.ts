@@ -362,6 +362,38 @@ describe("rail session grouping", () => {
     expect(expanded[1]?.depth).toBe(1);
   });
 
+  test("a collapsed tree projects only the selected descendant as one ordinary child row", () => {
+    const forest = buildRailForest(
+      [
+        railSession({ id: "schedule-latest", updatedAt: "2026-06-19T11:00:00.000Z" }),
+        railSession({
+          id: "schedule-run-a",
+          parentSessionId: "schedule-latest",
+          updatedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "schedule-run-b",
+          parentSessionId: "schedule-latest",
+          updatedAt: "2026-06-19T09:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    const collapsed = visibleForestRows(forest, new Set(), "schedule-run-b");
+    expect(collapsed.map((row) => [row.node.session.id, row.depth])).toEqual([
+      ["schedule-latest", 0],
+      ["schedule-run-b", 1],
+    ]);
+
+    const expanded = visibleForestRows(forest, new Set(["schedule-latest"]), "schedule-run-b");
+    expect(expanded.map((row) => row.node.session.id)).toEqual([
+      "schedule-latest",
+      "schedule-run-a",
+      "schedule-run-b",
+    ]);
+  });
+
   test("promotes every explicit pin globally while a parent pin owns only unpinned children", () => {
     const sections = buildPinnedRailSections(
       [
@@ -787,7 +819,7 @@ describe("session create draft", () => {
   test("an untouched (managed sandbox) draft adds nothing to the create payload", () => {
     expect(submissionFromSessionDraft(emptySessionDraft())).toEqual({
       extras: {},
-      options: { targetSandboxId: null, workingDir: null },
+      options: { targetSandboxId: null, workingDir: null, visibility: "workspace" },
       omitWorkspaceResources: false,
     });
   });
@@ -814,7 +846,7 @@ describe("session create draft", () => {
         },
         firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
       },
-      options: { targetSandboxId: null, workingDir: null },
+      options: { targetSandboxId: null, workingDir: null, visibility: "workspace" },
       omitWorkspaceResources: false,
     });
   });
@@ -852,6 +884,7 @@ describe("session create draft", () => {
       options: {
         targetSandboxId: "sbx-machine-1",
         workingDir: "~/repos/opengeni",
+        visibility: "workspace",
       },
       omitWorkspaceResources: true,
     });
@@ -870,6 +903,7 @@ describe("session create draft", () => {
     expect(submission.options).toEqual({
       targetSandboxId: "sbx-machine-2",
       workingDir: null,
+      visibility: "workspace",
     });
     expect(submission.omitWorkspaceResources).toBe(true);
   });
@@ -1835,6 +1869,7 @@ describe("GitHub repository resources", () => {
     const manualResource = resources[2] as Extract<ResourceRef, { kind: "repository" }>;
     const hydrated = rehydrateRepositoryResources(resources, [privateRepo, publicRepo]);
     expect(hydrated).toEqual([privateResource, manualResource]);
+    expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
       manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
       selectedRepoIds: new Set([privateRepo.id]),

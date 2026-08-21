@@ -47,8 +47,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "opengeni.migrationSecretName" . }}
                   key: OPENGENI_MIGRATIONS_DATABASE_URL
-            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStoragePublicEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
             {{- end }}
           {{- with .Values.catalogImport.resources }}
           resources:

@@ -1,0 +1,19 @@
+{{- if .Values.garage.enabled }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-garage
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: {{ .Values.garage.service.apiPort }}
+      targetPort: api
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: garage
+{{- end }}

@@ -322,7 +322,12 @@ describe("generated image retention boundary", () => {
     const resumed = await RunState.fromString(agent, projected);
     const reparsed = JSON.parse(resumed.toString());
     expect(reparsed.generatedItems[0].type).toBe("message_output_item");
-    expect(reparsed.generatedItems[0].rawItem.content[0].text).toContain(receipt.sandboxPath);
+    expect(reparsed.generatedItems[0].rawItem.content[0].text).toContain(
+      "generated-images/generated-image-33333333-3333-4333-8333-333333333333.png",
+    );
+    expect(reparsed.generatedItems[0].rawItem.content[0].text).not.toContain(
+      "/workspace/generated-images/",
+    );
   });
 
   test("parses only the closed permanent receipt shape", () => {
@@ -383,7 +388,10 @@ describe("generated image retention boundary", () => {
     expect(projected[0]).toBe(ordinary);
     const encoded = JSON.stringify(projected[1]);
     expect(encoded).toContain(receipt.artifact.artifactId);
-    expect(encoded).toContain(receipt.sandboxPath);
+    expect(encoded).toContain(
+      "generated-images/generated-image-33333333-3333-4333-8333-333333333333.png",
+    );
+    expect(encoded).not.toContain("/workspace/generated-images/");
     expect(encoded).not.toContain("provider-secret-id");
     expect(encoded).not.toContain("providerData");
   });

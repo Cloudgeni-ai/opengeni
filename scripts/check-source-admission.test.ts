@@ -53,12 +53,12 @@ function event(overrides: Record<string, unknown> = {}): Record<string, any> {
       number: pullNumber,
       state: "open",
       base: {
-        ref: CONTRACT.defaultBranch,
+        ref: CONTRACT.admissionBaseBranch,
         sha: baseSha,
         repo: { full_name: CONTRACT.repository },
       },
       head: {
-        ref: "candidate/source-admission",
+        ref: "hotfix/source-admission",
         sha: headSha,
         repo: { full_name: "contributor/opengeni" },
       },
@@ -70,15 +70,15 @@ function event(overrides: Record<string, unknown> = {}): Record<string, any> {
 function context(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     GITHUB_API_URL: CONTRACT.apiUrl,
-    GITHUB_BASE_REF: CONTRACT.defaultBranch,
+    GITHUB_BASE_REF: CONTRACT.admissionBaseBranch,
     GITHUB_EVENT_NAME: "pull_request_target",
-    GITHUB_HEAD_REF: "candidate/source-admission",
-    GITHUB_REF: `refs/heads/${CONTRACT.defaultBranch}`,
+    GITHUB_HEAD_REF: "hotfix/source-admission",
+    GITHUB_REF: `refs/heads/${CONTRACT.admissionBaseBranch}`,
     GITHUB_REPOSITORY: CONTRACT.repository,
     GITHUB_SERVER_URL: CONTRACT.serverUrl,
     GITHUB_SHA: baseSha,
     GITHUB_TOKEN: "test-token",
-    GITHUB_WORKFLOW_REF: `${CONTRACT.repository}/${CONTRACT.workflowPath}@refs/heads/${CONTRACT.defaultBranch}`,
+    GITHUB_WORKFLOW_REF: `${CONTRACT.repository}/${CONTRACT.workflowPath}@refs/heads/${CONTRACT.admissionBaseBranch}`,
     GITHUB_WORKFLOW_SHA: baseSha,
     OPENGENI_SOURCE_ADMISSION_ACTION: CONTRACT.action,
     ...overrides,
@@ -130,12 +130,12 @@ function fixture(options: FixtureOptions = {}) {
       number: pullNumber,
       state: "open",
       base: {
-        ref: CONTRACT.defaultBranch,
+        ref: CONTRACT.admissionBaseBranch,
         sha: apiBaseSha,
         repo: { full_name: CONTRACT.repository },
       },
       head: {
-        ref: "candidate/source-admission",
+        ref: "hotfix/source-admission",
         sha: head,
         repo: { full_name: headRepository },
       },
@@ -159,9 +159,11 @@ function fixture(options: FixtureOptions = {}) {
         disabled: false,
         private: false,
       };
-    } else if (path === `/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.defaultBranch}`) {
+    } else if (
+      path === `/repos/${CONTRACT.repository}/git/ref/heads/${CONTRACT.admissionBaseBranch}`
+    ) {
       value = {
-        ref: `refs/heads/${CONTRACT.defaultBranch}`,
+        ref: `refs/heads/${CONTRACT.admissionBaseBranch}`,
         object: {
           type: "commit",
           sha: terminalMainSha,
@@ -270,7 +272,7 @@ describe("source admission", () => {
     expect(result.manifestSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(api.methods.every((method) => method === "GET")).toBe(true);
     expect(api.logs).toEqual([
-      `Source admission verified ${headSha} from event base ${baseSha} at patch merge base ${baseSha}; base-owned workflow ${baseSha} remains retained by current main ${baseSha}: 2 direct tree paths, manifest sha256 ${result.manifestSha256}.`,
+      `Source admission verified ${headSha} from event base ${baseSha} at patch merge base ${baseSha}; base-owned workflow ${baseSha} remains retained by admission base ${baseSha}: 2 direct tree paths, manifest sha256 ${result.manifestSha256}.`,
     ]);
   });
 
@@ -312,6 +314,20 @@ describe("source admission", () => {
       }),
     ).rejects.toThrow(message);
     expect(api.requestedPaths).toEqual([]);
+  });
+
+  test("rejects a non-hotfix head into production", async () => {
+    const api = fixture();
+    const payload = event();
+    payload.pull_request.head.ref = "main";
+    await expect(
+      verifySourceAdmission({
+        env: context({ GITHUB_HEAD_REF: "main" }),
+        event: payload,
+        fetchImpl: api.fetchImpl,
+        logger: api.logger,
+      }),
+    ).rejects.toThrow("admission only admits hotfix branches into production");
   });
 
   test("rejects an event base that differs from the provider pull identity", async () => {
@@ -444,7 +460,7 @@ describe("source admission", () => {
         fetchImpl: api.fetchImpl,
         logger: api.logger,
       }),
-    ).rejects.toThrow("current main no longer retains the base-owned workflow SHA");
+    ).rejects.toThrow("admission base no longer retains the base-owned workflow SHA");
   });
 
   test("rejects terminal head movement", async () => {
@@ -486,6 +502,10 @@ describe("source admission", () => {
     expect(workflow).not.toContain("secrets.");
     expect(workflow).not.toContain("--location");
     expect(workflow).toContain("base-owned trust anchor");
+    expect(workflow).toContain("name: Verify hotfix freeze-head");
+    expect(workflow).toContain("name: Current-base source admission");
+    expect(workflow).toContain("if: ${{ always() }}");
+    expect(workflow).toContain("VERIFY_RESULT");
     expect(workflow).toContain(`ADMISSION_HELPER_SHA256: ${helperSha256}`);
     expect(workflow).toContain("ref=$GITHUB_WORKFLOW_SHA");
     expect(workflow).toContain('node "$helper"');

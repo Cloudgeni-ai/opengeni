@@ -73,6 +73,8 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_self_organization_invitation(text, uuid)",
   "list_organization_invitations(uuid, text, uuid, integer)",
   "list_organization_members(uuid, text)",
+  "get_organization_administration_overview(uuid, text)",
+  "update_organization_name(uuid, text, text, timestamp with time zone, uuid)",
   "organization_membership_command(jsonb)",
   "prepare_organization_membership_protocol_settlements(jsonb)",
   "assert_active_managed_human_organization_membership(uuid, text)",
@@ -93,6 +95,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -127,15 +130,13 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
-  "list_self_user_resource_authorities(uuid)",
-  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, boolean)",
-  "revoke_self_user_resource_grant(uuid, uuid)",
+  "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
+  "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
+  "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
+  "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
 const CONNECTION_AUTHORITY_ROUTINES = [
-  "list_self_connection_authorities(uuid)",
-  "issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean)",
-  "revoke_self_connection_use_grant(uuid, uuid)",
   "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
@@ -287,17 +288,33 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "workspace_learning_policy_revisions",
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
-  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
-  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
+const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
+const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
+const SESSION_TENANCY_QUIESCENCE_ROUTINE =
+  "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
+const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
+  "session_visibility_lifecycle_capability_held()";
+const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
+  "open_private_session_create_capability(uuid, uuid, uuid, text)",
+  "open_private_child_session_create_capability(uuid, uuid, uuid, uuid, uuid, uuid, integer)",
+  "close_private_session_create_capability(uuid)",
+] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
+  SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
+  ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
@@ -328,6 +345,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_TENANCY_ACTIVATED_ROUTINE,
+  SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -336,7 +355,9 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
+  ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
+  ...USER_RESOURCE_LIFECYCLE_ROUTINES,
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
@@ -347,11 +368,17 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
+  SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   XAI_POOL_VISIBLE_ROUTINE,
   XAI_RESOLVE_POOL_ROUTINE,
   XAI_REVALIDATE_CREDENTIAL_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+
+/** Owner-internal helpers that must exist but must never be callable by the runtime role. */
+export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  SESSION_TENANCY_QUIESCENCE_ROUTINE,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
@@ -509,6 +536,7 @@ export const FORCE_RLS_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -524,6 +552,7 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "preference_registry_snapshots",
+  "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
   "retained_screenshot_artifacts",
   "rig_changes",
@@ -575,6 +604,7 @@ export const FORCE_RLS_TABLES = [
   "session_stream_acknowledgments",
   "session_system_update_outbox",
   "session_system_updates",
+  "session_tenancy_activations",
   "session_turn_attempts",
   "session_turns",
   "session_visibility_write_capabilities",
@@ -612,6 +642,9 @@ export const FORCE_RLS_TABLES = [
   "transcription_recording_segments",
   "transcription_recordings",
   "turn_connection_authority_snapshots",
+  "turn_personal_resource_attachment_receipts",
+  "turn_personal_resource_once_receipts",
+  "turn_personal_resource_snapshots",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -820,6 +853,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "session_tenancy_activations",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -946,6 +980,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -955,6 +990,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
   "personal_resource_once_consumption_receipts",
+  "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
   "scheduled_task_connection_authority_snapshots",
   "scheduled_task_personal_resource_authorities",
@@ -979,6 +1015,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
   "turn_connection_authority_snapshots",
+  "turn_personal_resource_attachment_receipts",
+  "turn_personal_resource_once_receipts",
+  "turn_personal_resource_snapshots",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
 ] as const;
@@ -1020,6 +1059,7 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1095,6 +1135,7 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
+  sessionTenancyProductActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1142,7 +1183,7 @@ function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): stri
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
-/** Inspect only PostgreSQL catalogs and privilege functions; no tenant rows. */
+/** Inspect PostgreSQL catalogs plus one value-free global activation predicate; no tenant content. */
 export async function inspectRuntimeDatabasePosture(
   db: Database,
   options: RuntimeDatabasePostureOptions,
@@ -1193,6 +1234,15 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
+      // The forward-only activation receipt outlives topology. Embedded/scoped
+      // deployments must enforce the same environment interlock as standalone
+      // FORCE-RLS deployments, so inspect the value-free predicate before the
+      // scoped catalog fast-path.
+      const activationRows = resultRows<{ activated: boolean }>(
+        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
+      );
+      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
       // the standalone opengeni_app object/grant contract on the host's role.
@@ -1207,6 +1257,7 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
+          sessionTenancyProductActivationPresent,
         };
       }
 
@@ -1387,7 +1438,10 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => sql`${name}`),
+                  [
+                    ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+                    ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+                  ].map((name) => sql`${name}`),
                   sql`, `,
                 )}
               ]::text[]
@@ -1446,6 +1500,7 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
+        sessionTenancyProductActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1459,6 +1514,15 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (
+    posture.sessionTenancyProductActivationPresent &&
+    options.organizationTenancyCanonicalActivationEnabled !== true
+  ) {
+    violations.push(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+  }
 
   if (!identity.currentUser || !identity.sessionUser) {
     violations.push("database identity is empty");
@@ -1615,6 +1679,33 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const forbiddenRoutine of RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES) {
+    const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    if (matches.length !== 1) {
+      violations.push(
+        `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
+      );
+      continue;
+    }
+    const routine = matches[0]!;
+    if (!routine.securityDefiner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+    if (authorityOwner && routine.owner !== authorityOwner) {
+      violations.push(
+        `owner-internal target-schema helper ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
+      );
+    }
+    if (routine.execute) {
+      violations.push(`runtime role has forbidden owner-internal helper ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
+    }
+  }
   for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (matches.length !== 1) {

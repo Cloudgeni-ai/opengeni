@@ -1,0 +1,158 @@
+name: Install pinned Playwright browsers
+description: >-
+  Restore or download exactly the pinned Playwright browsers under a hard
+  per-attempt wall clock. An unbounded `playwright install` can wedge for the
+  full GitHub job default (360 minutes) while holding a runner slot, which
+  starves every other pull request in the account. Bounding the attempt turns
+  that outage into a fast, visible, re-runnable failure.
+
+inputs:
+  browsers:
+    description: Space-separated Playwright browser list, for example "chromium firefox".
+    required: true
+  only-shell:
+    description: Install the headless shell build instead of full Chromium.
+    required: false
+    default: "false"
+  attempt-timeout-seconds:
+    description: >-
+      Hard wall clock for one install attempt. Deliberately stated as a rule
+      rather than a percentile: independent measurements over different windows
+      disagree on the per-set p99 (the three-browser set has been measured at
+      both 7.5m and 27.7m), so a quoted percentile here would not reproduce.
+      What does reproduce across every window measured: no SINGLE-browser
+      install has ever exceeded this bound, and every observed overrun is a
+      cumulative MULTI-browser download. Because the cache save below persists
+      whichever browsers completed, a re-run after an overrun faces only the
+      browsers that did not - which reduces to the single-browser case. Residual
+      green-to-red exposure is roughly 1-2% on multi-browser sets and zero on
+      single-browser sets. Worst case is this value plus the 15s SIGKILL grace,
+      times `attempts`; keep that inside the calling job's timeout-minutes
+      alongside that job's own declared step budgets.
+    required: false
+    default: "900"
+  attempts:
+    description: >-
+      Bounded attempts before the step fails. Defaults to one: a retry reuses the
+      same runner, so it cannot escape a bad network path, and `--with-deps`
+      means a SIGKILLed attempt can leave a held dpkg lock that makes the next
+      attempt fail instantly rather than retry the download. For a
+      slow-but-progressing download one long attempt strictly dominates two
+      short ones. Cross-run recovery comes from the unconditional cache save
+      below, which persists partial progress so a re-run resumes instead of
+      repeating a cold download.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    # Inputs reach the shell through the environment, never through `${{ }}`
+    # interpolation into the script body, so a value can never be parsed as
+    # shell syntax.
+    - name: Resolve pinned Playwright version
+      id: pinned
+      shell: bash
+      env:
+        PLAYWRIGHT_BROWSERS: ${{ inputs.browsers }}
+        PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
+        RUNNER_OS: ${{ runner.os }}
+      run: |
+        set -euo pipefail
+        version="$(node -p "require('playwright/package.json').version")"
+        if [ -z "${version}" ]; then
+          echo "::error::Could not resolve the installed Playwright version."
+          exit 1
+        fi
+        slug="$(printf '%s' "${PLAYWRIGHT_BROWSERS}" | tr ' ' '-')"
+        if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
+          slug="${slug}-shell"
+        fi
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+        echo "key=playwright-${RUNNER_OS}-${version}-${slug}" >> "$GITHUB_OUTPUT"
+
+    # Keyed on the exact resolved Playwright version and browser set. A miss
+    # only costs today's behaviour; a hit removes the download that drives the
+    # entire hang tail. No restore-keys: a partial restore of another browser
+    # set would re-download anyway and could not be saved under this key.
+    #
+    # Split restore/save rather than `actions/cache`, whose post step is
+    # `post-if: success()`. With the combined action a bounded failure never
+    # saves, so a cold key on a degraded network can never converge: every
+    # re-run repeats the same cold download and is killed again. Saving on
+    # failure persists partial progress instead - Playwright writes its
+    # INSTALLATION_COMPLETE marker last, so an incomplete browser is simply
+    # re-downloaded while completed ones are kept.
+    - name: Restore pinned Playwright browsers
+      id: restore
+      uses: actions/cache/restore@v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.pinned.outputs.key }}
+
+    - name: Install pinned Playwright browsers
+      shell: bash
+      env:
+        PLAYWRIGHT_BROWSERS: ${{ inputs.browsers }}
+        PLAYWRIGHT_ONLY_SHELL: ${{ inputs.only-shell }}
+        ATTEMPT_TIMEOUT_SECONDS: ${{ inputs.attempt-timeout-seconds }}
+        ATTEMPTS: ${{ inputs.attempts }}
+        KILL_AFTER_SECONDS: "15"
+      run: |
+        set -uo pipefail
+        only_shell=""
+        if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
+          only_shell="--only-shell"
+        fi
+        attempt=1
+        while [ "${attempt}" -le "${ATTEMPTS}" ]; do
+          echo "::group::Playwright install attempt ${attempt}/${ATTEMPTS}"
+          # The runner invokes this as `bash --noprofile --norc -eo pipefail`,
+          # and `set -uo pipefail` does NOT clear that errexit. Without the
+          # `|| status=$?` guard the first failing attempt aborts the script,
+          # so the retry, the warnings, and the error summary never run.
+          status=0
+          timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s" \
+            bun x playwright install --with-deps ${only_shell} ${PLAYWRIGHT_BROWSERS} || status=$?
+          echo "::endgroup::"
+          if [ "${status}" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "${status}" -eq 124 ] || [ "${status}" -eq 137 ]; then
+            echo "::warning::Playwright install attempt ${attempt} exceeded ${ATTEMPT_TIMEOUT_SECONDS}s and was killed."
+          else
+            echo "::warning::Playwright install attempt ${attempt} failed with exit ${status}."
+          fi
+          attempt=$((attempt + 1))
+        done
+        echo "::error::Playwright install failed after ${ATTEMPTS} bounded attempts."
+        exit 1
+
+    # `always()` so a bounded failure still persists whatever downloaded, which
+    # is what makes the re-run after a timeout actually converge. Skipped on a
+    # hit, where the key already exists and saving would error.
+    #
+    # This checkpoint is ONE-SHOT, not iterative: cache keys are immutable, so
+    # once a partial set is saved every later run gets a hit and skips this
+    # step. One step is sufficient because it reduces the re-run to a
+    # single-browser download, which has never breached the bound - but it does
+    # mean a partial set persists for the life of this Playwright version.
+    # A SIGKILLed install can leave a stale __dirlock behind. Playwright locks
+    # the registry through proper-lockfile passing only retries/onCompromised/
+    # lockfilePath, so the default `stale: 10000` applies - the lock clears
+    # after ~10 seconds, not the ~5 minutes an earlier revision of this comment
+    # claimed. Removing it is therefore cheap hygiene rather than a large
+    # saving: it keeps a lock out of an immutable cache entry and avoids the
+    # onCompromised path entirely.
+    - name: Drop stale Playwright dirlock before saving
+      if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: rm -rf ~/.cache/ms-playwright/__dirlock
+
+    - name: Save pinned Playwright browsers
+      if: ${{ always() && steps.restore.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.pinned.outputs.key }}

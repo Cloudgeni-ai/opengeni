@@ -319,7 +319,7 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
       : typedCode === "CALLER_INTERRUPTED"
         ? ["caller_interrupted", "The calling session was interrupted before delivery."]
         : typedCode === "TARGET_NOT_VERTICAL"
-          ? ["target_not_vertical", "Agents may message only their parent or immediate children."]
+          ? ["target_not_vertical", "The calling agent cannot act on that session."]
           : typedCode === "CONTROL_CHANGED"
             ? ["conflict", "The target session control state changed; refresh and retry."]
             : typedCode === "IDEMPOTENCY_KEY_REUSED"
@@ -3934,7 +3934,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing: status, goal-bearing metadata, resources, tools, and variableSet attachment (names/ids only, never variable values). Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
+          "Get another session you are managing: status, goal-bearing metadata, resources, persisted tool refs, exact bounded effectiveToolPolicy, and variableSet attachment (names/ids only, never variable values). effectiveToolPolicy distinguishes selected refs from workspace defaults, mandatory carriers, configured/deferred refs, and dropped refs. Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
         inputSchema: { sessionId: z4.string().uuid() },
       },
       async ({ sessionId }) => {
@@ -4145,7 +4145,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker). The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

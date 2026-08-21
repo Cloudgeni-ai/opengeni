@@ -87,6 +87,7 @@ import {
   readTurnExecutionPolicyV1,
   resourceMountPath,
   resourceMountPathCollisionKey,
+  sandboxShellPath,
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
   UpdateScheduledTaskRequest,
@@ -619,6 +620,11 @@ describe("contracts", () => {
     expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+    expect(payload.visibility).toBe("workspace");
+    expect(
+      CreateSessionRequest.parse({ initialMessage: "private work", visibility: "private" })
+        .visibility,
+    ).toBe("private");
   });
 
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
@@ -836,6 +842,19 @@ describe("contracts", () => {
         mountPath: "inputs/current",
       }),
     ).toBe("inputs/current");
+  });
+
+  test("projects virtual /workspace paths to cwd-relative shell paths", () => {
+    expect(sandboxShellPath("/workspace")).toBe(".");
+    expect(sandboxShellPath("/workspace/.opengeni/files/file-1/report.pdf")).toBe(
+      ".opengeni/files/file-1/report.pdf",
+    );
+    expect(sandboxShellPath("/workspace/generated-images/out.png")).toBe(
+      "generated-images/out.png",
+    );
+    expect(sandboxShellPath(".opengeni/connector-attachments/gmail/ab/file.pdf")).toBe(
+      ".opengeni/connector-attachments/gmail/ab/file.pdf",
+    );
   });
 
   test("rejects non-portable and traversal mount paths", () => {

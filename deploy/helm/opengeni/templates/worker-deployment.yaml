@@ -74,8 +74,8 @@ spec:
             - name: OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE
               value: {{ .Values.opensandbox.kubernetesInventory.namespace | quote }}
             {{- end }}
-            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)) | nindent 12 }}
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
           {{- if $opensandboxKubernetesInventoryEnabled }}
           volumeMounts:

@@ -44,6 +44,7 @@ describe("connection authority API owner boundary", () => {
         mode: "session",
         context: "workspace_shared",
         sessionId: id("3"),
+        expectedAuthorityEpoch: 7,
         workspaceSharedAcknowledged: true,
       }),
     ).toEqual({
@@ -51,6 +52,7 @@ describe("connection authority API owner boundary", () => {
       mode: "session",
       context: "workspace_shared",
       sessionId: id("3"),
+      expectedAuthorityEpoch: 7,
       workspaceSharedAcknowledged: true,
     });
     expect(() =>
@@ -66,39 +68,62 @@ describe("connection authority API owner boundary", () => {
 
   test("projects only opaque connection authority rows", () => {
     expect(
-      projectSelfConnectionAuthorities([
-        {
-          authorityId: id("4"),
-          resourceKind: "connection",
-          generation: 1,
-          status: "active",
-          grants: [
-            {
-              grantId: id("5"),
-              targetWorkspaceId: id("2"),
-              targetSessionId: null,
-              action: "connection.use",
-              mode: "always",
-              context: "user_private",
-              generation: 1,
-              status: "active",
-              expiresAt: null,
-            },
-          ],
-        },
-        {
-          authorityId: id("6"),
-          resourceKind: "rig",
-          generation: 1,
-          status: "active",
-          grants: [],
-        },
-      ]),
+      projectSelfConnectionAuthorities({
+        authorities: [
+          {
+            authorityId: id("4"),
+            resourceKind: "connection",
+            resourceId: id("7"),
+            originWorkspaceId: id("8"),
+            generation: 1,
+            status: "active",
+            grants: [
+              {
+                grantId: id("5"),
+                targetWorkspaceId: id("2"),
+                targetSessionId: null,
+                action: "connection.use",
+                mode: "always",
+                context: "user_private",
+                authorityEpoch: null,
+                generation: 1,
+                status: "active",
+                expiresAt: null,
+                delegation: {
+                  authorityId: id("4"),
+                  grantId: id("5"),
+                  organizationId: id("1"),
+                  workspaceId: id("2"),
+                  sessionId: null,
+                  action: "connection.use",
+                  mode: "always",
+                  context: "user_private",
+                  authorityEpoch: null,
+                  authorityGeneration: 1,
+                  grantGeneration: 1,
+                },
+              },
+            ],
+          },
+          {
+            authorityId: id("6"),
+            resourceKind: "rig",
+            resourceId: id("9"),
+            originWorkspaceId: null,
+            generation: 1,
+            status: "active",
+            grants: [],
+          },
+        ],
+        nextCursor: id("6"),
+      }),
     ).toEqual({
       scope: "user",
       authorities: [
         {
           authorityId: id("4"),
+          resourceId: id("7"),
+          originWorkspaceId: id("8"),
           generation: 1,
           status: "active",
           grants: [
@@ -109,13 +134,28 @@ describe("connection authority API owner boundary", () => {
               action: "connection.use",
               mode: "always",
               context: "user_private",
+              authorityEpoch: null,
               generation: 1,
               status: "active",
               expiresAt: null,
+              delegation: {
+                authorityId: id("4"),
+                grantId: id("5"),
+                organizationId: id("1"),
+                workspaceId: id("2"),
+                sessionId: null,
+                action: "connection.use",
+                mode: "always",
+                context: "user_private",
+                authorityEpoch: null,
+                authorityGeneration: 1,
+                grantGeneration: 1,
+              },
             },
           ],
         },
       ],
+      nextCursor: id("6"),
     });
   });
 });

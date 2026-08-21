@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 # Full local OpenGeni stack for one checkout / git worktree.
 # Isolates Docker Compose project + host ports so parallel worktrees do not share
-# Postgres/NATS/Temporal/MinIO or race on :8000/:3000.
+# Postgres/NATS/Temporal/Garage or race on :8000/:3000.
 set -euo pipefail
+
+case "${1:-}" in
+--opengeni-dev-stack-token=*)
+  opengeni_dev_stack_token="${1#--opengeni-dev-stack-token=}"
+  shift
+  ;;
+*)
+  opengeni_dev_stack_token="$(bun -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')"
+  exec bash "$0" "--opengeni-dev-stack-token=${opengeni_dev_stack_token}" "$@"
+  ;;
+esac
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -168,24 +179,11 @@ else
   export OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
 fi
 
-slugify() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
-}
-
-# Compose project identity: directory basename (unique per linked worktree path).
-# Ignore ambient COMPOSE_PROJECT_NAME from the parent shell — a prior export of
-# `opengeni` would otherwise collapse every worktree onto one project. Override
-# only via OPENGENI_COMPOSE_PROJECT in .env / the environment.
-if [ -n "${OPENGENI_COMPOSE_PROJECT:-}" ]; then
-  COMPOSE_PROJECT_NAME="$(slugify "$OPENGENI_COMPOSE_PROJECT")"
-else
-  COMPOSE_PROJECT_NAME="$(slugify "$(basename "$(pwd)")")"
-  # Bare main-checkout directory name only — never rewrite an explicit override
-  # (operators may still want COMPOSE project `opengeni` for legacy volumes).
-  if [ "$COMPOSE_PROJECT_NAME" = "opengeni" ]; then
-    COMPOSE_PROJECT_NAME="opengeni-main"
-  fi
-fi
+# Compose project identity is shared with scripts/dev-stack-down.sh so
+# `bun run dev:down` / `dev:clean` always target exactly this worktree's stack.
+# shellcheck disable=SC1091
+. ./scripts/dev-stack-project.sh
+COMPOSE_PROJECT_NAME="$(resolve_compose_project_name)"
 export COMPOSE_PROJECT_NAME
 
 # Modal's application name is also an ownership namespace: the sandbox reaper
@@ -204,7 +202,7 @@ fi
 # A stopped host dev process intentionally leaves this worktree's dependency
 # containers running. Reuse the generated ports when those exact compose
 # services still exist; otherwise a restart mistakes its own containers for a
-# collision and needlessly moves Postgres/Temporal/MinIO to new ports.
+# collision and needlessly moves Postgres/Temporal/object-storage to new ports.
 reuse_runtime_ports=0
 if [ -f .env.runtime ] &&
   [ "$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env.runtime | tail -1)" = "$COMPOSE_PROJECT_NAME" ] &&
@@ -217,6 +215,7 @@ if [ -f .env.runtime ] &&
     OPENGENI_NATS_HOST_PORT \
     OPENGENI_NATS_MONITOR_HOST_PORT \
     OPENGENI_TEMPORAL_HOST_PORT \
+    OPENGENI_GARAGE_HOST_PORT \
     OPENGENI_MINIO_HOST_PORT \
     OPENGENI_MINIO_CONSOLE_HOST_PORT \
     OPENGENI_API_PORT \
@@ -379,8 +378,20 @@ choose_port OPENGENI_POSTGRES_HOST_PORT 5432
 choose_port OPENGENI_NATS_HOST_PORT 4222
 choose_port OPENGENI_NATS_MONITOR_HOST_PORT 8222
 choose_port OPENGENI_TEMPORAL_HOST_PORT 7233
-choose_port OPENGENI_MINIO_HOST_PORT 9000
-choose_port OPENGENI_MINIO_CONSOLE_HOST_PORT 9001
+OPENGENI_OBJECT_STORAGE_FIXTURE="${OPENGENI_OBJECT_STORAGE_FIXTURE:-garage}"
+export OPENGENI_OBJECT_STORAGE_FIXTURE
+object_s3_host_port=""
+if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+  choose_port OPENGENI_MINIO_HOST_PORT 9000
+  choose_port OPENGENI_MINIO_CONSOLE_HOST_PORT 9001
+  object_s3_host_port="$OPENGENI_MINIO_HOST_PORT"
+elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "garage" ]; then
+  choose_port OPENGENI_GARAGE_HOST_PORT 3900
+  object_s3_host_port="$OPENGENI_GARAGE_HOST_PORT"
+else
+  echo "OPENGENI_OBJECT_STORAGE_FIXTURE must be garage or minio." >&2
+  exit 1
+fi
 choose_port OPENGENI_API_PORT 8000
 choose_port OPENGENI_WORKER_HTTP_PORT 8001
 choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
@@ -538,43 +549,72 @@ else
   export OPENGENI_TEMPORAL_HOST="$(rewrite_loopback_port "$OPENGENI_TEMPORAL_HOST" "$OPENGENI_TEMPORAL_HOST_PORT")"
 fi
 
-default_object_endpoint="http://127.0.0.1:9000"
-if [ -z "${OPENGENI_OBJECT_STORAGE_ENDPOINT:-}" ] || [ "${OPENGENI_OBJECT_STORAGE_ENDPOINT}" = "$default_object_endpoint" ]; then
-  export OPENGENI_OBJECT_STORAGE_ENDPOINT="http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}"
+default_object_endpoint_garage="http://127.0.0.1:3900"
+default_object_endpoint_minio="http://127.0.0.1:9000"
+if [ -z "${OPENGENI_OBJECT_STORAGE_ENDPOINT:-}" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_ENDPOINT}" = "$default_object_endpoint_garage" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_ENDPOINT}" = "$default_object_endpoint_minio" ]; then
+  export OPENGENI_OBJECT_STORAGE_ENDPOINT="http://127.0.0.1:${object_s3_host_port}"
 else
-  export OPENGENI_OBJECT_STORAGE_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_ENDPOINT" "$OPENGENI_MINIO_HOST_PORT")"
+  export OPENGENI_OBJECT_STORAGE_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_ENDPOINT" "$object_s3_host_port")"
 fi
 
-# docker-compose.yml owns this worktree's local MinIO and fixes its development
-# credential pair. Sparse acceptance .env files should not have to repeat it.
-if [ -z "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID:-}" ] &&
-  [ -z "${OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY:-}" ]; then
-  export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=minioadmin
-  export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin
+# docker-compose.yml owns this worktree's local object-storage fixture.
+# Sparse acceptance .env files should not have to repeat the development keys.
+GARAGE_FIXTURE_ACCESS_KEY_ID="GK0123456789abcdef0123456789abcdef"
+GARAGE_FIXTURE_SECRET_ACCESS_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "garage" ]; then
+  if [ -z "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID:-}" ] ||
+    [ "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID}" = "minioadmin" ]; then
+    export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID="$GARAGE_FIXTURE_ACCESS_KEY_ID"
+    export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY="$GARAGE_FIXTURE_SECRET_ACCESS_KEY"
+  fi
+  if [ -z "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER:-}" ] ||
+    [ "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER}" = "Minio" ]; then
+    export OPENGENI_OBJECT_STORAGE_S3_PROVIDER="Other"
+  fi
+else
+  if [ -z "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID:-}" ] ||
+    [ "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID}" = "$GARAGE_FIXTURE_ACCESS_KEY_ID" ]; then
+    export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=minioadmin
+    export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin
+  fi
+  if [ -z "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER:-}" ] ||
+    [ "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER}" = "Other" ]; then
+    export OPENGENI_OBJECT_STORAGE_S3_PROVIDER="Minio"
+  fi
 fi
 
 # API/workers run on the host in local development, so their authenticated
-# object-storage client must use the host endpoint. `minio:9000` is reachable
-# only from compose/sandbox containers and previously made every server-side
-# upload fail after the expensive provider work had already completed.
-default_internal_object_endpoint="http://minio:9000"
+# object-storage client must use the host endpoint. Compose DNS (`garage:3900` /
+# `minio:9000`) is reachable only from compose/sandbox containers.
+default_internal_object_endpoint_garage="http://garage:3900"
+default_internal_object_endpoint_minio="http://minio:9000"
 if [ -z "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT:-}" ] ||
-  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_internal_object_endpoint" ] ||
-  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_object_endpoint" ]; then
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_internal_object_endpoint_garage" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_internal_object_endpoint_minio" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_object_endpoint_garage" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_object_endpoint_minio" ]; then
   export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
 else
-  export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT" "$OPENGENI_MINIO_HOST_PORT")"
+  export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT" "$object_s3_host_port")"
 fi
 
 default_sandbox_object_endpoint="http://host.docker.internal:9000"
-if [ -z "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-}" ] || [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_sandbox_object_endpoint" ]; then
-  # In-compose DNS; host port mapping is irrelevant inside the docker network.
-  export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"
+if [ -z "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-}" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_sandbox_object_endpoint" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_internal_object_endpoint_garage" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_internal_object_endpoint_minio" ]; then
+  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+    export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"
+  else
+    export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://garage:3900"
+  fi
 fi
 
-# A managed Modal sandbox cannot resolve compose-only `minio` DNS or reach the
-# host loopback endpoint embedded in local presigned URLs. Give remote sandboxes
-# a short-lived HTTPS route to this worktree's private MinIO. The object store
+# A managed Modal sandbox cannot resolve compose-only `garage`/`minio` DNS or
+# reach the host loopback endpoint embedded in local presigned URLs. Give remote
+# sandboxes a short-lived HTTPS route to this worktree's private object store.
 # remains credential-protected and every write still requires its object-scoped
 # signed URL. Operators can bypass this local convenience by configuring any
 # already-sandbox-reachable endpoint.
@@ -585,7 +625,8 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
       process.stdout.write(url.hostname.toLowerCase());
     '
   })"
-  if [ "$sandbox_object_host" = "minio" ] ||
+  if [ "$sandbox_object_host" = "garage" ] ||
+    [ "$sandbox_object_host" = "minio" ] ||
     [ "$sandbox_object_host" = "host.docker.internal" ] ||
     [ "$sandbox_object_host" = "127.0.0.1" ] ||
     [ "$sandbox_object_host" = "localhost" ] ||
@@ -630,7 +671,7 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
     edge_log=".opengeni/cloudflared-sandbox-edge.log"
     : >"$edge_log"
     OPENGENI_SANDBOX_EDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}" \
-      OPENGENI_SANDBOX_EDGE_OBJECT_ORIGIN="http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
+      OPENGENI_SANDBOX_EDGE_OBJECT_ORIGIN="http://127.0.0.1:${object_s3_host_port}" \
       bun scripts/dev-sandbox-edge.ts &
     pids+=("$!")
     for _attempt in $(seq 1 100); do
@@ -794,7 +835,27 @@ fi
 unset OPENGENI_ARTIFACT_RUNTIME_MANIFEST
 export NODE_ENV=development
 artifact_development_root="$(pwd)/.opengeni/artifact-runtime-development"
-bun scripts/prepare-development-artifact-runtime.ts \
+# Optional shared Cargo target cache for the host-side Rust builds (artifact
+# kernel napi binding here, Connected Machine relay below). Opt-in only: by
+# default every checkout keeps its own in-repo target/ trees. When set, each
+# Cargo workspace gets its own subdirectory so the two never mix, and parallel
+# worktrees reuse compiled registry dependencies instead of recompiling them.
+artifact_kernel_cargo_env=()
+relay_cargo_env=()
+if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then
+  case "$OPENGENI_DEV_CARGO_TARGET_DIR" in
+  /*) ;;
+  *)
+    echo "OPENGENI_DEV_CARGO_TARGET_DIR must be an absolute path." >&2
+    exit 1
+    ;;
+  esac
+  mkdir -p "${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel" "${OPENGENI_DEV_CARGO_TARGET_DIR}/agent"
+  artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")
+  relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")
+fi
+env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}" \
+  bun scripts/prepare-development-artifact-runtime.ts \
   --repository-root "$(pwd)" \
   --output "$artifact_development_root"
 export OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST="${artifact_development_root}/installation.development.json"
@@ -829,7 +890,7 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
     fi
     echo "Exact-head sandbox artifact runtime unavailable; standalone local Office file operations are disabled." >&2
   fi
-  OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"
+  OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}-${COMPOSE_PROJECT_NAME}"
   export OPENGENI_DOCKER_IMAGE OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED
 fi
 
@@ -849,8 +910,13 @@ fi
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
   printf 'OPENGENI_NATS_CONFIG_FILE=%s\n' "${OPENGENI_NATS_CONFIG_FILE:-$(pwd)/deploy/nats/local-development.conf}"
   printf 'OPENGENI_TEMPORAL_HOST_PORT=%s\n' "${OPENGENI_TEMPORAL_HOST_PORT}"
-  printf 'OPENGENI_MINIO_HOST_PORT=%s\n' "${OPENGENI_MINIO_HOST_PORT}"
-  printf 'OPENGENI_MINIO_CONSOLE_HOST_PORT=%s\n' "${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
+  printf 'OPENGENI_OBJECT_STORAGE_FIXTURE=%s\n' "${OPENGENI_OBJECT_STORAGE_FIXTURE}"
+  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+    printf 'OPENGENI_MINIO_HOST_PORT=%s\n' "${OPENGENI_MINIO_HOST_PORT}"
+    printf 'OPENGENI_MINIO_CONSOLE_HOST_PORT=%s\n' "${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
+  else
+    printf 'OPENGENI_GARAGE_HOST_PORT=%s\n' "${OPENGENI_GARAGE_HOST_PORT}"
+  fi
   printf 'OPENGENI_API_PORT=%s\n' "${OPENGENI_API_PORT}"
   printf 'OPENGENI_WORKER_HTTP_PORT=%s\n' "${OPENGENI_WORKER_HTTP_PORT}"
   printf 'OPENGENI_TURN_WORKER_HTTP_PORT=%s\n' "${OPENGENI_TURN_WORKER_HTTP_PORT}"
@@ -877,6 +943,9 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  printf 'OPENGENI_OBJECT_STORAGE_S3_PROVIDER=%s\n' "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER}"
+  printf 'OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=%s\n' "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID}"
+  printf 'OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=%s\n' "${OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY}"
   printf 'OPENGENI_MCP_INTERNAL_URL=%s\n' "${OPENGENI_MCP_INTERNAL_URL}"
   if [ -n "${OPENGENI_MCP_URL:-}" ]; then
     printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
@@ -902,11 +971,15 @@ fi
 echo "OpenGeni worktree stack: compose project=${COMPOSE_PROJECT_NAME}"
 echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}"
 echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
-echo "  temporal=${OPENGENI_TEMPORAL_HOST}  minio=${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+echo "  temporal=${OPENGENI_TEMPORAL_HOST}  object-storage=${OPENGENI_OBJECT_STORAGE_ENDPOINT} (${OPENGENI_OBJECT_STORAGE_FIXTURE})"
 echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
-docker compose up -d postgres nats temporal minio minio-init
+if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+  docker compose --profile minio up -d postgres nats temporal minio minio-init
+else
+  docker compose up -d postgres nats temporal garage garage-init
+fi
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
 # The sidecars need only their dedicated DSNs. Do not leak raw provisioning
@@ -919,18 +992,29 @@ if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
       --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
 if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
-  docker build \
-    -f docker/sandbox.Dockerfile \
-    --build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}" \
-    --build-arg "OPENGENI_SOURCE_SHA=$(git rev-parse HEAD)" \
-    -t "${OPENGENI_DOCKER_IMAGE}" \
-    .
+  # 6gb was the documented cap before one build's cache working set (10-14 GB)
+  # was measured; copied .env files still carry it and it makes every start
+  # evict and rebuild the whole image. Treat that exact stale value as unset;
+  # any other explicit value remains authoritative.
+  if [ "${OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX:-}" = "6gb" ]; then
+    echo "OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX=6gb is below one sandbox build's cache working set; using the default cap instead (set another explicit value in .env to override)." >&2
+    unset OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX
+  fi
+  bun scripts/prepare-development-sandbox-image.ts \
+    --repository-root "$(pwd)" \
+    --image "${OPENGENI_DOCKER_IMAGE}" \
+    --runtime-bundle "${sandbox_runtime_bundle}" \
+    --source-sha "$(git rev-parse HEAD)" \
+    --lease-id "${COMPOSE_PROJECT_NAME}" \
+    --lease-pid "$$" \
+    --lease-token "${opengeni_dev_stack_token}"
 else
   echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi
 
 if [ "$start_local_relay" = "1" ]; then
-  bash scripts/run-development-relay.sh &
+  env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
+    bash scripts/run-development-relay.sh &
   pids+=("$!")
 fi
 

@@ -18,19 +18,68 @@ import {
   getSessionTurnPersonalConnectionDelegations,
   getConnectionMetadata,
   getSocialConnection,
-  getWorkspaceGrant,
   listConnectionsMetadata,
   listSocialConnections,
   resolvePersonalConnectionAuthoritySelectionOrigin,
+  namedSubjectHasLiveWorkspaceAuthority,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 
 export type PersonalConnectionDelegationSource =
-  | { kind: "subject"; subjectId: string }
+  | {
+      kind: "subject";
+      subjectId: string;
+      /**
+       * Organization of the authorizing grant. The owner-only
+       * personal-workspace pointer lives on an organization membership, so
+       * the account is part of the question, not an optimization.
+       */
+      accountId: string;
+    }
   | { kind: "turn"; sessionId: string; turnId: string }
   | { kind: "none" };
+
+/**
+ * Is `subjectId` still authorized in `workspaceId`?
+ *
+ * Personal-connection authority has always been "the owner must still belong
+ * to this workspace", but the old check was `getWorkspaceGrant` - a bare
+ * `workspace_memberships` join. A managed human's personal workspace
+ * deliberately has no row in that table (migration 0219 raises on one), so the
+ * join answered `false` for the one person who always belongs, and every
+ * personal connection silently disappeared inside the owner's own private
+ * workspace.
+ *
+ * `namedSubjectHasLiveWorkspaceAuthority` models both halves - the membership
+ * row and the organization membership's `personal_workspace_id` pointer - but
+ * it is an **oracle, not an authorization**: it answers for whatever subject it
+ * is handed and cannot establish who the caller is (see its doc comment in
+ * `@opengeni/db`). Every use is safe only because *this* module has already
+ * established entitlement to ask, locally:
+ *
+ * - at freeze time the subject is `source.subjectId`, and
+ *   `personalConnectionDelegationSourceForGrant` admits only a grant whose
+ *   `subjectId` came from a real authenticated principal. Agent-attempt,
+ *   service, service-initiated, and **delegated/bearer** grants never reach
+ *   this branch: they resolve to `{kind:"none"}`, or - for a worker-signed
+ *   agent attempt - to `{kind:"turn"}`, which probes only a frozen
+ *   `ownerSubjectId` already persisted for the grant's own workspace. Either
+ *   way an unvalidated signed-token subject is never the probed subject; and
+ * - on the `*ForGrant` paths the subject is the frozen `ownerSubjectId` of a
+ *   delegation already persisted for the workspace the caller is already
+ *   authorized in.
+ *
+ * Do not pass any other subject through this helper. A subject that was merely
+ * looked up, guessed, or supplied by a caller is not entitled.
+ */
+async function ownerStillBelongsToWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await namedSubjectHasLiveWorkspaceAuthority(db, input);
+}
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 export type AuthorizedAtlassianConnection = {
   connection: ConnectionMetadata;
@@ -55,17 +104,48 @@ export function personalConnectionDelegationSourceForGrant(
 ): PersonalConnectionDelegationSource {
   const callerSessionId = grant.metadata?.["sessionId"];
   const callerTurnId = grant.metadata?.["turnId"];
+  // LOAD-BEARING ORDERING. This turn branch sits ABOVE the delegated filter
+  // below, so a grant carrying both `sessionId` and `turnId` never reaches that
+  // filter. That is safe only because `DelegatedAccessTokenPayload`'s
+  // `superRefine` forbids `principalKind: "human_session"` from carrying any
+  // attempt claim (`turnId`/`attemptId`/`executionGeneration`), so a delegated
+  // human-session bearer is structurally unable to take this branch. If that
+  // refinement is ever relaxed, a delegated bearer could route around the
+  // delegated filter by presenting a turn reference - move the filter above
+  // this branch at the same time. Pinned by
+  // `packages/contracts/test/delegated-access-token-attempt-claims.test.ts`.
   if (typeof callerSessionId === "string" && typeof callerTurnId === "string") {
     return { kind: "turn", sessionId: callerSessionId, turnId: callerTurnId };
   }
   if (
     grant.principalKind === "agent_attempt" ||
     grant.principalKind === "service" ||
-    grant.serviceInitiator
+    grant.serviceInitiator ||
+    // A delegated bearer's grant is built entirely from signed token payload
+    // (`delegatedAccessContext`); no database row binds its `subjectId` or
+    // `workspaceId` to anything. It is therefore never an entitled subject for
+    // the owner-only personal-workspace pointer, which CLAUDE.md reserves for
+    // the canonical managed-cookie session: "Bearer/delegated principals, API
+    // keys, and account or organization administrators receive no
+    // personal-workspace access through that exception." Before the pointer
+    // existed this was moot - `getWorkspaceGrant` returned null for a personal
+    // workspace regardless - so the filter belongs with the pointer.
+    //
+    // Why testing THIS field is sound while inspecting the others is not: a
+    // host signs `subjectId`, `principalKind`, and `serviceInitiator` into the
+    // token itself, so those are host-chosen and a hostile host picks whatever
+    // it likes. `metadata.delegated` is different - it is stamped by
+    // `delegatedAccessContext` in `@opengeni/core` AFTER the token signature is
+    // verified, and is not carried in the payload at all, so a host cannot
+    // clear it. Do not "harden" this by switching to `principalKind`. The
+    // strictly better shape is a positive assertion of how the request
+    // authenticated (a canonical managed-cookie stamp) rather than any
+    // inspection of the grant; that convergence is tracked separately.
+    grant.metadata?.delegated === true
   ) {
     return { kind: "none" };
   }
-  return { kind: "subject", subjectId: grant.subjectId };
+  return { kind: "subject", subjectId: grant.subjectId, accountId: grant.accountId };
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
@@ -104,7 +184,13 @@ export async function authorizedSocialConnectionsForGrant(input: {
   ).filter((item) => item.connectionType === "social");
   const personal: AuthorizedSocialConnection[] = [];
   for (const delegation of delegations) {
-    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId)))
+    if (
+      !(await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        subjectId: delegation.ownerSubjectId,
+      }))
+    )
       continue;
     const connection = await getSocialConnection(
       input.db,
@@ -161,7 +247,13 @@ export async function authorizedAtlassianConnectionsForGrant(input: {
   ).filter((item) => item.connectionType === "atlassian");
   const personal: AuthorizedAtlassianConnection[] = [];
   for (const delegation of delegations) {
-    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId))) {
+    if (
+      !(await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        subjectId: delegation.ownerSubjectId,
+      }))
+    ) {
       continue;
     }
     const connection = await getConnectionMetadata(
@@ -504,6 +596,12 @@ export function withFrozenPersonalConnectionDelegations(input: {
   resolveCredential: ConnectionCredentialResolver;
   settings: Pick<Settings, "mcpServers">;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  /**
+   * Does the frozen delegation owner still hold workspace authority? Supply
+   * the canonical `namedSubjectHasLiveWorkspaceAuthority` resolver, never a bare
+   * `workspace_memberships` lookup: a managed human's personal workspace has
+   * no membership row, so a bare lookup revokes the owner's own connections.
+   */
   ownerHasWorkspaceMembership: (subjectId: string) => Promise<boolean>;
 }): ConnectionCredentialResolver {
   return async (request) => {
@@ -605,7 +703,11 @@ export async function freezePersonalConnectionDelegations(input: {
     });
   }
   const ownerSubjectId = input.source.subjectId;
-  const membership = await getWorkspaceGrant(input.db, ownerSubjectId, input.workspaceId);
+  const membership = await ownerStillBelongsToWorkspace(input.db, {
+    accountId: input.source.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: ownerSubjectId,
+  });
   const targetLocalConnections = await listConnectionsMetadata(
     input.db,
     input.workspaceId,

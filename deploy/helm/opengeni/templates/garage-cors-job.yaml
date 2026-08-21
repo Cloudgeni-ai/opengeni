@@ -1,0 +1,86 @@
+{{- if .Values.garage.enabled }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.garage.priorityClassName "tier" "durable") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "opengeni.fullname" . }}-garage-cors
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: garage-cors
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "5"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: garage-cors
+    spec:
+      restartPolicy: Never
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      containers:
+        - name: mc
+          image: {{ printf "%s:%s" .Values.garage.mcImage.repository .Values.garage.mcImage.tag | quote }}
+          imagePullPolicy: {{ .Values.garage.mcImage.pullPolicy }}
+          env:
+            - name: HTTP_PROXY
+              value: ""
+            - name: HTTPS_PROXY
+              value: ""
+            - name: ALL_PROXY
+              value: ""
+            - name: http_proxy
+              value: ""
+            - name: https_proxy
+              value: ""
+            - name: all_proxy
+              value: ""
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,{{ include "opengeni.fullname" . }}-garage"
+            - name: no_proxy
+              value: "localhost,127.0.0.1,{{ include "opengeni.fullname" . }}-garage"
+            - name: GARAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.garageSecretName" . }}
+                  key: {{ .Values.garage.auth.accessKeyKey }}
+            - name: GARAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.garageSecretName" . }}
+                  key: {{ .Values.garage.auth.secretKeyKey }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              cat > /tmp/cors.xml <<'EOF'
+              <CORSConfiguration>
+                <CORSRule>
+                  <AllowedOrigin>*</AllowedOrigin>
+                  <AllowedMethod>GET</AllowedMethod>
+                  <AllowedMethod>PUT</AllowedMethod>
+                  <AllowedMethod>HEAD</AllowedMethod>
+                  <AllowedMethod>POST</AllowedMethod>
+                  <AllowedMethod>DELETE</AllowedMethod>
+                  <AllowedHeader>*</AllowedHeader>
+                  <ExposeHeader>ETag</ExposeHeader>
+                  <ExposeHeader>x-amz-meta-sha256</ExposeHeader>
+                  <ExposeHeader>x-amz-request-id</ExposeHeader>
+                  <MaxAgeSeconds>3600</MaxAgeSeconds>
+                </CORSRule>
+              </CORSConfiguration>
+              EOF
+              for i in $(seq 1 30); do
+                mc alias set local {{ include "opengeni.garageInternalEndpoint" . | quote }} "$GARAGE_ACCESS_KEY" "$GARAGE_SECRET_KEY" &&
+                mc cors set local/{{ .Values.garage.bucket }} /tmp/cors.xml &&
+                exit 0
+                sleep 2
+              done
+              exit 1
+{{- end }}

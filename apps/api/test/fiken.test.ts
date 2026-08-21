@@ -635,6 +635,13 @@ describe("FikenClient", () => {
       const first = fiken.listCompanies();
       await entered;
       const queued = fiken.listContacts({});
+      // Attach a rejection handler before releasing the active provider call.
+      // Once the chain advances, the queued authority check can reject before
+      // the fulfilled first call resumes this test under CI load.
+      const queuedOutcome = queued.then(
+        () => ({ status: "fulfilled" as const }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      );
       const current = await getConnectionMetadata(
         client.db,
         workspace.workspaceId,
@@ -664,7 +671,12 @@ describe("FikenClient", () => {
       }
       releaseFirst();
       await expect(first).resolves.toBeDefined();
-      await expect(queued).rejects.toThrow(/authority changed|reconnected/);
+      const outcome = await queuedOutcome;
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "rejected") {
+        expect(outcome.error).toBeInstanceOf(Error);
+        expect((outcome.error as Error).message).toMatch(/authority changed|reconnected/);
+      }
       expect(targetCalls).toBe(1);
     }
   });

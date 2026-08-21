@@ -33,9 +33,12 @@ import {
   lazyRouteComponent,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
+import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+
+type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
@@ -253,15 +256,22 @@ const workspaceCapabilitiesRoute = createRoute({
   }),
   component: Capabilities,
 });
+const SCHEDULES_SEARCH_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const workspaceSchedulesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "schedules",
-  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { sourceSessionId?: string; taskId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      search.sourceSessionId,
-    )
+    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+    // Set when arriving from a session that a schedule started, so the page can
+    // reveal that one task instead of leaving the reader to find it.
+    ...(typeof search.taskId === "string" && SCHEDULES_SEARCH_UUID.test(search.taskId)
+      ? { taskId: search.taskId }
       : {}),
   }),
   component: Schedules,
@@ -329,9 +339,18 @@ const workspaceOrganizationRoute = createRoute({
   path: "organization",
   // `?checkout=success|cancelled` arrives via the /billing Stripe-return
   // redirect so the organization page can confirm the top-up.
-  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { checkout?: CheckoutOutcome; section?: OrganizationAdminSection } => {
     const checkout = parseCheckoutOutcome(search);
-    return checkout ? { checkout } : {};
+    const section =
+      search.section === "overview" ||
+      search.section === "people" ||
+      search.section === "retention" ||
+      search.section === "billing"
+        ? search.section
+        : undefined;
+    return { ...(checkout ? { checkout } : {}), ...(section ? { section } : {}) };
   },
   component: Organization,
 });
@@ -380,7 +399,11 @@ const routeTree = rootRoute.addChildren([
     workspaceAccountRoute,
   ]),
 ]);
-const router = createRouter({ routeTree });
+// Every match needs its own Suspense boundary. Without a default pending
+// component, a cold lazy workspace page suspends through WorkspaceShell and is
+// caught only by the root Outlet, briefly replacing the rail along with the
+// canvas. The leaf boundary keeps the persistent workspace chrome mounted.
+const router = createRouter({ routeTree, ...ROUTER_PENDING_OPTIONS });
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -503,8 +526,14 @@ function Capabilities() {
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId } = workspaceSchedulesRoute.useSearch();
-  return <LazySchedulesRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
+  const { sourceSessionId, taskId } = workspaceSchedulesRoute.useSearch();
+  return (
+    <LazySchedulesRoute
+      workspaceId={workspaceId}
+      sourceSessionId={sourceSessionId}
+      focusTaskId={taskId}
+    />
+  );
 }
 
 function Documents() {
@@ -560,8 +589,8 @@ function EditableArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout } = workspaceOrganizationRoute.useSearch();
-  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} />;
+  const { checkout, section } = workspaceOrganizationRoute.useSearch();
+  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} section={section} />;
 }
 
 function AccountRedirect() {

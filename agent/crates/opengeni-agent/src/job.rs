@@ -107,6 +107,10 @@ pub enum JobCommand {
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
+    /// Test-only mailbox receipt. A sender that observes this notification
+    /// knows every command queued before it has been applied by the pump.
+    #[cfg(test)]
+    Barrier { completed: Arc<Notify> },
 }
 
 /// Tuning knobs for one job's pump.
@@ -624,6 +628,8 @@ impl Pump {
                     self.terminate_child();
                 }
             }
+            #[cfg(test)]
+            JobCommand::Barrier { completed } => completed.notify_one(),
         }
     }
 
@@ -907,6 +913,8 @@ mod tests {
     /// loaded parallel test run.
     const WAIT: Duration = Duration::from_secs(10);
     const PAUSED_WAIT: Duration = Duration::from_secs(30 * 24 * 3600);
+    const PRODUCER_POLL: Duration = Duration::from_millis(5);
+    const PRODUCER_STABLE_FOR: Duration = Duration::from_millis(150);
 
     struct JobBuilder {
         script: String,
@@ -1064,6 +1072,33 @@ mod tests {
             .await;
         }
 
+        /// Waits until the pump has applied every command queued before this
+        /// receipt. Used to release a child only after its attach is live.
+        async fn barrier(&self) {
+            let completed = Arc::new(Notify::new());
+            self.send(JobCommand::Barrier {
+                completed: completed.clone(),
+            })
+            .await;
+            timeout(self.wait, completed.notified())
+                .await
+                .expect("pump reaches the test barrier");
+        }
+
+        async fn wait_for_watermark_at_least(&self, target: u64) -> u64 {
+            timeout(self.wait, async {
+                loop {
+                    let current = self.watermark.load(Ordering::Relaxed);
+                    if current >= target {
+                        return current;
+                    }
+                    tokio::time::sleep(PRODUCER_POLL).await;
+                }
+            })
+            .await
+            .expect("pump reaches the expected watermark")
+        }
+
         async fn next_frame(&mut self) -> Frame {
             timeout(self.wait, self.frames.recv())
                 .await
@@ -1103,6 +1138,74 @@ mod tests {
                 .expect("task ends within the await budget")
                 .expect("pump task must not panic");
         }
+    }
+
+    /// A fixed-size producer with no per-frame child processes. The two files
+    /// bracket each stdout write: once `started == completed + 1` remains
+    /// stable, the shell is parked inside that write rather than merely slow
+    /// between repeated `fork+exec` calls.
+    fn blocking_producer_script(frame_bytes: usize) -> String {
+        format!(
+            "payload=$(printf '%{frame_bytes}s' ''); \
+             while [ ! -f producer.go ]; do :; done; \
+             i=0; while [ $i -lt 200 ]; do \
+               printf '%s\\n' \"$i\" >> producer-started.txt; \
+               printf '%s' \"$payload\"; \
+               printf '%s\\n' \"$i\" >> producer-completed.txt; \
+               i=$((i+1)); \
+             done"
+        )
+    }
+
+    fn producer_counts(job: &TestJob) -> (usize, usize) {
+        let lines = |name: &str| {
+            std::fs::read_to_string(job.dir.path().join(name))
+                .map_or(0, |source| source.lines().count())
+        };
+        (
+            lines("producer-started.txt"),
+            lines("producer-completed.txt"),
+        )
+    }
+
+    fn release_producer(job: &TestJob) {
+        std::fs::write(job.dir.path().join("producer.go"), b"go")
+            .expect("release producer after attach barrier");
+    }
+
+    /// Waits for a stable in-write producer witness while simultaneously
+    /// asserting that the pump's read watermark remains pinned. Requiring at
+    /// least three completed writes proves post-gate bytes are already queued
+    /// in the pipe, so a broken read gate has runnable work independent of the
+    /// producer's scheduling rate.
+    async fn wait_for_parked_producer(job: &TestJob, expected_watermark: u64) -> usize {
+        timeout(job.wait, async {
+            let mut stable: Option<((usize, usize), Instant)> = None;
+            loop {
+                assert_eq!(
+                    job.watermark.load(Ordering::Relaxed),
+                    expected_watermark,
+                    "the pump read past its closed gate"
+                );
+                let counts = producer_counts(job);
+                if counts.1 >= 3 && counts.0 == counts.1 + 1 {
+                    match stable {
+                        Some((candidate, since))
+                            if candidate == counts && since.elapsed() >= PRODUCER_STABLE_FOR =>
+                        {
+                            return counts.1;
+                        }
+                        Some((candidate, _)) if candidate == counts => {}
+                        _ => stable = Some((counts, Instant::now())),
+                    }
+                } else {
+                    stable = None;
+                }
+                tokio::time::sleep(PRODUCER_POLL).await;
+            }
+        })
+        .await
+        .expect("producer parks in stdout write while the read gate is closed")
     }
 
     /// Orders frames by seq, asserting duplicate seqs (replay overlap) carry
@@ -1309,34 +1412,33 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_window_throttles_the_child_end_to_end() {
-        // The child reports its own write progress to a FILE (not a pipe), so
-        // a stalled file proves the child is blocked in write(2) on stdout.
-        let mut job = job("i=0; while [ $i -lt 200 ]; do head -c 4096 /dev/zero; \
-             echo $i >> progress.txt; i=$((i+1)); done")
-        .frame_bytes(4096)
-        .start();
-        let progress_path = job.dir.path().join("progress.txt");
-        let lines =
-            |path: &std::path::Path| std::fs::read_to_string(path).map_or(0, |s| s.lines().count());
+        let script = blocking_producer_script(4096);
+        let mut job = job(&script).frame_bytes(4096).start();
 
         job.attach(1, 0, 8192).await;
+        // Apply the attach before releasing the producer so detached reads
+        // cannot race this gate witness.
+        job.barrier().await;
+        release_producer(&job);
         let mut frames = vec![job.next_frame().await, job.next_frame().await];
         assert_eq!(data_total(&frames), 8192, "exactly one window was emitted");
-        job.no_frame_for(Duration::from_millis(200)).await;
 
-        // Pipe (64 KiB) + window are full: the producer must be blocked well
-        // short of its 200 iterations, and stay parked while we withhold acks.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let parked_at = lines(&progress_path);
+        // There is no overshoot here: two full frames exactly exhaust the
+        // allowance. Wait for the pump-owned witness before asserting the
+        // closed-gate value rather than sampling it opportunistically.
+        assert_eq!(
+            job.wait_for_watermark_at_least(2).await,
+            2,
+            "the allowance gate must close at the exhausted window"
+        );
+
+        // The stable started/completed difference proves the shell is parked
+        // inside stdout write(2). Requiring already-queued post-gate writes
+        // avoids assumptions about host pipe size or fork throughput.
+        let parked_at = wait_for_parked_producer(&job, 2).await;
         assert!(
             parked_at < 200,
-            "producer must be far from done: {parked_at}"
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            lines(&progress_path),
-            parked_at,
-            "producer is blocked in write(2) while credit is withheld"
+            "producer must be parked before completing: {parked_at}"
         );
 
         // Credit returns: the child un-blocks and finishes all 200 writes.
@@ -1351,13 +1453,13 @@ mod tests {
                 break;
             }
         }
-        let zeros = vec![0u8; 200 * 4096];
-        assert_eq!(reassemble(&frames, Channel::Stdout), zeros);
+        let spaces = vec![b' '; 200 * 4096];
+        assert_eq!(reassemble(&frames, Channel::Stdout), spaces);
         let (exit_seq, exit) = job.wait_exit().await;
         assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
         assert_eq!(exit.stdout.total_bytes, 819_200);
-        assert_eq!(exit.stdout.digest, blake3::hash(&zeros));
-        assert_eq!(lines(&progress_path), 200);
+        assert_eq!(exit.stdout.digest, blake3::hash(&spaces));
+        assert_eq!(producer_counts(&job), (200, 200));
         job.final_ack(1, exit_seq.unwrap(), 1 << 20).await;
         job.join().await;
     }
@@ -1615,35 +1717,36 @@ mod tests {
     async fn overshoot_frame_closes_the_read_gate_end_to_end() {
         // Window 1536, frames <= 1024: frame 1 (1024) sends; frame 2 cannot
         // (allowance 512) and is retained UNSENT — the pump is now behind.
-        // The read gate must CLOSE (caught-up requirement): the producer's
-        // progress file plateaus, and retention never grows past the
-        // overshoot frame. Credit + catch-up then resume everything.
-        let mut job = job(
-            "i=0; while [ $i -lt 200 ]; do head -c 1024 /dev/zero;              echo $i >> progress.txt; i=$((i+1)); done",
-        )
-        .frame_bytes(1024)
-        .start();
-        let progress_path = job.dir.path().join("progress.txt");
-        let lines =
-            |path: &std::path::Path| std::fs::read_to_string(path).map_or(0, |s| s.lines().count());
+        // The read gate must CLOSE (caught-up requirement): the pump stops
+        // reading, so retention never grows past the overshoot frame and the
+        // producer parks in stdout write(2). Credit + catch-up then resume.
+        let script = blocking_producer_script(1024);
+        let mut job = job(&script).frame_bytes(1024).start();
 
         job.attach(1, 0, 1536).await;
+        // Apply the attach before releasing the producer so detached reads
+        // cannot race this gate witness.
+        job.barrier().await;
+        release_producer(&job);
         let first = job.next_frame().await;
         assert_eq!(first.body.payload_len(), 1024);
         job.no_frame_for(Duration::from_millis(200)).await;
 
-        // Gate closed: the producer parks (pipe full) despite allowance 512.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let parked_at = lines(&progress_path);
+        // Do not let this pass at watermark 1: wait until the retained seq 2
+        // overshoot actually exists, then require it to be the last read.
+        assert_eq!(
+            job.wait_for_watermark_at_least(2).await,
+            2,
+            "the overshoot frame must be the last read before the gate closes"
+        );
+
+        // The stable started/completed difference proves the shell is parked
+        // inside stdout write(2). Requiring already-queued post-gate writes
+        // avoids assumptions about host pipe size or fork throughput.
+        let parked_at = wait_for_parked_producer(&job, 2).await;
         assert!(
             parked_at < 200,
-            "producer must be far from done: {parked_at}"
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(
-            lines(&progress_path),
-            parked_at,
-            "the overshoot frame must close the read gate (E3 regression)"
+            "producer must be parked before completing: {parked_at}"
         );
 
         // Credit resumes: catch-up sends the retained overshoot frame first,
@@ -1660,10 +1763,11 @@ mod tests {
             }
         }
         assert_consecutive_from_one(&frames);
-        let zeros = vec![0u8; 200 * 1024];
-        assert_eq!(reassemble(&frames, Channel::Stdout), zeros);
+        let spaces = vec![b' '; 200 * 1024];
+        assert_eq!(reassemble(&frames, Channel::Stdout), spaces);
         let (exit_seq, exit) = job.wait_exit().await;
-        assert_eq!(exit.stdout.digest, blake3::hash(&zeros));
+        assert_eq!(exit.stdout.digest, blake3::hash(&spaces));
+        assert_eq!(producer_counts(&job), (200, 200));
         job.final_ack(1, exit_seq.expect("retained"), 1 << 20).await;
         job.join().await;
     }

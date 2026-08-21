@@ -80,6 +80,12 @@ import {
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
+  ForkSessionRequest as ContractForkSessionRequest,
+  ForkSessionResponse as ContractForkSessionResponse,
+  UpdateSessionVisibilityRequest as ContractUpdateSessionVisibilityRequest,
+  UpdateSessionVisibilityResponse as ContractUpdateSessionVisibilityResponse,
+  IssueUserResourceGrantRequest as ContractIssueUserResourceGrantRequest,
+  ListUserResourceAuthoritiesResponse as ContractListUserResourceAuthoritiesResponse,
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
   SessionMcpServerInput as ContractSessionMcpServerInput,
@@ -212,6 +218,12 @@ import type {
   UpdateRigRequest,
   ProposeRigChangeRequest,
   Session,
+  ForkSessionRequest,
+  ForkSessionResponse,
+  UpdateSessionVisibilityRequest,
+  UpdateSessionVisibilityResponse,
+  IssueUserResourceGrantRequest,
+  ListUserResourceAuthoritiesResponse,
   SessionCapabilities,
   SessionEvent,
   SessionHumanInputRequest,
@@ -245,6 +257,40 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("personal-resource management request and page shapes stay in parity", () => {
+    const request = (
+      value: IssueUserResourceGrantRequest,
+    ): z.input<typeof ContractIssueUserResourceGrantRequest> => value;
+    const pageFromSdk = (
+      value: ListUserResourceAuthoritiesResponse,
+    ): z.input<typeof ContractListUserResourceAuthoritiesResponse> => value;
+    const pageFromContract = (
+      value: z.infer<typeof ContractListUserResourceAuthoritiesResponse>,
+    ): ListUserResourceAuthoritiesResponse => value;
+    expect([request, pageFromSdk, pageFromContract].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
+  });
+
+  test("session visibility and private-fork request/response shapes stay in parity", () => {
+    const visibilityRequest = (
+      value: UpdateSessionVisibilityRequest,
+    ): z.input<typeof ContractUpdateSessionVisibilityRequest> => value;
+    const visibilityResponse = (
+      value: z.infer<typeof ContractUpdateSessionVisibilityResponse>,
+    ): UpdateSessionVisibilityResponse => value;
+    const forkRequest = (value: ForkSessionRequest): z.input<typeof ContractForkSessionRequest> =>
+      value;
+    const forkResponse = (
+      value: z.infer<typeof ContractForkSessionResponse>,
+    ): ForkSessionResponse => value;
+    expect(
+      [visibilityRequest, visibilityResponse, forkRequest, forkResponse].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+  });
+
   test("pins the exact API revision and transport header values", () => {
     expect(OPENGENI_API_CONTRACT_REVISION).toBe(CONTRACT_API_CONTRACT_REVISION);
     expect(OPENGENI_API_CONTRACT_HEADER).toBe(CONTRACT_API_CONTRACT_HEADER);
@@ -688,6 +734,10 @@ describe("SDK / contracts parity", () => {
     const settings: UpdateWorkspaceSettingsRequest = {
       memoryEnabled: true,
       memoryPromptMode: "retrieval_only",
+      sessionDefaults: {
+        model: "codex/gpt-5.6-sol",
+        reasoningEffort: "high",
+      },
     };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);

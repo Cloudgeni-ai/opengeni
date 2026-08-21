@@ -175,7 +175,7 @@ new turn. The encrypted row update runs after the cancelled-session guard in the
 same locked acceptance path, and only metadata is persisted in the `user.message`
 event.
 
-`apps/worker/src/activities/agent-turn.ts` overlays session MCP servers after
+`apps/worker/src/activities/agent-turn/tool-environment.ts` overlays session MCP servers after
 capability and Codex overlays, and before `runtime.prepareTools`. The worker-only
 DB accessor decrypts headers for that run path, combines them with the exact
 attempt's approval-policy snapshot, and carries the connection ref into the

@@ -16,13 +16,19 @@ describe("normalizeCodexRequestBody", () => {
       call_id: "call_1",
       arguments: '{"query":"x"}',
     });
+    const statusItem = Object.freeze({
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "ok" }],
+    });
     const unchangedItem = Object.freeze({ type: "message", role: "user", content: [] });
     const source = Object.freeze({
       model: "namespace/gpt-5.6-sol",
       stream: false,
       max_output_tokens: 100,
       reasoning: Object.freeze({ effort: "minimal" }),
-      input: Object.freeze([changedItem, unchangedItem]),
+      input: Object.freeze([changedItem, statusItem, unchangedItem]),
     });
 
     const normalized = normalizedCodexRequestBody(source, identity);
@@ -30,8 +36,10 @@ describe("normalizeCodexRequestBody", () => {
 
     expect(source.reasoning.effort).toBe("minimal");
     expect(source.input[0]).toBe(changedItem);
+    expect(source.input[1]).toBe(statusItem);
     expect(changedItem.id).toBe("ts_1");
     expect(changedItem.arguments).toBe('{"query":"x"}');
+    expect(statusItem.status).toBe("completed");
     expect(normalized.reasoning).toEqual({ effort: "low" });
     expect(normalizedInput[0]).toEqual({
       type: "tool_search_call",
@@ -39,7 +47,13 @@ describe("normalizeCodexRequestBody", () => {
       arguments: { query: "x" },
     });
     expect(normalizedInput[0]).not.toBe(changedItem);
-    expect(normalizedInput[1]).toBe(unchangedItem);
+    expect(normalizedInput[1]).toEqual({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "ok" }],
+    });
+    expect(normalizedInput[1]).not.toBe(statusItem);
+    expect(normalizedInput[2]).toBe(unchangedItem);
   });
 
   test("forces store:false + stream:true and strips max token fields", () => {
@@ -109,6 +123,55 @@ describe("normalizeCodexRequestBody", () => {
     expect(input[1]?.call_id).toBe("call_abc");
     expect(input[2]?.call_id).toBe("call_abc");
     expect(input[3]?.encrypted_content).toBe("blob"); // reasoning continuity preserved
+  });
+
+  test("strips SuperGrok-origin item status so Codex does not 400 unknown_parameter", () => {
+    const body = normalizeCodexRequestBody(
+      {
+        input: [
+          { type: "message", role: "user", content: "continue" },
+          {
+            type: "message",
+            id: "msg_1",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "ok" }],
+          },
+          {
+            type: "function_call",
+            id: "fc_1",
+            call_id: "call_abc",
+            name: "exec_command",
+            status: "completed",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_abc",
+            name: "exec_command",
+            status: "completed",
+            output: "ok",
+          },
+          {
+            type: "web_search_call",
+            id: "ws_1",
+            status: "completed",
+            action: { type: "search", query: "x" },
+          },
+        ],
+      },
+      identity,
+    );
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input).toHaveLength(5);
+    for (const item of input) {
+      expect("status" in item).toBe(false);
+      expect("id" in item).toBe(false);
+    }
+    expect(input[2]?.call_id).toBe("call_abc");
+    expect(input[3]?.call_id).toBe("call_abc");
+    expect(input[3]?.name).toBe("exec_command");
+    expect(input[4]?.action).toEqual({ type: "search", query: "x" });
   });
 
   test("does NOT remove item_reference items or convert orphans (verdict §0 a/c)", () => {
@@ -318,8 +381,11 @@ describe("normalizeCodexRequestBody: tool_search replay shapes", () => {
     };
     const out = normalizeCodexRequestBody(body, (m) => m);
     const call = (out.input as Array<Record<string, unknown>>)[0]!;
+    const result = (out.input as Array<Record<string, unknown>>)[1]!;
     expect(call.arguments).toEqual({ query: "send email", limit: 5 });
     expect("id" in call).toBe(false); // provider-stored tsc_ id stripped like every item id
+    expect("status" in call).toBe(false);
+    expect("status" in result).toBe(false);
     expect(call.call_id).toBe("c1"); // pairing key preserved
   });
 

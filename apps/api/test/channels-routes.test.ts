@@ -135,6 +135,24 @@ describe("channel routes", () => {
     expect(patched.status).toBe(200);
     expect(((await patched.json()) as Channel).name).toBe("sec-audits");
 
+    const secondCreated = await app().request(base, {
+      method: "POST",
+      headers: writer,
+      body: JSON.stringify({ name: "product" }),
+    });
+    expect(secondCreated.status).toBe(201);
+    const secondChannel = (await secondCreated.json()) as Channel;
+    const reordered = await app().request(`${base}/order`, {
+      method: "PUT",
+      headers: writer,
+      body: JSON.stringify({ channelIds: [secondChannel.id, channel.id] }),
+    });
+    expect(reordered.status).toBe(200);
+    expect(((await reordered.json()) as Channel[]).map((row) => row.id)).toEqual([
+      secondChannel.id,
+      channel.id,
+    ]);
+
     // Unknown/malformed ids stay non-enumerating 404s.
     expect(
       (

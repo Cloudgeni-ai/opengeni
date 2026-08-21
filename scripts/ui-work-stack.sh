@@ -35,7 +35,8 @@ SID="${OPENGENI_SEED_SESSION_ID:-95d8c854-5858-420d-9f35-656fbd5841b6}"
 echo "[ui-work] root=$ROOT"
 echo "[ui-work] api=:${OPENGENI_API_PORT} web=:${OPENGENI_WEB_PORT} db=${OPENGENI_DATABASE_URL}"
 
-docker start opengeni-ui-work-postgres-1 opengeni-ui-work-nats-1 opengeni-ui-work-temporal-1 opengeni-ui-work-minio-1 >/dev/null 2>&1 || true
+docker start opengeni-ui-work-postgres-1 opengeni-ui-work-nats-1 opengeni-ui-work-temporal-1 opengeni-ui-work-garage-1 >/dev/null 2>&1 ||
+  docker start opengeni-ui-work-postgres-1 opengeni-ui-work-nats-1 opengeni-ui-work-temporal-1 opengeni-ui-work-minio-1 >/dev/null 2>&1 || true
 
 port_in_use() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1

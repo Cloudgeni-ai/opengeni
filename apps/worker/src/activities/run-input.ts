@@ -287,7 +287,7 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 function attachmentReceiptText(ref: FileResourceRef, file: FileAsset | undefined): string {
   if (!file) {
     return (
-      `[Earlier attachment: fileId=${ref.fileId}; mountDirectory=/workspace/${resourceMountPath(ref)}. ` +
+      `[Earlier attachment: fileId=${ref.fileId}; mountDirectory=${resourceMountPath(ref)}. ` +
       `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
       `download it with the shell.]`
     );
@@ -710,5 +710,5 @@ function sandboxFilePath(
   resource: Extract<ResourceRef, { kind: "file" }>,
   file: FileAsset,
 ): string {
-  return `/workspace/${resourceMountPath(resource)}/${file.safeFilename}`;
+  return `${resourceMountPath(resource)}/${file.safeFilename}`;
 }

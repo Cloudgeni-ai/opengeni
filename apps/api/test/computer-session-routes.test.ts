@@ -45,6 +45,8 @@ describe("ComputerSession route discipline", () => {
     expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
     expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend)");
     expect(attachment).toContain("createInteractionFrameProxyAttachment");
+    expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
+    expect(attachment).toContain('context.req.header("x-forwarded-proto")');
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );

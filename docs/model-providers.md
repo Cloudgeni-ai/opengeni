@@ -157,8 +157,11 @@ object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
-ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
-exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
+ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
+runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
+`load_skill`, `request_human_input`), and exact session MCP refs marked
+`eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
+`generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
 bound through `resolveMissingFunctionTool` in that same model response before
 normal approval, guardrail, timeout, MCP error, and event handling. Leftover
@@ -193,7 +196,14 @@ canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
 facts. A session frozen to `remote_v2` compaction admits only Codex models;
 portable sessions may use any supported route whose request adapter can express
-their canonical history.
+their canonical history. Responses output items may carry `status`
+(`completed` / `in_progress` / `incomplete`); that field is not conversation
+meaning — pairing is `call_id` — and Codex's input schema rejects it
+(`400 Unknown parameter: 'input[N].status'`). New `session_history_items` rows
+omit it at persist (`canonicalizePersistedHistoryItem`). The Codex request
+normalizer still strips leftover item `id` and `status` on the wire for
+already-stored SuperGrok rows and mid-turn SDK items — ordinary inference and
+portable compaction share that seam — and never rewrites stored rows.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
 `supergrok-subscription` provider. The catalog advertises image input, which is
@@ -253,7 +263,10 @@ The catalog describes:
 GPT-5.6 Sol, Terra, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
 use a 2× billing multiplier, and fail the turn if the provider response omits
-or downgrades that tier; OpenGeni never silently falls back to Standard.
+or downgrades that tier; OpenGeni never silently falls back to Standard. The
+same billed GPT-5.6 family pins Codex's 272,000 / 258,400 / 244,800
+raw / effective / auto-compact catalog rather than the 1.05M deployment
+fallback.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
@@ -275,10 +288,11 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or OpenGeni tools therefore cannot silently
 disable web search.
 
-`tool_search` is a different capability: it searches bounded deferred tool
-schemas so the model can discover MCP tools without preloading every schema. It
-does not search the public web and must not be presented as a fallback for
-native `web_search`.
+`tool_search` is a different capability: it searches bounded lazy tool
+schemas (deferred MCP plus every non-MCP function tool outside the
+always-visible base set) so the model can discover them without preloading
+every schema. It does not search the public web and must not be presented as a
+fallback for native `web_search`.
 
 Progressive disclosure is selected explicitly per resolved provider:
 
@@ -293,6 +307,16 @@ Progressive disclosure is selected explicitly per resolved provider:
   receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
   protocol extension is required. This includes an OpenAI-compatible custom base
   URL: configuring the built-in OpenAI slot does not prove native-search support.
+
+Classification is origin, not transport. The same first-request set is eager on
+every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
+`apply_patch`, `view_image`, `load_skill`, `request_human_input`) plus MCP
+tools whose session `ToolRef.eager` is true. Every other function tool —
+deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
+`get_video_generation_capabilities`, and later first-party additions — is
+searchable on Codex, OpenAI, and generic dispatch alike. Native hosted image
+generation stays a `hosted_tool` and is not in this function-tool hide set.
+`ToolRef.eager` remains a per-session MCP choice and is untouched.
 
 The sandbox's hosted-vs-function structured-tool setting does not select any of
 these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native

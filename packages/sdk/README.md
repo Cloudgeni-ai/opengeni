@@ -37,6 +37,73 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Session visibility and private forks
+
+For organizations with session-tenancy activation, a canonical managed-cookie
+owner can change a fully quiescent session between private and workspace
+visibility or create an independent same-workspace private fork. API keys and
+delegated/service bearers are intentionally not authority for these methods.
+The browser client below intentionally omits `apiKey`; its same-origin request
+carries the authenticated managed-session cookie.
+
+```ts
+const browserClient = new OpenGeniClient({ baseUrl: window.location.origin });
+const current = await browserClient.getSession(workspaceId, sessionId);
+if (!current.tenancy) throw new Error("Session tenancy is not activated");
+
+await browserClient.updateSessionVisibility(workspaceId, sessionId, {
+  visibility: "private",
+  expectedAuthorityEpoch: current.tenancy.authorityEpoch,
+  idempotencyKey: crypto.randomUUID(),
+});
+
+const fork = await browserClient.forkSession(workspaceId, sessionId, {
+  idempotencyKey: crypto.randomUUID(),
+});
+```
+
+Retain each idempotency key until the request has a known outcome. If a
+transport failure reports `outcomeUnknown`, retry the same operation with the
+same key. An authority-epoch conflict requires a fresh `getSession` and a new
+user decision. A quiescence conflict identifies the stable blocker after live
+turns, goals, realtime, schedules, workspace writers, retained processes, and
+sandbox access have been settled. Forks copy same-workspace durable content and
+references but no live turn, goal, credential, personal grant, Variable Set,
+Rig, MCP server configuration, sandbox identity, or workflow.
+
+## Personal-resource grants
+
+The same canonical managed-cookie owner can manage explicit personal-resource
+delegations after organization activation. Pages are bounded to one exact kind;
+the server derives the only valid action and returns the full credential-free
+delegation to attach through the resource's ordinary session API.
+
+```ts
+const page = await browserClient.listUserResourceAuthorities(workspaceId, {
+  resourceKind: "connection",
+  limit: 50,
+});
+const authority = page.authorities[0];
+if (!authority) throw new Error("No personal Connection is available");
+
+const issued = await browserClient.issueUserResourceGrant(workspaceId, authority.authorityId, {
+  scope: "user",
+  resourceKind: "connection",
+  mode: "session",
+  context: "workspace_shared",
+  sessionId,
+  expectedAuthorityEpoch: current.tenancy.authorityEpoch,
+  workspaceSharedAcknowledged: true,
+});
+
+await browserClient.revokeUserResourceGrant(workspaceId, issued.grant.grantId);
+```
+
+The SDK deliberately exposes only exact-session and standing (`always`) grant
+management. It does not expose standalone `once`, custom expiry, scheduled or
+cross-workspace authority, or an atomic create-session-and-attach workflow.
+Revocation prevents future reads but cannot retract output already shared.
+
 ## Scheduled connection authority
 
 Agent schedules may carry explicit personal Connection authority. The public

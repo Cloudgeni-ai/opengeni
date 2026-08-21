@@ -4,6 +4,8 @@ import type {
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
+  PersonalResourceAttachmentIntent,
+  PersonalResourceAttachmentSummary,
   McpServerConnectionRef,
   ModelContextContributionSummary,
   RigProviderImages,
@@ -13,6 +15,7 @@ import type {
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
@@ -500,6 +503,61 @@ export const organizationMemberships = pgTable(
       "organization_memberships_revocation_check",
       sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
         or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
+    ),
+  }),
+);
+
+export const organizationProfileEvents = pgTable(
+  "organization_profile_events",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    previousName: text("previous_name").notNull(),
+    requestedName: text("requested_name").notNull(),
+    expectedUpdatedAt: timestamp("expected_updated_at", { withTimezone: true }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorMembership: foreignKey({
+      name: "organization_profile_events_actor_fk",
+      columns: [table.actorMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+  }),
+);
+
+// Forward-only organization-scoped activation receipt for the product session-
+// tenancy surface. Runtime may observe this marker, but only the drained
+// migration-owner activation seam may insert it.
+export const sessionTenancyActivations = pgTable(
+  "session_tenancy_activations",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "restrict" }),
+    activationVersion: integer("activation_version").notNull(),
+    inventoryDigest: text("inventory_digest").notNull(),
+    parityDigest: text("parity_digest").notNull(),
+    activatedBy: text("activated_by").notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    versionValid: check(
+      "session_tenancy_activations_version_check",
+      sql`${table.activationVersion} = 1`,
+    ),
+    digestsValid: check(
+      "session_tenancy_activations_digests_check",
+      sql`${table.inventoryDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.parityDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    actorValid: check(
+      "session_tenancy_activations_actor_check",
+      sql`octet_length(${table.activatedBy}) between 1 and 256`,
     ),
   }),
 );
@@ -2963,6 +3021,9 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    pinned: boolean("pinned").notNull().default(false),
+    // Explicit user order within the pinned and unpinned project groups.
+    sortOrder: integer("sort_order").notNull().default(0),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3023,6 +3084,9 @@ export const sessions = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
+    createRequestedVisibility: text("create_requested_visibility")
+      .notNull()
+      .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
     // Independent-copy provenance. A destination may use either visibility and
     // may live in another workspace in the same organization; no live process,
@@ -3104,6 +3168,12 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    // Initial accepted-work staging only. The initializer consumes this inside
+    // the same transaction that inserts the first logical turn and grant
+    // snapshots; runtime never authorizes from the session field.
+    initialPersonalResourceAttachmentIntent: jsonb(
+      "initial_personal_resource_attachment_intent",
+    ).$type<PersonalResourceAttachmentIntent>(),
     initialXaiProviderAccountAuthoritySnapshot: jsonb(
       "initial_xai_provider_account_authority_snapshot",
     )
@@ -3120,8 +3190,8 @@ export const sessions = pgTable(
     // spawning a worker); null for direct API creates and scheduled-task runs.
     // When set, this worker's terminal-for-now transitions wake the parent so a
     // manager can orchestrate workers without busy-polling. The migration-owned
-    // self-reference uses ON DELETE RESTRICT so immutable hierarchy and
-    // authority lineage cannot be silently orphaned by a parent hard delete.
+    // self-reference uses ON DELETE CASCADE so the explicit quiescent root-tree
+    // deletion lifecycle removes the complete hierarchy atomically.
     parentSessionId: uuid("parent_session_id"),
     // Exact parent turn whose worker-signed attempt created this child. This is
     // private immutable authority lineage: child completion copies personal MCP
@@ -3804,10 +3874,11 @@ export const sessionSpawnDenials = pgTable(
   }),
 );
 
-// Per-authenticated-subject session organization. This is deliberately a
-// relation instead of a session column: one member's pin must never reorder a
-// shared workspace for another member, and a session's own activity timestamps
-// must remain agent/runtime truth. `subjectId` is the trusted AccessGrant
+// Per-authenticated-subject session organization and follow-up state. This is
+// deliberately a relation instead of session columns: one member's pin,
+// acknowledgment, or actively-working label must never affect another member,
+// and a session's own activity timestamps must remain agent/runtime truth.
+// `subjectId` is the trusted AccessGrant
 // subject, which is text because configured/delegated principals are not always
 // UUIDs. The account/workspace pair carries the standard forced-RLS boundary.
 export const sessionPins = pgTable(
@@ -3831,13 +3902,38 @@ export const sessionPins = pgTable(
     pinned: boolean("pinned").notNull().default(true),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }).defaultNow(),
     version: integer("version").notNull().default(1),
+    // A session is unread for this subject whenever its durable event sequence
+    // has advanced beyond this explicit acknowledgment fence. Merely opening a
+    // route never changes the fence.
+    acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
+    activelyWorking: boolean("actively_working").notNull().default(false),
+    attentionVersion: integer("attention_version").notNull().default(0),
+    archived: boolean("archived").notNull().default(false),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archiveVersion: integer("archive_version").notNull().default(0),
   },
   (table) => ({
     subjectNonempty: check(
       "session_pins_subject_nonempty",
       sql`length(btrim(${table.subjectId})) > 0`,
     ),
-    versionPositive: check("session_pins_version_positive", sql`${table.version} >= 1`),
+    versionNonnegative: check("session_pins_version_nonnegative", sql`${table.version} >= 0`),
+    acknowledgedSequenceFloor: check(
+      "session_pins_acknowledged_sequence_floor",
+      sql`${table.acknowledgedSequence} >= -1`,
+    ),
+    attentionVersionNonnegative: check(
+      "session_pins_attention_version_nonnegative",
+      sql`${table.attentionVersion} >= 0`,
+    ),
+    archiveVersionNonnegative: check(
+      "session_pins_archive_version_nonnegative",
+      sql`${table.archiveVersion} >= 0`,
+    ),
+    archiveStateConsistent: check(
+      "session_pins_archive_state_consistent",
+      sql`((${table.archived}) and (${table.archivedAt}) is not null) or ((not ${table.archived}) and (${table.archivedAt}) is null)`,
+    ),
     stateConsistent: check(
       "session_pins_state_consistent",
       sql`((${table.pinned}) and (${table.pinnedAt}) is not null) or ((not ${table.pinned}) and (${table.pinnedAt}) is null)`,
@@ -3864,15 +3960,22 @@ export const sessionPins = pgTable(
       table.pinnedAt.desc(),
       table.sessionId.desc(),
     ),
+    subjectArchived: index("session_pins_workspace_subject_archived_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.archived,
+      table.archivedAt.desc(),
+      table.sessionId.desc(),
+    ),
   }),
 );
 
-// A short-lived server-owned continuation snapshot for the pin-aware session
-// list. The ordinary list is ordered by mutable activity, so a cursor cannot
-// safely replay that order from updated_at alone across HTTP requests. The
-// snapshot stores the already-ordered ordinary ids; the list query still joins
-// live session rows for current lifecycle/title data and expires snapshots
-// opportunistically.
+// Rolling-compatibility storage for pre-keyset session-list cursors. New page
+// one reads freeze the committed workspace activity revision in an opaque
+// updated_at/id keyset and create no row here. Old API replicas and cursors may
+// retain an already-ordered id array for its short TTL, so current replicas keep
+// reading, visibility-stripping, member-cleaning, and reaping those rows until
+// the compatibility table is retired by a later migration.
 export const sessionListSnapshots = pgTable(
   "session_list_snapshots",
   {
@@ -3882,6 +3985,7 @@ export const sessionListSnapshots = pgTable(
     subjectId: text("subject_id").notNull(),
     parentSessionFilter: text("parent_session_filter").notNull().default("all"),
     search: text("search"),
+    archiveMode: text("archive_mode").$type<"active" | "archived">().notNull().default("active"),
     ordinarySessionIds: uuid("ordinary_session_ids")
       .array()
       .notNull()
@@ -3906,6 +4010,10 @@ export const sessionListSnapshots = pgTable(
     searchLength: check(
       "session_list_snapshots_search_length",
       sql`${table.search} is null or length(${table.search}) <= 200`,
+    ),
+    archiveModeValid: check(
+      "session_list_snapshots_archive_mode_valid",
+      sql`${table.archiveMode} in ('active', 'archived')`,
     ),
     workspaceExpiry: index("session_list_snapshots_workspace_expiry_idx").on(
       table.workspaceId,
@@ -5141,6 +5249,17 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    // Credential-free public summary of a turn-bound personal Variable
+    // Set/Rig attachment. Exact resource and grant identity lives only in the
+    // immutable accepted-work snapshot tables.
+    personalResourceAttachmentSummary: jsonb(
+      "personal_resource_attachment_summary",
+    ).$type<PersonalResourceAttachmentSummary>(),
+    // 0 = legacy attempt-selected authority; 1 = immutable logical-turn
+    // snapshots. Drained migration 0306 makes every new atomic attachment v1.
+    personalResourceProtocolVersion: integer("personal_resource_protocol_version")
+      .notNull()
+      .default(0),
     // Immutable scheduled occurrence that accepted this logical turn. Null for
     // ordinary human, goal, child, and unrelated internal work.
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
@@ -5180,6 +5299,145 @@ export const sessionTurns = pgTable(
       "session_turns_model_context_check",
       sql`${table.modelContext} is null
         or opengeni_private.model_context_value_valid(${table.modelContext})`,
+    ),
+  }),
+);
+
+/** Immutable logical-turn receipt for atomic personal Variable Set/Rig issuance. */
+export const turnPersonalResourceAttachmentReceipts = pgTable(
+  "turn_personal_resource_attachment_receipts",
+  {
+    turnId: uuid("turn_id")
+      .primaryKey()
+      .references(() => sessionTurns.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    membershipAuthorizationRevision: bigint("membership_authorization_revision", {
+      mode: "number",
+    }).notNull(),
+    sessionVisibility: text("session_visibility").notNull(),
+    sessionAuthorityEpoch: integer("session_authority_epoch").notNull(),
+    grantMode: text("grant_mode").notNull(),
+    sharedOutputWarningVersion: integer("shared_output_warning_version").notNull(),
+    sharedOutputAcknowledged: boolean("shared_output_acknowledged").notNull(),
+    requestDigest: bytea("request_digest").notNull(),
+    resourceCount: integer("resource_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceTurn: foreignKey({
+      name: "turn_personal_resource_attachment_receipts_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    identity: check(
+      "turn_personal_resource_attachment_receipts_identity_chk",
+      sql`${table.sessionAuthorityEpoch} > 0
+        and octet_length(${table.initiatingHumanSubjectId}) between 1 and 512
+        and ${table.membershipAuthorizationRevision} > 0
+        and ${table.resourceCount} between 1 and 27
+        and ${table.grantMode} in ('once', 'session', 'always')
+        and ${table.sessionVisibility} in ('user_private', 'workspace_shared')
+        and ${table.sharedOutputWarningVersion} = 1
+        and (${table.sessionVisibility} <> 'workspace_shared'
+          or ${table.sharedOutputAcknowledged})`,
+    ),
+  }),
+);
+
+/** Exact resource/grant authority frozen on one accepted logical turn. */
+export const turnPersonalResourceSnapshots = pgTable(
+  "turn_personal_resource_snapshots",
+  {
+    turnId: uuid("turn_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    resourceKind: text("resource_kind").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    resourceVersionId: uuid("resource_version_id"),
+    selectionSources: text("selection_sources").array().notNull(),
+    action: text("action").notNull(),
+    originWorkspaceId: uuid("origin_workspace_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    membershipAuthorizationRevision: bigint("membership_authorization_revision", {
+      mode: "number",
+    }).notNull(),
+    authorityId: uuid("authority_id").notNull(),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    grantId: uuid("grant_id").notNull(),
+    grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
+    grantMode: text("grant_mode").notNull(),
+    grantContext: text("grant_context").notNull(),
+    grantSessionId: uuid("grant_session_id"),
+    grantAuthorityEpoch: integer("grant_authority_epoch"),
+    canonicalDelegation: jsonb("canonical_delegation").$type<UserResourceDelegation>().notNull(),
+    snapshotDigest: bytea("snapshot_digest").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.turnId, table.resourceKind, table.resourceId] }),
+    receipt: foreignKey({
+      name: "turn_personal_resource_snapshots_receipt_fk",
+      columns: [table.turnId],
+      foreignColumns: [turnPersonalResourceAttachmentReceipts.turnId],
+    }).onDelete("cascade"),
+    authority: index("turn_personal_resource_snapshots_authority_idx").on(table.authorityId),
+    grant: index("turn_personal_resource_snapshots_grant_idx").on(table.grantId),
+    kind: check(
+      "turn_personal_resource_snapshots_kind_chk",
+      sql`(${table.resourceKind} = 'variable_set'
+          and ${table.action} = 'variable_set.use'
+          and ${table.resourceVersionId} is null)
+        or (${table.resourceKind} = 'rig'
+          and ${table.action} = 'rig.use'
+          and ${table.resourceVersionId} is not null)`,
+    ),
+    generations: check(
+      "turn_personal_resource_snapshots_generation_chk",
+      sql`${table.membershipAuthorizationRevision} > 0
+        and ${table.authorityGeneration} > 0
+        and ${table.grantGeneration} > 0
+        and cardinality(${table.selectionSources}) between 1 and 26`,
+    ),
+    grantShape: check(
+      "turn_personal_resource_snapshots_grant_chk",
+      sql`${table.grantMode} in ('once', 'session', 'always')
+        and ${table.grantContext} in ('user_private', 'workspace_shared')
+        and ((${table.grantMode} = 'always'
+            and ${table.grantSessionId} is null
+            and ${table.grantAuthorityEpoch} is null)
+          or (${table.grantMode} in ('once', 'session')
+            and ${table.grantSessionId} = ${table.sessionId}
+            and ${table.grantAuthorityEpoch} > 0))`,
+    ),
+  }),
+);
+
+/** One once grant may belong to one accepted logical turn only. */
+export const turnPersonalResourceOnceReceipts = pgTable(
+  "turn_personal_resource_once_receipts",
+  {
+    grantId: uuid("grant_id").primaryKey(),
+    turnId: uuid("turn_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    authorityId: uuid("authority_id").notNull(),
+    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    receipt: foreignKey({
+      name: "turn_personal_resource_once_receipts_turn_fk",
+      columns: [table.turnId],
+      foreignColumns: [turnPersonalResourceAttachmentReceipts.turnId],
+    }).onDelete("cascade"),
+    generations: check(
+      "turn_personal_resource_once_receipts_generation_chk",
+      sql`${table.authorityGeneration} > 0 and ${table.grantGeneration} > 0`,
     ),
   }),
 );
@@ -5272,6 +5530,9 @@ export const sessionTurnAttempts = pgTable(
     authorityEpoch: integer("authority_epoch").notNull(),
     authorityVisibility: text("authority_visibility").notNull(),
     authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
+    personalResourceProtocolVersion: integer("personal_resource_protocol_version")
+      .notNull()
+      .default(0),
     // Immutable policy snapshot captured under the session lock at claim.
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()
@@ -5300,7 +5561,7 @@ export const sessionTurnAttempts = pgTable(
       name: "session_turn_attempts_workspace_session_fk",
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     workspaceTurn: foreignKey({
       name: "session_turn_attempts_workspace_turn_fk",
       columns: [table.workspaceId, table.turnId],
@@ -5920,7 +6181,7 @@ export const sessionCommandReceipts = pgTable(
       name: "session_command_receipts_target_session_fk",
       columns: [table.workspaceId, table.targetSessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     targetTurn: foreignKey({
       name: "session_command_receipts_target_turn_fk",
       columns: [table.workspaceId, table.targetTurnId],
@@ -5986,7 +6247,7 @@ export const workspaceControlEvents = pgTable(
       name: "workspace_control_events_root_session_fk",
       columns: [table.workspaceId, table.rootSessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     workspaceRevision: uniqueIndex("workspace_control_events_workspace_revision_uq").on(
       table.workspaceId,
       table.revision,
@@ -6034,7 +6295,7 @@ export const sessionAttemptInterruptions = pgTable(
       name: "session_attempt_interruptions_workspace_session_fk",
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
-    }).onDelete("restrict"),
+    }).onDelete("cascade"),
     operation: foreignKey({
       name: "session_attempt_interruptions_operation_fk",
       columns: [table.workspaceId, table.operationId],

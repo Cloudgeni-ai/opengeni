@@ -117,6 +117,21 @@ function weatherTool(
   }) as unknown as Tool;
 }
 
+function firstPartyTool(name: string, description: string): Tool {
+  return tool({
+    name,
+    description,
+    parameters: {
+      type: "object",
+      properties: { action: { type: "string" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    strict: false,
+    execute: () => "unused",
+  }) as unknown as Tool;
+}
+
 function agentWith(toolValue: Tool): Agent<any, any> {
   return new Agent({
     name: "lazy-test",
@@ -663,19 +678,11 @@ describe("generic lazy tool dispatch", () => {
   });
 
   test("hides and searches first-party function tools without an MCP registry id", async () => {
-    const firstPartyTool = tool({
-      name: "interaction__browser_act",
-      description: "Click, type, and interact with the current browser page",
-      parameters: {
-        type: "object",
-        properties: { action: { type: "string" } },
-        required: ["action"],
-        additionalProperties: false,
-      },
-      strict: false,
-      execute: () => "unused",
-    }) as unknown as Tool;
-    const agent = agentWith(firstPartyTool);
+    const firstParty = firstPartyTool(
+      "interaction__browser_act",
+      "Click, type, and interact with the current browser page",
+    );
+    const agent = agentWith(firstParty);
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
     const inner = new CapturingModel();
@@ -687,6 +694,60 @@ describe("generic lazy tool dispatch", () => {
       "tool_search",
       "tool_invoke",
     ]);
+    expect(
+      runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
+    ).toEqual(["interaction__browser_act"]);
+  });
+
+  test("keeps the always-visible base set in the first request and out of search", async () => {
+    const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+    const stdin = firstPartyTool("write_stdin", "Write to a running command's stdin");
+    const image = firstPartyTool("view_image", "Return an image from a sandbox path");
+    const patch = firstPartyTool("apply_patch", "Apply a create, update, or delete file patch");
+    const skill = firstPartyTool("load_skill", "Load a lazily configured skill into the sandbox");
+    const human = firstPartyTool(
+      "request_human_input",
+      "Pause this turn and request structured human input",
+    );
+    const browser = firstPartyTool(
+      "interaction__browser_act",
+      "Click, type, and interact with the current browser page",
+    );
+    const agent = new Agent({
+      name: "lazy-test",
+      instructions: "Use tools.",
+      model: "scripted",
+      tools: [exec, stdin, image, patch, skill, human, browser],
+    });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const visible = await agent.getAllTools(undefined as never);
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+    await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+    expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "exec_command",
+      "write_stdin",
+      "view_image",
+      "apply_patch",
+      "load_skill",
+      "request_human_input",
+      "tool_search",
+      "tool_invoke",
+    ]);
+    for (const name of [
+      "exec_command",
+      "write_stdin",
+      "view_image",
+      "apply_patch",
+      "load_skill",
+      "request_human_input",
+    ]) {
+      expect(
+        runtime.search({ query: name.replaceAll("_", " ") }).map((candidate) => candidate.name),
+      ).not.toContain(name);
+    }
     expect(
       runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
     ).toEqual(["interaction__browser_act"]);
@@ -1314,6 +1375,153 @@ describe("OpenAI/Azure native client tool search", () => {
     const tools = await cloned.getAllTools(undefined as never);
 
     expect(tools.map((candidate) => candidate.name)).toEqual([WEATHER_TOOL, "tool_search"]);
+  });
+
+  test("hides first-party Browser/Computer schemas behind native search", async () => {
+    for (const transport of ["codex_native", "openai_native"] as const) {
+      const screenshot = firstPartyTool(
+        "computer_screenshot",
+        "Capture the current desktop and return it as an image",
+      );
+      const browser = firstPartyTool(
+        "interaction__browser_act",
+        "Click, type, and interact with the current browser page",
+      );
+      const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+      const agent = new Agent({
+        name: "lazy-test",
+        instructions: "Use tools.",
+        model: "scripted",
+        tools: [screenshot, browser, exec],
+      });
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const visible = await agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+        "exec_command",
+        "tool_search",
+      ]);
+      expect(
+        runtime.search({ query: "screenshot the desktop" }).map((candidate) => candidate.name),
+      ).toContain("computer_screenshot");
+      expect(
+        runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
+      ).toContain("interaction__browser_act");
+      expect(
+        runtime.search({ query: "run a shell command" }).map((candidate) => candidate.name),
+      ).not.toContain("exec_command");
+    }
+  });
+
+  test("hides image and video adapter schemas behind search on every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const image = firstPartyTool("generate_image", "Generate or edit exactly one image");
+      const video = firstPartyTool(
+        "generate_video",
+        "Start one durable asynchronous video generation",
+      );
+      const capabilities = firstPartyTool(
+        "get_video_generation_capabilities",
+        "Return the video-generation models currently enabled",
+      );
+      const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+      const agent = new Agent({
+        name: "lazy-test",
+        instructions: "Use tools.",
+        model: "scripted",
+        tools: [image, video, capabilities, exec],
+      });
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const visible = await agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
+        transport === "generic_dispatch"
+          ? ["exec_command", "tool_search", "tool_invoke"]
+          : ["exec_command", "tool_search"],
+      );
+      expect(
+        runtime.search({ query: "generate an image" }).map((candidate) => candidate.name),
+      ).toContain("generate_image");
+      expect(
+        runtime.search({ query: "generate a video" }).map((candidate) => candidate.name),
+      ).toContain("generate_video");
+      expect(
+        runtime
+          .search({ query: "video generation capabilities" })
+          .map((candidate) => candidate.name),
+      ).toContain("get_video_generation_capabilities");
+      expect(
+        runtime.search({ query: "run a shell command" }).map((candidate) => candidate.name),
+      ).not.toContain("exec_command");
+    }
+  });
+
+  test("keeps needsApproval on a disclosed first-party tool after native search", async () => {
+    let executions = 0;
+    const interactionTool = tool({
+      name: "interaction__interaction_request_human",
+      description: "Request a human decision in the current Browser or Computer surface",
+      parameters: {
+        type: "object",
+        properties: { prompt: { type: "string" } },
+        required: ["prompt"],
+        additionalProperties: false,
+      },
+      strict: false,
+      needsApproval: () => true,
+      execute: ({ prompt }) => {
+        executions += 1;
+        return `asked:${prompt}`;
+      },
+    }) as unknown as Tool;
+    const agent = agentWith(interactionTool);
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "tool_search_call",
+          call_id: "search-interaction",
+          execution: "client",
+          status: "completed",
+          arguments: { query: "request a human decision" },
+        },
+      ],
+      [
+        {
+          type: "function_call",
+          callId: "interaction-call",
+          name: "interaction__interaction_request_human",
+          arguments: JSON.stringify({ prompt: "continue?" }),
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    const first = await new Runner({
+      modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+    }).run(agent, "Ask the human", {
+      stream: true,
+      historyOwnership: "external",
+      maxTurns: 8,
+      toolNotFoundBehavior: "return_error_to_model",
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+    });
+    for await (const _event of first.toStream()) void _event;
+    await first.completed;
+
+    expect(executions).toBe(0);
+    expect(first.interruptions).toHaveLength(1);
+    expect(first.interruptions[0]!.rawItem).toMatchObject({
+      type: "function_call",
+      name: "interaction__interaction_request_human",
+    });
   });
 
   test("starts the first model request before deferred tools settle, then searches and executes them", async () => {

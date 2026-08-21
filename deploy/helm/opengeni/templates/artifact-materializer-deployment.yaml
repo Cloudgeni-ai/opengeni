@@ -58,7 +58,7 @@ spec:
                 secretKeyRef:
                   name: {{ $credentialsSecret }}
                   key: {{ required "artifactMaterializer.databaseUrlSecretKey is required" $materializer.databaseUrlSecretKey }}
-            {{- if and (not .Values.minio.enabled) (or (eq $storageBackend "s3-compatible") (eq $storageBackend "aws-s3")) }}
+            {{- if and (not (or .Values.garage.enabled .Values.minio.enabled)) (or (eq $storageBackend "s3-compatible") (eq $storageBackend "aws-s3")) }}
             - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -107,7 +107,7 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
             {{- end }}
-            {{- if not .Values.minio.enabled }}
+            {{- if not (or .Values.garage.enabled .Values.minio.enabled) }}
             {{- range $name := list "OPENGENI_OBJECT_STORAGE_BACKEND" "OPENGENI_OBJECT_STORAGE_BUCKET" }}
             - name: {{ $name }}
               value: {{ index $.Values.config $name | quote }}
@@ -172,8 +172,8 @@ spec:
               value: {{ $materializer.maxSourceBytes | quote }}
             - name: OPENGENI_ARTIFACT_MATERIALIZER_MAX_OUTPUT_BYTES
               value: {{ $materializer.maxOutputBytes | quote }}
-            {{- if .Values.minio.enabled }}
-            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
+            {{- if or .Values.garage.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
             {{- end }}
           {{- if $materializer.probes.readiness.enabled }}
           readinessProbe:

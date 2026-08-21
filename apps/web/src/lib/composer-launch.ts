@@ -12,6 +12,8 @@ export type ComposerLaunchSearch = {
   effort?: ReasoningEffortT;
   latency?: LatencyModeT;
   realtime?: SessionRealtimeModel;
+  /** File a newly created session in this workspace folder. */
+  channelId?: string;
 };
 
 /** Stable empty search — safe default prop (no per-render object literal). */
@@ -29,6 +31,14 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
   if (latency.success) out.latency = latency.data;
   const realtime = SessionRealtimeModelSchema.safeParse(search.realtime);
   if (realtime.success) out.realtime = realtime.data;
+  if (
+    typeof search.channelId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      search.channelId,
+    )
+  ) {
+    out.channelId = search.channelId;
+  }
   return out;
 }
 

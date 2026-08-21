@@ -60,11 +60,24 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
+  personalOnlyConnectionPrincipalMessage,
+  personalOwnerStateAccepted,
+  personalOwnerVerifiedInState,
+  PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
+} from "../connection-ownership";
+import {
   integrationBaseUrl,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
 } from "./oauth-client";
 
+/**
+ * Flow discriminator for this connector's signed OAuth state. See the matching
+ * constant in `google-drive.ts`: this state carries no `ownership` field and no
+ * provider identity, and its return path is byte-identical to one the MCP OAuth
+ * start signs from caller input, so the flow kind is what binds a state here.
+ */
+const ATLASSIAN_OAUTH_STATE_KIND = "atlassian_oauth";
 const ATLASSIAN_AUTHORIZATION_URL = "https://auth.atlassian.com/authorize";
 const ATLASSIAN_TOKEN_URL = "https://auth.atlassian.com/oauth/token";
 const ATLASSIAN_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources";
@@ -77,6 +90,8 @@ type AtlassianOAuthState = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Signed proof that a live managed human started this personal-only flow. */
+  personalOwnerVerified: boolean;
   returnPath: string;
   connectionId?: string;
   connectionVersion?: number;
@@ -122,6 +137,10 @@ export async function startAtlassianOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
+    kind: ATLASSIAN_OAUTH_STATE_KIND,
+    // The route admits only a managed human, so reaching here is the proof; the
+    // callback has no live principal and enforces exactly this claim.
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: ATLASSIAN_RETURN_PATH(input.workspaceId),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
@@ -1479,6 +1498,12 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1_000) {
     throw new HTTPException(400, { message: "expired Atlassian OAuth state" });
   }
+  // Reject a state minted by any other flow before reading anything else. A
+  // pre-cutover state carries no kind and is refused; that is the same bounded
+  // `oauthStateTtlMs` window the personal-owner claim already fails closed on.
+  if (payload.kind !== ATLASSIAN_OAUTH_STATE_KIND) {
+    throw new HTTPException(400, { message: "invalid Atlassian OAuth state" });
+  }
   const accountId = requiredString(payload.accountId, "state.accountId");
   const workspaceId = requiredString(payload.workspaceId, "state.workspaceId");
   const subjectId = requiredString(payload.subjectId, "state.subjectId");
@@ -1495,6 +1520,7 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
     accountId,
     workspaceId,
     subjectId,
+    personalOwnerVerified: personalOwnerVerifiedInState(payload),
     returnPath,
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
@@ -1503,6 +1529,21 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
 }
 
 async function requireCallbackGrant(deps: ApiRouteDeps, state: AtlassianOAuthState): Promise<void> {
+  // This connector is personal-only by construction: its start request carries
+  // no ownership and the callback always writes `subjectId: state.subjectId`.
+  // A state minted before the start-side principal fence existed carries no
+  // `personalOwnerVerified` claim and must not land a personal Connection.
+  if (
+    !personalOwnerStateAccepted({
+      ownership: "personal",
+      subjectId: state.subjectId,
+      personalOwnerVerified: state.personalOwnerVerified,
+    })
+  ) {
+    throw new HTTPException(422, {
+      message: personalOnlyConnectionPrincipalMessage("Atlassian"),
+    });
+  }
   const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
   if (
     !grant ||

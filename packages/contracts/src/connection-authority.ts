@@ -1,10 +1,10 @@
 import { z } from "zod";
 import {
   ConnectionKind,
+  ManagedUserResourceGrantMode,
   SessionTenancyVisibility,
   UserResourceAuthorityGrant,
   UserResourceDelegation,
-  UserResourceLifecycleGrantMode,
 } from "./index";
 
 /** The only generic grant action that authorizes use of a connection. */
@@ -57,6 +57,8 @@ export type ConnectionAuthorityGrant = z.infer<typeof ConnectionAuthorityGrant>;
 export const ConnectionAuthoritySummary = z
   .object({
     authorityId: z.string().uuid(),
+    resourceId: z.string().uuid(),
+    originWorkspaceId: z.string().uuid().nullable(),
     generation: z.number().int().positive(),
     status: z.enum(["active", "retained", "revoked"]),
     grants: z.array(ConnectionAuthorityGrant),
@@ -64,20 +66,28 @@ export const ConnectionAuthoritySummary = z
   .strict();
 export type ConnectionAuthoritySummary = z.infer<typeof ConnectionAuthoritySummary>;
 
-export const ListConnectionAuthoritiesQuery = z.object({ scope: z.literal("user") }).strict();
+export const ListConnectionAuthoritiesQuery = z
+  .object({
+    scope: z.literal("user"),
+    cursor: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+  })
+  .strict();
 export const ListConnectionAuthoritiesResponse = z
   .object({
     scope: z.literal("user"),
     authorities: z.array(ConnectionAuthoritySummary),
+    nextCursor: z.string().uuid().nullable(),
   })
   .strict();
 
 export const IssueConnectionUseGrantRequest = z
   .object({
     scope: z.literal("user"),
-    mode: UserResourceLifecycleGrantMode,
+    mode: ManagedUserResourceGrantMode,
     context: SessionTenancyVisibility,
     sessionId: z.string().uuid().nullable().optional(),
+    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
     workspaceSharedAcknowledged: z.boolean().default(false),
   })
   .strict()
@@ -89,14 +99,14 @@ export const IssueConnectionUseGrantRequest = z
         message: "workspace_shared requires durable shared-output acknowledgement",
       });
     }
-    if (value.mode === "always" && value.sessionId) {
+    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
       context.addIssue({ code: "custom", path: ["sessionId"], message: "always is unbound" });
     }
-    if (value.mode !== "always" && !value.sessionId) {
+    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "once/session require a target session",
+        message: "session requires a target session and expectedAuthorityEpoch",
       });
     }
   });

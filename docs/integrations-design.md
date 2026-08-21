@@ -53,6 +53,92 @@ Decisions baked in:
 
 **Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
 
+**An omitted ownership is never guessed.** The MCP OAuth start keeps its
+documented behaviour: it resolves through the resolved provider profile's
+declared default (`defaultOwnershipFor`, §5.2.2) — workspace, unless the
+profile's `allowedOwnership` is personal-only. The Integration Definition OAuth
+start (`provider-oauth.ts`) instead **refuses** an ambiguous omission with a
+422, because both possible fallbacks are defects there: `personal` (what it used
+to do) inverts the doctrine for every caller that did not spell ownership out,
+and `workspace` silently flips a newly connected Outlook mailbox, Drive, or
+OneDrive from subject-scoped to workspace-shared. A profile that allows exactly
+one ownership is unambiguous and still resolves, so Gmail and hosted Slack MCP
+are unaffected, as is a reconnect (which takes the existing row's ownership).
+No flow may fall back to `personal` on its own.
+
+**Only a managed human may own a personal connection**
+(`apps/api/src/connection-ownership.ts`). An API key, the shared `configured:`
+key, a service principal, an agent attempt, a grant that fails
+`contextIntegrity`, and any principal whose grant subject is not its
+authenticated subject are refused with an explicit **422** before a connection
+is created — never silently downgraded to workspace ownership, which a
+personal-only profile (Gmail, hosted Slack MCP) forbids outright. Two
+independent facts require it: personal execution resolves only through the
+immutable delegation snapshot frozen on a *human's* causal turn or scheduled
+task, and `bind_connection_authority` (migration 0256) can mint the `user`
+authority scope only for a subject holding an active organization membership, so
+a machine-owned personal row lands on the `legacy_user` compatibility lane and
+can never become a real organization-scoped authority.
+
+`principalKind` is the trusted allow-list: exactly `human_session` passes and
+unknown provenance fails closed. The delegated-token contract forbids a
+`human_session` claim from carrying `serviceInitiator` or exact agent-attempt
+authority. This ownership-value helper and `requireConnectionAuthorityOwner`
+share the core checks: `contextIntegrity`, exact authenticated/grant subject
+identity, `principalKind: "human_session"`, and no service-initiator provenance.
+They are intentionally not identical: this helper additionally rejects every
+OpenGeni-reserved machine-subject namespace as defence-in-depth. Start-time
+ownership-value rejection is a 422; the sibling self-owner authority surface
+uses a 403.
+
+A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
+`sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
+against a delegation-secret holder signing a human claim over an
+OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
+human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
+OpenGeni" and that hosts must not have the kind inferred from a subject-id
+prefix, so a trusted embedding host legitimately signs `human_session` over a
+non-`user:` subject.
+
+`connection-ownership.test.ts` asserts that every machine subject in its list is
+rejected. Be precise about what that buys: the list is hand-maintained on both
+sides, so the test catches a namespace being *removed* from the constant and
+documents the known machine subjects, but it **cannot** fail when a genuinely
+new machine namespace is introduced elsewhere in the repo — adding one there is
+a manual step. That residual gap is acceptable only because this check decides
+nothing on its own: a new machine namespace still arrives with a
+non-`human_session` `principalKind` and is refused on that basis.
+
+**Personal-only connector states are bound to their flow.** The Google Drive and
+Atlassian OAuth states carry no `ownership` field and no provider identity (both
+connectors are personal-only by construction), and their return path is
+byte-identical to `/workspaces/<id>/capabilities` — a path the MCP OAuth start
+signs from caller input. Before the flow-kind discriminator, a caller's own MCP
+state therefore reached those callbacks and passed their personal-owner fence.
+That was never an escalation (same subject, and the callback independently
+rechecks `connections:write`), but the state was not bound to the flow that
+minted it. Both states now carry an exact `kind`, checked before anything else
+in their parsers.
+
+**OAuth callbacks enforce a signed claim, not a subject shape.** A callback
+carries signed state and no live principal, so it cannot re-evaluate
+`principalKind`. Every start path that may persist a personal owner therefore
+stamps a `personalOwnerVerified` claim into its HMAC-signed state, and all five
+callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
+Google Drive, Atlassian, and social — require it. A state minted before the
+claim existed simply lacks it and fails closed, which closes the one
+`oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
+MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
+machine-owned row. Callback refusals retain each flow's existing bounded
+redirect/error projection rather than sharing one HTTP status: for example,
+Integration Definition OAuth reports `connection_conflict`, while social OAuth
+reports `not_authorized`.
+
+The two personal-only first-party connectors (`google-drive/install`,
+`atlassian/install`) carry no ownership field at all and always write
+`subject_id = <caller>`, so their start routes apply the principal fence
+directly.
+
 ## 3. Credential encryption
 
 Reuse the existing AES-256-GCM envelope: `encryptEnvironmentValue`/`decryptEnvironmentValue` in `packages/db/src/environment-crypto.ts` (current lossless format `v2:<base64 iv>:<base64 ciphertext||tag>`, with historical `v1` reads retained), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `environmentsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:
@@ -100,7 +186,7 @@ type ResolveConnectionCredentialResult =
     };
 ```
 
-`PrepareToolsOptions` gains `resolveCredential` and `onAuthNeeded`; `prepareAgentTools` composes a broker fetch for servers carrying a `connectionRef`: resolve → inject headers → on 401 force-refresh once and retry → on 403 `insufficient_scope` emit `auth_needed` (§6). Wired from the worker (`apps/worker/src/activities/agent-turn.ts`) alongside `onRuntimeEvent`.
+`PrepareToolsOptions` gains `resolveCredential` and `onAuthNeeded`; `prepareAgentTools` composes a broker fetch for servers carrying a `connectionRef`: resolve → inject headers → on 401 force-refresh once and retry → on 403 `insufficient_scope` emit `auth_needed` (§6). Wired from the worker (`apps/worker/src/activities/agent-turn/tool-environment.ts`) alongside `onRuntimeEvent`.
 
 Broker rules:
 

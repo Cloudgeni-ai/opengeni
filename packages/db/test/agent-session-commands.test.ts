@@ -3,20 +3,23 @@ import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@open
 import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  AgentCommandAuthorityError,
   applySessionTurnSettlement,
+  addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   getActiveSessionHistoryItems,
   getSessionQueueSnapshot,
+  getSession,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
+  setSessionGoalStatus,
   settleSessionAttemptInterruptions,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
@@ -356,6 +359,169 @@ describe("attempt-fenced Agent session commands", () => {
     });
   });
 
+  test("a late child result stays pending without restarting a settled no-goal parent", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await submit(grant, parent.id, "finish parent work");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `late-child:${crypto.randomUUID()}`,
+      summary: "Late child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (update.reason === "session_cancelled") {
+      throw new Error("settled parent was unexpectedly cancelled");
+    }
+
+    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(await getSession(client.db, grant.workspaceId!, parent.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: null,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, parent.id),
+    ).toEqual([expect.objectContaining({ id: update.update.id, state: "pending" })]);
+  });
+
+  test("a child result still wakes an idle parent with an active goal", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      text: "active parent objective",
+      createdBy: "api",
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `active-child:${crypto.randomUUID()}`,
+      summary: "Active-goal child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(update).toMatchObject({ added: true, shouldWake: true });
+  });
+
+  test("paused and completed goals cannot be restarted by a child result", async () => {
+    const grant = await fixture();
+    for (const goalStatus of ["paused", "completed"] as const) {
+      const parent = await makeSession(grant);
+      await createSessionGoal(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: parent.id,
+        text: `${goalStatus} parent objective`,
+        createdBy: "api",
+      });
+      await setSessionGoalStatus(client.db, grant.workspaceId!, parent.id, {
+        status: goalStatus,
+        ...(goalStatus === "paused"
+          ? { rationale: "wait for human direction" }
+          : { evidence: "objective already complete" }),
+      });
+      const update = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: parent.id,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `${goalStatus}-child:${crypto.randomUUID()}`,
+        summary: "Late child completed",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+      });
+      expect(update).toMatchObject({ added: true, shouldWake: false });
+    }
+  });
+
+  test("a failed parent cannot be restarted by a child result", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await submit(grant, parent.id, "parent turn that fails");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "expected parent failure" } }],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `failed-child:${crypto.randomUUID()}`,
+      summary: "Late child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(await getSession(client.db, grant.workspaceId!, parent.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
+    });
+  });
+
   test("message context is durable, audit-visible, and materialized only in canonical user history", async () => {
     const grant = await fixture();
     const session = await makeSession(grant);
@@ -434,39 +600,34 @@ describe("attempt-fenced Agent session commands", () => {
     });
   });
 
-  test("Agent Pause rejects self and its direct parent with zero writes", async () => {
+  test("Agent Pause may target its parent with a durable receipt", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     const caller = await activeAgent(grant, parent.id);
 
-    for (const targetSessionId of [caller.session.id, parent.id]) {
-      await expect(
-        withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-          db.transaction((tx) =>
-            mutateSessionControlInTransaction(tx as unknown as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: targetSessionId,
-              actor: caller.actor,
-              operationKey: crypto.randomUUID(),
-              action: "pause",
-            }),
-          ),
-        ),
-      ).rejects.toMatchObject({
-        code: "TARGET_NOT_VERTICAL",
-      } satisfies Partial<AgentCommandAuthorityError>);
-    }
+    const paused = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: parent.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.control.state).toBe("paused");
     const rows = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ id: schema.sessionCommandReceipts.id })
         .from(schema.sessionCommandReceipts)
         .where(eq(schema.sessionCommandReceipts.actorAttemptId, caller.attemptId)),
     );
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
   });
 
-  test("transactional Agent commands reject lateral and skipped-generation targets", async () => {
+  test("transactional Agent commands allow lateral and skipped-generation targets", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     const caller = await activeAgent(grant, parent.id);
@@ -488,35 +649,33 @@ describe("attempt-fenced Agent session commands", () => {
     );
     expect(upstream).toMatchObject({ replay: false });
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            targetSessionId: sibling.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            text: "lateral update",
-          }),
-        ),
+    const lateral = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: sibling.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "lateral update",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(lateral).toMatchObject({ replay: false });
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          sendAgentMessageInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            targetSessionId: grandchild.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            text: "skipped generation update",
-          }),
-        ),
+    const skipped = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: grandchild.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "skipped generation update",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(skipped).toMatchObject({ replay: false });
 
     const controlled = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -532,20 +691,19 @@ describe("attempt-fenced Agent session commands", () => {
     );
     expect(controlled.control.state).toBe("paused");
 
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
-        db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as unknown as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId!,
-            sessionId: parent.id,
-            actor: caller.actor,
-            operationKey: crypto.randomUUID(),
-            action: "pause",
-          }),
-        ),
+    const pausedParent = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: parent.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
       ),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_VERTICAL" });
+    );
+    expect(pausedParent.control.state).toBe("paused");
   });
 
   test("Agent message stays pending under Pause and never becomes human queue work", async () => {
