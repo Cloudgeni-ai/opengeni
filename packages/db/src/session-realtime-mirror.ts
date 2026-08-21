@@ -215,7 +215,7 @@ export function renderRealtimeHumanInputRequestContext(input: {
         lines.push("      </options>");
       }
       lines.push(
-        `      <allow_other>${String(question.allowOther)}</allow_other>`,
+        `      <allow_other>${String(question.kind !== "text")}</allow_other>`,
         "    </question>",
       );
     }

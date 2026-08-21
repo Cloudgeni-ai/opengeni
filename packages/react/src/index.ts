@@ -321,6 +321,8 @@ export type {
   AuthNeededItem,
   ContextCompactionItem,
   GoalItem,
+  HumanInputAnswerSummary,
+  HumanInputItem,
   MachineInputBatchItem,
   MachineInputMember,
   NoticeItem,

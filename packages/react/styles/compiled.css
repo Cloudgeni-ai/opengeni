@@ -763,6 +763,9 @@
 :where(.og-root).mr-1,:where(.og-root) .mr-1 {
     margin-right: calc(var(--spacing) * 1);
   }
+:where(.og-root).mr-1\.5,:where(.og-root) .mr-1\.5 {
+    margin-right: calc(var(--spacing) * 1.5);
+  }
 :where(.og-root).mr-2,:where(.og-root) .mr-2 {
     margin-right: calc(var(--spacing) * 2);
   }
@@ -1185,6 +1188,9 @@
   }
 :where(.og-root).max-w-\[85\%\],:where(.og-root) .max-w-\[85\%\] {
     max-width: 85%;
+  }
+:where(.og-root).max-w-\[90\%\],:where(.og-root) .max-w-\[90\%\] {
+    max-width: 90%;
   }
 :where(.og-root).max-w-\[180px\],:where(.og-root) .max-w-\[180px\] {
     max-width: 180px;
@@ -1641,6 +1647,9 @@
   }
 :where(.og-root).rounded-br-og-xs,:where(.og-root) .rounded-br-og-xs {
     border-bottom-right-radius: var(--og-radius-xs);
+  }
+:where(.og-root).rounded-bl-og-xs,:where(.og-root) .rounded-bl-og-xs {
+    border-bottom-left-radius: var(--og-radius-xs);
   }
 :where(.og-root).border,:where(.og-root) .border {
     border-style: var(--tw-border-style);
@@ -4516,6 +4525,11 @@
 :where(.og-root).sm\:max-w-\[12rem\],:where(.og-root) .sm\:max-w-\[12rem\] {
     @media (width >= 40rem) {
       max-width: 12rem;
+    }
+  }
+:where(.og-root).sm\:max-w-\[82\%\],:where(.og-root) .sm\:max-w-\[82\%\] {
+    @media (width >= 40rem) {
+      max-width: 82%;
     }
   }
 :where(.og-root).sm\:max-w-full,:where(.og-root) .sm\:max-w-full {

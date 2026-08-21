@@ -10,6 +10,7 @@ import {
   toolDisplayName,
   type AgentMessageItem,
   type FleetDecisionItem,
+  type HumanInputItem,
   type MemoryItem,
   type SandboxItem,
   type StartupPhaseItem,
@@ -847,7 +848,7 @@ describe("buildTimeline", () => {
     expect(message.tools).toEqual([]);
   });
 
-  test("projects answered structured input as a visible user message", () => {
+  test("projects answered structured input as a persistent question-and-answer item", () => {
     reset();
     const items = buildTimeline([
       event("session.humanInput.requested", {
@@ -894,25 +895,25 @@ describe("buildTimeline", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      kind: "user-message",
-      text: [
-        "**Repository**",
-        "",
-        "https://github.com/acme/widget",
-        "",
-        "**GitHub access**",
-        "",
-        "Connect the workspace integration",
-        "",
-        "**Regions**",
-        "",
-        "- EU North",
-        "- On-premises",
-      ].join("\n"),
-      resources: [],
-      tools: [],
+      kind: "human-input",
+      requestId: "request-1",
+      answers: [
+        {
+          questionId: "repository",
+          label: "Repository",
+          values: ["https://github.com/acme/widget"],
+        },
+        {
+          questionId: "github_access",
+          label: "GitHub access",
+          values: ["Connect the workspace integration"],
+        },
+        { questionId: "regions", label: "Regions", values: ["EU North", "On-premises"] },
+      ],
     });
-    expect((items[0] as UserMessageItem).text).not.toContain("connect_workspace");
+    expect((items[0] as HumanInputItem).answers.flatMap((answer) => answer.values)).not.toContain(
+      "connect_workspace",
+    );
   });
 
   test("keeps structured answers visible when the request event is outside the loaded page", () => {
@@ -929,8 +930,9 @@ describe("buildTimeline", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      kind: "user-message",
-      text: "**Release Channel**\n\ncanary",
+      kind: "human-input",
+      requestId: "request-before-window",
+      answers: [{ questionId: "release_channel", label: "Release Channel", values: ["canary"] }],
     });
   });
 

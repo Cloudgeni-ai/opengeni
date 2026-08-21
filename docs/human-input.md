@@ -3,8 +3,8 @@
 OpenGeni has a built-in `request_human_input` agent tool for questions that need
 an answer before the current turn can continue. A single request can contain up
 to 20 text, single-select, or multi-select questions. Select questions can
-optionally accept an `Other` value; requests can optionally allow Skip and can
-carry a durable expiry deadline.
+always accept an inline `Other` free-text value; requests can optionally allow
+Skip and can carry a durable expiry deadline.
 
 Workspace admins can set `agentHumanInputEnabled: false` through the ordinary
 workspace settings API. Disabled workspaces omit the tool from model-visible
@@ -23,6 +23,9 @@ into that exact call:
 - `cancelled`, when the owning turn is permanently replaced or terminated.
 
 The agent sees that outcome as ordinary tool output and decides how to proceed.
+An `Other` answer is returned exactly as entered. The agent may interpret it as
+the answer or issue a new structured request if genuine clarification is still
+needed; OpenGeni never manufactures an automatic reprompt.
 No outcome creates a synthetic `user.message`, no response starts a new logical
 turn, and a host must not translate Skip or expiry into approval rejection.
 
@@ -102,7 +105,11 @@ Text answers have no agent-chosen character min/max (agents invent arbitrary
 `≥N chars` rules). Selection min/max remains. Answer strings stay
 platform-capped (~8192). The API validates the response again against the
 persisted questions: unknown or duplicate question/option ids, missing required
-answers, invalid `Other` use, and selection-bound violations. User-controlled
+answers, text-answer shape, and selection-bound violations. Every choice
+question accepts `Other`, including legacy rows whose compatibility field still
+says `allowOther: false`. The runtime normalizes new choice requests to `true`,
+while stock React and realtime surfaces expose the free-text path regardless of
+that legacy field. User-controlled
 regular expressions are intentionally not part of the contract. Legacy
 persisted `minLength`/`maxLength` on question JSON is ignored.
 
@@ -150,22 +157,38 @@ The SDK exposes `listHumanInputRequests`, `getHumanInputRequest`, and
   title, description, labels, and styling.
 - `HumanInputSurface` is the session-host shell: when several requests are
   pending in parallel, it presents them **one at a time** (oldest first) with
-  an `N of M` progress label. Continue/Skip settles the active request; the
+  an `N of M` progress label. Send answers/Skip settles the active request; the
   next remaining set advances when the authoritative pending list updates. The
   follow-up composer stays fully available — structured input is not a modal
   that owns the page.
 
-The stock OpenGeni session route mounts the hook plus `HumanInputSurface`. An
+Each single- and multi-select control includes an inline Other option and text
+field. Hosts submit that exact value in `answer.other`; they should not create a
+synthetic follow-up prompt or coerce it into an option id.
+
+The stock OpenGeni session route mounts the hook plus `HumanInputSurface` at the
+timeline tip, so the live question is part of the main conversation rather than
+a detached strip above the composer. An
 embedded product may mount the surface, the single form, compose its own
 renderer over the hook, or use the SDK through its backend proxy. It should not
 maintain an independent request state machine: access control stays at the
 host/OpenGeni API boundary, while the OpenGeni row, turn checkpoint, workflow
 timer, and response event remain the durable truth.
 
-After an answered response is accepted, the React timeline projects its values
-as a normal human-authored message outside the collapsed activity rail. When the
-matching request event is available, question and option labels replace their
-wire ids; a readable id-based fallback keeps paginated history understandable.
+After a response is accepted, the React timeline keeps a chat-native resolved
+decision containing both the original question and the human's readable answer.
+The matching raw `request_human_input` tool call is not repeated behind a
+generic activity step. When the request event is available, question and option
+labels replace their wire ids; a readable id-based fallback keeps paginated
+history understandable.
+
+Agent-created child sessions use the same tool and lifecycle. Their requests are
+owned by the exact child session and surface when that child is opened; the
+parent session shows only its existing `Needs you` child signal. An authorized
+workspace controller answers on the child route. Settlement wakes the child's
+frozen turn and returns the structured result to that original child tool call;
+the parent receives only the child's later ordinary terminal result, not a copy
+of the human answer.
 
 ## Acceptance boundary
 

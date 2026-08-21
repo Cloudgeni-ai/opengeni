@@ -83,6 +83,7 @@ describe("structured human-input history", () => {
           timelineEvent("session.humanInput.requested", {
             request: {
               id: "request-1",
+              toolCallId: "human-input-call",
               questions: [
                 {
                   id: "environment",
@@ -91,6 +92,13 @@ describe("structured human-input history", () => {
                   prompt: "Where?",
                   options: [{ id: "staging", label: "Staging" }],
                 },
+                {
+                  id: "verification",
+                  kind: "text",
+                  label: "Verification",
+                  prompt: "What should be checked?",
+                  options: [],
+                },
               ],
             },
           }),
@@ -98,7 +106,17 @@ describe("structured human-input history", () => {
             requestId: "request-1",
             response: {
               outcome: "answered",
-              answers: [{ questionId: "environment", values: ["staging"] }],
+              answers: [
+                {
+                  questionId: "environment",
+                  values: [],
+                  other: "Customer sandbox eu-42",
+                },
+                {
+                  questionId: "verification",
+                  values: ["Run migration smoke tests before handoff."],
+                },
+              ],
             },
           }),
           timelineEvent("agent.toolCall.output", {
@@ -112,11 +130,17 @@ describe("structured human-input history", () => {
     await flush();
 
     const text = r.container.textContent ?? "";
+    expect(text).toContain("Agent asked");
+    expect(text).toContain("You answered");
     expect(text).toContain("Environment");
-    expect(text).toContain("Staging");
+    expect(text).toContain("Customer sandbox eu-42");
+    expect(text).toContain("Verification");
+    expect(text).toContain("Run migration smoke tests before handoff.");
+    expect(text.match(/1\.\s*Environment/g)).toHaveLength(2);
+    expect(text.match(/2\.\s*Verification/g)).toHaveLength(2);
     const steps = turnSummaryTrigger(r.container);
-    expect(steps).not.toBeNull();
-    expect(steps?.getAttribute("aria-expanded")).toBe("false");
+    expect(steps).toBeNull();
+    expect(r.container.querySelector('[data-human-input-history="request-1"]')).not.toBeNull();
     await r.unmount();
   });
 });

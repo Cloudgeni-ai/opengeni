@@ -30472,12 +30472,6 @@ function validateAnsweredHumanInput(
       // still present on older persisted question JSON.
       continue;
     }
-    if (other && !question.allowOther) {
-      throw new HumanInputResponseValidationError(
-        "INVALID_RESPONSE",
-        `Question ${question.id} does not allow Other`,
-      );
-    }
     const optionIds = new Set(question.options.map((option) => option.id));
     if (values.some((value) => !optionIds.has(value))) {
       throw new HumanInputResponseValidationError(
@@ -57365,17 +57359,22 @@ export async function applySessionTurnSettlement(
         };
       }
 
-      const humanInputRequests = input.runState?.humanInputRequests ?? [];
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
+        ...request,
+        questions: request.questions.map((question) => {
+          const parsed = HumanInputQuestionContract.parse(question);
+          return parsed.kind === "text" || parsed.allowOther
+            ? parsed
+            : { ...parsed, allowOther: true };
+        }),
+      }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
         }
         for (const request of humanInputRequests) {
-          const parsedQuestions = request.questions.map((question) =>
-            HumanInputQuestionContract.parse(question),
-          );
-          if (Buffer.byteLength(JSON.stringify(parsedQuestions)) > 49_152) {
+          if (Buffer.byteLength(JSON.stringify(request.questions)) > 49_152) {
             throw new Error("Human-input request questions exceed the durable payload limit");
           }
           if (

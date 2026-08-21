@@ -189,6 +189,7 @@ describe("durable structured human input", () => {
       creationAttemptId: fixture.attemptId,
       toolCallId: "human-call-1",
       status: "pending",
+      questions: [{ id: "environment", allowOther: true }],
     });
     if (!request?.expiresAt) throw new Error("fixture request did not retain its deadline");
     // A fresh workflow obtains all wait state from Postgres, including the timer.
@@ -218,7 +219,13 @@ describe("durable structured human input", () => {
       requestId: fixture.requestId,
       response: {
         outcome: "answered",
-        answers: [{ questionId: "environment", values: ["staging"] }],
+        answers: [
+          {
+            questionId: "environment",
+            values: [],
+            other: "Customer sandbox eu-42",
+          },
+        ],
       },
       respondedBy: fixture.grant.subjectId,
       clientEventId: crypto.randomUUID(),
@@ -237,7 +244,13 @@ describe("durable structured human input", () => {
       toolCallId: "human-call-1",
       response: {
         outcome: "answered",
-        answers: [{ questionId: "environment", values: ["staging"] }],
+        answers: [
+          {
+            questionId: "environment",
+            values: [],
+            other: "Customer sandbox eu-42",
+          },
+        ],
       },
     });
     expect(

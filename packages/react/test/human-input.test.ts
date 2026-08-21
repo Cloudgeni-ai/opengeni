@@ -145,6 +145,39 @@ describe("answersFromDrafts", () => {
       }).errors.targets,
     ).toBe("Enter a value for Other.");
   });
+
+  test("keeps exact Other text for a legacy choice that did not advertise it", () => {
+    expect(
+      answersFromDrafts(
+        [
+          {
+            id: "environment",
+            kind: "single_select",
+            prompt: "Where should this run?",
+            options: [{ id: "staging", label: "Staging" }],
+            required: true,
+            allowOther: false,
+          },
+        ],
+        {
+          environment: {
+            values: [],
+            other: "  Customer sandbox eu-42  ",
+            otherSelected: true,
+          },
+        },
+      ),
+    ).toEqual({
+      answers: [
+        {
+          questionId: "environment",
+          values: [],
+          other: "  Customer sandbox eu-42  ",
+        },
+      ],
+      errors: {},
+    });
+  });
 });
 
 describe("HumanInputForm async host boundary", () => {
@@ -185,7 +218,7 @@ describe("HumanInputForm async host boundary", () => {
     );
   });
 
-  test("multi-question header shows count; invalid Continue focuses first error", async () => {
+  test("multi-question header shows count; invalid Send answers focuses first error", async () => {
     const multi = {
       id: "request-multi",
       questions: [
@@ -199,9 +232,9 @@ describe("HumanInputForm async host boundary", () => {
         },
         {
           id: "q2",
-          kind: "text" as const,
+          kind: "single_select" as const,
           prompt: "Second?",
-          options: [],
+          options: [{ id: "yes", label: "Yes" }],
           required: true,
           allowOther: false,
         },
@@ -217,7 +250,19 @@ describe("HumanInputForm async host boundary", () => {
       }),
     );
     expect(mounted.container.textContent).toContain("2 questions");
+    expect(mounted.container.querySelector('button[type="submit"]')?.textContent).toBe(
+      "Send answers",
+    );
     expect(mounted.container.querySelectorAll("[data-human-input-question]")).toHaveLength(2);
+    expect(
+      mounted.container.querySelector('[data-human-input-question="q1"] label')?.textContent,
+    ).toMatch(/1\.\s*First\?/);
+    const secondGroup = mounted.container.querySelector(
+      '[data-human-input-question="q2"] [role="radiogroup"]',
+    );
+    const secondLabelId = secondGroup?.getAttribute("aria-labelledby");
+    expect(secondLabelId).toBeTruthy();
+    expect(document.getElementById(secondLabelId!)?.textContent).toMatch(/2\.\s*Second\?/);
 
     const form = mounted.container.querySelector("form");
     expect(form).not.toBeNull();
@@ -231,6 +276,36 @@ describe("HumanInputForm async host boundary", () => {
       '[data-human-input-question="q1"] textarea, [data-human-input-question="q1"] input',
     );
     expect(document.activeElement).toBe(firstField);
+  });
+
+  test("always renders an accessible inline Other field for a choice question", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-other",
+          questions: [
+            {
+              id: "environment",
+              kind: "single_select" as const,
+              prompt: "Where should this run?",
+              options: [{ id: "staging", label: "Staging" }],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const group = mounted.container.querySelector('[data-human-input-question="environment"]');
+    expect(group?.textContent).toContain("Other");
+    const otherInput = group?.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(otherInput).not.toBeNull();
+    expect(otherInput?.disabled).toBe(true);
+    expect(otherInput?.closest("label")?.textContent).toContain("Other");
   });
 
   test("supports complete host copy and autofocus", async () => {
