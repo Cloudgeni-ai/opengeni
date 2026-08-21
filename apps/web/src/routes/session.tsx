@@ -88,6 +88,10 @@ import {
   runnableLatencyModesForModel,
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
+import {
+  applySessionAttentionProjection,
+  notifySessionAttentionChanged,
+} from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
@@ -272,15 +276,12 @@ export function SessionRoute({
         expectedVersion: session.attentionVersion ?? 0,
       })
       .then((updated) => {
+        // The rail owns separately polled page objects. Keep the completed
+        // acknowledgement there so leaving this route cannot resurrect the
+        // stale dot while the next 15-second poll settles.
+        notifySessionAttentionChanged(updated);
         setContextSession((current) =>
-          current?.id === updated.id
-            ? {
-                ...current,
-                unread: updated.unread,
-                activelyWorking: updated.activelyWorking,
-                attentionVersion: updated.attentionVersion,
-              }
-            : current,
+          current?.id === updated.id ? applySessionAttentionProjection(current, updated) : current,
         );
       })
       .catch(() => {
