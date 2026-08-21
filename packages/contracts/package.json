@@ -30,6 +30,10 @@
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
     },
+    "./personal-github": {
+      "types": "./src/personal-github.ts",
+      "default": "./src/personal-github.ts"
+    },
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"

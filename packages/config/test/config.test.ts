@@ -334,6 +334,80 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("personal GitHub OAuth settings", () => {
+  const enabled = {
+    OPENGENI_ENVIRONMENT: "test",
+    OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+    OPENGENI_PUBLIC_BASE_URL: "https://api.staging.example.test",
+    OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+    OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    OPENGENI_INTEGRATIONS_ENABLED: "true",
+    OPENGENI_INTEGRATIONS_STATE_SECRET: "oauth-state-secret",
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+    OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+    OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client-staging",
+    OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "personal-client-secret",
+  };
+
+  test("is disabled by default and loads a separate managed client when enabled", () => {
+    expect(withEnv({}, () => getSettings()).githubPersonalOauthEnabled).toBe(false);
+    expect(withEnv(enabled, () => getSettings())).toMatchObject({
+      githubPersonalOauthEnabled: true,
+      githubPersonalOauthClientId: "personal-client-staging",
+      githubPersonalOauthClientSecret: "personal-client-secret",
+    });
+  });
+
+  test("requires the personal client id and secret together", () => {
+    expect(() =>
+      withEnv({ OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client" }, () => getSettings()),
+    ).toThrow(/must be configured together/);
+  });
+
+  test("requires managed integrations, state signing, encryption, and a distinct client", () => {
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_PRODUCT_ACCESS_MODE: "local" }, () => getSettings()),
+    ).toThrow(/requires OPENGENI_PRODUCT_ACCESS_MODE=managed/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_INTEGRATIONS_ENABLED: "false" }, () => getSettings()),
+    ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_INTEGRATIONS_STATE_SECRET: "" }, () => getSettings()),
+    ).toThrow(/OPENGENI_INTEGRATIONS_STATE_SECRET/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: "" }, () => getSettings()),
+    ).toThrow(/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY/);
+    expect(() =>
+      withEnv(
+        {
+          ...enabled,
+          OPENGENI_GITHUB_CLIENT_ID: "personal-client-staging",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/different OAuth App client/);
+  });
+
+  test("rejects non-origin and insecure production callback bases", () => {
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_PUBLIC_BASE_URL: "https://api.example.test/path" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/credential-free origin/);
+    expect(() =>
+      withEnv(
+        {
+          ...enabled,
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PUBLIC_BASE_URL: "http://api.example.test",
+          OPENGENI_RESEND_API_KEY: "re_test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https/);
+  });
+});
+
 describe("OpenGeni Slack interaction settings", () => {
   const slackEnv = {
     OPENGENI_ENVIRONMENT: "local",

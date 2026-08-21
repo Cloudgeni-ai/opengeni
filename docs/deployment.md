@@ -2,6 +2,20 @@
 
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
+## Personal GitHub OAuth
+
+Personal GitHub is disabled by default. Managed staging and production must use
+different GitHub OAuth Apps and configure the exact API-origin callback
+`/v1/integrations/github-personal/oauth/callback`. Keep device flow disabled and
+store each client secret only in that environment's secret manager. Runtime
+artifacts pass through `OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED`,
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`, and
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`; enabling the feature also
+requires integrations state signing and environment encryption. See
+[`personal-github.md`](personal-github.md) for the authority and rollout
+contract. Repository delivery does not create the external OAuth Apps or write
+their secrets.
+
 ## Profiles
 
 List supported profiles:

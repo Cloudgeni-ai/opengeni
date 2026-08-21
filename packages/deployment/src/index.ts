@@ -1444,6 +1444,15 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
     );
+    if (env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED === "true") {
+      vars.push(
+        "OPENGENI_INTEGRATIONS_ENABLED",
+        "OPENGENI_INTEGRATIONS_STATE_SECRET",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      );
+    }
   } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
   }
@@ -2068,6 +2077,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
+    valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
+    valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||
     (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")
@@ -2106,6 +2117,18 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_GITHUB_CLIENT_SECRET", env.OPENGENI_GITHUB_CLIENT_SECRET),
           requiredEnv("OPENGENI_GITHUB_APP_SLUG", env.OPENGENI_GITHUB_APP_SLUG),
           requiredEnv("OPENGENI_GITHUB_APP_PRIVATE_KEY", env.OPENGENI_GITHUB_APP_PRIVATE_KEY),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+            env.OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET,
+          ),
         ]
       : []),
     ...(contract.product.billingMode === "stripe"
