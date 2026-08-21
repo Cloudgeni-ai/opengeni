@@ -28661,9 +28661,9 @@ export async function setSessionPin(
 }
 
 /**
- * Idempotently update one member's explicit follow-up state. Opening a route is
- * intentionally absent from this protocol: acknowledgment is a deliberate
- * action, and the next durable session event makes the session unread again.
+ * Idempotently update one member's explicit follow-up state. Route reads remain
+ * side-effect free: a foreground client acknowledges its exact rendered event
+ * frontier through this mutation, and later durable events remain unread.
  */
 export async function setSessionAttention(
   db: Database,
@@ -28672,6 +28672,7 @@ export async function setSessionAttention(
     subjectId: string;
     sessionId: string;
     unread?: boolean | undefined;
+    acknowledgedThroughSequence?: number | undefined;
     activelyWorking?: boolean | undefined;
     expectedVersion?: number | undefined;
   },
@@ -28719,10 +28720,24 @@ export async function setSessionAttention(
           )
           .limit(1);
         const current = mapSessionAttention(session, existing);
-        const desiredUnread = input.unread ?? current.unread;
+        const currentAcknowledgedSequence = existing?.acknowledgedSequence ?? 0;
+        const acknowledgedSequence =
+          input.unread === undefined
+            ? currentAcknowledgedSequence
+            : input.unread
+              ? current.unread
+                ? currentAcknowledgedSequence
+                : Math.max(-1, session.lastSequence - 1)
+              : Math.max(
+                  currentAcknowledgedSequence,
+                  Math.min(
+                    input.acknowledgedThroughSequence ?? session.lastSequence,
+                    session.lastSequence,
+                  ),
+                );
         const desiredActivelyWorking = input.activelyWorking ?? current.activelyWorking;
         if (
-          desiredUnread === current.unread &&
+          acknowledgedSequence === currentAcknowledgedSequence &&
           desiredActivelyWorking === current.activelyWorking
         ) {
           const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -28743,12 +28758,6 @@ export async function setSessionAttention(
           throw new SessionAttentionVersionConflictError(current);
         }
 
-        const acknowledgedSequence =
-          input.unread === undefined
-            ? (existing?.acknowledgedSequence ?? 0)
-            : input.unread
-              ? Math.max(-1, session.lastSequence - 1)
-              : session.lastSequence;
         let state = existing ?? null;
         if (!existing) {
           const [inserted] = await tx

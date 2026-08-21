@@ -1494,9 +1494,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  // Personal follow-up state. Viewing a session never acknowledges it; the
-  // member must explicitly mark it read/unread, and the actively-working label
-  // remains independent of that acknowledgment.
+  // Personal follow-up state. Session reads stay side-effect free; clients use
+  // this explicit mutation after a deliberate read/unread action. The managed
+  // web console treats an exact foreground chat event frontier as that action,
+  // while the actively-working label remains independent of acknowledgment.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");

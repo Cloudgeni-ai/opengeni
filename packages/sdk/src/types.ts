@@ -1320,6 +1320,7 @@ export type UpdateSessionPinRequest = {
 
 export type UpdateSessionAttentionRequest = {
   unread?: boolean;
+  acknowledgedThroughSequence?: number;
   activelyWorking?: boolean;
   expectedVersion?: number;
 };
