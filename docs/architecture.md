@@ -1171,7 +1171,10 @@ from the `(workspace_id, updated_at, id)` keyset, and carries the revision plus
 the last sort key in an opaque cursor. Activity committed after that fence
 belongs to the next traversal. The old `session_list_snapshots` ID arrays remain
 readable, visibility-stripped, member-cleaned, and TTL-reaped only for rolling
-compatibility; current first pages never create one or scan the workspace's full
+compatibility. A new keyset cursor retains a legacy envelope whose reserved
+snapshot identity makes an old replica return the existing typed 410/rebase
+response rather than rejecting the cursor during a mixed-version rollout;
+current first pages never create an ID array or scan the workspace's full
 session identity set. Canonical: `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, `packages/sdk/src/client.ts`.
 

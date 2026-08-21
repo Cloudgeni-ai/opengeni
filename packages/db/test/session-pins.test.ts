@@ -880,6 +880,48 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const cursor = decodeSessionListCursor(firstPage.nextCursor!);
     expect(cursor).not.toBeNull();
 
+    // A pre-v2 replica ignores the new fields and decodes this envelope as a
+    // legacy snapshot cursor. The reserved snapshot never exists, so mixed
+    // rollout traffic reaches the SDK/browser's typed 410 rebase path instead
+    // of the old decoder's unrecoverable 400 path.
+    const rollingEnvelope = JSON.parse(
+      Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(rollingEnvelope).toMatchObject({
+      version: 2,
+      snapshotId: "00000000-0000-4000-8000-000000000000",
+      offset: 0,
+    });
+    const legacyReplicaCursor = {
+      kind: "snapshot" as const,
+      snapshotId: rollingEnvelope.snapshotId as string,
+      offset: rollingEnvelope.offset as number,
+      parentSessionFilter: rollingEnvelope.parentSessionFilter as string,
+      search: rollingEnvelope.search as string | null,
+      archiveMode: rollingEnvelope.archiveMode as "active" | "archived",
+    };
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: legacyReplicaCursor,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+
+    for (const invalidSortAt of [
+      "0000-01-01T00:00:00.000000Z",
+      "2026-02-30T00:00:00.000000Z",
+      "2026-01-01T00:00:00.000Z",
+    ]) {
+      expect(
+        decodeSessionListCursor(
+          Buffer.from(JSON.stringify({ ...rollingEnvelope, sortAt: invalidSortAt })).toString(
+            "base64url",
+          ),
+        ),
+      ).toBeNull();
+    }
+
     await expect(
       listSessionsForSubject(db, workspace.workspaceId, {
         subjectId,

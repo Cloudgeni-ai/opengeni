@@ -344,6 +344,22 @@ describe("API component integration", () => {
     ).toBe(400);
     const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
     expect(decodedCursor).not.toBeNull();
+    const cursorEnvelope = JSON.parse(
+      Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const outOfRangeTimestampCursor = Buffer.from(
+      JSON.stringify({ ...cursorEnvelope, sortAt: "0000-01-01T00:00:00.000000Z" }),
+    ).toString("base64url");
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&cursor=${encodeURIComponent(outOfRangeTimestampCursor)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
     for (const invalidCursor of [
       encodeSessionListCursor({
         ...decodedCursor!,

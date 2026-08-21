@@ -27551,6 +27551,22 @@ async function sessionIdsCoveredByAuthorizationRoots(
 export const SESSION_LIST_SNAPSHOT_REDACTED_SESSION_ID = "00000000-0000-0000-0000-000000000000";
 const SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS = 3;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// A v2 keyset cursor also carries this reserved, never-materialized
+// compatibility snapshot identity. An old API replica ignores the unknown v2
+// fields, accepts the legacy envelope, and returns the existing typed 410. The
+// SDK/browser then rebases instead of surfacing an unrecoverable 400 during a
+// rolling deploy.
+const SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000000";
+const SESSION_LIST_CURSOR_TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{6})Z$/;
+
+function isSessionListCursorTimestamp(value: string): boolean {
+  const match = SESSION_LIST_CURSOR_TIMESTAMP_PATTERN.exec(value);
+  if (!match || match[1] === "0000") return false;
+  const millisecondTimestamp = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}.${match[7]!.slice(0, 3)}Z`;
+  const parsed = Date.parse(millisecondTimestamp);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === millisecondTimestamp;
+}
 
 function sessionParentFilter(parentSessionId: string | null | undefined): string {
   return parentSessionId === undefined
@@ -27572,6 +27588,10 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
       cursor.kind === "keyset"
         ? {
             version: 2,
+            // Preserve the old cursor envelope until every pre-v2 replica has
+            // rolled away. It resolves only to the typed expiry/rebase path.
+            snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
+            offset: 0,
             snapshotRevision: cursor.snapshotRevision,
             sortAt: cursor.sortAt,
             id: cursor.id,
@@ -27619,7 +27639,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       if (
         typeof parsed.snapshotRevision !== "string" ||
         typeof parsed.sortAt !== "string" ||
-        !Number.isFinite(Date.parse(parsed.sortAt)) ||
+        !isSessionListCursorTimestamp(parsed.sortAt) ||
         typeof parsed.id !== "string" ||
         !UUID_PATTERN.test(parsed.id)
       ) {

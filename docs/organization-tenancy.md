@@ -1473,7 +1473,8 @@ freezes the committed workspace activity revision and traverses the existing
 `updated_at,id` index with a bounded `limit + 1` keyset. The table and trigger
 remain active only for old cursors and replicas during rolling deployment, so
 the original migration guarantee below continues to describe that compatibility
-window.
+window. The v2 cursor's legacy envelope deliberately resolves to the existing
+typed 410/rebase path on an old replica; it never points at a materialized row.
 
 - A cached list page is stripped at the transition, not filtered on the read
   path. An `AFTER UPDATE OF visibility` trigger on `sessions` replaces the
