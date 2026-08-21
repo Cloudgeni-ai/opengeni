@@ -136,6 +136,20 @@ export function runtimeMetricsHooksForObservability(
         labels: { backend, outcome },
       });
     },
+    onOpenSandboxSignedEndpoint: ({ outcome, port }) => {
+      observability.incrementCounter({
+        name: "opengeni_opensandbox_signed_endpoint_total",
+        help: "OpenSandbox signed Channel B mint and host-fetch outcomes.",
+        labels: { outcome, port: String(port) },
+      });
+    },
+    onWorkspaceArchiveObject: ({ outcome, backend }) => {
+      observability.incrementCounter({
+        name: "opengeni_workspace_archive_object_total",
+        help: "Workspace archive object-storage put/delete outcomes.",
+        labels: { outcome, backend },
+      });
+    },
     onMcpToolCall: ({ outcome, durationSeconds }) => {
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",

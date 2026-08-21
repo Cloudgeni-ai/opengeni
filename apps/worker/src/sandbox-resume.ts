@@ -813,6 +813,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
             descriptor: archive.descriptor,
             base64: archive.base64,
           },
+          ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         });
         workspaceArchiveRef = published.workspaceArchiveRef;
         const { wrote } = await persistWarmSnapshot(db, {
@@ -826,11 +827,8 @@ export async function maybePersistWarmWorkspaceSnapshot(
           expectedInstanceId: instanceId,
           expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
           captureId,
-          workspaceArchive: published.workspaceArchive,
           workspaceArchiveMeta: archive.descriptor,
-          ...(published.workspaceArchiveRef
-            ? { workspaceArchiveRef: published.workspaceArchiveRef }
-            : {}),
+          ...published,
           checkpointArtifactId: candidate?.id ?? null,
           minIntervalMs: force ? 0 : intervalMs,
           capturedAtMs,
@@ -840,6 +838,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
             await deleteUnpublishedWorkspaceArchiveObject(
               services.objectStorage,
               published.workspaceArchiveRef,
+              services.sandboxMetrics,
             );
           } else {
             const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
@@ -857,7 +856,11 @@ export async function maybePersistWarmWorkspaceSnapshot(
         }
         return wrote;
       } catch (error) {
-        await deleteUnpublishedWorkspaceArchiveObject(services.objectStorage, workspaceArchiveRef);
+        await deleteUnpublishedWorkspaceArchiveObject(
+          services.objectStorage,
+          workspaceArchiveRef,
+          services.sandboxMetrics,
+        );
         if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {

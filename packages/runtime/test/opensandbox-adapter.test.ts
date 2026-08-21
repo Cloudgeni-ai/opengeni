@@ -465,6 +465,7 @@ describe("OpenSandbox adapter", () => {
 
     expect(fake.createdRequest).toMatchObject({
       extensions: { poolRef: "warm-pool" },
+      resourceLimits: { cpu: "1", memory: "1Gi" },
     });
     expect(fake.createdRequest).not.toHaveProperty("image");
     await session.start();

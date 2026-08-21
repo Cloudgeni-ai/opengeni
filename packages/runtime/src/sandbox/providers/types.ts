@@ -6,6 +6,7 @@
 
 import type { Settings } from "@opengeni/config";
 import type { CapabilityDescriptor, SandboxBackend } from "@opengeni/contracts";
+import type { RuntimeMetricsHooks } from "../../metrics";
 
 export interface ProviderConstructionContext {
   settings: Settings;
@@ -18,6 +19,7 @@ export interface ProviderConstructionContext {
    * createSandboxClient before build()).
    */
   exposedPorts: number[];
+  metrics?: RuntimeMetricsHooks;
 }
 
 export type ProviderImmutableImageBuildResult = {

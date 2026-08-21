@@ -129,7 +129,7 @@ describe("workspace archive object storage", () => {
       archive: { bytes, descriptor, base64: Buffer.from(bytes).toString("base64") },
     });
     expect(inlined.workspaceArchiveRef).toBeUndefined();
-    expect(inlined.workspaceArchive.length).toBeGreaterThan(0);
+    expect(inlined.workspaceArchive?.length).toBeGreaterThan(0);
   });
 
   test("deletes an unpublished object after persist throws", async () => {
@@ -159,7 +159,7 @@ describe("workspace archive object storage", () => {
       sandboxGroupId: "33333333-3333-4333-8333-333333333333",
       archive: { bytes, descriptor, base64: Buffer.from(bytes).toString("base64") },
     });
-    expect(published.workspaceArchive).toBe("");
+    expect(published.workspaceArchive).toBeUndefined();
     expect(objects.has(published.workspaceArchiveRef!.key)).toBe(true);
     await deleteUnpublishedWorkspaceArchiveObject(storage, published.workspaceArchiveRef);
     expect(objects.has(published.workspaceArchiveRef!.key)).toBe(false);

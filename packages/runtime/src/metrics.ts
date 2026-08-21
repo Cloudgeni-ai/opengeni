@@ -32,6 +32,14 @@ export type RuntimeMetricsHooks = {
     operation: "create" | "renew";
   }) => void;
   onSandboxTtlRenewal?: (input: { backend: string; outcome: "completed" | "failed" }) => void;
+  onOpenSandboxSignedEndpoint?: (input: {
+    outcome: "minted" | "mint_failed" | "host_fetch_unauthorized";
+    port: number;
+  }) => void;
+  onWorkspaceArchiveObject?: (input: {
+    outcome: "put" | "put_failed" | "deleted_unpublished";
+    backend: string;
+  }) => void;
   /**
    * One physical MCP tools/call invocation. The closed outcome enum deliberately
    * excludes server, tool, tenant, request, and error-content labels.

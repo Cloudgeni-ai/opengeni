@@ -234,6 +234,11 @@ export function signedEndpointNeedsRefresh(
   return nowMs + skewMs >= expiresAt;
 }
 
+/** Logs and artifacts may keep the signed path shape, never the signature. */
+export function redactOpenSandboxSignedUriPath(path: string): string {
+  return path.replace(/^(\/[^/]+\/\d+\/[0-9a-z]+)\/[0-9a-z]+/iu, "$1/[redacted]");
+}
+
 /** Rehydrate a persisted provider tunnel URL without contacting the provider.
  * Only the exact ws/wss shape emitted by buildStreamUrl is accepted. */
 export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {

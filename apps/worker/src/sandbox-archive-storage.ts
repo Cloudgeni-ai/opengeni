@@ -72,8 +72,14 @@ export async function putVersion1TarArchiveOrInline(input: {
     descriptor: WorkspaceArchiveDescriptor;
     base64: string;
   };
+  metrics?: {
+    onWorkspaceArchiveObject?: (input: {
+      outcome: "put" | "put_failed" | "deleted_unpublished";
+      backend: string;
+    }) => void;
+  };
 }): Promise<{
-  workspaceArchive: string;
+  workspaceArchive?: string;
   workspaceArchiveRef?: WorkspaceArchiveObjectRef;
 }> {
   if (input.archive.descriptor.version !== 1) {
@@ -85,25 +91,62 @@ export async function putVersion1TarArchiveOrInline(input: {
   if (!input.objectStorage) {
     return { workspaceArchive: input.archive.base64 };
   }
-  return {
-    workspaceArchive: "",
-    workspaceArchiveRef: await putTarWorkspaceArchiveObject({
+  try {
+    const workspaceArchiveRef = await putTarWorkspaceArchiveObject({
       objectStorage: input.objectStorage,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sandboxGroupId: input.sandboxGroupId,
       archive: { bytes: input.archive.bytes, descriptor: input.archive.descriptor },
-    }),
-  };
+    });
+    try {
+      input.metrics?.onWorkspaceArchiveObject?.({
+        outcome: "put",
+        backend: input.objectStorage.backend,
+      });
+    } catch {
+      /* metrics must not affect persist */
+    }
+    console.info("workspace archive object put", {
+      key: workspaceArchiveRef.key,
+      bytes: workspaceArchiveRef.bytes,
+      sha256: workspaceArchiveRef.sha256,
+    });
+    return { workspaceArchiveRef };
+  } catch (error) {
+    try {
+      input.metrics?.onWorkspaceArchiveObject?.({
+        outcome: "put_failed",
+        backend: input.objectStorage.backend,
+      });
+    } catch {
+      /* metrics must not affect persist */
+    }
+    throw error;
+  }
 }
 
 export async function deleteUnpublishedWorkspaceArchiveObject(
   objectStorage: ObjectStorage | null | undefined,
   ref: WorkspaceArchiveObjectRef | undefined,
+  metrics?: {
+    onWorkspaceArchiveObject?: (input: {
+      outcome: "deleted_unpublished";
+      backend: string;
+    }) => void;
+  },
 ): Promise<void> {
   if (!objectStorage || !ref) return;
   try {
     await objectStorage.deleteObject(ref.key);
+    try {
+      metrics?.onWorkspaceArchiveObject?.({
+        outcome: "deleted_unpublished",
+        backend: objectStorage.backend,
+      });
+    } catch {
+      /* metrics must not affect persist */
+    }
   } catch {
     console.error("unpublished workspace archive object delete failed", { key: ref.key });
   }

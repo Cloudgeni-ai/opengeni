@@ -15,6 +15,7 @@ function clientOptions(
   settings: Parameters<ProviderRegistration["validateCredentials"]>[0],
   environment: Record<string, string> = {},
   exposedPorts: number[] = [],
+  metrics?: import("../../metrics").RuntimeMetricsHooks,
 ) {
   return {
     baseUrl: settings.openSandboxBaseUrl!,
@@ -33,6 +34,7 @@ function clientOptions(
     environment,
     exposedPorts,
     ...(settings.openSandboxPoolRef ? { poolRef: settings.openSandboxPoolRef } : {}),
+    ...(metrics ? { metrics } : {}),
   };
 }
 
@@ -59,7 +61,7 @@ export const opensandboxProvider: ProviderRegistration = {
   async renewExpiration({ settings, instanceId }) {
     await new OpenSandboxClient(clientOptions(settings)).renewExpiration(instanceId);
   },
-  build({ settings, environment, exposedPorts }) {
-    return new OpenSandboxClient(clientOptions(settings, environment, exposedPorts));
+  build({ settings, environment, exposedPorts, metrics }) {
+    return new OpenSandboxClient(clientOptions(settings, environment, exposedPorts, metrics));
   },
 };

@@ -982,6 +982,103 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(JSON.stringify(row!.resume_state)).not.toContain(archive2);
   });
 
+  test("warm persist accepts an object-storage ref without inline bytes", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    await insertLease(
+      { ...ids, groupId: attempt.sandboxGroupId },
+      {
+        liveness: "warm",
+        refcount: 1,
+        turnHolders: 1,
+        leaseEpoch: 5,
+        expiresInMs: 600_000,
+        instanceId: "box-ref-only",
+        backend: "opensandbox",
+        resumeBackendId: "opensandbox",
+        resumeState: {
+          backendId: "opensandbox",
+          sessionState: {
+            providerState: { sandboxId: "sb-ref-only" },
+            workspaceReady: true,
+          },
+        },
+      },
+    );
+    const archive = Buffer.from("ref-only-tar").toString("base64");
+    const meta = archiveDescriptor(archive, 1_900_000_000_000);
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: attempt.sandboxGroupId,
+        revision: meta.revision,
+      }),
+      sha256: meta.archiveSha256,
+      bytes: meta.archiveBytes,
+      backend: "s3-compatible",
+    };
+    const result = await persistWarmSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      expectedEpoch: 5,
+      expectedInstanceId: "box-ref-only",
+      expectedWorkspaceGeneration: 0,
+      workspaceArchiveMeta: meta,
+      workspaceArchiveRef: ref,
+      minIntervalMs: 0,
+      capturedAtMs: 1_900_000_000_000,
+    });
+    expect(result.wrote).toBe(true);
+    const [row] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${attempt.sandboxGroupId}`;
+    const ss = (row!.resume_state as { sessionState?: Record<string, unknown> }).sessionState;
+    expect(ss?.workspaceArchive).toBeUndefined();
+    expect(ss?.workspaceArchiveRef).toEqual(ref);
+    expect(JSON.stringify(row!.resume_state)).not.toContain(archive);
+  });
+
+  test("warm persist fails closed when inline bytes disagree with the object ref", async () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const workspaceId = "22222222-2222-4222-8222-222222222222";
+    const sandboxGroupId = "33333333-3333-4333-8333-333333333333";
+    const archive = Buffer.from("left-bytes").toString("base64");
+    const meta = archiveDescriptor(archive, 1_900_000_000_000);
+    await expect(
+      persistWarmSnapshotRaw(db, {
+        accountId,
+        workspaceId,
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        turnId: "55555555-5555-4555-8555-555555555555",
+        attemptId: "66666666-6666-4666-8666-666666666666",
+        sandboxGroupId,
+        expectedEpoch: 5,
+        expectedInstanceId: "box-mismatch",
+        expectedWorkspaceGeneration: 0,
+        captureId: "77777777-7777-4777-8777-777777777777",
+        workspaceArchive: archive,
+        workspaceArchiveMeta: meta,
+        workspaceArchiveRef: {
+          schema: "sandbox_archive_object_v1",
+          key: workspaceArchiveObjectKey({
+            accountId,
+            workspaceId,
+            sandboxGroupId,
+            revision: meta.revision,
+          }),
+          sha256: "0".repeat(64),
+          bytes: meta.archiveBytes,
+          backend: "s3-compatible",
+        },
+        minIntervalMs: 0,
+        capturedAtMs: 1_900_000_000_000,
+      }),
+    ).rejects.toThrow(/disagree/);
+  });
+
   test("(1b-recovery) published capture resumes teardown immediately without recapture or claim replacement", async () => {
     if (!available) return;
     const ids = await freshWorkspace();

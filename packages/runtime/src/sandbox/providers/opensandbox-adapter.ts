@@ -57,6 +57,11 @@ import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { nextDurableOpId } from "../op-correlation";
+import {
+  parseOpenSandboxSignedUriPath,
+  redactOpenSandboxSignedUriPath,
+} from "../stream-port";
+import type { RuntimeMetricsHooks } from "../../metrics";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
@@ -111,6 +116,7 @@ export type OpenSandboxClientOptions = {
   environment?: Record<string, string>;
   exposedPorts?: number[];
   adapterFactory?: AdapterFactory;
+  metrics?: RuntimeMetricsHooks;
 };
 
 export interface OpenSandboxSessionState extends SandboxSessionState {
@@ -215,28 +221,39 @@ function assertNoSnapshot(args: ReturnType<typeof normalizeSandboxClientCreateAr
   }
 }
 
+function recordSignedEndpointMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  input: { outcome: "minted" | "mint_failed" | "host_fetch_unauthorized"; port: number },
+): void {
+  try {
+    metrics?.onOpenSandboxSignedEndpoint?.(input);
+  } catch {
+    /* metrics must not affect Channel B */
+  }
+}
+
 function createRequest(
   options: OpenSandboxClientOptions,
   environment: Record<string, string>,
 ): CreateSandboxRequest {
-  const common = {
+  const common: CreateSandboxRequest = {
     timeout: options.ttlSeconds,
     env: environment,
     metadata: { opengeni: "true", backend: "opensandbox" },
+    resourceLimits: options.resourceLimits,
+    resourceRequests: options.resourceRequests,
     ...(options.signedEndpoints ? { secureAccess: true } : {}),
   };
   if (options.poolRef) {
     return {
       ...common,
       extensions: { poolRef: options.poolRef },
-    } as unknown as CreateSandboxRequest;
+    };
   }
   return {
     ...common,
     image: { uri: options.image },
     entrypoint: ["tail", "-f", "/dev/null"],
-    resourceLimits: options.resourceLimits,
-    resourceRequests: options.resourceRequests,
   };
 }
 
@@ -472,6 +489,9 @@ export class OpenSandboxSession {
   private readonly options: OpenSandboxClientOptions;
   get requireHostFetchController(): boolean {
     return this.options.signedEndpoints === true;
+  }
+  get runtimeMetrics(): RuntimeMetricsHooks | undefined {
+    return this.options.metrics;
   }
   private provider: ProviderSandbox | null = null;
   private startPromise: Promise<ProviderSandbox> | null = null;
@@ -1323,28 +1343,49 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
       throw new SandboxExposedPortUnavailableError(`Invalid OpenSandbox port: ${port}`);
     }
     const signed = this.options.signedEndpoints === true;
-    const endpoint = await withLifecycle(this.options, async (sandboxes) => {
-      if (signed) {
-        const expires =
-          Math.floor(Date.now() / 1000) + (this.options.signedEndpointTtlSeconds ?? 600);
-        return await sandboxes.getSignedEndpoint(this.state.sandboxId, port, expires);
-      }
-      return await sandboxes.getSandboxEndpoint(
-        this.state.sandboxId,
+    try {
+      const endpoint = await withLifecycle(this.options, async (sandboxes) => {
+        if (signed) {
+          const expires =
+            Math.floor(Date.now() / 1000) + (this.options.signedEndpointTtlSeconds ?? 600);
+          return await sandboxes.getSignedEndpoint(this.state.sandboxId, port, expires);
+        }
+        return await sandboxes.getSandboxEndpoint(
+          this.state.sandboxId,
+          port,
+          this.options.useServerProxy,
+        );
+      });
+      const rewrite = channelBRewriteTarget(this.options);
+      const resolved = recordExposedPortEndpoint(
+        this.state,
+        withOpenSandboxDesktopViewerPath(
+          endpointToExposedPort(endpoint, rewrite.baseUrl, rewrite.rewriteToBaseUrl),
+          port,
+          signed,
+        ),
         port,
-        this.options.useServerProxy,
       );
-    });
-    const rewrite = channelBRewriteTarget(this.options);
-    return recordExposedPortEndpoint(
-      this.state,
-      withOpenSandboxDesktopViewerPath(
-        endpointToExposedPort(endpoint, rewrite.baseUrl, rewrite.rewriteToBaseUrl),
+      const parsed = signed
+        ? parseOpenSandboxSignedUriPath(typeof resolved.path === "string" ? resolved.path : "")
+        : null;
+      console.info("opensandbox channel-b resolve", {
+        mode: signed ? "signed" : "server-proxy",
+        sandboxId: this.state.sandboxId,
         port,
-        signed,
-      ),
-      port,
-    );
+        expiresAtSeconds: parsed?.expiresAtSeconds ?? null,
+        path: typeof resolved.path === "string" ? redactOpenSandboxSignedUriPath(resolved.path) : null,
+      });
+      if (signed) {
+        recordSignedEndpointMetric(this.options.metrics, { outcome: "minted", port });
+      }
+      return resolved;
+    } catch (error) {
+      if (signed) {
+        recordSignedEndpointMetric(this.options.metrics, { outcome: "mint_failed", port });
+      }
+      throw error;
+    }
   }
 }
 

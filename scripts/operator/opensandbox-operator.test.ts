@@ -267,4 +267,17 @@ metadata:
     expect(rendered).toContain("docker.io/opensandbox/server@sha256:");
     expect(rendered).not.toContain("value: a=");
   });
+
+  test("ships the Channel B signed-endpoint proof as an operator script", async () => {
+    const source = await readFile(
+      resolve(import.meta.dir, "opensandbox-signed-endpoint-proof.ts"),
+      "utf8",
+    );
+    expect(source).toContain("signedEndpoints: true");
+    expect(source).toContain("resolveExposedPort");
+    expect(source).toContain("redactOpenSandboxSignedUriPath");
+    expect(source).toContain("isOpenSandboxLifecycleProxyPath");
+    expect(source).toContain("parseOpenSandboxSignedUriPath");
+    expect(source).not.toContain("OpenSandbox-Secure-Access");
+  });
 });

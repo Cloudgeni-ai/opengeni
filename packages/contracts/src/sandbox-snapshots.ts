@@ -112,6 +112,21 @@ export function workspaceArchivePayloadPresent(
   return parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef) !== null;
 }
 
+/** Restore may inline object bytes in memory for hydrate. That copy must never
+ *  be published onto a lease when a durable object-storage ref exists. */
+export function omitInlineWorkspaceArchiveWhenObjectRefPresent(
+  sessionState: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...sessionState };
+  if (parseWorkspaceArchiveObjectRef(next.workspaceArchiveRef)) {
+    delete next.workspaceArchive;
+  }
+  if (parseWorkspaceArchiveObjectRef(next.workspaceArchivePrevRef)) {
+    delete next.workspaceArchivePrev;
+  }
+  return next;
+}
+
 export const NATIVE_SNAPSHOT_PREFIXES: ReadonlyArray<{
   provider: NativeSnapshotProvider;
   prefix: string;

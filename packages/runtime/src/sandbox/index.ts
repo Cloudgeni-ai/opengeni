@@ -25,6 +25,7 @@ import {
   DESKTOP_STREAM_PORT,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveObjectRef,
   type SandboxBackend,
   type SandboxProviderContinuityRecovery,
@@ -343,6 +344,7 @@ export {
   isOpenSandboxLifecycleProxyPath,
   joinExposedPortPath,
   parseOpenSandboxSignedUriPath,
+  redactOpenSandboxSignedUriPath,
   signedEndpointExpiresAtMs,
   signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
@@ -592,6 +594,7 @@ export function createSandboxClientForBackend(
   backend: SandboxBackend,
   settings: Settings,
   environment = collectSandboxEnvironment(settings),
+  metrics?: RuntimeMetricsHooks,
 ): unknown {
   const registration = PROVIDER_REGISTRY[backend];
   if (!registration) {
@@ -640,7 +643,12 @@ export function createSandboxClientForBackend(
 
   const raw = withProviderExactResumeContract(
     registration,
-    registration.build({ settings, environment, exposedPorts }),
+    registration.build({
+      settings,
+      environment,
+      exposedPorts,
+      ...(metrics ? { metrics } : {}),
+    }),
   );
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
@@ -1722,10 +1730,10 @@ export async function establishSandboxSessionFromEnvelope(
   if (backend === "modal" && opts.recovery === "create-or-restore" && !opts.clientFactory) {
     await ensureModalRegistryImage(settings);
   }
-  const client = (opts.clientFactory ?? createSandboxClientForBackend)(
-    backend,
-    settings,
-    environment,
+  const client = (
+    opts.clientFactory
+      ? opts.clientFactory(backend, settings, environment)
+      : createSandboxClientForBackend(backend, settings, environment, opts.metrics)
   ) as ResumeCapableClient | undefined;
   if (!client) {
     throw new SandboxConfigError(
@@ -1800,11 +1808,14 @@ export async function establishSandboxSessionFromEnvelope(
     const restoreClient =
       restoreSettings === settings
         ? client
-        : ((opts.clientFactory ?? createSandboxClientForBackend)(
-            backend,
-            restoreSettings,
-            environment,
-          ) as ResumeCapableClient | undefined);
+        : ((opts.clientFactory
+            ? opts.clientFactory(backend, restoreSettings, environment)
+            : createSandboxClientForBackend(
+                backend,
+                restoreSettings,
+                environment,
+                opts.metrics,
+              )) as ResumeCapableClient | undefined);
     if (!restoreClient?.create) {
       throw new SandboxConfigError(
         backend,
@@ -1859,10 +1870,15 @@ export async function establishSandboxSessionFromEnvelope(
         workspaceArchive,
       );
       await ensureModalRegistryImage(fallbackSettings);
-      const fallbackClient = (opts.clientFactory ?? createSandboxClientForBackend)(
-        backend,
-        fallbackSettings,
-        environment,
+      const fallbackClient = (
+        opts.clientFactory
+          ? opts.clientFactory(backend, fallbackSettings, environment)
+          : createSandboxClientForBackend(
+              backend,
+              fallbackSettings,
+              environment,
+              opts.metrics,
+            )
       ) as ResumeCapableClient | undefined;
       if (!fallbackClient?.create) {
         throw new SandboxConfigError(
@@ -2350,15 +2366,7 @@ function durableWorkspaceArchiveFields(
       fields[key] = sessionState[key];
     }
   }
-  // Restore may inline object bytes in memory for hydrateWorkspace. That copy
-  // must never be published onto the replacement lease when a durable ref exists.
-  if (archiveRef) {
-    delete fields.workspaceArchive;
-  }
-  if (previousRef) {
-    delete fields.workspaceArchivePrev;
-  }
-  return fields;
+  return omitInlineWorkspaceArchiveWhenObjectRefPresent(fields);
 }
 
 /**

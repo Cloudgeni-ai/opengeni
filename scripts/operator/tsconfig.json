@@ -10,6 +10,7 @@
     "opensandbox-load-profile.ts",
     "verify-opensandbox-cluster.ts",
     "opensandbox-operator.test.ts",
+    "opensandbox-signed-endpoint-proof.ts",
     "turn-density-profile.ts",
     "sandbox-reaper-hold.ts",
     "sandbox-reaper-hold.test.ts",

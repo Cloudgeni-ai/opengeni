@@ -126,6 +126,7 @@ export {
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
   encodeNativeSnapshotRef,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveDescriptor,
   parseWorkspaceArchiveObjectRef,
   workspaceArchiveObjectKey,

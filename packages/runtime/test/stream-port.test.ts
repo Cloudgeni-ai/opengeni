@@ -6,6 +6,7 @@ import {
   exposeStreamPort,
   joinExposedPortPath,
   parseOpenSandboxSignedUriPath,
+  redactOpenSandboxSignedUriPath,
   signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
   verifyStreamToken,
@@ -125,6 +126,12 @@ describe("exposedPortAllowsHostFetch", () => {
     ).toBe(false);
     const signed = parseOpenSandboxSignedUriPath("/sbx-1/7682/s6ph0/sigsigsig/v1/origins");
     expect(signed).toMatchObject({ sandboxId: "sbx-1", port: 7682, signature: "sigsigsig" });
+    expect(redactOpenSandboxSignedUriPath("/sbx-1/7682/s6ph0/sigsigsig/v1/origins")).toBe(
+      "/sbx-1/7682/s6ph0/[redacted]/v1/origins",
+    );
+    expect(redactOpenSandboxSignedUriPath("/v1/sandboxes/sbx-1/proxy/7682")).toBe(
+      "/v1/sandboxes/sbx-1/proxy/7682",
+    );
     expect(signedEndpointNeedsRefresh("/sbx-1/7682/s6ph0/sigsigsig", signed!.expiresAtSeconds * 1000 - 60_000)).toBe(
       false,
     );

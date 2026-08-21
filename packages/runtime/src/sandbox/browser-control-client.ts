@@ -74,6 +74,7 @@ import {
   buildStreamUrl,
   exposedPortAllowsHostFetch,
   joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
 } from "./stream-port";
@@ -134,6 +135,12 @@ export type BrowserControlPlacementSession = {
   resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
   /** Signed OpenSandbox Channel B must host-fetch. Never fall through to in-box curl. */
   requireHostFetchController?: boolean;
+  runtimeMetrics?: {
+    onOpenSandboxSignedEndpoint?: (input: {
+      outcome: "minted" | "mint_failed" | "host_fetch_unauthorized";
+      port: number;
+    }) => void;
+  };
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
   ) => Promise<BrowserControlEnsureResponse>;
@@ -914,7 +921,12 @@ export class BrowserControlClient {
         }
         if (hostFetchAllowed) {
           try {
-            return await requestExposedController(endpoint, input, this.timeoutMs);
+            return await requestExposedController(
+              endpoint,
+              input,
+              this.timeoutMs,
+              this.session.runtimeMetrics,
+            );
           } catch (error) {
             if (
               retryNativeEndpoint &&
@@ -1527,6 +1539,12 @@ async function requestExposedController(
     timeoutMs?: number;
   },
   defaultTimeoutMs: number,
+  metrics?: {
+    onOpenSandboxSignedEndpoint?: (input: {
+      outcome: "minted" | "mint_failed" | "host_fetch_unauthorized";
+      port: number;
+    }) => void;
+  },
 ): Promise<unknown> {
   const token = requireToken(input.token, "browser controller token");
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
@@ -1557,6 +1575,17 @@ async function requestExposedController(
     (response.status === 401 || response.status === 403) &&
     !looksLikeBrowserControlEnvelope(responseText)
   ) {
+    const signed = parseOpenSandboxSignedUriPath(endpoint.path ?? "");
+    if (signed) {
+      try {
+        metrics?.onOpenSandboxSignedEndpoint?.({
+          outcome: "host_fetch_unauthorized",
+          port: signed.port,
+        });
+      } catch {
+        /* metrics must not affect Channel B */
+      }
+    }
     throw new BrowserControlTransportError(
       `browser controller returned HTTP ${response.status}`,
     );

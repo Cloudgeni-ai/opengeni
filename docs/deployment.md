@@ -1497,7 +1497,11 @@ interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
 JSON and streams use signed URI-mode ingress when
 `OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true`. That flag defaults off so ClusterIP-only
 operators keep the lifecycle `/proxy/` path, in-box curl, and API frame-proxy.
-Signed mode never falls back to those compensations. The
+Signed mode never falls back to those compensations. Prove Channel B signed HTTP
+Bearer passthrough and WebSocket subprotocol preservation with
+`bun run deployment:opensandbox-signed-endpoint-proof` against the preview ClusterIP
+lifecycle + ingress port-forwards. The script writes a redacted JSON artifact and
+must not log signatures or browserd tokens. The
 Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
 is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
 exact retained provider command. `runAs` remains unavailable.

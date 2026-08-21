@@ -127,6 +127,7 @@ import {
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
+  runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
 import {
   inspectOpenSandboxKubernetesInventory,
@@ -2143,6 +2144,7 @@ async function terminateDrainableBox(
     if (!lease.instanceId || !captureClaim) {
       return { wrote: false, archiveRevision: null };
     }
+    const archiveMetrics = runtimeMetricsHooksForObservability(observability);
     let checkpointArtifactId: string | null = null;
     if (
       archiveBase64 &&
@@ -2207,15 +2209,13 @@ async function terminateDrainableBox(
             descriptor: archiveMetadata,
             base64: archiveBase64,
           },
+          metrics: archiveMetrics,
         });
         workspaceArchiveRef = published.workspaceArchiveRef;
         result = await persistDrainSnapshot(db, {
           ...baseInput,
-          workspaceArchive: published.workspaceArchive,
           workspaceArchiveMeta: archiveMetadata,
-          ...(published.workspaceArchiveRef
-            ? { workspaceArchiveRef: published.workspaceArchiveRef }
-            : {}),
+          ...published,
           ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
         });
         if (published.workspaceArchiveRef && objectStorage) {
@@ -2223,6 +2223,7 @@ async function terminateDrainableBox(
             await deleteUnpublishedWorkspaceArchiveObject(
               objectStorage,
               published.workspaceArchiveRef,
+              archiveMetrics,
             );
           } else {
             const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
@@ -2236,7 +2237,11 @@ async function terminateDrainableBox(
           }
         }
       } catch (error) {
-        await deleteUnpublishedWorkspaceArchiveObject(objectStorage, workspaceArchiveRef);
+        await deleteUnpublishedWorkspaceArchiveObject(
+          objectStorage,
+          workspaceArchiveRef,
+          archiveMetrics,
+        );
         throw error;
       }
     }
