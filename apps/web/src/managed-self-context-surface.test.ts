@@ -38,9 +38,7 @@ describe("managed self-context surfaces", () => {
     expect(switcherSource).toContain("export const WorkspaceSwitcherTrigger = forwardRef");
     expect(switcherSource).toContain("{rail.collapsed ? (");
     expect(switcherSource).toContain('<span className="inline-flex">{trigger}</span>');
-    expect(switcherSource).not.toContain(
-      "<TooltipTrigger asChild>{trigger}</TooltipTrigger>",
-    );
+    expect(switcherSource).not.toContain("<TooltipTrigger asChild>{trigger}</TooltipTrigger>");
     expect(switcherSource).not.toContain(
       "<TooltipTrigger asChild>\n          <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>",
     );
