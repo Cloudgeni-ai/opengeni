@@ -1912,9 +1912,7 @@ function selfhostedPlacementPrivatePath(value: unknown): string {
 }
 
 function joinExecCommandOutput(stdout: string, stderr: string): string {
-  return [stdout, stderr]
-    .filter((value) => value.trim().length > 0)
-    .join("\n");
+  return [stdout, stderr].filter((value) => value.trim().length > 0).join("\n");
 }
 
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {
