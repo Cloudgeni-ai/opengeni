@@ -131,7 +131,6 @@ import {
   SessionListAccessError,
   SessionListCursorError,
   SessionListCursorExpiredError,
-  SessionListSnapshotLimitError,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
@@ -625,10 +624,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       if (error instanceof SessionListCursorError) {
         throw new HTTPException(400, { message: error.message });
-      }
-      if (error instanceof SessionListSnapshotLimitError) {
-        c.header("Retry-After", "5");
-        throw new HTTPException(429, { message: error.message });
       }
       throw error;
     }

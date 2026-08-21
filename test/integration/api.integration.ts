@@ -344,14 +344,26 @@ describe("API component integration", () => {
     ).toBe(400);
     const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
     expect(decodedCursor).not.toBeNull();
+    const cursorEnvelope = JSON.parse(
+      Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const outOfRangeTimestampCursor = Buffer.from(
+      JSON.stringify({ ...cursorEnvelope, sortAt: "0000-01-01T00:00:00.000000Z" }),
+    ).toString("base64url");
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&cursor=${encodeURIComponent(outOfRangeTimestampCursor)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
     for (const invalidCursor of [
       encodeSessionListCursor({
         ...decodedCursor!,
         search: "different-filter",
-      }),
-      encodeSessionListCursor({
-        ...decodedCursor!,
-        offset: Number.MAX_SAFE_INTEGER,
       }),
     ]) {
       expect(
@@ -365,11 +377,6 @@ describe("API component integration", () => {
         ).status,
       ).toBe(400);
     }
-    await dbClient.db.execute(dbSql`
-      update session_list_snapshots
-      set expires_at = now() - interval '1 second'
-      where id = ${decodedCursor!.snapshotId}
-    `);
     expect(
       (
         await app.request(
@@ -379,7 +386,7 @@ describe("API component integration", () => {
           ),
         )
       ).status,
-    ).toBe(410);
+    ).toBe(200);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);

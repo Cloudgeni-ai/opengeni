@@ -574,60 +574,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await visibleRows.count()).toBe(100);
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
-      // Delete the exact server-owned snapshot named by the live continuation.
-      // The API must type that response as 410; the client then creates one new
-      // snapshot and immediately continues from its page-two cursor.
-      const expiredCursor = secondPage.nextCursor!;
-      const expiredSnapshotId = decodeBrowserSessionCursor(expiredCursor).snapshotId;
-      const deleted = await shared.admin<{ id: string }[]>`
-        delete from session_list_snapshots where id = ${expiredSnapshotId} returning id`;
-      expect(deleted.map((row) => row.id)).toEqual([expiredSnapshotId]);
-
-      const expiredResponse = page.waitForResponse(
-        (response) =>
-          sessionPageResponse(response, workspaceId, { search: batch, cursor: expiredCursor }),
-        { timeout: 10_000 },
-      );
-      const freshFirstResponse = page.waitForResponse(
-        (response) =>
-          successfulSessionPageResponse(response, workspaceId, { search: batch, cursor: null }),
-        { timeout: 10_000 },
-      );
-      const rebasedSecondResponse = page.waitForResponse(
-        (response) => {
-          const cursor = new URL(response.url()).searchParams.get("cursor");
-          return (
-            cursor !== null &&
-            cursor !== expiredCursor &&
-            successfulSessionPageResponse(response, workspaceId, { search: batch, cursor })
-          );
-        },
-        { timeout: 10_000 },
-      );
-      await retryOlder.click();
-      expect((await expiredResponse).status()).toBe(410);
-      const freshFirst = (await (await freshFirstResponse).json()) as BrowserSessionPage;
-      const rebasedSecond = (await (await rebasedSecondResponse).json()) as BrowserSessionPage;
-      expect(freshFirst.nextCursor).toBeTruthy();
-      expect(decodeBrowserSessionCursor(freshFirst.nextCursor!).snapshotId).not.toBe(
-        expiredSnapshotId,
-      );
-      expect(rebasedSecond.sessions).toHaveLength(50);
-      expect(await visibleRows.count()).toBe(100);
-      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
-
-      // The rebased page-two response exposes the last cursor. All 106 matching
-      // rows remain reachable exactly once, including the oldest sentinel.
-      expect(rebasedSecond.nextCursor).toBeTruthy();
+      // The stateless keyset remains retryable after an unrelated failure; no
+      // server snapshot expires or forces a page-one rebase. The exact cursor
+      // resumes at the final six rows and keeps all previously painted rows.
       const finalPageResponse = page.waitForResponse(
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
             search: batch,
-            cursor: rebasedSecond.nextCursor,
+            cursor: secondPage.nextCursor,
           }),
         { timeout: 10_000 },
       );
-      await page.getByRole("button", { name: "Load older sessions" }).click();
+      await retryOlder.click();
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
@@ -1378,8 +1336,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // membership row must not revoke listing (that same over-reach 403'd
       // every workspace-scoped api_key principal in production). Membership
       // is personalization for non-user subjects, not authorization: removal
-      // cleans their pins, and any snapshot the post-removal listing writes is
-      // TTL-bounded, not an unbounded leak.
+      // cleans their pins, while the post-removal keyset creates no durable
+      // per-subject listing state.
       const response = await listingPromise;
       expect(response.status).toBe(200);
       const body = (await response.json()) as {
@@ -1589,16 +1547,6 @@ function successfulSessionPageResponse(
   filters: { search?: string; cursor?: string | null } = {},
 ): boolean {
   return response.ok() && sessionPageResponse(response, workspaceId, filters);
-}
-
-function decodeBrowserSessionCursor(cursor: string): { snapshotId: string } {
-  const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
-    snapshotId?: unknown;
-  };
-  if (typeof parsed.snapshotId !== "string") {
-    throw new Error("session cursor did not contain a snapshot id");
-  }
-  return { snapshotId: parsed.snapshotId };
 }
 
 const browserDiagnostics = new WeakMap<BrowserContext, string[]>();

@@ -3970,12 +3970,12 @@ export const sessionPins = pgTable(
   }),
 );
 
-// A short-lived server-owned continuation snapshot for the pin-aware session
-// list. The ordinary list is ordered by mutable activity, so a cursor cannot
-// safely replay that order from updated_at alone across HTTP requests. The
-// snapshot stores the already-ordered ordinary ids; the list query still joins
-// live session rows for current lifecycle/title data and expires snapshots
-// opportunistically.
+// Rolling-compatibility storage for pre-keyset session-list cursors. New page
+// one reads freeze the committed workspace activity revision in an opaque
+// updated_at/id keyset and create no row here. Old API replicas and cursors may
+// retain an already-ordered id array for its short TTL, so current replicas keep
+// reading, visibility-stripping, member-cleaning, and reaping those rows until
+// the compatibility table is retired by a later migration.
 export const sessionListSnapshots = pgTable(
   "session_list_snapshots",
   {

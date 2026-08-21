@@ -1468,6 +1468,14 @@ to `sessions.id`, so it reached 70 relations but could not reach
 `session_list_snapshots.ordinary_session_ids` — a bare `uuid[]` with no foreign
 key. 0301 closes both halves of that gap:
 
+The current session rail no longer creates these arrays: its opaque cursor
+freezes the committed workspace activity revision and traverses the existing
+`updated_at,id` index with a bounded `limit + 1` keyset. The table and trigger
+remain active only for old cursors and replicas during rolling deployment, so
+the original migration guarantee below continues to describe that compatibility
+window. The v2 cursor's legacy envelope deliberately resolves to the existing
+typed 410/rebase path on an old replica; it never points at a materialized row.
+
 - A cached list page is stripped at the transition, not filtered on the read
   path. An `AFTER UPDATE OF visibility` trigger on `sessions` replaces the
   transitioned identity with the reserved all-zero UUID in every *other*
