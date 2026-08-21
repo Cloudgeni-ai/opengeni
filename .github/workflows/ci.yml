@@ -1375,8 +1375,8 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-  worker-web-images:
-    name: Build worker and web workload images
+  worker-image:
+    name: Build worker workload image
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
@@ -1386,7 +1386,6 @@ jobs:
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
-      web_digest: ${{ steps.web_image.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -1421,6 +1420,37 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+  web-image:
+    name: Build web workload image
+    needs: [automation-admission, plan]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
+    outputs:
+      web_digest: ${{ steps.web_image.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build web image
         id: web_image
@@ -1632,7 +1662,8 @@ jobs:
       - automation-admission
       - plan
       - api-image
-      - worker-web-images
+      - worker-image
+      - web-image
       - artifact-materializer-image
       - artifact-outbox-dispatcher-image
       - relay-image
@@ -1646,7 +1677,8 @@ jobs:
       - name: Require every workload image build
         env:
           API_IMAGE_RESULT: ${{ needs.api-image.result }}
-          WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}
+          WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}
+          WEB_IMAGE_RESULT: ${{ needs.web-image.result }}
           ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}
           ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: ${{ needs.artifact-outbox-dispatcher-image.result }}
           RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}
@@ -1654,7 +1686,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$API_IMAGE_RESULT" = "success"
-          test "$WORKER_WEB_IMAGES_RESULT" = "success"
+          test "$WORKER_IMAGE_RESULT" = "success"
+          test "$WEB_IMAGE_RESULT" = "success"
           test "$ARTIFACT_MATERIALIZER_IMAGE_RESULT" = "success"
           test "$ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT" = "success"
           test "$RELAY_IMAGE_RESULT" = "success"
@@ -1669,8 +1702,8 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           API_DIGEST: ${{ needs.api-image.outputs.api_digest }}
-          WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}
-          WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}
+          WORKER_DIGEST: ${{ needs.worker-image.outputs.worker_digest }}
+          WEB_DIGEST: ${{ needs.web-image.outputs.web_digest }}
           SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}
           RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}
           ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.artifact-materializer-image.outputs.artifact_materializer_digest }}
