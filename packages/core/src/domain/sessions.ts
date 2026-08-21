@@ -66,6 +66,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  getSessionAuthorityProjection,
   SessionIdConflictError,
   NewSessionDraftConflictError,
   getSessionSpawnDenialByIdempotencyKey,
@@ -1385,6 +1386,26 @@ export function resolveChildGoalFromAcceptedSnapshot(
   };
 }
 
+export function resolveSessionCreateVisibility(input: {
+  requestedVisibility: "private" | "workspace";
+  visibilityProvided: boolean;
+  parentVisibility: "user_private" | "workspace_shared" | null;
+}): "user_private" | "workspace_shared" {
+  if (input.parentVisibility === "user_private") {
+    if (input.visibilityProvided && input.requestedVisibility !== "private") {
+      throw new Error("A private parent cannot create a workspace-visible child");
+    }
+    return "user_private";
+  }
+  if (input.parentVisibility === "workspace_shared") {
+    if (input.visibilityProvided && input.requestedVisibility === "private") {
+      throw new Error("A workspace-visible parent cannot create a private child");
+    }
+    return "workspace_shared";
+  }
+  return input.requestedVisibility === "private" ? "user_private" : "workspace_shared";
+}
+
 export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1394,7 +1415,8 @@ export async function createSessionForRequestWithOutcome(
 ): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
-  if (payload.visibility === "private") {
+  const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
+  if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
     if (!authorization) {
       throw new HTTPException(403, { message: "managed human session required" });
     }
@@ -1439,11 +1461,6 @@ export async function createSessionForRequestWithOutcome(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
-  if (payload.visibility === "private" && parentSessionId) {
-    throw new HTTPException(422, {
-      message: "Agent-created child sessions cannot be private",
-    });
-  }
   if (parentSessionId) {
     try {
       await requireSessionAuthorization(deps, grant, {
@@ -1462,6 +1479,24 @@ export async function createSessionForRequestWithOutcome(
   if (parentSessionId && !parentSession) {
     throw new HTTPException(404, {
       message: `parent session not found in workspace: ${parentSessionId}`,
+    });
+  }
+  const parentAuthority = parentSession
+    ? await getSessionAuthorityProjection(db, workspaceId, parentSession.id)
+    : null;
+  if (parentSession && !parentAuthority) {
+    throw new HTTPException(403, { message: "parent session authority is unavailable" });
+  }
+  let effectiveVisibility: "user_private" | "workspace_shared";
+  try {
+    effectiveVisibility = resolveSessionCreateVisibility({
+      requestedVisibility: payload.visibility,
+      visibilityProvided,
+      parentVisibility: parentAuthority?.visibility ?? null,
+    });
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid child visibility",
     });
   }
   const creationInitiator = creationInitiatorForGrant(grant);
@@ -1550,7 +1585,6 @@ export async function createSessionForRequestWithOutcome(
   // written rows without it. Compare it only when the create request supplied
   // the field explicitly; the parsed schema default must not manufacture a
   // mismatch for a legacy draft.
-  const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   const requestedTools = validateToolRefs(
     toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
     runtimeSettings,
@@ -2119,7 +2153,7 @@ export async function createSessionForRequestWithOutcome(
       workflowClient,
       accountId: grant.accountId,
       workspaceId,
-      visibility: payload.visibility === "private" ? "user_private" : "workspace_shared",
+      visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,

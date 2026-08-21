@@ -1253,6 +1253,21 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.create_xai_subscription_credential(uuid,uuid,text,text,text,text,text,text,text,timestamptz)',
         ${literal(schema)}
       )

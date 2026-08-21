@@ -12511,8 +12511,11 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
-    /** Workspace-visible by default. Private creation is an activated,
-     * managed-cookie owning-human capability and commits atomically. */
+    /** Top-level omission is workspace-visible. Agent-child omission inherits
+     * the exact parent visibility; cross-visibility child creation is rejected.
+     * Top-level private creation is an activated managed-cookie owning-human
+     * capability, while a private child uses an exact live-parent-attempt
+     * database capability. Both commit atomically. */
     visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or

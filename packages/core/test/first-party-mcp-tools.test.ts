@@ -3,6 +3,7 @@ import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts";
 import {
   resolveChildGoalFromAcceptedSnapshot,
   resolveFirstPartyMcpToolsForCreate,
+  resolveSessionCreateVisibility,
 } from "../src/domain/sessions";
 
 describe("first-party MCP tool selection at session creation", () => {
@@ -47,6 +48,35 @@ describe("first-party MCP tool selection at session creation", () => {
         policy,
       ),
     ).toEqual(["session_get", "goal_update"]);
+  });
+});
+
+describe("child session visibility", () => {
+  test("omission inherits a private parent and explicit widening is rejected", () => {
+    expect(
+      resolveSessionCreateVisibility({
+        requestedVisibility: "workspace",
+        visibilityProvided: false,
+        parentVisibility: "user_private",
+      }),
+    ).toBe("user_private");
+    expect(() =>
+      resolveSessionCreateVisibility({
+        requestedVisibility: "workspace",
+        visibilityProvided: true,
+        parentVisibility: "user_private",
+      }),
+    ).toThrow("cannot create a workspace-visible child");
+  });
+
+  test("a workspace parent cannot mint a private child", () => {
+    expect(() =>
+      resolveSessionCreateVisibility({
+        requestedVisibility: "private",
+        visibilityProvided: true,
+        parentVisibility: "workspace_shared",
+      }),
+    ).toThrow("cannot create a private child");
   });
 });
 
