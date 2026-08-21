@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "b
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError, type Session } from "@opengeni/sdk";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
@@ -13,6 +13,7 @@ import {
 
 const toastSuccess = mock((_message: string) => undefined);
 const toastInfo = mock((_message: string) => undefined);
+let confirmRestoreFocusRef: RefObject<HTMLElement | null> | undefined;
 
 mock.module("sonner", () => ({
   ...SonnerPackage,
@@ -32,15 +33,18 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     description,
     onConfirm,
     open,
+    restoreFocusRef,
     title,
   }: {
     confirmLabel: string;
     description?: ReactNode;
     onConfirm: () => unknown;
     open: boolean;
+    restoreFocusRef?: RefObject<HTMLElement | null>;
     title: ReactNode;
-  }) =>
-    open ? (
+  }) => {
+    confirmRestoreFocusRef = restoreFocusRef;
+    return open ? (
       <div role="dialog">
         <span>{title}</span>
         <span>{description}</span>
@@ -48,7 +52,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
           {confirmLabel}
         </button>
       </div>
-    ) : null,
+    ) : null;
+  },
 }));
 
 // Keep mutation/reconciliation tests independent of Radix portal geometry.
@@ -196,6 +201,7 @@ afterAll(() => {
 beforeEach(() => {
   toastInfo.mockClear();
   toastSuccess.mockClear();
+  confirmRestoreFocusRef = undefined;
 });
 
 describe("SessionTenancyControl", () => {
@@ -235,6 +241,43 @@ describe("SessionTenancyControl", () => {
     expect(container.textContent).toContain("Workspace");
     expect(container.querySelector('[aria-label^="Workspace session access"]')).not.toBeNull();
     expect(container.querySelector('[aria-label$="Manage session access"]')).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("offers Fork session from a private session and restores the access trigger", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const privateSession = {
+      ...baseSession,
+      tenancy: { ...baseSession.tenancy!, visibility: "private" as const },
+    };
+
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={privateSession}
+          client={{} as OpenGeniCoreClient}
+          managedSession
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label$="Manage session access"]',
+    );
+    expect(trigger).not.toBeNull();
+    await chooseAccessAction(container, "Fork session…");
+    expect(container.textContent).toContain("Fork this session?");
+    expect(container.textContent).toContain("continue in a new one");
+    expect(confirmRestoreFocusRef?.current).toBe(trigger);
 
     await act(async () => root.unmount());
     container.remove();

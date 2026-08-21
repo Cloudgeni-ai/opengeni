@@ -166,6 +166,7 @@ export function SessionTenancyControl({
   const [failure, setFailure] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [, setControllerRevision] = useState(0);
+  const accessTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -552,6 +553,7 @@ export function SessionTenancyControl({
           <DropdownMenu>
             <DropdownMenuTrigger asChild disabled={busy}>
               <button
+                ref={accessTriggerRef}
                 type="button"
                 aria-label={`${stateLabel} session access. Manage session access`}
                 aria-busy={busy}
@@ -581,20 +583,18 @@ export function SessionTenancyControl({
                 {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
                 {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
               </DropdownMenuItem>
-              {!privateSession ? (
-                <DropdownMenuItem
-                  aria-label={pendingFork ? "Retry: Fork session…" : "Fork session…"}
-                  onSelect={() => setConfirmation({ kind: "fork" })}
-                >
-                  <CopyPlusIcon />
-                  <span className="flex flex-col">
-                    <span>{pendingFork ? "Retry: Fork session…" : "Fork session…"}</span>
-                    <span className="text-xs font-normal text-muted-foreground">
-                      Copies this session so you can continue in a new one.
-                    </span>
+              <DropdownMenuItem
+                aria-label={pendingFork ? "Retry: Fork session…" : "Fork session…"}
+                onSelect={() => setConfirmation({ kind: "fork" })}
+              >
+                <CopyPlusIcon />
+                <span className="flex flex-col">
+                  <span>{pendingFork ? "Retry: Fork session…" : "Fork session…"}</span>
+                  <span className="text-xs font-normal text-muted-foreground">
+                    Copies this session so you can continue in a new one.
                   </span>
-                </DropdownMenuItem>
-              ) : null}
+                </span>
+              </DropdownMenuItem>
               {failure ? (
                 <>
                   <DropdownMenuSeparator />
@@ -648,6 +648,7 @@ export function SessionTenancyControl({
         }
         destructive={confirmation?.kind !== "fork" && confirmation?.visibility === "workspace"}
         cancelAutoFocus
+        restoreFocusRef={accessTriggerRef}
         onConfirm={() =>
           confirmation?.kind === "fork"
             ? createPrivateFork()

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { RailTrailingMetadata } from "./session-list";
+import { RailTrailingMetadata } from "./session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
@@ -14,13 +14,14 @@ describe("RailTrailingMetadata", () => {
         <RailTrailingMetadata summary={neutral} relativeTime={relativeTime} />,
       );
 
-      expect(markup).toContain("grid-cols-[0.875rem_0.75rem_2.25rem]");
-      expect(markup).toContain("shrink-0 whitespace-nowrap");
+      expect(markup).toContain("data-session-row-metadata");
+      expect(markup).toContain("min-w-9 shrink-0 whitespace-nowrap");
       expect(markup).toContain(`>${relativeTime}</span>`);
+      expect(markup).not.toContain("w-[4.375rem]");
     },
   );
 
-  test("keeps status and scheduled columns separate from the fixed date column", () => {
+  test("renders only status, schedule, and date metadata that actually exists", () => {
     const markup = renderToStaticMarkup(
       <RailTrailingMetadata summary={active} scheduled relativeTime="12 Aug" />,
     );
@@ -28,5 +29,9 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain("Scheduled task");
     expect(markup).toContain("Running");
     expect(markup).toContain(">12 Aug</span>");
+  });
+
+  test("reserves no trailing rail width when a row has no metadata", () => {
+    expect(renderToStaticMarkup(<RailTrailingMetadata summary={neutral} />)).toBe("");
   });
 });
