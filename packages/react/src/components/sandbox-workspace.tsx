@@ -305,6 +305,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   /** Unique identity for `requestedFilePath`, including repeated requests for the
    *  same path. */
   requestedFileRequestId?: string | number | null | undefined;
+  /** 1-based line to reveal after `requestedFilePath` opens. */
+  requestedFileLine?: number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
   /** Restore and report navigation inside the built-in workbench surfaces. */
@@ -366,6 +368,7 @@ export function useSandboxWorkspaceTabs(
     browserExtensionSetupUrl,
     requestedFilePath,
     requestedFileRequestId,
+    requestedFileLine,
     onOpenFile,
     initialFilePath,
     onFilePathChange,
@@ -437,6 +440,9 @@ export function useSandboxWorkspaceTabs(
     },
     [sessionId],
   );
+  useEffect(() => {
+    if (requestedFilePath) requestWarmIntent("warmFiles");
+  }, [requestWarmIntent, requestedFilePath, requestedFileRequestId]);
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Polls slowly — ambient context.
@@ -771,6 +777,9 @@ export function useSandboxWorkspaceTabs(
                     ? { requestedPathRequestId: requestedFileRequestId }
                     : {}),
                   requestedPathReady: sandboxAcceptsLiveIo(liveness),
+                  ...(requestedFileLine != null && requestedFileLine > 0
+                    ? { requestedLine: requestedFileLine }
+                    : {}),
                 }
               : {})}
             // Ordinary capture browsing does not warm a box. The first edit — or an
@@ -888,6 +897,7 @@ export function useSandboxWorkspaceTabs(
     warmTerminal,
     requestedFilePath,
     requestedFileRequestId,
+    requestedFileLine,
     onOpenFile,
     initialFilePath,
     onFilePathChange,
@@ -956,6 +966,18 @@ export type SandboxWorkspaceProps = ClientOverride & {
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
+  /**
+   * Host request to open a workspace file (and optional line) in Files. A new
+   * `requestId` re-opens even the same path.
+   */
+  openFileRequest?:
+    | {
+        path: string;
+        line?: number | null;
+        requestId: number;
+      }
+    | null
+    | undefined;
   initialBrowserSessionId?: string | null | undefined;
   onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   initialComputerSessionId?: string | null | undefined;
@@ -1001,6 +1023,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onActiveTabChange,
     initialFilePath,
     onFilePathChange,
+    openFileRequest,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -1027,6 +1050,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const [requestedFile, setRequestedFile] = useState<{
     sessionId: string;
     path: string;
+    line: number | null;
     requestId: number;
   } | null>(null);
   const [requestedComputer, setRequestedComputer] = useState<{
@@ -1039,15 +1063,28 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
-    (path: string) => {
+    (path: string, line?: number | null) => {
       nextFileRequestId.current += 1;
-      setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
+      setRequestedFile({
+        sessionId,
+        path,
+        line: line != null && line > 0 ? line : null,
+        requestId: nextFileRequestId.current,
+      });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
       onActiveTabChange?.(WORKBENCH_TAB_FILES);
       onFilePathChange?.(path);
+      onCollapsedChange?.(false);
     },
-    [onActiveTabChange, onFilePathChange, sessionId],
+    [onActiveTabChange, onCollapsedChange, onFilePathChange, sessionId],
   );
+  const handledOpenFileRequestId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!openFileRequest) return;
+    if (handledOpenFileRequestId.current === openFileRequest.requestId) return;
+    handledOpenFileRequestId.current = openFileRequest.requestId;
+    openFile(openFileRequest.path, openFileRequest.line ?? null);
+  }, [openFile, openFileRequest]);
   const openComputer = useCallback(
     (computerSessionId: string) => {
       nextComputerRequestId.current += 1;
@@ -1088,6 +1125,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onComputerSessionIdChange,
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
     requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
+    requestedFileLine: requestedFile?.sessionId === sessionId ? requestedFile.line : null,
     onOpenFile: openFile,
     onOpenComputerSession: openComputer,
     requestedComputerSessionId:

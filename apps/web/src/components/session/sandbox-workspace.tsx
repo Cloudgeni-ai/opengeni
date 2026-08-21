@@ -56,6 +56,11 @@ export function SessionWorkspace(props: {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   mobileLeadingControl?: ReactNode;
+  openFileRequest?: {
+    path: string;
+    line?: number | null;
+    requestId: number;
+  } | null;
 }) {
   const layoutStorageId = sessionDockLayoutStorageId(props.preferenceOwnerId, props.sessionId);
   const navigation = useMemo(() => readSessionDockNavigation(layoutStorageId), [layoutStorageId]);
@@ -124,6 +129,7 @@ export function SessionWorkspace(props: {
       onComputerSessionIdChange={rememberDesktopSession}
       collapsed={effectiveCollapsed}
       onCollapsedChange={props.onCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
       {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
       autoSaveId={layoutStorageId}
       browserExtensionSetupUrl="/browser-extension-setup.html"
