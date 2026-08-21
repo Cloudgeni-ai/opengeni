@@ -65,9 +65,6 @@ export function SwitcherBlock() {
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
-  const orgWorkspaces = activeAccountId
-    ? workspacesInOrg(context.workspaces, activeAccountId)
-    : context.workspaces;
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const createAccountId = workspaceCreationAccountId(
@@ -147,7 +144,8 @@ export function SwitcherBlock() {
     return (
       <>
         <WorkspaceMenu
-          workspaces={orgWorkspaces}
+          orgs={orgs}
+          workspaces={context.workspaces}
           activeWorkspaceId={rail.workspaceId}
           canCreate={createAccountId !== null}
           onSelect={rail.openWorkspace}
@@ -189,7 +187,8 @@ export function SwitcherBlock() {
       />
 
       <WorkspaceMenu
-        workspaces={orgWorkspaces}
+        orgs={orgs}
+        workspaces={context.workspaces}
         activeWorkspaceId={rail.workspaceId}
         canCreate={createAccountId !== null}
         onSelect={rail.openWorkspace}
@@ -348,6 +347,7 @@ export function WorkspaceSwitcherTrigger(props: {
 }
 
 function WorkspaceMenu(props: {
+  orgs: OrgOption[];
   workspaces: Workspace[];
   activeWorkspaceId: string;
   canCreate: boolean;
@@ -362,32 +362,46 @@ function WorkspaceMenu(props: {
   children: ReactNode;
 }) {
   const rail = useRail();
+  const grouped = props.orgs.map((org) => ({
+    org,
+    workspaces: workspacesInOrg(props.workspaces, org.accountId),
+  }));
+  const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
   return (
     <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>
-        </TooltipTrigger>
-        {rail.collapsed ? <TooltipContent side="right">Switch workspace</TooltipContent> : null}
-      </Tooltip>
+      {rail.collapsed ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+          <TooltipContent side="right">Switch workspace</TooltipContent>
+        </Tooltip>
+      ) : (
+        trigger
+      )}
       <DropdownMenuContent
         align={props.align}
         className="min-w-60"
         side={rail.collapsed ? "right" : "bottom"}
       >
-        <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
-        {props.workspaces.map((workspace) => (
-          <DropdownMenuItem
-            key={workspace.id}
-            aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
-            onSelect={() => props.onSelect(workspace.id)}
-          >
-            <WorkspaceMenuItemContent
-              workspace={workspace}
-              activeWorkspaceId={props.activeWorkspaceId}
-              managedSelfContext={props.managedSelfContext}
-            />
-          </DropdownMenuItem>
+        {grouped.map(({ org, workspaces }, index) => (
+          <div key={org.accountId}>
+            {index > 0 ? <DropdownMenuSeparator /> : null}
+            <DropdownMenuLabel className="text-fg-subtle">
+              {props.orgs.length > 1 ? org.label : "Workspaces"}
+            </DropdownMenuLabel>
+            {workspaces.map((workspace) => (
+              <DropdownMenuItem
+                key={workspace.id}
+                aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
+                onSelect={() => props.onSelect(workspace.id)}
+              >
+                <WorkspaceMenuItemContent
+                  workspace={workspace}
+                  activeWorkspaceId={props.activeWorkspaceId}
+                  managedSelfContext={props.managedSelfContext}
+                />
+              </DropdownMenuItem>
+            ))}
+          </div>
         ))}
         <DropdownMenuSeparator />
         {props.activeWorkspace && props.canControl ? (
