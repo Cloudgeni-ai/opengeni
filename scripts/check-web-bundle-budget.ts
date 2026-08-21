@@ -69,13 +69,18 @@ const budgets = {
   // next full-KiB envelope is 2,030 KiB (2,078,720 bytes). The 1,450 KiB
   // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
   // graph and per-file cap, stay fixed.
+  // Foreground read reconciliation now follows each active chat's durable
+  // event frontier instead of acknowledging only its first render. The exact
+  // configured production graph measures 2,082,545 raw bytes on macOS/arm64;
+  // its next whole-KiB envelope is 2,034 KiB. Every gzip, file, lazy, initial,
+  // and CSS cap remains unchanged.
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2033 * kib,
+  directSessionRaw: 2034 * kib,
   directSessionGzip: 566 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

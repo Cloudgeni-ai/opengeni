@@ -89,6 +89,7 @@ import {
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
+import { sessionReadProjectionKey, shouldAcknowledgeActiveSession } from "@/lib/session-attention";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
@@ -255,46 +256,115 @@ export function SessionRoute({
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const {
+    client,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
-  const acknowledgedSessionRef = useRef<string | null>(null);
+  const acknowledgedProjectionRef = useRef<string | null>(null);
+  const [foreground, setForeground] = useState(() => ({
+    documentVisible: document.visibilityState === "visible",
+    windowFocused: document.hasFocus(),
+  }));
+  const latestEventSequence = useMemo(
+    () => events.reduce((latest, event) => Math.max(latest, event.sequence), 0),
+    [events],
+  );
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
-    if (!session?.unread || acknowledgedSessionRef.current === session.id) return;
-    acknowledgedSessionRef.current = session.id;
-    void context.client
-      .updateSessionAttention(workspaceId, session.id, {
-        unread: false,
-        expectedVersion: session.attentionVersion ?? 0,
-      })
-      .then((updated) => {
-        setContextSession((current) =>
-          current?.id === updated.id
-            ? {
-                ...current,
-                unread: updated.unread,
-                activelyWorking: updated.activelyWorking,
-                attentionVersion: updated.attentionVersion,
-              }
-            : current,
-        );
-      })
-      .catch(() => {
-        // A later route load or the normal rail refresh can retry. Reading a
-        // chat should never interrupt the user with an acknowledgement error.
-        if (acknowledgedSessionRef.current === session.id) {
-          acknowledgedSessionRef.current = null;
-        }
+    const reconcileForeground = () => {
+      setForeground({
+        documentVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
       });
+    };
+    window.addEventListener("focus", reconcileForeground);
+    window.addEventListener("blur", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileForeground);
+      window.removeEventListener("blur", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
+  }, []);
+  useEffect(() => {
+    const projectionKey = session
+      ? sessionReadProjectionKey(session.id, latestEventSequence)
+      : null;
+    const unreadProjection = session
+      ? {
+          ...session,
+          unread:
+            (session.unread || latestEventSequence > 0) &&
+            projectionKey !== acknowledgedProjectionRef.current,
+        }
+      : null;
+    if (
+      !session ||
+      !projectionKey ||
+      !shouldAcknowledgeActiveSession({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: unreadProjection,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+    const targetSession = session;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) return;
+      acknowledgedProjectionRef.current = projectionKey;
+      void client
+        .updateSessionAttention(workspaceId, targetSession.id, {
+          unread: false,
+        })
+        .then(async (updated) => {
+          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          setContextSession((current) =>
+            current?.id === updated.id
+              ? {
+                  ...current,
+                  unread: updated.unread,
+                  activelyWorking: updated.activelyWorking,
+                  attentionVersion: updated.attentionVersion,
+                }
+              : current,
+          );
+          await refreshSession();
+        })
+        .catch(() => {
+          // A foreground/focus transition or the next durable event can retry.
+          // Reading a chat should never interrupt the user with an error.
+          if (
+            !cancelled &&
+            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+            acknowledgedProjectionRef.current === projectionKey
+          ) {
+            acknowledgedProjectionRef.current = null;
+          }
+        });
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [
-    context.client,
-    session?.attentionVersion,
-    session?.id,
-    session?.unread,
+    captureWorkspaceInvocation,
+    client,
+    foreground,
+    latestEventSequence,
+    ownsWorkspaceInvocation,
+    refreshSession,
+    session,
+    sessionId,
     setContextSession,
     workspaceId,
   ]);
