@@ -445,9 +445,9 @@ These routes require a direct managed-human cookie session; API keys and
 delegated bearer requests are rejected. Provider email delivery remains a
 separate integration.
 
-### Pre-registration invitations and signup convergence (0313)
+### Pre-registration invitations and signup convergence (0314)
 
-Migration `0313_unregistered_organization_invitations.sql` lets an owner or
+Migration `0314_unregistered_organization_invitations.sql` lets an owner or
 administrator record an invitation before its target has an OpenGeni login.
 The durable row keeps the normalized email, optional display name, role, and a
 bounded set of initial shared-workspace ids, while `target_subject_id` stays
@@ -478,7 +478,7 @@ and acceptance bind through the same database-attested verified-email seam.
 accept an invitation without applying its initial workspace grants and can run
 fallback provisioning before verified-email convergence. Stop every API,
 control worker, and turn worker; provide the exact old/new application database
-role list to the migrator; apply 0313; and never restart a pre-0313 image.
+role list to the migrator; apply 0314; and never restart a pre-0314 image.
 
 The Better Auth create hook no longer provisions access before required email
 verification. Email verification and later canonical managed-cookie access
@@ -994,7 +994,7 @@ The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
 described above is also active. Pre-registration invitation storage, verified
-email binding, and direct invited-user convergence are active through 0313.
+email binding, and direct invited-user convergence are active through 0314.
 Provider email delivery and automatic scheduling of the operator command remain
 deferred.
 

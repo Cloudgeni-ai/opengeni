@@ -9,7 +9,7 @@ const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
 const DEFAULT_APPLICATION_DATABASE_ROLE = "opengeni_app";
 const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_constraints.sql";
 const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resource_attachments.sql";
-const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0313_unregistered_organization_invitations.sql";
+const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;

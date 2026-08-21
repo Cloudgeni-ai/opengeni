@@ -149,7 +149,7 @@ describe("release schema contract", () => {
       "0311_company_scope_and_private_session_create.sql",
       "0312_quiescent_session_tree_deletion.sql",
       "0313_private_child_session_authority.sql",
-      "0313_unregistered_organization_invitations.sql",
+      "0314_unregistered_organization_invitations.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -166,7 +166,7 @@ describe("release schema contract", () => {
     }
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0313_unregistered_organization_invitations.sql",
+        (migration) => migration.path === "0314_unregistered_organization_invitations.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
     expect(

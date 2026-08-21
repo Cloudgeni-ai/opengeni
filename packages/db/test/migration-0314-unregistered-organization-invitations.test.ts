@@ -20,8 +20,8 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0313-unregistered-invitations");
-  if (!shared && requireRealDatabase) throw new Error("migration 0313 requires PostgreSQL");
+  shared = await acquireSharedTestDatabase("migration-0314-unregistered-invitations");
+  if (!shared && requireRealDatabase) throw new Error("migration 0314 requires PostgreSQL");
   if (shared) client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
 
@@ -63,7 +63,7 @@ async function waitForAdvisoryWaiterHeldBy(holderPid: number): Promise<void> {
   throw new Error("verified convergence did not park on the invitation email fence");
 }
 
-describe("migration 0313 unregistered organization invitations", () => {
+describe("migration 0314 unregistered organization invitations", () => {
   test("binds only a verified email and joins without provisioning a second organization", async () => {
     if (!shared || !client) return;
     const ownerId = `invite-owner-${crypto.randomUUID()}`;
@@ -91,7 +91,7 @@ describe("migration 0313 unregistered organization invitations", () => {
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (
-        ${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0313-test'
+        ${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0314-test'
       ) on conflict (account_id) do nothing`;
 
     const revokedTargetUserId = crypto.randomUUID();
@@ -138,7 +138,7 @@ describe("migration 0313 unregistered organization invitations", () => {
     await shared.admin`
       insert into workspaces (id, account_id, name, external_source, external_id)
       values (
-        ${initialWorkspaceId}, ${organizationId}, 'Product', 'migration-0313',
+        ${initialWorkspaceId}, ${organizationId}, 'Product', 'migration-0314',
         ${crypto.randomUUID()}
       )`;
 
@@ -398,7 +398,7 @@ describe("migration 0313 unregistered organization invitations", () => {
 
   test("declares bounded fields, exact verified binding and runtime-only capabilities", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0313_unregistered_organization_invitations.sql", import.meta.url),
+      new URL("../drizzle/0314_unregistered_organization_invitations.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: maintenance");
     expect(source).toContain("requires an explicit application database role list");

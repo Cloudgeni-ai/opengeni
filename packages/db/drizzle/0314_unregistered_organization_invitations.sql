@@ -3,7 +3,7 @@
 -- OpenGeni login. A verified Better Auth email binds the invitation to the
 -- canonical user subject before the existing acceptance lifecycle runs.
 -- This is a one-way application protocol cutover: stop every API, control
--- worker, and turn worker before applying it, and never restart a pre-0313
+-- worker, and turn worker before applying it, and never restart a pre-0314
 -- image. Old callers can accept without initial workspace grants and can
 -- provision a fallback organization before verified invitation convergence.
 
@@ -19,14 +19,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0313 organization invitation activation requires an explicit application database role list'
+      '0314 organization invitation activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0313 organization invitation activation received a malformed application database role list'
+      '0314 organization invitation activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -45,7 +45,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0313 organization invitation activation received an invalid application database role list'
+      '0314 organization invitation activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -57,7 +57,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0313 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
+      '0314 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -84,7 +84,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0313 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
+      '0314 organization invitation activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
