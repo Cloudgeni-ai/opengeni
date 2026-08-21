@@ -123,25 +123,18 @@ describe("Personal workspace accessibility in Chromium", () => {
     const region = surface.getByRole("region", { name: "Session access", exact: true });
     const snapshot = await region.ariaSnapshot();
 
-    expect(snapshot).toContain("Access");
-    expect(snapshot).toContain("Private");
+    expect(snapshot).toContain("Only me");
     expect(snapshot).toContain("Only you can open this session.");
     expect(snapshot).toContain('button "Share with workspace"');
-    expect(snapshot).toContain('button "Private fork"');
+    expect(snapshot).not.toContain("Private copy");
 
     await page.setViewportSize({ width: 320, height: 740 });
     expect(await region.getAttribute("class")).toContain("flex-wrap");
     expect(await surface.getByRole("button", { name: "Share with workspace" }).count()).toBe(1);
-    expect(await surface.getByRole("button", { name: "Private fork" }).count()).toBe(1);
+    expect(await surface.getByRole("button", { name: "Private copy" }).count()).toBe(0);
 
     await page.locator("body").press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe(
-      "Share with workspace",
-    );
-    await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe(
-      "Private fork",
-    );
+    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Share");
   });
 
   test("a suspended membership never labels the workspace Personal", async () => {

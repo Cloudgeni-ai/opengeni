@@ -17,8 +17,8 @@ const MODE_OPTIONS = [
   },
   {
     value: "always" as const,
-    label: "This workspace",
-    description: "Keep standing authority for work you start in this workspace.",
+    label: "Remember here",
+    description: "Make it available for future work you start in this workspace.",
   },
 ];
 
@@ -54,7 +54,7 @@ export function PersonalResourceAttachmentControl(props: {
       <legend className="px-1 text-xs font-semibold text-fg">
         <span className="inline-flex items-center gap-1.5">
           <KeyRoundIcon className="size-3.5 text-fg-subtle" aria-hidden />
-          Personal resources
+          Your resource access
         </span>
       </legend>
       {controller.loading ? (
@@ -64,8 +64,9 @@ export function PersonalResourceAttachmentControl(props: {
       ) : controller.selected.resourceCount > 0 ? (
         <>
           <p className="text-xs text-fg-muted">
-            {names.join(" · ")} remain yours. Choose how long OpenGeni may use them for this fixed
-            session setup.
+            {names.join(" · ")} {controller.selected.resourceCount === 1 ? "belongs" : "belong"} to
+            you. Choose how long OpenGeni may use{" "}
+            {controller.selected.resourceCount === 1 ? "it" : "them"}.
           </p>
           <div className="mt-3 grid gap-2 sm:grid-cols-3" role="radiogroup">
             {MODE_OPTIONS.map((option) => (
@@ -123,8 +124,8 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="mt-2 flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            Personal-resource authority could not be verified. Retry or choose a non-personal
-            resource.
+            We couldn’t check access to the selected Variable Set or Rig. Try again, or choose a
+            different resource.
           </span>
           <Button
             type="button"

@@ -69,6 +69,7 @@ export function usePersonalResourceAttachment(input: {
   onReloadSession?: (() => Promise<void>) | undefined;
 }): PersonalResourceAttachmentController {
   const onReloadSession = input.onReloadSession;
+  const hasFixedResources = input.fixed.variableSetId !== null || input.fixed.rigId !== null;
   const resolvedScope =
     input.enabled === false
       ? null
@@ -271,12 +272,16 @@ export function usePersonalResourceAttachment(input: {
 
   return {
     eligible: scope !== null,
-    loading,
-    refreshing,
-    error: effectiveError,
+    // Catalog discovery populates the resource pickers in the background. It
+    // becomes submission UI only after the user has actually selected a fixed
+    // personal resource; an unavailable optional catalog must not turn an
+    // ordinary new-session composer into an error state.
+    loading: hasFixedResources && loading,
+    refreshing: hasFixedResources && refreshing,
+    error: hasFixedResources ? effectiveError : null,
     notice,
     sourceLost,
-    truncated: catalog?.truncated ?? false,
+    truncated: hasFixedResources && (catalog?.truncated ?? false),
     catalog,
     selected,
     mode,
