@@ -16,9 +16,7 @@ describe("provider-neutral operational instructions", () => {
   });
 
   test("teaches OpenGeni sandbox file links with optional line numbers", () => {
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "[app.py](sandbox:/workspace/app.py:12)",
-    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
     );
