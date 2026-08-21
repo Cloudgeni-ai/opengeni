@@ -523,7 +523,22 @@ function sessionListQuery(options: {
   };
 }
 
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+/**
+ * Web-standard fetch response accepted by the SDK.
+ *
+ * Bun augments the global `Response` type with the non-standard `textStream()`
+ * method. Fetch implementations such as Expo implement the web Response
+ * contract without that runtime-specific extension, so it must not be part of
+ * the adapter boundary.
+ */
+export type FetchResponse = Omit<Response, "clone" | "textStream"> & {
+  clone(): FetchResponse;
+};
+
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<FetchResponse>;
 
 export type WorkspaceControlEventPage = {
   events: WorkspaceControlEvent[];
@@ -653,7 +668,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
         method: "POST",
@@ -752,7 +767,7 @@ export class OpenGeniClient {
     input: UploadTranscriptionRecordingChunkInput,
   ): Promise<UploadTranscriptionRecordingChunkResponse> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(
         this.url(
@@ -6526,7 +6541,7 @@ export class OpenGeniClient {
     options: OpenGeniRequestOptions = {},
   ): Promise<T> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
@@ -6565,9 +6580,9 @@ export class OpenGeniClient {
     path: string,
     query: Record<string, string> = {},
     options: OpenGeniRequestOptions = {},
-  ): Promise<Response> {
+  ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
@@ -6591,7 +6606,7 @@ export class OpenGeniClient {
   /** Like `requestJson` for endpoints that respond with no body (204). */
   private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
@@ -6615,7 +6630,7 @@ export class OpenGeniClient {
   }
 }
 
-function assertApiContractResponse(response: Response): void {
+function assertApiContractResponse(response: FetchResponse): void {
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
@@ -6745,7 +6760,7 @@ type ApiErrorRequestContext = {
 };
 
 async function apiErrorFromResponse(
-  response: Response,
+  response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<OpenGeniApiError> {
   return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
@@ -6755,7 +6770,7 @@ async function apiErrorFromResponse(
 }
 
 async function assertJsonResponse(
-  response: Response,
+  response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<void> {
   if (isJsonContentType(response.headers.get("content-type"))) return;
@@ -6769,7 +6784,7 @@ async function assertJsonResponse(
   });
 }
 
-async function readBoundedJsonErrorBody(response: Response): Promise<string> {
+async function readBoundedJsonErrorBody(response: FetchResponse): Promise<string> {
   if (!isJsonContentType(response.headers.get("content-type"))) {
     await cancelResponseBody(response, "discarding API error body");
     return "";
@@ -6823,7 +6838,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function cancelResponseBody(response: Response, reason: string): Promise<void> {
+async function cancelResponseBody(response: FetchResponse, reason: string): Promise<void> {
   await response.body?.cancel(reason).catch(() => undefined);
 }
 
@@ -6892,7 +6907,7 @@ function parseBoundedContentLength(value: string | null): number | null {
 }
 
 async function readBoundedResponseBytes(
-  response: Response,
+  response: FetchResponse,
   maxBytes: number,
   expectedBytes: number | null,
 ): Promise<Uint8Array> {
