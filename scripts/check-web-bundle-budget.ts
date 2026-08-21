@@ -71,6 +71,9 @@ const budgets = {
   // client, measuring 1,500,166 initial raw bytes and 2,083,879 direct-session
   // raw bytes on macOS/arm64. Advance only those raw envelopes by one KiB;
   // every compressed, file-count, lazy-chunk, and CSS cap remains unchanged.
+  // The rail workspace switcher lists every accessible workspace instead of
+  // the current org only. Linux/x64 production CI measured the direct-session
+  // gzip graph at 579,618 bytes, 34 over the 566 KiB envelope.
   initialRaw: 1466 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
@@ -86,7 +89,7 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   directSessionRaw: 2036 * kib,
-  directSessionGzip: 566 * kib,
+  directSessionGzip: 567 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
