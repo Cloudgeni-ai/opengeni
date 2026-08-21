@@ -4,6 +4,7 @@ import {
   GENERATED_IMAGE_MAX_BYTES,
   GeneratedImageReceiptSchema,
   retainedGeneratedImageReferenceFromFile,
+  sandboxShellPath,
   type GeneratedImageReceipt,
 } from "@opengeni/contracts";
 import {
@@ -699,7 +700,7 @@ function generatedImageModelFact(receipt: GeneratedImageReceipt): string {
   return [
     "Generated image artifact:",
     `Artifact ID: ${receipt.artifact.artifactId}`,
-    `Sandbox path: ${receipt.sandboxPath}`,
+    `Sandbox path: ${sandboxShellPath(receipt.sandboxPath)}`,
     `Format: ${receipt.artifact.contentType}`,
     `Dimensions: ${receipt.artifact.dimensions?.width ?? "?"}x${receipt.artifact.dimensions?.height ?? "?"}`,
   ].join("\n");

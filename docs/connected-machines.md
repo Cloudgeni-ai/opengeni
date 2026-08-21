@@ -44,7 +44,11 @@ The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
-worktrees under that path as it needs them).
+worktrees under that path as it needs them). Structured cwd/fs ops rewrite the
+virtual `/workspace` frame via `toMachinePath`. Model-facing shell paths are
+cwd-relative (`.opengeni/files/...`); durable receipts and `sandbox:` UI links
+keep `/workspace/...`. `execCommand` returns the SDK banner with combined
+stdout/stderr and exit code.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or

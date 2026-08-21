@@ -4309,6 +4309,25 @@ export function defaultRepositoryMountPath(
   );
 }
 
+/** Virtual SDK/UI workspace root. Provisioned boxes mount this path; Connected Machines do not. */
+export const VIRTUAL_WORKSPACE_ROOT = "/workspace" as const;
+
+/**
+ * Cwd-relative path for shell/exec prompts. Durable receipts and `sandbox:` UI
+ * links keep the virtual `/workspace/...` form. Every backend already starts the
+ * shell in that frame (provisioned boxes at `/workspace`, Connected Machines at
+ * `sessions.working_dir`), so advertising the absolute virtual root ENOENTs on a
+ * machine and is redundant on a box.
+ */
+export function sandboxShellPath(virtualPath: string): string {
+  if (virtualPath === VIRTUAL_WORKSPACE_ROOT) return ".";
+  if (virtualPath.startsWith(`${VIRTUAL_WORKSPACE_ROOT}/`)) {
+    const relative = virtualPath.slice(VIRTUAL_WORKSPACE_ROOT.length + 1);
+    return relative.length > 0 ? relative : ".";
+  }
+  return virtualPath;
+}
+
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
 export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
 
