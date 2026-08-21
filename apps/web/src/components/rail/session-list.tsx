@@ -101,6 +101,12 @@ import {
   subscribeToSessionPinChanges,
 } from "@/lib/session-pins";
 import {
+  applySessionAttentionProjection,
+  latestSessionAttentionProjection,
+  subscribeToSessionAttentionChanges,
+  type SessionAttentionProjection,
+} from "@/lib/session-attention";
+import {
   buildPinnedRailSections,
   channelRailSections,
   filterSessionsForBrowse,
@@ -337,6 +343,9 @@ export function SessionList() {
   const [archiveTransitions, setArchiveTransitions] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [attentionOverrides, setAttentionOverrides] = useState<
+    ReadonlyMap<string, SessionAttentionProjection>
+  >(() => new Map());
   const archiving = useRef(new Set<string>());
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
@@ -393,8 +402,26 @@ export function SessionList() {
           : override.session,
       );
     }
+    for (const [id, override] of attentionOverrides) {
+      const current = source.get(id);
+      if (current) source.set(id, applySessionAttentionProjection(current, override));
+    }
     return [...source.values()];
-  }, [pinOverrides, serverSessions]);
+  }, [attentionOverrides, pinOverrides, serverSessions]);
+
+  useEffect(() => {
+    setAttentionOverrides(new Map());
+    return subscribeToSessionAttentionChanges((projection) => {
+      setAttentionOverrides((current) => {
+        const latest = latestSessionAttentionProjection(current.get(projection.id), projection);
+        if (latest !== projection) return current;
+        const next = new Map(current);
+        next.set(projection.id, latest);
+        if (next.size > 64) next.delete(next.keys().next().value!);
+        return next;
+      });
+    });
+  }, [rail.workspaceId]);
   const creatorLabels = useMemo(() => sessionCreatorLabelMap(allSessions), [allSessions]);
   const creatorOptions = useMemo(() => {
     return [...creatorLabels].map(([value, label]) => ({ value, label }));

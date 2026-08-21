@@ -88,8 +88,13 @@ import {
   runnableLatencyModesForModel,
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
+import {
+  applySessionAttentionProjection,
+  notifySessionAttentionChanged,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
+} from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
-import { sessionReadProjectionKey, shouldAcknowledgeActiveSession } from "@/lib/session-attention";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
@@ -173,6 +178,8 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
+    loadingLatest,
+    lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -268,10 +275,7 @@ export function SessionRoute({
     documentVisible: document.visibilityState === "visible",
     windowFocused: document.hasFocus(),
   }));
-  const latestEventSequence = useMemo(
-    () => events.reduce((latest, event) => Math.max(latest, event.sequence), 0),
-    [events],
-  );
+  const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
@@ -293,16 +297,18 @@ export function SessionRoute({
   }, []);
   useEffect(() => {
     const projectionKey = session
-      ? sessionReadProjectionKey(session.id, latestEventSequence)
+      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
       : null;
     const unreadProjection = session
       ? {
           ...session,
           unread:
-            (session.unread || latestEventSequence > 0) &&
+            (session.unread || renderedThroughSequence > session.lastSequence) &&
             projectionKey !== acknowledgedProjectionRef.current,
         }
       : null;
+    const liveTipLoaded =
+      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
     if (
       !session ||
       !projectionKey ||
@@ -310,6 +316,7 @@ export function SessionRoute({
         activeSessionId: sessionId,
         workspaceId,
         session: unreadProjection,
+        liveTipLoaded,
         ...foreground,
       })
     ) {
@@ -325,21 +332,19 @@ export function SessionRoute({
       void client
         .updateSessionAttention(workspaceId, targetSession.id, {
           unread: false,
-          acknowledgedThroughSequence: latestEventSequence,
+          acknowledgedThroughSequence: renderedThroughSequence,
         })
-        .then(async (updated) => {
+        .then((updated) => {
           if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          // The rail owns separately polled page objects. Keep this exact
+          // frontier result there so a stale list poll cannot resurrect or
+          // prematurely clear the unread dot.
+          notifySessionAttentionChanged(updated);
           setContextSession((current) =>
             current?.id === updated.id
-              ? {
-                  ...current,
-                  unread: updated.unread,
-                  activelyWorking: updated.activelyWorking,
-                  attentionVersion: updated.attentionVersion,
-                }
+              ? applySessionAttentionProjection(current, updated)
               : current,
           );
-          await refreshSession();
         })
         .catch(() => {
           // A foreground/focus transition or the next durable event can retry.
@@ -350,6 +355,7 @@ export function SessionRoute({
             acknowledgedProjectionRef.current === projectionKey
           ) {
             acknowledgedProjectionRef.current = null;
+            setAttentionRetryRevision((revision) => revision + 1);
           }
         });
     }, 750);
@@ -358,12 +364,17 @@ export function SessionRoute({
       window.clearTimeout(timer);
     };
   }, [
+    attentionRetryRevision,
     captureWorkspaceInvocation,
     client,
     foreground,
-    latestEventSequence,
+    hasNewer,
+    initialLoading,
+    loadingLatest,
+    loadingNewer,
+    loadingOldest,
     ownsWorkspaceInvocation,
-    refreshSession,
+    renderedThroughSequence,
     session,
     sessionId,
     setContextSession,
