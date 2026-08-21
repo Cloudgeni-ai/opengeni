@@ -12,6 +12,17 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("`final` channel");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("skill://");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("orchestrator");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("/abs/path");
+  });
+
+  test("teaches OpenGeni sandbox file links with optional line numbers", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "[app.py](sandbox:/workspace/app.py:12)",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 
   test("is non-configurable and precedes every workspace persona", () => {
