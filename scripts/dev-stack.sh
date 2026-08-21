@@ -4,6 +4,17 @@
 # Postgres/NATS/Temporal/Garage or race on :8000/:3000.
 set -euo pipefail
 
+case "${1:-}" in
+--opengeni-dev-stack-token=*)
+  opengeni_dev_stack_token="${1#--opengeni-dev-stack-token=}"
+  shift
+  ;;
+*)
+  opengeni_dev_stack_token="$(bun -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')"
+  exec bash "$0" "--opengeni-dev-stack-token=${opengeni_dev_stack_token}" "$@"
+  ;;
+esac
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if [ ! -f .env ]; then
@@ -856,7 +867,7 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
     fi
     echo "Exact-head sandbox artifact runtime unavailable; standalone local Office file operations are disabled." >&2
   fi
-  OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"
+  OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}-${COMPOSE_PROJECT_NAME}"
   export OPENGENI_DOCKER_IMAGE OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED
 fi
 
@@ -957,12 +968,14 @@ if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
       --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
 if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
-  docker build \
-    -f docker/sandbox.Dockerfile \
-    --build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}" \
-    --build-arg "OPENGENI_SOURCE_SHA=$(git rev-parse HEAD)" \
-    -t "${OPENGENI_DOCKER_IMAGE}" \
-    .
+  bun scripts/prepare-development-sandbox-image.ts \
+    --repository-root "$(pwd)" \
+    --image "${OPENGENI_DOCKER_IMAGE}" \
+    --runtime-bundle "${sandbox_runtime_bundle}" \
+    --source-sha "$(git rev-parse HEAD)" \
+    --lease-id "${COMPOSE_PROJECT_NAME}" \
+    --lease-pid "$$" \
+    --lease-token "${opengeni_dev_stack_token}"
 else
   echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi

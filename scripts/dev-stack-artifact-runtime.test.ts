@@ -4,6 +4,10 @@ const scriptPath = new URL("./dev-stack.sh", import.meta.url);
 const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
 const envExamplePath = new URL("../.env.example", import.meta.url);
 const relaySupervisorPath = new URL("./run-development-relay.sh", import.meta.url);
+const sandboxImagePreparationPath = new URL(
+  "./prepare-development-sandbox-image.ts",
+  import.meta.url,
+);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -237,18 +241,34 @@ describe("local artifact runtime stack contract", () => {
   });
 
   test("admits only an exact-head runtime in a source-tagged local image", async () => {
-    const source = await Bun.file(scriptPath).text();
+    const [source, imagePreparation] = await Promise.all([
+      Bun.file(scriptPath).text(),
+      Bun.file(sandboxImagePreparationPath).text(),
+    ]);
     expect(source).toContain("bun scripts/resolve-development-sandbox-runtime.ts");
     expect(source).toContain('sandbox_source_tag="$(git rev-parse --short=12 HEAD)"');
     expect(source).toContain(
-      'OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"',
+      'OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}-${COMPOSE_PROJECT_NAME}"',
     );
     expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true");
     expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false");
     expect(source).toContain("OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME");
-    expect(source).toContain(
-      '--build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}"',
-    );
+    expect(source).toContain("bun scripts/prepare-development-sandbox-image.ts");
+    expect(source).toContain('--runtime-bundle "${sandbox_runtime_bundle}"');
+    expect(source).toContain('--lease-id "${COMPOSE_PROJECT_NAME}"');
+    expect(source).toContain('--lease-pid "$$"');
+    expect(source).toContain('--lease-token "${opengeni_dev_stack_token}"');
+    expect(imagePreparation).toContain('"buildx"');
+    expect(imagePreparation).toContain('"build"');
+    expect(imagePreparation).toContain('"--bootstrap"');
+    expect(imagePreparation).toContain('"--max-used-space"');
+    expect(imagePreparation).toContain("planDevelopmentSandboxImageRetention");
+    expect(imagePreparation).toContain("withMaintenanceLock");
+    expect(imagePreparation).toContain("loadFlockLibrary");
+    expect(imagePreparation).toContain("activeLeasedImages");
+    expect(imagePreparation).toContain('const DEFAULT_BUILDER = "opengeni-development-sandbox"');
+    expect(imagePreparation).not.toContain("OPENGENI_DEV_SANDBOX_BUILDER");
+    expect(imagePreparation).not.toContain("Reusing existing local sandbox image");
     expect(source).not.toContain("-t opengeni-sandbox:local .");
   });
 
