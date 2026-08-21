@@ -30,6 +30,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
+const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -89,6 +90,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
@@ -258,6 +260,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
