@@ -414,7 +414,14 @@ async function buildCurrentHostKernel(
     const targetDirectory = join(temporaryAssetRoot, "native", target);
     await mkdir(targetDirectory, { recursive: true });
     const nativeOutput = join(targetDirectory, "opengeni_artifact_kernel.node");
-    await copyFile(join(napiRoot, "target", "release", nativeLibraryName()), nativeOutput);
+    // Cargo honours CARGO_TARGET_DIR (relative to its working directory); the
+    // dev stack may point it at a shared per-user cache so parallel worktrees
+    // reuse compiled dependencies instead of each owning a full target tree.
+    const cargoTargetDirectory = resolve(
+      napiRoot,
+      process.env.CARGO_TARGET_DIR?.trim() || "target",
+    );
+    await copyFile(join(cargoTargetDirectory, "release", nativeLibraryName()), nativeOutput);
     await run(["bun", "run", join(napiRoot, "scripts", "smoke.mjs")], repositoryRoot, {
       OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH: nativeOutput,
     });

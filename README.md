@@ -209,7 +209,7 @@ OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 
 The public endpoint is embedded in browser-facing signed URLs. The internal endpoint is used by API and worker storage requests, while the sandbox endpoint is supplied to Docker agent containers. The two private endpoints may share the same address when those processes use one Docker network. Presigned URLs generated for one host are not safely interchangeable with another because the host is part of the S3 signature.
 
-`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`.
+`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`. `bun run dev:down` stops only that worktree's containers; `bun run dev:clean` also removes its data volumes and sandbox image tags.
 
 For production deployments, use the native provider object store instead of running Garage or MinIO manually:
 

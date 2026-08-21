@@ -21,6 +21,8 @@
   "scripts": {
     "dev": "bash scripts/dev-stack.sh",
     "dev:stack": "bash scripts/dev-stack.sh",
+    "dev:down": "bash scripts/dev-stack-down.sh",
+    "dev:clean": "bash scripts/dev-stack-down.sh --clean",
     "dev:api": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd apps/api && bun run dev",
     "dev:worker": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd apps/worker && bun run dev",
     "dev:worker:control": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; export OPENGENI_WORKER_ROLE=control; cd apps/worker && bun run dev",
