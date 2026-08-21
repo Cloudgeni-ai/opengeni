@@ -130,6 +130,99 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("acknowledges later output without leaving and reopening the active chat", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Unread active chat",
+      );
+      const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
+      let acknowledgementAttempts = 0;
+      await page.route(`**${attentionPath}`, async (route) => {
+        acknowledgementAttempts += 1;
+        if (acknowledgementAttempts === 1) {
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ message: "transient acknowledgement failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      const firstAcknowledgement = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          new URL(response.url()).pathname === attentionPath &&
+          response.status() === 200,
+        { timeout: 10_000 },
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const firstAcknowledgementResponse = await firstAcknowledgement;
+      const firstReadThrough = Number(
+        firstAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence,
+      );
+      expect(acknowledgementAttempts).toBeGreaterThanOrEqual(2);
+      expect(Number.isSafeInteger(firstReadThrough)).toBe(true);
+      // Let every initial tail/load projection settle so the next mutation can
+      // only be caused by the event appended below, not by a second initial
+      // render of the same chat.
+      await page.waitForTimeout(1_500);
+
+      const laterAcknowledgement = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          new URL(response.url()).pathname === attentionPath,
+        { timeout: 10_000 },
+      );
+      const sendResponse = await page.evaluate(
+        async ({ browserApiBaseUrl, targetWorkspaceId, targetSessionId }) => {
+          const response = await fetch(
+            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/events`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                type: "user.message",
+                clientEventId: crypto.randomUUID(),
+                payload: { text: "Later output arrived while the chat stayed open" },
+              }),
+            },
+          );
+          return { status: response.status, body: await response.text() };
+        },
+        {
+          browserApiBaseUrl: apiBaseUrl,
+          targetWorkspaceId: workspaceId,
+          targetSessionId: target.id,
+        },
+      );
+      expect(sendResponse).toEqual({ status: 202, body: expect.any(String) });
+      const laterAcknowledgementResponse = await laterAcknowledgement;
+      expect(laterAcknowledgementResponse.status()).toBe(200);
+      expect(
+        Number(laterAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence),
+      ).toBeGreaterThan(firstReadThrough);
+      await page
+        .locator(`a[data-session-row="${target.id}"]`)
+        .waitFor({ state: "visible", timeout: 10_000 });
+      expect(
+        await page.locator(`a[data-session-row="${target.id}"]`).getAttribute("aria-label"),
+      ).not.toContain("unread");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("pins through UI, reconciles another device, and stays above newer paged/search rows", async () => {
     const deviceA = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },

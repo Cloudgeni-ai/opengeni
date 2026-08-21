@@ -1478,30 +1478,48 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       { unread: true, activelyWorking: false, attentionVersion: 2 },
     );
 
+    // The browser rendered through sequence 3, then sequence 5 arrived before
+    // its acknowledgement request reached the API. Only the rendered frontier
+    // is consumed; the unseen newer events remain unread.
+    const partialRead = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: false,
+      acknowledgedThroughSequence: 3,
+      expectedVersion: 2,
+    });
+    expect(partialRead).toMatchObject({
+      unread: true,
+      activelyWorking: false,
+      attentionVersion: 3,
+    });
+
     const read = await setSessionAttention(db, {
       workspaceId: workspace.workspaceId,
       subjectId: subject,
       sessionId: target.id,
       unread: false,
-      expectedVersion: 2,
+      acknowledgedThroughSequence: 5,
+      expectedVersion: 3,
     });
-    expect(read).toMatchObject({ unread: false, activelyWorking: false, attentionVersion: 3 });
+    expect(read).toMatchObject({ unread: false, activelyWorking: false, attentionVersion: 4 });
 
     const active = await setSessionAttention(db, {
       workspaceId: workspace.workspaceId,
       subjectId: subject,
       sessionId: target.id,
       activelyWorking: true,
-      expectedVersion: 3,
+      expectedVersion: 4,
     });
-    expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 4 });
+    expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 5 });
 
     await executeSessionActivity(
       workspace.workspaceId,
       sql`update sessions set last_sequence = 6 where id = ${target.id}`,
     );
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
-      { unread: true, activelyWorking: true, attentionVersion: 4 },
+      { unread: true, activelyWorking: true, attentionVersion: 5 },
     );
     expect(
       await getSessionForSubject(db, workspace.workspaceId, target.id, otherSubject),

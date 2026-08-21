@@ -91,6 +91,8 @@ import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import {
   applySessionAttentionProjection,
   notifySessionAttentionChanged,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
 } from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
@@ -176,6 +178,8 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
+    loadingLatest,
+    lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -259,43 +263,124 @@ export function SessionRoute({
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const {
+    client,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
-  const acknowledgedSessionRef = useRef<string | null>(null);
+  const acknowledgedProjectionRef = useRef<string | null>(null);
+  const retriedProjectionRef = useRef<string | null>(null);
+  const [foreground, setForeground] = useState(() => ({
+    documentVisible: document.visibilityState === "visible",
+    windowFocused: document.hasFocus(),
+  }));
+  const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
-    if (!session?.unread || acknowledgedSessionRef.current === session.id) return;
-    acknowledgedSessionRef.current = session.id;
-    void context.client
-      .updateSessionAttention(workspaceId, session.id, {
-        unread: false,
-        expectedVersion: session.attentionVersion ?? 0,
-      })
-      .then((updated) => {
-        // The rail owns separately polled page objects. Keep the completed
-        // acknowledgement there so leaving this route cannot resurrect the
-        // stale dot while the next 15-second poll settles.
-        notifySessionAttentionChanged(updated);
-        setContextSession((current) =>
-          current?.id === updated.id ? applySessionAttentionProjection(current, updated) : current,
-        );
-      })
-      .catch(() => {
-        // A later route load or the normal rail refresh can retry. Reading a
-        // chat should never interrupt the user with an acknowledgement error.
-        if (acknowledgedSessionRef.current === session.id) {
-          acknowledgedSessionRef.current = null;
-        }
+    const reconcileForeground = () => {
+      setForeground({
+        documentVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
       });
+    };
+    window.addEventListener("focus", reconcileForeground);
+    window.addEventListener("blur", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileForeground);
+      window.removeEventListener("blur", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
+  }, []);
+  useEffect(() => {
+    const projectionKey = session
+      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
+      : null;
+    const unreadProjection = session
+      ? {
+          ...session,
+          unread:
+            (session.unread || renderedThroughSequence > session.lastSequence) &&
+            projectionKey !== acknowledgedProjectionRef.current,
+        }
+      : null;
+    const liveTipLoaded =
+      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
+    if (
+      !session ||
+      !projectionKey ||
+      !shouldAcknowledgeActiveSession({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: unreadProjection,
+        liveTipLoaded,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+    const targetSession = session;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) return;
+      acknowledgedProjectionRef.current = projectionKey;
+      void client
+        .updateSessionAttention(workspaceId, targetSession.id, {
+          unread: false,
+          acknowledgedThroughSequence: renderedThroughSequence,
+        })
+        .then((updated) => {
+          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          // The rail owns separately polled page objects. Keep this exact
+          // frontier result there so a stale list poll cannot resurrect or
+          // prematurely clear the unread dot.
+          notifySessionAttentionChanged(updated);
+          setContextSession((current) =>
+            current?.id === updated.id
+              ? applySessionAttentionProjection(current, updated)
+              : current,
+          );
+        })
+        .catch(() => {
+          // Retry one transient failure for this exact frontier. Keeping the
+          // receipt after the second failure prevents a permanent 4xx/5xx from
+          // becoming an unbounded request and log loop.
+          if (
+            !cancelled &&
+            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+            acknowledgedProjectionRef.current === projectionKey &&
+            retriedProjectionRef.current !== projectionKey
+          ) {
+            retriedProjectionRef.current = projectionKey;
+            acknowledgedProjectionRef.current = null;
+            setAttentionRetryRevision((revision) => revision + 1);
+          }
+        });
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [
-    context.client,
-    session?.attentionVersion,
-    session?.id,
-    session?.unread,
+    attentionRetryRevision,
+    captureWorkspaceInvocation,
+    client,
+    foreground,
+    hasNewer,
+    initialLoading,
+    loadingLatest,
+    loadingNewer,
+    loadingOldest,
+    ownsWorkspaceInvocation,
+    renderedThroughSequence,
+    session,
+    sessionId,
     setContextSession,
     workspaceId,
   ]);
