@@ -35,7 +35,10 @@ describe("managed self-context surfaces", () => {
     expect(switcherSource).toContain('<span className="sr-only"> Paused</span>');
     expect(switcherSource.match(/<PersonalWorkspaceBadge/g)?.length).toBeGreaterThanOrEqual(2);
     expect(switcherSource).toContain("workspaces={context.workspaces}");
+    expect(switcherSource).toContain("export const WorkspaceSwitcherTrigger = forwardRef");
     expect(switcherSource).toContain("{rail.collapsed ? (");
+    expect(switcherSource).toContain('<span className="inline-flex">{trigger}</span>');
+    expect(switcherSource).not.toContain("<TooltipTrigger asChild>{trigger}</TooltipTrigger>");
     expect(switcherSource).not.toContain(
       "<TooltipTrigger asChild>\n          <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>",
     );

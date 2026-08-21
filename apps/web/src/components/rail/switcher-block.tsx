@@ -14,7 +14,7 @@ import {
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { forwardRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
@@ -299,12 +299,15 @@ export function OrganizationSwitcherLine(props: {
   );
 }
 
-export function WorkspaceSwitcherTrigger(props: {
-  activeWorkspace: Workspace | null;
-  activeOrganizationLabel: string;
-  personal: boolean;
-  collapsed: boolean;
-}) {
+export const WorkspaceSwitcherTrigger = forwardRef<
+  HTMLButtonElement,
+  {
+    activeWorkspace: Workspace | null;
+    activeOrganizationLabel: string;
+    personal: boolean;
+    collapsed: boolean;
+  }
+>(function WorkspaceSwitcherTrigger(props, ref) {
   const workspaceLabel =
     props.activeWorkspace?.name ?? (props.collapsed ? "switch workspace" : "none");
   const accessibleLabel = `${props.activeOrganizationLabel}. ${
@@ -314,6 +317,7 @@ export function WorkspaceSwitcherTrigger(props: {
   if (props.collapsed) {
     return (
       <button
+        ref={ref}
         type="button"
         aria-label={accessibleLabel}
         className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
@@ -325,6 +329,7 @@ export function WorkspaceSwitcherTrigger(props: {
 
   return (
     <button
+      ref={ref}
       type="button"
       aria-label={accessibleLabel}
       className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
@@ -344,7 +349,7 @@ export function WorkspaceSwitcherTrigger(props: {
       <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
     </button>
   );
-}
+});
 
 function WorkspaceMenu(props: {
   orgs: OrgOption[];
@@ -371,7 +376,9 @@ function WorkspaceMenu(props: {
     <DropdownMenu>
       {rail.collapsed ? (
         <Tooltip>
-          <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+          <TooltipTrigger asChild>
+            <span className="inline-flex">{trigger}</span>
+          </TooltipTrigger>
           <TooltipContent side="right">Switch workspace</TooltipContent>
         </Tooltip>
       ) : (
