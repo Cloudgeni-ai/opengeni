@@ -27,7 +27,7 @@ It does **not** restate the run lifecycle, goal loop, deployment procedures, or 
 
 **The "managed agent service" framing.** OpenGeni is the _substrate_, not the agent. You bring a goal and a workspace; OpenGeni gives you:
 
-- **A session API** — create/list/get/rename sessions, Send/Steer human prompts, Pause/Resume recursive workstreams, terminally cancel session subtrees, approve tools, and read durable history.
+- **A session API** — create/list/get/rename sessions, Send/Steer human prompts, Pause/Resume recursive workstreams, terminally cancel session subtrees, permanently delete quiescent root trees, approve tools, and read durable history.
 - **An exactly-once live stream** — SSE anchored on a per-session monotonic `sequence`, with reconnect, replay, and gap backfill.
 - **Durable, recoverable runs** — runs survive worker death and provider hiccups, with no run-length limits by design.
 - **A dual compute model** — _provisioned sandboxes_ (disposable boxes OpenGeni creates, snapshots, and reaps across ten local/cloud backends) **and** _Connected Machines_ (a user's own always-on machine, enrolled via the `selfhosted` backend, as a **first-class, co-equal PRIMARY** compute target — a machine-targeted turn runs the agent **directly on the machine** with no cloud box created, leased, or billed).
@@ -958,6 +958,8 @@ The **relay** (`opengeni-relay`) is the data-plane edge that carries live pixel 
 ---
 
 ## 7. Component deep-dives
+
+Permanent session deletion is a distinct `sessions:control` boundary: only a complete root tree may be removed, every session and provider-side owner must be quiescent, tree-owned evidence cascades atomically, and independent forks or immutable workspace provenance keep their restrictive foreign keys and force the caller to archive instead.
 
 ### 7.1 `apps/api` — the public edge
 

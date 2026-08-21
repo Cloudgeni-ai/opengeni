@@ -1121,6 +1121,17 @@ export class OpenGeniClient {
     );
   }
 
+  /** Permanently delete one quiescent root session and its full descendant tree. */
+  async deleteSession(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ deletedSessionCount: number }> {
+    return await this.requestJson<{ deletedSessionCount: number }>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+    );
+  }
+
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
     return await this.singleFlightRead(path, () =>

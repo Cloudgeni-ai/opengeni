@@ -5887,6 +5887,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.pin.write",
   "session.attention.write",
   "session.archive.write",
+  "session.delete",
   "session.codex_account.write",
   "session.realtime.start",
   "session.realtime.control",

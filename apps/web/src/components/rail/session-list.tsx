@@ -9,7 +9,7 @@ import {
   OpenGeniSessionListCursorError,
   type SessionListResponse,
 } from "@opengeni/sdk";
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   CalendarClockIcon,
@@ -175,6 +175,7 @@ type UpdateAttentionFn = (
   update: { unread?: boolean; activelyWorking?: boolean },
 ) => Promise<void>;
 type ArchiveFn = (session: Session, archived: boolean) => Promise<void>;
+type RequestDeleteFn = (session: Session) => void;
 type PinOverride = { session: Session; operation: number };
 type PendingPinFocus = {
   sessionId: string;
@@ -207,6 +208,7 @@ function findSessionTreeNode(
 export function SessionList() {
   const rail = useRail();
   const context = useAppContext();
+  const navigate = useNavigate();
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
@@ -269,6 +271,7 @@ export function SessionList() {
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
+  const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
@@ -772,6 +775,33 @@ export function SessionList() {
     },
     [context, rail.workspaceId, refreshSessionPages],
   );
+  const onDeleteSession = useCallback(async (): Promise<boolean> => {
+    if (!sessionPendingDelete) return false;
+    try {
+      const result = await context.client.deleteSession(rail.workspaceId, sessionPendingDelete.id);
+      const viewingDeletedTree = context.session?.rootSessionId === sessionPendingDelete.id;
+      if (viewingDeletedTree) {
+        context.resetSessionView();
+        await navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId: rail.workspaceId },
+          replace: true,
+        });
+      }
+      await refreshSessionPages();
+      toast.success(
+        result.deletedSessionCount === 1
+          ? "Session deleted"
+          : `${result.deletedSessionCount} sessions deleted`,
+      );
+      return true;
+    } catch (deleteError) {
+      toast.error("Couldn't delete the workstream.", {
+        description: deleteError instanceof Error ? deleteError.message : String(deleteError),
+      });
+      return false;
+    }
+  }, [context, navigate, rail.workspaceId, refreshSessionPages, sessionPendingDelete]);
   const nodesById = useMemo(() => {
     const result = new Map<string, SessionTreeNode>();
     const visit = (node: SessionTreeNode): void => {
@@ -1518,6 +1548,7 @@ export function SessionList() {
                   onMoveToChannel={onMoveToChannel}
                   onUpdateAttention={onUpdateAttention}
                   onArchive={onArchive}
+                  onRequestDelete={setSessionPendingDelete}
                 />
                 {pinnedTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
@@ -1571,6 +1602,7 @@ export function SessionList() {
                   onMoveToChannel={onMoveToChannel}
                   onUpdateAttention={onUpdateAttention}
                   onArchive={onArchive}
+                  onRequestDelete={setSessionPendingDelete}
                 />
               ))
             ) : (
@@ -1593,6 +1625,7 @@ export function SessionList() {
                     onMoveToChannel={onMoveToChannel}
                     onUpdateAttention={onUpdateAttention}
                     onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
                   />
                 ) : null}
                 {forest.grouped.map((bucket) => (
@@ -1614,6 +1647,7 @@ export function SessionList() {
                     onMoveToChannel={onMoveToChannel}
                     onUpdateAttention={onUpdateAttention}
                     onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
                   />
                 ))}
               </>
@@ -1642,6 +1676,7 @@ export function SessionList() {
                 onMoveToChannel={onMoveToChannel}
                 onUpdateAttention={onUpdateAttention}
                 onArchive={onArchive}
+                onRequestDelete={setSessionPendingDelete}
               />
             ) : null}
             {continuationCursor ? (
@@ -1678,6 +1713,21 @@ export function SessionList() {
           if (!open) setChannelNameDraft("");
         }}
         onSubmit={() => void submitCreateChannel()}
+      />
+      <ConfirmDialog
+        open={sessionPendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setSessionPendingDelete(null);
+        }}
+        title={<>Delete “{sessionPendingDelete?.title?.trim() || "Untitled session"}”?</>}
+        description={
+          sessionPendingDelete?.treeStats?.totalDescendants
+            ? `This permanently deletes the complete workstream and its ${sessionPendingDelete.treeStats.totalDescendants} spawned sessions. This cannot be undone.`
+            : "This permanently deletes the session and its history. This cannot be undone."
+        }
+        confirmLabel="Delete workstream"
+        cancelAutoFocus
+        onConfirm={onDeleteSession}
       />
       <ConfirmDialog
         open={projectPendingDelete !== null}
@@ -1736,6 +1786,7 @@ function SessionGroup(props: {
   onMoveToChannel: MoveToChannelFn;
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
 }) {
   const sectionId = `session-group-${
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
@@ -1886,6 +1937,7 @@ function SessionGroup(props: {
               onMoveToChannel={props.onMoveToChannel}
               onUpdateAttention={props.onUpdateAttention}
               onArchive={props.onArchive}
+              onRequestDelete={props.onRequestDelete}
             />
           ))}
         </div>
@@ -1912,6 +1964,7 @@ function SessionTreeRow(props: {
   onMoveToChannel: MoveToChannelFn;
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
 }) {
   const { node } = props;
   const index = props.flat.indexOf(node.session);
@@ -1955,6 +2008,7 @@ function SessionTreeRow(props: {
         onMoveToChannel={props.onMoveToChannel}
         onUpdateAttention={props.onUpdateAttention}
         onArchive={props.onArchive}
+        onRequestDelete={props.onRequestDelete}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -1976,6 +2030,7 @@ function SessionTreeRow(props: {
               onMoveToChannel={props.onMoveToChannel}
               onUpdateAttention={props.onUpdateAttention}
               onArchive={props.onArchive}
+              onRequestDelete={props.onRequestDelete}
             />
           ) : null}
           {childCount > 0 && isExpanded
@@ -1998,6 +2053,7 @@ function SessionTreeRow(props: {
                   onMoveToChannel={props.onMoveToChannel}
                   onUpdateAttention={props.onUpdateAttention}
                   onArchive={props.onArchive}
+                  onRequestDelete={props.onRequestDelete}
                 />
               ))
             : null}
@@ -2079,6 +2135,7 @@ function SessionRow(props: {
   onMoveToChannel: MoveToChannelFn;
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
 }) {
   const rail = useRail();
   const title =
@@ -2233,6 +2290,7 @@ function SessionRow(props: {
             onMoveToChannel={props.onMoveToChannel}
             onUpdateAttention={props.onUpdateAttention}
             onArchive={props.onArchive}
+            onRequestDelete={props.onRequestDelete}
           />
         </div>
       </ContextMenuTrigger>
@@ -2298,6 +2356,15 @@ function SessionRow(props: {
             {props.session.archived ? "Restore" : "Archive"}
           </ContextMenuItem>
         ) : null}
+        {props.session.parentSessionId === null && props.session.archived ? (
+          <ContextMenuItem
+            className="pointer-coarse:min-h-11 text-status-failed"
+            onSelect={() => props.onRequestDelete(props.session)}
+          >
+            <Trash2Icon className="size-4" />
+            Delete workstream
+          </ContextMenuItem>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -2341,6 +2408,7 @@ function RowActionsMenu({
   onMoveToChannel,
   onUpdateAttention,
   onArchive,
+  onRequestDelete,
 }: {
   session: Session;
   onRename: () => void;
@@ -2349,6 +2417,7 @@ function RowActionsMenu({
   onMoveToChannel: MoveToChannelFn;
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
 }) {
   const pinSelection = useRef(false);
   // Filing is a root-session concept: the rail groups a whole tree by its
@@ -2439,6 +2508,16 @@ function RowActionsMenu({
           >
             <ArchiveIcon className="size-4" />
             {session.archived ? "Restore" : "Archive"}
+          </DropdownMenuItem>
+        ) : null}
+        {session.parentSessionId === null && session.archived ? (
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => onRequestDelete(session)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Trash2Icon className="size-4" />
+            Delete workstream
           </DropdownMenuItem>
         ) : null}
         {canMove ? (
