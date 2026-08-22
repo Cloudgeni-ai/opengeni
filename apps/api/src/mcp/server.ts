@@ -62,6 +62,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
+  listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listEnrollments,
   projectEffectiveControlForRelatedAccess,
@@ -207,6 +208,14 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import {
+  SESSION_WAIT_DEFAULT_SECONDS,
+  SESSION_WAIT_EVENT_TYPES,
+  SESSION_WAIT_EVENTS_PER_TARGET,
+  SESSION_WAIT_MAX_SECONDS,
+  SESSION_WAIT_MAX_TARGETS,
+  waitForSessionChanges,
+} from "./session-wait";
 import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
@@ -433,6 +442,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
   session_events: { allOf: ["sessions:read"] },
+  // Blocking wait inside a running turn: the live attempt's own session is the
+  // self target, so the tool exists only for session-scoped grants.
+  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
@@ -4092,6 +4104,85 @@ function registerWorkspaceOrchestrationTools(
             sourceTruncatedBy: dbPage.truncatedBy,
             after: after ?? 0,
             before: before ?? null,
+          }),
+        );
+      },
+    );
+
+    server.registerTool(
+      "session_wait",
+      {
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). timedOut=true means nothing changed. The whole result is byte-bounded; truncated rows remain readable through session_events. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds; loop on the tool for longer waits.`,
+        inputSchema: {
+          targets: z4
+            .array(
+              z4.object({
+                sessionId: z4.string().uuid(),
+                afterSequence: z4.number().int().nonnegative(),
+              }),
+            )
+            .min(1)
+            .max(SESSION_WAIT_MAX_TARGETS),
+          includeOwnPendingUpdates: z4
+            .boolean()
+            .optional()
+            .describe(
+              "Also return when your own session has pending machine input (default true).",
+            ),
+          maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
+        },
+      },
+      async ({ targets, includeOwnPendingUpdates, maxWaitSeconds }, extra) => {
+        const distinct = new Set(targets.map((target) => target.sessionId));
+        if (distinct.size !== targets.length) {
+          throw new Error("session_wait targets must name distinct sessions");
+        }
+        // Authorize and resolve every target exactly as session_events does,
+        // before any live-fanout subscription exists for it.
+        for (const target of targets) {
+          await authorizeFirstPartySession(deps, grant, target.sessionId, "session.events.read");
+          await requireSession(deps.db, grant.workspaceId, target.sessionId);
+        }
+        const ownSessionId = includeOwnPendingUpdates === false ? null : callerSessionId;
+        // The MCP SDK aborts `extra.signal` when the client cancels the request
+        // (Steer/Pause/turn interruption); the test harness passes no extra.
+        const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
+        const workspaceId = grant.workspaceId;
+        // A NATS subscription is live fanout only; the durable session_events
+        // read below is the authority. Bun.serve idleTimeout (255 s) and the
+        // 60 s MCP client request timeout both exceed the 50 s cap.
+        return json(
+          await waitForSessionChanges({
+            targets,
+            ownSessionId,
+            maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+            signal,
+            source: {
+              readTargetEvents: async (target) => {
+                const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
+                  after: target.afterSequence,
+                  direction: "after",
+                  limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                  payloadMode: "full",
+                  includeTypes: SESSION_WAIT_EVENT_TYPES,
+                  maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+                });
+                return { events: page.events, hasMore: page.hasMore };
+              },
+              readOwnPendingUpdateKinds:
+                ownSessionId === null
+                  ? null
+                  : async () =>
+                      (
+                        await listOutstandingSessionSystemUpdates(
+                          deps.db,
+                          workspaceId,
+                          ownSessionId,
+                        )
+                      ).map((update) => update.kind),
+              subscribe: (targetSessionId, onEvents) =>
+                deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+            },
           }),
         );
       },

@@ -28,6 +28,11 @@ First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEn
 
 - `company_profile_propose` - records one inactive organization company-profile proposal (`durable_learning` provenance, `agent-attempt:<attemptId>` source) for an exact agent attempt; it never activates, and an organization account admin activates it from Company Brain → Company profile & goals (see [`company-profile.md`](company-profile.md)).
 
+First-party OpenGeni MCP session monitoring tools (`sessions:read`):
+
+- `sessions_list` / `session_get` / `session_events` - compact discovery, exact bounded detail, and the byte-bounded semantic event tail.
+- `session_wait` - one blocking call (session-scoped grants only) that returns as soon as any watched session has new durable events after the caller's cursor, the caller's own session has pending machine input, or `maxWaitSeconds` (default 45, max 50) elapses. It subscribes to live NATS fanout first and then reads `session_events` in PostgreSQL, so the result always carries exact durable rows plus a `latestSequence` cursor per target; the bus only wakes it. Only turn lifecycle, `agent.message.completed`, blocking failures, goal facts, and session status/control changes count as a change. Every target is authorized exactly as `session_events` (`session.events.read`), the result is byte-bounded like `session_events`, and a cancelled MCP request (Steer/Pause) aborts the wait. The 50 s cap exists because the built-in `opengeni` server entry uses the MCP client's default 60 s request timeout; agents loop on the tool for longer waits.
+
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
 which excludes connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools; those require

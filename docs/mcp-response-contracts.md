@@ -212,6 +212,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
+| First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |
 | Docs: `list_document_bases` | List | Existing document-base list result |
 | Docs: `search_documents`, `knowledge_search`, `memory_search` | List/read | Existing bounded retrieval result |
 | Docs: `fetch_document_chunk`, `knowledge_fetch` | Read | Explicit chunk read result |

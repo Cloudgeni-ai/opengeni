@@ -2744,6 +2744,7 @@ export type FirstPartyMcpToolName =
   | "sessions_list"
   | "session_get"
   | "session_events"
+  | "session_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
