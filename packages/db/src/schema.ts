@@ -5911,6 +5911,69 @@ export const sessionTurnAttempts = pgTable(
   }),
 );
 
+// Per-turn startup SLO checkpoint ledger (migration 0318). One row per
+// (turn, milestone, outcome); the transaction whose
+// `insert ... on conflict do nothing returning` returns the row is the
+// canonical inserter and the sole metric receipt, so recovery and replay
+// conflict without re-reading the turn's session_events. `pre_ledger_history`
+// rows seal a turn whose startup predates the ledger.
+export const sessionTurnStartupMilestones = pgTable(
+  "session_turn_startup_milestones",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    milestone: text("milestone").notNull(),
+    outcome: text("outcome").notNull(),
+    canonicalSource: text("canonical_source").notNull(),
+    eventId: uuid("event_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_turn_startup_milestones_pkey",
+      columns: [table.workspaceId, table.turnId, table.milestone, table.outcome],
+    }),
+    workspaceAccount: foreignKey({
+      name: "session_turn_startup_milestones_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_turn_startup_milestones_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      name: "session_turn_startup_milestones_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    workspaceSessionIndex: index("session_turn_startup_milestones_workspace_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    milestoneCheck: check(
+      "session_turn_startup_milestones_milestone_chk",
+      sql`${table.milestone} in ('queue', 'provider_dispatch', 'first_byte')`,
+    ),
+    outcomeCheck: check(
+      "session_turn_startup_milestones_outcome_chk",
+      sql`${table.outcome} in ('completed', 'failed')`,
+    ),
+    checkpointCheck: check(
+      "session_turn_startup_milestones_checkpoint_chk",
+      sql`${table.outcome} = 'completed' or ${table.milestone} = 'first_byte'`,
+    ),
+    canonicalSourceCheck: check(
+      "session_turn_startup_milestones_canonical_source_chk",
+      sql`(${table.canonicalSource} = 'inserted_event' and ${table.eventId} is not null and ${table.occurredAt} is not null) or (${table.canonicalSource} = 'pre_ledger_history' and ${table.outcome} = 'completed' and ${table.eventId} is null and ${table.occurredAt} is null)`,
+    ),
+  }),
+);
+
 // Credential-free authority captured with the accepted logical turn. Runtime
 // credential resolution loads this canonical row by exact turn + tool surface;
 // a caller-provided snapshot is never authority.

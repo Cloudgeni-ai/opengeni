@@ -44,6 +44,7 @@ import {
   evaluateSessionControl,
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
+  lockWorkspaceInferenceControlForAdmission,
   registerInternalUpdateWakeInTransaction,
   reserveSessionCommandReceipt,
   registerSessionWorkflowWakeInTransaction,
@@ -1235,9 +1236,18 @@ export async function steerQueuedTurnInTransaction(
     controlEtag?: string | null;
     actor: SessionCommandActor;
     operationKey: string;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<SteerQueueCommandResult> {
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
+  const workspaceControl = admission.control;
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1302,6 +1312,7 @@ export async function steerQueuedTurnInTransaction(
         : input.actor.subjectId,
     reason: "human_steer",
     observedControlEtag: input.controlEtag ?? null,
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const rows = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
@@ -1497,10 +1508,22 @@ export async function submitHumanPromptInTransaction(
       id: string;
       headersEncrypted: Record<string, string>;
     }>;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  // Send/Steer mutate the control row only when they auto-resume a paused
+  // branch. Hold the prefix shared otherwise so concurrent admission on the
+  // workspace is not serialized and genuine mutators are not starved.
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
+  const workspaceControl = admission.control;
   if (input.actor.type === "human") {
     await setSubjectRlsContext(db, input.actor.subjectId);
     await assertActiveManagedHumanOrganizationMembership(db, {
@@ -1643,6 +1666,7 @@ export async function submitHumanPromptInTransaction(
           ? "human_steer"
           : "human_send",
     observedControlEtag: input.controlEtag ?? null,
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   if (session.status === "cancelled") {
@@ -2465,9 +2489,17 @@ export async function steerAgentSessionInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     instruction: string;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -2532,6 +2564,7 @@ export async function steerAgentSessionInTransaction(
     sessionId: input.targetSessionId,
     actor: `attempt:${input.actor.attemptId}`,
     reason: "agent_steer",
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {

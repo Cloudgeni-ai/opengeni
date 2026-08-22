@@ -613,11 +613,44 @@ existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
-Claim, interruption, and event-writing settlement share one lock order:
-`workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
-UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
-`FOR UPDATE`. Generic audit/title appends skip the control row but use the same
+Claim, interruption, and event-writing settlement share one lock order: the
+workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
+when the write is control-aware, then the actual `workspaces` row
+`FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
+turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+`lockWorkspaceInferenceControl` takes
+`pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
+in the same mode before the row lock. The row lock alone is unfair: PostgreSQL
+lets a new `FOR SHARE` join a share-locked tuple without queueing behind an
+already waiting `FOR UPDATE`, so with many sessions continuously claiming,
+settling, and appending, a Pause/Resume could wait for hours while every
+HTTP caller gave up and left its backend parked with a pinned snapshot. The
+heavyweight advisory queue is FIFO, so a mutator waits only for the holders that
+preceded it and sharers resume right after it commits. Only genuine control
+mutations (Pause/Resume/Cancel, workspace Pause/Resume, auto-resume, settings
+narrowing, quiescent tree deletion) take the exclusive prefix. Read projections
+(`getSession`, session lists, discovery) read the control row with lock `none`
+and never join the prefix queue. Send, Steer,
+queued Steer, and realtime ledger sync use
+`lockWorkspaceInferenceControlForAdmission`: the shared prefix while the target
+branch is active (it still excludes every control mutation, so the observed
+state cannot change inside the transaction), escalating to the exclusive prefix
+for a paused branch only after rolling back a savepoint, because an in-place
+upgrade deadlocks as soon as two sharers escalate together. Request-scoped API
+mutations pass `workspaceControlRequestLockTimeoutMs()` (default 20 s, override
+with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`): one wall-clock budget shared
+by every lock step of the admission (advisory lock, row lock, and a savepoint
+escalation), so the total wait never exceeds the bound. Exceeding it fails with
+the typed retryable `WorkspaceControlBusyError` before any write; `app.onError`
+renders it for every route as HTTP 503 with `retryable: true`,
+`outcomeUnknown: false`, and `details.code: WORKSPACE_CONTROL_BUSY`, the MCP
+orchestration envelope reports `<tool>_workspace_busy` with a retry hint, and
+Slack interactions keep the raw error so their classifier retries it. Worker
+settlement and claims never pass a bound. `updateWorkspaceSettings` and
+`deleteSessionTreeIfQuiescent` keep an unbounded exclusive wait, and queue
+move/edit/delete keep an unbounded shared wait: they are rare, and a bound there
+would only trade a slow admin action for a failed one. Generic
+audit/title appends skip the control row but use the same
 workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
 before insert so its turn/attempt FK checks cannot invert against event writers;
 retry only that idempotent prepare transaction on `40P01`/`40001`. Event inserts also touch the workspace through their
@@ -1469,6 +1502,20 @@ credential, and content values remain only in authenticated durable events.
 The database returns a milestone receipt only when the current transaction
 inserted the first canonical current-association checkpoint, so ordinary
 attempt recovery and callback replay cannot deterministically double-count it.
+That decision is a per-turn ledger, `session_turn_startup_milestones` (one row
+per turn, milestone, outcome; migration 0318): the event-append or settlement
+transaction performs `insert ... on conflict do nothing returning` for each
+checkpoint it inserted, and only a returned row is a receipt, measured from the
+turn's durable `created_at` to the canonical event's own `occurred_at`. It
+never re-reads the turn's `session_events` rows, so the cost is O(1) per model
+request instead of O(events in the turn) inside the transaction that holds the
+workspace inference-control row. The terminal failed first-byte outcome is
+fenced on ledger state (a provider-dispatch row exists and no completed
+first-byte row exists). A turn whose `turn.started` was already durable before
+a ledger-aware writer touched it (in flight across the ledger rollout) is
+sealed once with `pre_ledger_history` sentinel rows after one bounded probe for
+an earlier current `turn.started`, and emits no further startup receipts rather
+than re-observing a checkpoint with a duration equal to its age.
 A terminal `turn.failed` after provider dispatch contributes one bounded failed
 first-byte sample only when the logical turn produced no canonical byte in any
 attempt. A recoverable pre-byte attempt and a later tool-loop failure after a

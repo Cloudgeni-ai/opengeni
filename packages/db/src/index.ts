@@ -58759,111 +58759,197 @@ function startupMilestoneForEvent(
   return null;
 }
 
+type TurnStartupCheckpoint = Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">;
+
+type TurnStartupLedgerScope = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+};
+
+/**
+ * Claim one startup checkpoint for the turn in `session_turn_startup_milestones`.
+ * Returns true only when this transaction inserted the row, i.e. it is the
+ * canonical inserter of that checkpoint. A durable row from an earlier
+ * transaction (or a pre-ledger sentinel) conflicts, so recovery and replay are
+ * no-ops. The exclusive terminal-failed first_byte outcome is additionally
+ * fenced on ledger state: a provider_dispatch row must exist for the turn and
+ * no completed first_byte row may exist, mirroring the former exists/not-exists
+ * scan over the turn's events. Every probe is a primary-key lookup; the turn's
+ * session_events rows are never re-read.
+ */
+async function claimTurnStartupMilestone(
+  tx: Database,
+  input: TurnStartupLedgerScope & {
+    checkpoint: TurnStartupCheckpoint;
+    event: { id: string; occurredAt: Date };
+  },
+): Promise<boolean> {
+  const { milestone, outcome } = input.checkpoint;
+  const ledger = schema.sessionTurnStartupMilestones;
+  const terminalFailedFence =
+    outcome === "failed"
+      ? sql`
+        exists (
+          select 1 from ${ledger}
+          where ${ledger.workspaceId} = ${input.workspaceId}
+            and ${ledger.turnId} = ${input.turnId}
+            and ${ledger.milestone} = 'provider_dispatch'
+            and ${ledger.outcome} = 'completed'
+        )
+        and not exists (
+          select 1 from ${ledger}
+          where ${ledger.workspaceId} = ${input.workspaceId}
+            and ${ledger.turnId} = ${input.turnId}
+            and ${ledger.milestone} = 'first_byte'
+            and ${ledger.outcome} = 'completed'
+        )`
+      : sql`true`;
+  const claimed = await tx.execute<{ event_id: string }>(sql`
+    insert into ${ledger} (
+      ${sql.identifier("account_id")}, ${sql.identifier("workspace_id")},
+      ${sql.identifier("session_id")}, ${sql.identifier("turn_id")},
+      ${sql.identifier("milestone")}, ${sql.identifier("outcome")},
+      ${sql.identifier("canonical_source")}, ${sql.identifier("event_id")},
+      ${sql.identifier("occurred_at")}
+    )
+    select
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+      ${input.turnId}::uuid, ${milestone}::text, ${outcome}::text, 'inserted_event',
+      ${input.event.id}::uuid, ${input.event.occurredAt.toISOString()}::timestamptz
+    where ${terminalFailedFence}
+    on conflict do nothing
+    returning ${sql.identifier("event_id")} as event_id
+  `);
+  return claimed.length > 0;
+}
+
+/**
+ * A turn whose canonical `turn.started` was durable before any ledger-aware
+ * writer touched it (in flight across the ledger rollout, or claimed by a
+ * pre-ledger worker during the rolling window) already observed, or may have
+ * observed, its startup checkpoints through the former event scan. Re-claiming
+ * them through the ledger would re-observe each checkpoint with a duration equal
+ * to the turn's age, so the turn is sealed once: its queue row becomes a
+ * `pre_ledger_history` sentinel and the remaining completed checkpoints receive
+ * sentinels, after which every later claim conflicts and the terminal-failed
+ * fence stays closed. The check is one bounded index probe for an earlier
+ * current-association `turn.started` row, performed only by the transaction
+ * that first claimed the queue checkpoint, never per model request.
+ */
+async function sealPreLedgerTurnStartupHistory(
+  tx: Database,
+  input: TurnStartupLedgerScope & { queueEvent: { id: string; sequence: number } },
+): Promise<boolean> {
+  const [earlier] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.type, "turn.started"),
+        eq(schema.sessionEvents.turnAssociation, "current"),
+        lt(schema.sessionEvents.sequence, input.queueEvent.sequence),
+      ),
+    )
+    .limit(1);
+  if (!earlier) return false;
+  const ledger = schema.sessionTurnStartupMilestones;
+  await tx
+    .update(ledger)
+    .set({ canonicalSource: "pre_ledger_history", eventId: null, occurredAt: null })
+    .where(
+      and(
+        eq(ledger.workspaceId, input.workspaceId),
+        eq(ledger.turnId, input.turnId),
+        eq(ledger.milestone, "queue"),
+        eq(ledger.outcome, "completed"),
+        eq(ledger.eventId, input.queueEvent.id),
+      ),
+    );
+  await tx
+    .insert(ledger)
+    .values(
+      (["provider_dispatch", "first_byte"] as const).map((milestone) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        milestone,
+        outcome: "completed",
+        canonicalSource: "pre_ledger_history",
+        eventId: null,
+        occurredAt: null,
+      })),
+    )
+    .onConflictDoNothing();
+  return true;
+}
+
 async function canonicalTurnStartupMilestonesForInsertedEvents(
   tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
+  input: TurnStartupLedgerScope & {
     turnCreatedAt: Date;
     inserted: Array<typeof schema.sessionEvents.$inferSelect>;
     terminalTurnFailed: boolean;
   },
 ): Promise<CanonicalTurnStartupMilestoneReceipt[]> {
-  const insertedIds = new Set(input.inserted.map((event) => event.id));
-  const insertedCheckpoints = new Set(
-    input.inserted.flatMap((event) => {
-      const candidate = startupMilestoneForEvent(event);
-      return candidate ? [startupCheckpointKey(candidate)] : [];
-    }),
-  );
-  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
-  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
-    const { milestone, outcome } = checkpoint;
+  // The lowest-sequence inserted event per checkpoint is this transaction's
+  // candidate; a second same-kind event in one batch can never be canonical.
+  const candidates = new Map<string, typeof schema.sessionEvents.$inferSelect>();
+  for (const event of [...input.inserted].sort((a, b) => a.sequence - b.sequence)) {
+    const checkpoint = startupMilestoneForEvent(event);
+    if (!checkpoint) continue;
     // A request-local transport terminal is not a logical startup failure: it
     // may recover, or it may follow a byte during a later tool loop. Only the
     // atomic terminal failed-turn settlement may project the exclusive failed
     // outcome; ordinary append/replay paths keep this flag false.
-    if (outcome === "failed" && !input.terminalTurnFailed) continue;
-    if (!insertedCheckpoints.has(startupCheckpointKey(checkpoint))) continue;
-    const phaseCondition =
-      milestone === "provider_dispatch"
-        ? sql`${schema.sessionEvents.payload} ->> 'phase' = 'started'`
-        : milestone === "first_byte" && outcome === "completed"
-          ? sql`${schema.sessionEvents.payload} ->> 'phase' in ('first_byte', 'first_event')`
-          : milestone === "first_byte"
-            ? and(
-                sql`exists (
-                  select 1
-                  from session_events dispatched
-                  where dispatched.workspace_id = ${schema.sessionEvents.workspaceId}
-                    and dispatched.session_id = ${schema.sessionEvents.sessionId}
-                    and dispatched.turn_id = ${schema.sessionEvents.turnId}
-                    and dispatched.turn_association = 'current'
-                    and dispatched.type = 'agent.model.request'
-                    and dispatched.sequence < ${schema.sessionEvents.sequence}
-                    and dispatched.payload ->> 'phase' = 'started'
-                )`,
-                sql`not exists (
-                  select 1
-                  from session_events responded
-                  where responded.workspace_id = ${schema.sessionEvents.workspaceId}
-                    and responded.session_id = ${schema.sessionEvents.sessionId}
-                    and responded.turn_id = ${schema.sessionEvents.turnId}
-                    and responded.turn_association = 'current'
-                    and responded.type = 'agent.model.request'
-                    and responded.payload ->> 'phase' in ('first_byte', 'first_event')
-                )`,
-              )
-            : undefined;
-    const [canonical] = await tx
-      .select({
-        id: schema.sessionEvents.id,
-        type: schema.sessionEvents.type,
-        payload: schema.sessionEvents.payload,
-        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
-        turnAssociation: schema.sessionEvents.turnAssociation,
-        occurredAt: schema.sessionEvents.occurredAt,
-      })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          eq(schema.sessionEvents.turnId, input.turnId),
-          eq(schema.sessionEvents.turnAssociation, "current"),
-          eq(
-            schema.sessionEvents.type,
-            milestone === "queue"
-              ? "turn.started"
-              : milestone === "first_byte" && outcome === "failed"
-                ? "turn.failed"
-                : "agent.model.request",
-          ),
-          phaseCondition,
-        ),
-      )
-      .orderBy(asc(schema.sessionEvents.sequence))
-      .limit(1);
-    // A durable event from an earlier transaction is already the canonical
-    // checkpoint. Only the transaction that first inserts that checkpoint may
-    // return a metric receipt, which makes ordinary recovery and callback
+    if (checkpoint.outcome === "failed" && !input.terminalTurnFailed) continue;
+    const key = startupCheckpointKey(checkpoint);
+    if (!candidates.has(key)) candidates.set(key, event);
+  }
+  if (candidates.size === 0) return [];
+  const scope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+  };
+  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
+  // Checkpoint order matters: completed checkpoints first so the terminal
+  // failed fence observes every completed row of this transaction, and queue
+  // first so a pre-ledger turn is sealed before its later checkpoints claim.
+  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
+    const { milestone, outcome } = checkpoint;
+    const candidate = candidates.get(startupCheckpointKey(checkpoint));
+    if (!candidate) continue;
+    // A durable ledger row from an earlier transaction means that checkpoint is
+    // already canonical. Only the transaction that first inserts the checkpoint
+    // may return a metric receipt, which makes ordinary recovery and callback
     // replay no-ops. The consumer's in-memory Prometheus observation happens
     // after COMMIT and remains explicitly at-most-once across a process crash.
-    if (!canonical || !insertedIds.has(canonical.id)) continue;
-    const canonicalCheckpoint = startupMilestoneForEvent(canonical);
+    const claimed = await claimTurnStartupMilestone(tx, {
+      ...scope,
+      checkpoint,
+      event: { id: candidate.id, occurredAt: candidate.occurredAt },
+    });
+    if (!claimed) continue;
     if (
-      !canonicalCheckpoint ||
-      canonicalCheckpoint.milestone !== milestone ||
-      canonicalCheckpoint.outcome !== outcome
+      milestone === "queue" &&
+      (await sealPreLedgerTurnStartupHistory(tx, {
+        ...scope,
+        queueEvent: { id: candidate.id, sequence: candidate.sequence },
+      }))
     ) {
       continue;
     }
     receipts.push({
       milestone,
       outcome,
-      eventId: canonical.id,
-      durationMs: Math.max(0, canonical.occurredAt.getTime() - input.turnCreatedAt.getTime()),
+      eventId: candidate.id,
+      durationMs: Math.max(0, candidate.occurredAt.getTime() - input.turnCreatedAt.getTime()),
     });
   }
   return receipts;
@@ -59386,6 +59472,7 @@ export async function applySessionTurnSettlement(
       const canonicalStartupMilestones = await canonicalTurnStartupMilestonesForInsertedEvents(
         tx as unknown as Database,
         {
+          accountId: session.accountId,
           workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -63107,6 +63194,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               .returning();
             const canonicalStartupMilestones = fence.allowed
               ? await canonicalTurnStartupMilestonesForInsertedEvents(tx as unknown as Database, {
+                  accountId: session.accountId,
                   workspaceId,
                   sessionId,
                   turnId,
@@ -63657,8 +63745,14 @@ async function sessionControlProjections(
   sessionIds: string[],
   workspaceControl?: WorkspaceControlRow,
 ): Promise<Map<string, Session["effectiveControl"]>> {
+  // Read projections (GET session, session lists) are not control writers.
+  // Like discovery, they read the control row without joining the writer lock
+  // graph: a projection that took FOR SHARE would queue behind a waiting Pause
+  // under the fair control prefix and would let a burst of reads delay it,
+  // while buying no consistency the separate session-row statement has.
+  // Writers that already hold the prefix pass their locked row through.
   const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
-    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
+    ...(workspaceControl ? { workspaceControl } : { lock: "none" as const }),
   });
   return new Map(
     [...controls].map(([sessionId, control]) => [

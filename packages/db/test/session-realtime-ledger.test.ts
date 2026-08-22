@@ -18,6 +18,7 @@ import {
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
+  evaluateSessionControl,
   failSessionRealtimeConnectionInTransaction,
   getActiveSessionHistoryItems,
   getSessionHumanInputRequest,
@@ -2630,5 +2631,40 @@ describe("session realtime ledger", () => {
         .where(eq(schema.sessionTurns.sessionId, otherSession.id)),
     );
     expect(peerTurns).toEqual([]);
+  });
+});
+
+describe("realtime ledger admission on a paused branch", () => {
+  test("a delegation Send re-enters the exclusive admission held by the sync", async () => {
+    const value = await fixture();
+    const { claimed } = await claimInitial(value);
+    await complete(value, claimed.connection);
+    await proveProviderStarted(value, claimed.connection);
+    await transaction(value.owner.workspaceId, (tx) =>
+      mutateSessionControlInTransaction(tx, {
+        accountId: value.grant.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.owner.sessionId,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+      }),
+    );
+    // The sync admission observes the paused branch and escalates to the
+    // exclusive prefix; the inner delegation Send takes its shared savepoint
+    // against that held exclusive prefix, rolls it back, and auto-resumes.
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, delegationSyncInput(value, claimed.connection)),
+    );
+    expect(admitted.accepted[0]?.entry.turnId).toBeTruthy();
+    const control = await withWorkspaceRls(client.db, value.owner.workspaceId, (db) =>
+      evaluateSessionControl(db, value.owner.workspaceId, value.owner.sessionId, {
+        lock: "none",
+      }),
+    );
+    expect(control.state).toBe("active");
+    expect(
+      await peekSessionWork(client.db, value.owner.workspaceId, value.owner.sessionId),
+    ).toEqual({ kind: "runnable" });
   });
 });

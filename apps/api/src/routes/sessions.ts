@@ -151,6 +151,7 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
@@ -1448,6 +1449,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             realtimeId,
             ownerSubjectId: grant.subjectId,
             ...parsed.data,
+            controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
           }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
