@@ -1763,7 +1763,7 @@ export const slackInstallationBindings = pgTable(
         and octet_length(${table.slackTeamName}) between 1 and 256
         and octet_length(${table.botId}) between 1 and 64
         and octet_length(${table.botUserId}) between 1 and 64
-        and ${table.botDisplayName} = 'OpenGeni'`,
+        and ${table.botDisplayName} in ('OpenGeni', 'OpenGeni Staging')`,
     ),
     versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
   }),

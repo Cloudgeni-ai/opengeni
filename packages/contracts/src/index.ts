@@ -8083,7 +8083,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
             slackTeamName: z.string().min(1).max(256),
             botUserId: z.string().min(1).max(64),
             botId: z.string().min(1).max(64),
-            botDisplayName: z.literal("OpenGeni"),
+            botDisplayName: z.enum(["OpenGeni", "OpenGeni Staging"]),
             verifiedAt: z.string().datetime({ offset: true }),
           })
           .passthrough(),
@@ -9536,6 +9536,8 @@ export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as co
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
+export const OpenGeniSlackBotDisplayName = z.enum(["OpenGeni", "OpenGeni Staging"]);
+export type OpenGeniSlackBotDisplayName = z.infer<typeof OpenGeniSlackBotDisplayName>;
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
     credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
@@ -9544,7 +9546,7 @@ export const OpenGeniSlackBotConnectionMetadata = z
     slackTeamName: z.string().min(1).max(256),
     botUserId: z.string().min(1).max(64),
     botId: z.string().min(1).max(64),
-    botDisplayName: z.literal("OpenGeni"),
+    botDisplayName: OpenGeniSlackBotDisplayName,
     verifiedAt: z.string().datetime({ offset: true }),
   })
   .passthrough();
@@ -9725,7 +9727,7 @@ export const SlackInstallationBinding = z.object({
   slackTeamName: z.string().min(1).max(256),
   botId: z.string().min(1).max(64),
   botUserId: z.string().min(1).max(64),
-  botDisplayName: z.literal("OpenGeni"),
+  botDisplayName: OpenGeniSlackBotDisplayName,
   state: SlackInstallationBindingState,
   quarantineReason: z.string().min(1).nullable(),
   version: z.number().int().positive(),

@@ -10,6 +10,7 @@ process.stdout.write(
   `${JSON.stringify(
     buildOpenGeniSlackBotManifest(publicBaseUrl, {
       appName: process.env.OPENGENI_SLACK_APP_NAME,
+      botDisplayName: process.env.OPENGENI_SLACK_BOT_DISPLAY_NAME,
       slashCommand: process.env.OPENGENI_SLACK_COMMAND,
       shortcutName: process.env.OPENGENI_SLACK_SHORTCUT_NAME,
     }),

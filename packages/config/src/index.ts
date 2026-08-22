@@ -11,6 +11,7 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
   SEEDANCE_2_5_MODEL_ID,
@@ -386,6 +387,7 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
   slackCommand: z
     .string()
     .trim()
@@ -2261,6 +2263,7 @@ export function getSettings(): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),

@@ -114,6 +114,11 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
       slackTeamId: "T_TEST",
       botDisplayName: "OpenGeni",
     });
+    expect(
+      openGeniSlackBotUiMetadata(
+        connection({ metadata: { ...valid.metadata, botDisplayName: "OpenGeni Staging" } }),
+      ),
+    ).toMatchObject({ botDisplayName: "OpenGeni Staging" });
   });
 
   test("prefers an active reinstall target over a newer revoked connection", () => {

@@ -820,7 +820,7 @@ export type SlackInstallationBinding = {
   slackTeamName: string;
   botId: string;
   botUserId: string;
-  botDisplayName: "OpenGeni";
+  botDisplayName: "OpenGeni" | "OpenGeni Staging";
   state: SlackInstallationBindingState;
   quarantineReason: string | null;
   version: number;

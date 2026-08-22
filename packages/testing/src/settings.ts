@@ -62,6 +62,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,
     integrationsOauthClientsJson: "{}",
+    slackBotDisplayName: "OpenGeni",
     slackCommand: "/opengeni",
     googleDriveSyncMaxItems: 500,
     googleDriveSyncMaxBytes: 500_000_000,
