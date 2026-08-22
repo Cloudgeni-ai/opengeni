@@ -112,9 +112,14 @@ export function accessGrantAuthorizationFromContext(
   const matchingAccountGrants = context.accountGrants.filter(
     (candidate) => candidate.accountId === grant.accountId,
   );
+  const matchingWorkspaceGrants = context.workspaceGrants.filter(
+    (candidate) => candidate.workspaceId === grant.workspaceId,
+  );
   const delegated = grant.metadata?.delegated === true;
   const contextIntegrity =
     context.subjectId === grant.subjectId &&
+    matchingWorkspaceGrants.length === 1 &&
+    matchingWorkspaceGrants[0] === grant &&
     context.accountGrants.every((candidate) => candidate.subjectId === context.subjectId) &&
     context.workspaceGrants.every(
       (candidate) =>

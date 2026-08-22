@@ -22,6 +22,7 @@ function authorization(input: {
   accountGrantAccountId?: string;
   accountGrantSubjectId?: string;
   serviceInitiator?: AccessGrant["serviceInitiator"];
+  duplicateWorkspaceGrant?: boolean;
 }) {
   const grant: AccessGrant = {
     accountId,
@@ -42,7 +43,7 @@ function authorization(input: {
         permissions: input.accountPermissions ?? ["account:read"],
       },
     ],
-    workspaceGrants: [grant],
+    workspaceGrants: [grant, ...(input.duplicateWorkspaceGrant ? [{ ...grant }] : [])],
     defaultAccountId: accountId,
     defaultWorkspaceId: workspaceId,
   };
@@ -82,6 +83,16 @@ describe("company-profile human mutation authorization", () => {
           }),
         ),
       "organization owner or admin",
+    );
+  });
+
+  test("fails closed for duplicate matching workspace grants", () => {
+    const access = authorization({ role: "admin", duplicateWorkspaceGrant: true });
+    expect(access.contextIntegrity).toBe(false);
+    expect(access.accountGrant).toBeNull();
+    expectForbidden(
+      () => authorizeCompanyProfileMutation(access),
+      "direct human-authorized request",
     );
   });
 
