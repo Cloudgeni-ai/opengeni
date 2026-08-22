@@ -215,6 +215,18 @@ describe("sessionChromeGoalPillState", () => {
         lastError: null,
       }),
     ).toBe("held");
+    // Idle backoff between consecutive no-input continuations is ordinary
+    // scheduled work with a known next-attempt time, not a blocked goal.
+    expect(
+      sessionChromeGoalPillState("active", {
+        state: "scheduled",
+        reason: "backoff_pending",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: "2026-01-01T00:00:00.000Z",
+        lastError: null,
+      }),
+    ).toBe("scheduled");
   });
 });
 

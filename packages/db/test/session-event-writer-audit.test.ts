@@ -230,7 +230,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#appendSessionEvents": { inserts: 1, contract: "canonical" },

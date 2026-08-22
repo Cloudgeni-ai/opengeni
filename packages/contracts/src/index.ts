@@ -5494,9 +5494,39 @@ export const SessionGoalContinuationReason = z.enum([
   "session_cancelled",
   "system_work_pending",
   "held_for_input",
+  // Idle backoff: consecutive no-input continuations are paced, and the next
+  // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
+  "backoff_pending",
   "missing_obligation",
 ]);
 export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+
+/**
+ * Why a paused goal became active again. `api` is the operator PATCH; the
+ * system resumes only a `max_auto_continuations` pause, and only because new
+ * external input arrived: a child result, scheduled occurrence, media result,
+ * Agent message, Agent Steer, or human/API Send/Steer. The cap is pacing,
+ * never user intent, so a `user_pause`/`api`/`agent`/`limits` pause is never
+ * auto-resumed.
+ */
+export const SessionGoalResumedReason = z.enum(["api", "external_input"]);
+export type SessionGoalResumedReason = z.infer<typeof SessionGoalResumedReason>;
+
+export const SessionGoalResumedEventPayload = z
+  .object({
+    goalId: z.string().uuid(),
+    actor: z.enum(["api", "system"]),
+    reason: SessionGoalResumedReason,
+    cause: z
+      .object({
+        kind: z.string().min(1),
+        updateId: z.string().uuid().optional(),
+        turnId: z.string().uuid().optional(),
+      })
+      .optional(),
+  })
+  .passthrough();
+export type SessionGoalResumedEventPayload = z.infer<typeof SessionGoalResumedEventPayload>;
 
 export const SessionGoalContinuation = z.object({
   state: SessionGoalContinuationState,

@@ -2515,13 +2515,16 @@ function registerGoalTools(
     {
       description:
         "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+      // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
+      // API/scheduled-task pacing configuration, and an agent that set its own
+      // cap used to silence its orchestration for hours. Continuation pacing is
+      // the deployment's input-aware idle backoff instead.
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
-        maxAutoContinuations: z4.number().int().positive().optional(),
       },
     },
-    async ({ text, successCriteria, maxAutoContinuations }) => {
+    async ({ text, successCriteria }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -2541,7 +2544,7 @@ function registerGoalTools(
         sessionId,
         text,
         successCriteria: successCriteria ?? null,
-        maxAutoContinuations: maxAutoContinuations ?? null,
+        maxAutoContinuations: null,
         createdBy: "agent",
         actor: "agent",
       });

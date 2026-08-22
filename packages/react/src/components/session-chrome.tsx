@@ -161,6 +161,8 @@ export function sessionChromeGoalPillState(
         ? "waiting"
         : "invariant_broken";
   }
+  // `backoff_pending` (idle pacing between consecutive no-input continuations,
+  // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
     // `held_for_input` is the agent's own goal_wait hold (waiting for child
@@ -1035,7 +1037,7 @@ function GoalPanel({
       <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
         <div className="flex flex-wrap gap-1 text-[10px] text-og-fg-muted">
           <span className="rounded bg-og-surface-3/70 px-1 py-px">
-            {record.autoContinuations} auto-continues
+            {record.autoContinuations} consecutive unattended continues
           </span>
           <span className="rounded bg-og-surface-3/70 px-1 py-px">
             {record.noProgressStreak} stalled

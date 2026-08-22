@@ -1382,6 +1382,83 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "a deferred (idle-backoff) goal closes the run like a hold and the delayed wake restarts it",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: string[] = [];
+      const goalDecisions: string[] = [];
+      let backoffCurrent = true;
+      let continued = false;
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        runs.push(turn.triggerEventId);
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+        maybeContinueGoal: async () => {
+          // The DB materializer returns `deferred` while the previous no-input
+          // continuation finished less than its pacing delay ago; it arms a
+          // delayed outbox wake at that deadline instead of a Temporal timer.
+          if (backoffCurrent) {
+            goalDecisions.push("deferred");
+            return { action: "deferred" as const };
+          }
+          if (!continued) {
+            continued = true;
+            queuedTurns.push(queuedTurn("goal-after-backoff"));
+            goalDecisions.push("continue");
+            return { action: "continue" as const };
+          }
+          goalDecisions.push("none");
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const workflowId = `wf-${crypto.randomUUID()}`;
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        });
+        await handle.result();
+        // No synthesized continuation and no polling while deferred: the run
+        // closes exactly like an idle or held goal.
+        expect(runs).toEqual(["event-1"]);
+        expect(goalDecisions.length).toBeGreaterThanOrEqual(1);
+        expect(goalDecisions.every((decision) => decision === "deferred")).toBe(true);
+
+        // The pacing deadline passes (or new input pulls it to now): the
+        // wake-outbox dispatcher restarts the closed workflow through
+        // signalWithStart and the materializer continues.
+        backoffCurrent = false;
+        const restarted = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+        });
+        await restarted.result();
+        expect(runs).toEqual(["event-1", "goal-after-backoff"]);
+        expect(goalDecisions).toContain("continue");
+        expect(goalDecisions[goalDecisions.length - 1]).toBe("none");
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    goalContinuationTestTimeoutMs,
+  );
+
+  test(
     "holds the loop for continueDelayMs before the goal continuation check",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

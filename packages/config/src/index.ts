@@ -84,6 +84,20 @@ const EnvBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+/** Default pacing between consecutive no-input goal continuations. */
+export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
+export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
+
+const EnvGoalIdleBackoffMs = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const source = value.trim();
+  if (!source) return undefined;
+  return source.split(",").map((entry) => {
+    const trimmed = entry.trim();
+    return trimmed === "" ? Number.NaN : Number(trimmed);
+  });
+}, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
+
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
     if (typeof value !== "string") return value;
@@ -448,6 +462,18 @@ const SettingsSchema = z.object({
   // by default (no cap); deployments may configure one, and it then acts as a
   // hard ceiling that per-goal overrides can only lower.
   goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
+  // Idle backoff between CONSECUTIVE no-input goal continuations. This is
+  // pacing, not a cap: the first continuation after a turn that consumed any
+  // external input is immediate, the n-th consecutive no-input continuation
+  // waits schedule[min(n - 1, last)] ms after the previous one finished, and
+  // any new input (machine input, human/API prompt, Steer) wakes the session
+  // immediately. The delay never exceeds goalIdleBackoffMaxMs.
+  goalIdleBackoffMs: EnvGoalIdleBackoffMs.default(DEFAULT_GOAL_IDLE_BACKOFF_MS),
+  goalIdleBackoffMaxMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -2294,6 +2320,8 @@ export function getSettings(): Settings {
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
+    goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
+    goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
@@ -5174,6 +5202,11 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
+    throw new Error(
+      `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
+    );
+  }
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );

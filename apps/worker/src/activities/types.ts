@@ -349,7 +349,10 @@ export type MaybeContinueGoalResult = {
   // materialized and the goal obligation stays armed; the workflow closes like
   // `none` and the wake outbox (deadline) or any producer's signalWithStart
   // restarts it.
-  action: "none" | "queue" | "continue" | "paused" | "held";
+  // `deferred`: idle backoff between consecutive no-input continuations. Same
+  // shape as `held`: nothing materialized, obligation armed, a delayed outbox
+  // wake at the pacing deadline (pulled to now by any new input) restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "held" | "deferred";
 };
 
 export type DispatchScheduledTaskRunInput = {

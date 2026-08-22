@@ -55,6 +55,7 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputContext,
@@ -2114,6 +2115,29 @@ export async function submitHumanPromptInTransaction(
     });
   }
 
+  // A human/API prompt is external input for the goal. A goal paused only by
+  // its continuation ceiling (`max_auto_continuations`, pacing rather than
+  // intent) resumes in this same commit; a user/API/agent/limits pause is never
+  // touched here. Goal row FOR UPDATE follows the session and turn locks above,
+  // the order the claim transaction uses.
+  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    cause: { kind: "human_prompt", turnId },
+    now,
+  });
+  if (goalAutoResumed) {
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "goal.resumed",
+      payload: goalAutoResumed.payload,
+      occurredAt: now,
+    });
+  }
+
   const ordered =
     input.delivery === "steer" ? [turn, ...existingQueued] : [...existingQueued, turn];
   await normalizeQueuePositions(
@@ -2440,29 +2464,52 @@ export async function sendAgentMessageInTransaction(
     )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent message was not inserted");
-  const [event] = await db
-    .insert(schema.sessionEvents)
-    .values(
-      withLosslessContentWriteVersion(
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.targetSessionId,
-          sequence: session.lastSequence + 1,
-          type: "system.update.pending",
-          payload: {
-            updateId: update.id,
-            kind: "agent_message",
-            sourceSessionId: input.actor.sessionId,
+  // An Agent message is external input for the target's goal. A goal paused
+  // only by its continuation ceiling (`max_auto_continuations`, pacing rather
+  // than intent) resumes in this same commit; any other pause stays. Goal row
+  // FOR UPDATE follows the session lock above, the goal tools' order.
+  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    cause: { kind: "agent_message", updateId: update.id },
+    now,
+  });
+  const eventValues: SessionEventInsertWithPayload[] = [
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.targetSessionId,
+      sequence: session.lastSequence + 1,
+      type: "system.update.pending",
+      payload: {
+        updateId: update.id,
+        kind: "agent_message",
+        sourceSessionId: input.actor.sessionId,
+      },
+      occurredAt: now,
+    },
+    ...(goalAutoResumed
+      ? [
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.targetSessionId,
+            sequence: session.lastSequence + 2,
+            type: "goal.resumed" as const,
+            payload: goalAutoResumed.payload,
+            occurredAt: now,
           },
-          occurredAt: now,
-        },
-        "payload",
-        "payloadCodecVersion",
-      ),
-    )
+        ]
+      : []),
+  ];
+  const insertedEvents = await db
+    .insert(schema.sessionEvents)
+    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
     .returning({ id: schema.sessionEvents.id });
-  if (!event) throw new SessionControlInvariantError("Agent message event was not inserted");
+  if (insertedEvents.length !== eventValues.length) {
+    throw new SessionControlInvariantError("Agent message event was not inserted");
+  }
+  const eventIds = insertedEvents.map((event) => event.id);
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
   const runnable = !realtimeActive && session.activeTurnId === null && effective.state === "active";
   const wake = runnable
@@ -2476,7 +2523,7 @@ export async function sendAgentMessageInTransaction(
   await db
     .update(schema.sessions)
     .set({
-      lastSequence: session.lastSequence + 1,
+      lastSequence: session.lastSequence + eventValues.length,
       ...(runnable ? { status: "queued" as const } : {}),
       updatedAt: now,
     })
@@ -2505,7 +2552,7 @@ export async function sendAgentMessageInTransaction(
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     result: {
       updateId: update.id,
-      eventIds: [event.id],
+      eventIds,
       wakeRevision: wake?.wakeRevision ?? null,
       workflowId,
       effectiveState: effective.state,
@@ -2514,7 +2561,7 @@ export async function sendAgentMessageInTransaction(
   return {
     receipt,
     updateId: update.id,
-    eventIds: [event.id],
+    eventIds,
     wakeRevision: wake?.wakeRevision ?? null,
     shouldSignal: wake?.shouldSignal ?? false,
     workflowId,
@@ -2619,6 +2666,20 @@ export async function steerAgentSessionInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  const now = new Date();
+  const updateId = crypto.randomUUID();
+  // An Agent Steer is external input for the target's goal. A goal paused only
+  // by its continuation ceiling (`max_auto_continuations`, pacing rather than
+  // intent) resumes here, before the supersession, so the Steer starts a fresh
+  // continuation epoch; any other pause stays. Goal row FOR UPDATE follows the
+  // session lock above; the `goal.resumed` fact is appended below at the next
+  // sequence of this same commit.
+  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    cause: { kind: "agent_steer_instruction", updateId },
+    now,
+  });
   const supersession = await supersedeSessionCurrentDirectionInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -2641,13 +2702,13 @@ export async function steerAgentSessionInTransaction(
       ),
     )
     .returning({ id: schema.sessionSystemUpdates.id });
-  const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
     .values(
       withLosslessContentWriteVersion(
         withLosslessContentWriteVersion(
           {
+            id: updateId,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.targetSessionId,
@@ -2753,6 +2814,17 @@ export async function steerAgentSessionInTransaction(
       occurredAt: now,
     },
   );
+  if (goalAutoResumed) {
+    events.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.targetSessionId,
+      sequence: ++sequence,
+      type: "goal.resumed",
+      payload: goalAutoResumed.payload,
+      occurredAt: now,
+    });
+  }
   const insertedEvents = await db
     .insert(schema.sessionEvents)
     .values(withLosslessContentWriteVersion(events, "payload", "payloadCodecVersion"))
