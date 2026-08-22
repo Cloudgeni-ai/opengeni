@@ -567,6 +567,18 @@ function retainedProcessSession(
   return session?.hasRetainedProcess?.(providerSessionId) === true ? session : null;
 }
 
+/**
+ * The model-facing rendering for a fault raised on a direct (non-SDK-tool)
+ * retained-process path. Mirrors the Agents SDK's default tool `errorFunction`
+ * byte-for-byte so `write_stdin` to a retained PTY reports a fenced/failed
+ * admission exactly like `exec_command` on the same lease: as the tool's
+ * string result, keeping the run alive instead of failing the turn.
+ */
+export function renderDirectToolFault(error: unknown): string {
+  const details = error instanceof Error ? error.toString() : String(error);
+  return `An error occurred while running the tool. Please try again. Error: ${details}`;
+}
+
 function safeProcessIdentity(raw: string): ShellProcessIdentity | null {
   if (parseExecBannerExitCode(raw) !== 0) return null;
   const match = execOutput(raw)
@@ -1109,17 +1121,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : input;
             const directProcessSession =
               sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
-            const output =
-              sessionId !== null && directProcessSession?.writeStdinForProcessMutation
-                ? await directProcessSession.writeStdinForProcessMutation({
-                    sessionId,
-                    ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
-                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
-                    ...(typeof parsed?.max_output_tokens === "number"
-                      ? { maxOutputTokens: parsed.max_output_tokens }
-                      : {}),
-                  })
-                : await tool.invoke(runContext, cappedInput, details);
+            let output: Awaited<ReturnType<FunctionToolInvoke>>;
+            if (sessionId !== null && directProcessSession?.writeStdinForProcessMutation) {
+              // This bypasses the SDK-built tool, whose default errorFunction
+              // renders any thrown execute() failure as the tool's string
+              // result. Keep that contract here: a workspace-mutation admission
+              // fence (lease rotation/epoch), an outcome-unknown settlement, or
+              // a provider fault on the retained PTY must reach the model as a
+              // tool error string, never escape as a ToolCallError that fails
+              // the whole turn.
+              try {
+                output = await directProcessSession.writeStdinForProcessMutation({
+                  sessionId,
+                  ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
+                  yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
+                  ...(typeof parsed?.max_output_tokens === "number"
+                    ? { maxOutputTokens: parsed.max_output_tokens }
+                    : {}),
+                });
+              } catch (error) {
+                return renderDirectToolFault(error);
+              }
+            } else {
+              output = await tool.invoke(runContext, cappedInput, details);
+            }
             if (sessionId !== null && typeof output === "string") {
               if (isExecSessionLostBanner(output, sessionId)) {
                 // Modal reports a vanished exec session as a non-throwing

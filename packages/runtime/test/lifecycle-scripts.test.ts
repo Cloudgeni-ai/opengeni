@@ -437,12 +437,20 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           providerBindingCount: 1,
         },
       ];
+      const initialSeedPath = join(root, "broker-seed-one");
+      writeFileSync(initialSeedPath, "broker-bearer-one", { mode: 0o600 });
+      const initialRefresh = gitCredentialBindingTokenRefreshCommand(initialBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(initialBindings[0]!.credentialBindingId),
+          path: initialSeedPath,
+        },
+      ]);
+      expect(initialRefresh).not.toContain("broker-bearer-one");
       expect(
-        runScript(
-          `${gitCredentialBindingTokenRefreshCommand(initialBindings)}\n${setupScript(resources, initialBindings)}`,
-          { HOME: home },
-        ).status,
+        runScript(`${initialRefresh}\n${setupScript(resources, initialBindings)}`, { HOME: home })
+          .status,
       ).toBe(0);
+      expect(existsSync(initialSeedPath)).toBe(false);
 
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
@@ -486,9 +494,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           token: "broker-bearer-two",
         },
       ];
-      expect(
-        runScript(gitCredentialBindingTokenRefreshCommand(renewedBindings), { HOME: home }).status,
-      ).toBe(0);
+      const renewedSeedPath = join(root, "broker-seed-two");
+      writeFileSync(renewedSeedPath, "broker-bearer-two", { mode: 0o600 });
+      const renewedRefresh = gitCredentialBindingTokenRefreshCommand(renewedBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(renewedBindings[0]!.credentialBindingId),
+          path: renewedSeedPath,
+        },
+      ]);
+      expect(renewedRefresh).not.toContain("broker-bearer-two");
+      expect(runScript(renewedRefresh, { HOME: home }).status).toBe(0);
+      expect(existsSync(renewedSeedPath)).toBe(false);
       expect(fill()).toContain("password=broker-bearer-two");
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
@@ -605,12 +621,19 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           },
         },
       ];
+      const brokerSeedPath = join(root, "mixed-broker-seed");
+      writeFileSync(brokerSeedPath, "broker-bearer", { mode: 0o600 });
+      const refresh = gitCredentialBindingTokenRefreshCommand(bindings, [
+        {
+          bindingHash: gitCredentialBindingHash(bindings[1]!.credentialBindingId),
+          path: brokerSeedPath,
+        },
+      ]);
+      expect(refresh).not.toContain("broker-bearer");
       expect(
-        runScript(
-          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
-          { HOME: home },
-        ).status,
+        runScript(`${refresh}\n${setupScript(resources, bindings)}`, { HOME: home }).status,
       ).toBe(0);
+      expect(existsSync(brokerSeedPath)).toBe(false);
 
       const fill = (host: string, path: string) =>
         execFileSync("git", ["credential", "fill"], {

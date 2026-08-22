@@ -231,6 +231,27 @@ export function OrgSettingsRoute({
     }
   }
 
+  async function openBillingPortal() {
+    const operation = claimBillingOperation("billing", "mutation");
+    setBusyOwnerKey(identityKey);
+    setBusy(true);
+    try {
+      const session = await client.createBillingPortalSession({
+        ...(accountId ? { accountId } : {}),
+        returnUrl: window.location.href,
+      });
+      if (!ownsBillingOperation(operation)) return;
+      window.location.assign(session.url);
+    } catch (error) {
+      if (!ownsBillingOperation(operation)) return;
+      toast.error("Couldn't open Stripe billing", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (ownsBillingOperation(operation)) setBusy(false);
+    }
+  }
+
   const visibleBilling = billingOwnerKey === identityKey ? billing : null;
   const visibleBillingError = billingOwnerKey === identityKey ? billingError : null;
   const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
@@ -412,6 +433,20 @@ export function OrgSettingsRoute({
                   ))}
                 </div>
                 <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+                  <p className="text-xs text-fg-muted">
+                    View invoices and manage payment information in Stripe.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={visibleBusy}
+                    onClick={() => void openBillingPortal()}
+                  >
+                    Open Stripe billing
+                  </Button>
+                </div>
               </div>
             ) : (
               <p className="text-xs text-fg-subtle">

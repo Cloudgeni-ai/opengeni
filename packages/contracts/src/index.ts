@@ -885,6 +885,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sessions_list",
   "session_get",
   "session_events",
+  "session_wait",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -4169,6 +4170,18 @@ export const CreateCheckoutResponse = z.object({
   url: z.string().url(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
+
+export const CreateBillingPortalRequest = z.object({
+  accountId: z.string().uuid().optional(),
+  returnUrl: z.string().url().optional(),
+});
+export type CreateBillingPortalRequest = z.infer<typeof CreateBillingPortalRequest>;
+
+export const CreateBillingPortalResponse = z.object({
+  portalSessionId: z.string(),
+  url: z.string().url(),
+});
+export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
 
 export const RepositoryResourceRef = z.object({
   kind: z.literal("repository"),

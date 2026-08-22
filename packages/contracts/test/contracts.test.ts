@@ -3,6 +3,8 @@ import {
   AddDocumentRequest,
   assertUniqueResourceMountPaths,
   approvalIdentifier,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -99,6 +101,18 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("validates Stripe billing portal sessions", () => {
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    expect(CreateBillingPortalRequest.parse({ accountId })).toEqual({
+      accountId,
+    });
+    expect(
+      CreateBillingPortalResponse.parse({
+        portalSessionId: "bps_123",
+        url: "https://billing.stripe.com/p/session/test",
+      }).url,
+    ).toBe("https://billing.stripe.com/p/session/test");
+  });
   test("keeps model context contribution summaries content-free and uniquely keyed", () => {
     const valid = {
       source: "workspace_instruction_policy",

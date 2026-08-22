@@ -1754,6 +1754,10 @@ describe("OpenGeniClient billing", () => {
     });
     await client.getBillingEntitlements();
     await client.createBillingCheckout({ amountUsd: 25 });
+    await client.createBillingPortalSession({
+      accountId: "acc-1",
+      returnUrl: "https://app.opengeni.ai/billing",
+    });
     expect(
       requests.map(
         (request) =>
@@ -1764,8 +1768,13 @@ describe("OpenGeniClient billing", () => {
       `GET /v1/billing/usage?accountId=acc-1&workspaceId=${WORKSPACE_ID}`,
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
+      "POST /v1/billing/portal",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      accountId: "acc-1",
+      returnUrl: "https://app.opengeni.ai/billing",
+    });
   });
 });
 

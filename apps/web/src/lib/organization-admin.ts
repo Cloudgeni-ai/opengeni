@@ -15,6 +15,7 @@ export type OrganizationAdminResource =
   | "incoming-invitations"
   | "retention"
   | "billing"
+  | "invoices"
   | "entitlements";
 export type OrganizationAdminOperationLane = "read" | "mutation";
 export type OrganizationAdminOperationSlot =

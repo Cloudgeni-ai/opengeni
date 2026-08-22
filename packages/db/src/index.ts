@@ -39019,7 +39019,39 @@ async function touchLiveLeaseHolder(
 // HEARTBEAT path): a stale (superseded) owner's lease refresh is rejected so it
 // self-evicts. Also liveness-guarded to warm/warming (C2) so a heartbeat can't
 // wedge a draining lease forever by pushing its grace deadline.
-export async function heartbeatLeaseHolder(
+//
+// CONTRACT (two independent signals, one transaction):
+//   - `holderAlive`: this exact holder row still exists and (for a canonical
+//     `turn-attempt:<uuid>` holder) its attempt is still the active writer. The
+//     row's `last_heartbeat_at` was refreshed, so the dead-worker reap cannot
+//     remove it. This is the ONLY signal that licenses a caller to drop its
+//     in-memory ownership (stop timers, release the holder).
+//   - `leaseExtended`: the lease TTL was refreshed. It is false while the lease is
+//     rotation-fenced, draining, or at another epoch even though the holder is
+//     alive. A false here means "finish orderly work (rotation checkpoint) and
+//     then release"; it never means "the holder is gone". Releasing a live holder
+//     on this signal alone drops the lease to draining under a running turn and
+//     lets the reaper terminate the box it is using.
+// `heartbeatLeaseHolder` keeps its historical boolean (= `leaseExtended`) for
+// callers that only need lease authority; liveness loops must use the status form.
+export type LeaseHolderHeartbeatFence =
+  | "unsupported_kind"
+  | "lease_missing"
+  | "holder_gone"
+  | "epoch"
+  | "liveness"
+  | "rotation_requested";
+
+export type LeaseHolderHeartbeatStatus =
+  | {
+      holderAlive: false;
+      leaseExtended: false;
+      fence: "unsupported_kind" | "lease_missing" | "holder_gone";
+    }
+  | { holderAlive: true; leaseExtended: true; fence: null }
+  | { holderAlive: true; leaseExtended: false; fence: "epoch" | "liveness" | "rotation_requested" };
+
+export async function heartbeatLeaseHolderStatus(
   db: Database,
   input: {
     accountId: string;
@@ -39030,31 +39062,38 @@ export async function heartbeatLeaseHolder(
     leaseTtlMs: number;
     expectedEpoch: number;
   },
-): Promise<boolean> {
-  if (input.kind === "process") return false;
+): Promise<LeaseHolderHeartbeatStatus> {
+  if (input.kind === "process") {
+    return { holderAlive: false, leaseExtended: false, fence: "unsupported_kind" };
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
+      await scopedDb.transaction(async (txRaw): Promise<LeaseHolderHeartbeatStatus> => {
         const tx = txRaw as unknown as Database;
         // Canonical lock order is lease -> holder. The global reaper uses the
         // same order, so a heartbeat reviving a stale holder can never deadlock
         // against stale-holder deletion.
-        const leases = await tx.execute<{ id: string }>(sql`
-          select id from sandbox_leases
+        const leases = await tx.execute<{
+          id: string;
+          lease_epoch: number | string;
+          liveness: SandboxLeaseLiveness;
+          rotation_requested_at: Date | string | null;
+        }>(sql`
+          select id, lease_epoch, liveness, rotation_requested_at from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
         const lease = leases[0];
-        if (!lease) return false;
+        if (!lease) return { holderAlive: false, leaseExtended: false, fence: "lease_missing" };
 
         // Holder liveness and lease authority are separate signals. Even after
         // rotation fences lease extension, the still-running owner can spend
         // minutes checkpointing before it aborts. Keep its holder alive so the
         // dead-worker reaper cannot race that checkpoint and terminate the box.
-        // The guarded lease UPDATE below still returns false, which tells the
+        // The guarded lease UPDATE below still returns no row, which tells the
         // owner to complete orderly rotation and release its holder.
         const holderAlive = await touchLiveLeaseHolder(tx, {
           workspaceId: input.workspaceId,
@@ -39062,7 +39101,10 @@ export async function heartbeatLeaseHolder(
           kind: input.kind,
           holderId: input.holderId,
         });
-        if (!holderAlive) return false; // reaped or no longer the exact active attempt
+        if (!holderAlive) {
+          // reaped or no longer the exact active attempt
+          return { holderAlive: false, leaseExtended: false, fence: "holder_gone" };
+        }
         // Recheck the same fence in the write even though its row lock is held,
         // keeping the mutation independently auditable and future-proof.
         const leaseRows = await tx.execute<{ id: string }>(sql`
@@ -39075,7 +39117,144 @@ export async function heartbeatLeaseHolder(
           and rotation_requested_at is null
         returning id
       `);
-        return leaseRows.length > 0;
+        if (leaseRows.length > 0) return { holderAlive: true, leaseExtended: true, fence: null };
+        if (Number(lease.lease_epoch) !== input.expectedEpoch) {
+          return { holderAlive: true, leaseExtended: false, fence: "epoch" };
+        }
+        if (lease.liveness !== "warm" && lease.liveness !== "warming") {
+          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+        }
+        return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+      }),
+  );
+}
+
+export async function heartbeatLeaseHolder(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    kind: LeaseHolderKind;
+    holderId: string;
+    leaseTtlMs: number;
+    expectedEpoch: number;
+  },
+): Promise<boolean> {
+  return (await heartbeatLeaseHolderStatus(db, input)).leaseExtended;
+}
+
+export type ReinstateTurnLeaseHolderResult =
+  | { status: "present" | "reinstated"; lease: LeaseSnapshot }
+  | {
+      status:
+        | "lease_missing"
+        | "lease_fenced"
+        | "capture_in_progress"
+        | "reaper_held"
+        | "attempt_fenced";
+    };
+
+/**
+ * Defense in depth for the orderly provider-deadline rotation checkpoint: put the
+ * exact canonical turn holder back onto the lease it is still physically using.
+ * The warm capture claim requires exactly this holder, so a holder lost while
+ * the attempt is still the active writer (a stale release, a reap race) would
+ * otherwise silently disable the rotation checkpoint and let the reaper
+ * terminate the box under the running turn.
+ *
+ * Fenced hard: the lease must still be the established epoch and provider
+ * instance, carry no capture/teardown claim and no active reaper hold, and the
+ * attempt must still be the turn's active `claimed`/`running` writer on a
+ * session of this group. A draining lease that passes those fences re-arms to
+ * warm exactly like a late arrival in `acquireLease`; a cold or superseded lease
+ * is never touched. Idempotent: an existing holder is reported `present`.
+ */
+export async function reinstateTurnLeaseHolder(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sessionId: string;
+    attemptId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    leaseTtlMs: number;
+  },
+): Promise<ReinstateTurnLeaseHolderResult> {
+  const holderId = `turn-attempt:${input.attemptId}`;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw): Promise<ReinstateTurnLeaseHolderResult> => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+          select lease.*,
+            (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
+              as reaper_hold_active
+          from sandbox_leases lease
+          where lease.workspace_id = ${input.workspaceId}
+            and lease.sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row) return { status: "lease_missing" };
+        if (
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.instance_id !== input.expectedInstanceId ||
+          (row.liveness !== "warm" && row.liveness !== "draining")
+        ) {
+          return { status: "lease_fenced" };
+        }
+        if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
+          return { status: "capture_in_progress" };
+        }
+        if (row.reaper_hold_active) return { status: "reaper_held" };
+        const live = await tx.execute<{ id: string }>(sql`
+          select attempt.id
+          from session_turn_attempts attempt
+          join session_turns turn
+            on turn.account_id = attempt.account_id
+           and turn.workspace_id = attempt.workspace_id
+           and turn.session_id = attempt.session_id
+           and turn.id = attempt.turn_id
+           and turn.execution_generation = attempt.execution_generation
+           and turn.active_attempt_id = attempt.id
+          join sessions session
+            on session.workspace_id = attempt.workspace_id
+           and session.id = attempt.session_id
+          where attempt.id = ${input.attemptId}
+            and attempt.account_id = ${input.accountId}
+            and attempt.workspace_id = ${input.workspaceId}
+            and attempt.session_id = ${input.sessionId}
+            and attempt.state in ('claimed', 'running')
+            and session.sandbox_group_id = ${input.sandboxGroupId}
+          limit 1
+        `);
+        if (live.length === 0) return { status: "attempt_fenced" };
+        const present = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_lease_holders
+          where lease_id = ${row.id} and kind = 'turn' and holder_id = ${holderId}
+        `);
+        if (present.length > 0) return { status: "present", lease: mapLeaseRow(row) };
+        await upsertLeaseHolder(
+          tx,
+          row.id,
+          input.accountId,
+          input.workspaceId,
+          "turn",
+          holderId,
+          input.sessionId,
+        );
+        const updated = await recomputeAndStampLease(
+          tx,
+          row.id,
+          input.leaseTtlMs,
+          row.liveness === "draining" ? "warm" : null,
+        );
+        return { status: "reinstated", lease: mapLeaseRow(updated) };
       }),
   );
 }
@@ -40018,6 +40197,13 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "attempt_fenced"
       | "holder_fenced"
       | "lease_fenced"
+      // The lease still matches the writer's exact epoch/instance/backend, but
+      // a provider-deadline/operator rotation was requested: new mutations are
+      // fenced only until the current holders checkpoint and the cold
+      // successor is elected. Distinct from `lease_fenced` (a genuine
+      // epoch/instance/backend mismatch) so callers can hand the turn to the
+      // orderly rotation path instead of treating the box as lost.
+      | "rotation_in_progress"
       | "route_fenced"
       | "process_fenced"
       | "capture_in_progress"
@@ -40961,6 +41147,7 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
           const current = await tx.execute<{
             workspace_generation: number | string;
             lease_current: boolean;
+            rotation_pending: boolean;
             holder_current: boolean;
             capture_in_progress: boolean;
           }>(sql`
@@ -40974,6 +41161,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
                 and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
                 and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
               ) as lease_current,
+              (
+                lease.account_id = ${locked.accountId}
+                and lease.liveness = 'warm'
+                and lease.rotation_requested_at is not null
+                and lease.lease_epoch = ${locked.expectedEpoch}
+                and lease.instance_id = ${locked.expectedInstanceId}
+                and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
+                and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
+              ) as rotation_pending,
               (lease.archive_capture_id is not null) as capture_in_progress,
               exists (
                 select 1 from sandbox_lease_holders as holder
@@ -41006,6 +41202,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             throw new SandboxWorkspaceMutationFencedError(
               "capture_in_progress",
               "Workspace mutation is waiting for the exact provider archive capture to settle",
+            );
+          }
+          if (current[0]?.rotation_pending) {
+            // Same epoch/instance/backend, but a rotation was requested: the
+            // box is not lost. Admission reopens on the cold successor once
+            // the current holders checkpoint and release.
+            throw new SandboxWorkspaceMutationFencedError(
+              "rotation_in_progress",
+              "Workspace mutation is waiting for the sandbox rotation to complete",
             );
           }
           throw new SandboxWorkspaceMutationFencedError(
