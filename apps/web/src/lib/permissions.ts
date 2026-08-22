@@ -261,10 +261,10 @@ export function canManageOrganizationCompanyProfile(
     return false;
   }
   const matchingAccountGrants = context.accountGrants.filter(
-    (candidate) =>
-      candidate.accountId === workspaceGrant.accountId && candidate.subjectId === context.subjectId,
+    (candidate) => candidate.accountId === workspaceGrant.accountId,
   );
   if (matchingAccountGrants.length !== 1) return false;
   const accountGrant = matchingAccountGrants[0]!;
+  if (accountGrant.subjectId !== context.subjectId) return false;
   return accountGrant.role === "owner" || accountGrant.role === "admin";
 }

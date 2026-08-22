@@ -516,7 +516,6 @@ BEGIN
     AND receipt.workspace_id = p_workspace_id
     AND receipt.session_id = p_session_id
     AND receipt.turn_id = p_turn_id
-    AND receipt.execution_generation = p_execution_generation
   FOR SHARE;
   IF NOT FOUND
     OR proposal.initiating_human_subject_id IS DISTINCT FROM actor_membership.subject_id
@@ -564,7 +563,8 @@ BEGIN
     AND request.workspace_id = p_workspace_id
     AND request.session_id = p_session_id
     AND request.turn_id = p_turn_id
-    AND request.turn_generation = p_execution_generation
+    AND proposal.execution_generation <= request.turn_generation
+    AND request.turn_generation < p_execution_generation
     AND request.status = 'answered'
     AND request.responded_by = actor_membership.subject_id
     AND request.allow_skip = false

@@ -171,6 +171,11 @@ describe("organization company-profile manual editor", () => {
     delegatedHuman.workspaceGrants[0]!.metadata = { delegated: true };
     const duplicateAccountGrant = accessContext("admin");
     duplicateAccountGrant.accountGrants.push({ ...duplicateAccountGrant.accountGrants[0]! });
+    const otherSubjectAccountGrant = accessContext("admin");
+    otherSubjectAccountGrant.accountGrants.push({
+      ...otherSubjectAccountGrant.accountGrants[0]!,
+      subjectId: "user:other-organization-admin",
+    });
     const duplicateWorkspaceGrant = accessContext("admin");
     duplicateWorkspaceGrant.workspaceGrants.push({
       ...duplicateWorkspaceGrant.workspaceGrants[0]!,
@@ -180,6 +185,7 @@ describe("organization company-profile manual editor", () => {
       accessContext("admin", "agent_attempt"),
       delegatedHuman,
       duplicateAccountGrant,
+      otherSubjectAccountGrant,
       duplicateWorkspaceGrant,
     ]) {
       context.accessContext = deniedContext;

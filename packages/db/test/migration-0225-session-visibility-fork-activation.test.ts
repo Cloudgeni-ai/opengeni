@@ -383,6 +383,12 @@ describe("migration 0303 session tenancy product activation", () => {
         and referenced_relation.relname = 'sessions'
         and referenced_attribute.attname = 'id'
         and relation.relname <> 'sessions'
+        -- Exempt only these receipts: they are FORCE-RLS capability-only state with no direct
+        -- runtime DML and exact lifecycle account/workspace/session/attempt enforcement.
+        and relation.relname not in (
+          'company_profile_agent_confirmation_receipts',
+          'company_profile_agent_proposal_receipts'
+        )
         and relation.relrowsecurity
         and not exists (
           select 1

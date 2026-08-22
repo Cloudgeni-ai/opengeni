@@ -152,6 +152,7 @@ describe("release schema contract", () => {
       "0313_private_child_session_authority.sql",
       "0314_unregistered_organization_invitations.sql",
       "0316_human_confirmed_activation_resumed_generation.sql",
+      "0317_session_goal_continuation_hold.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -569,8 +570,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0318_human_confirmed_company_profile_agent_admin.sql")) {
         return includesActivation
-          ? "a099f57fbb481c6212b51e0c6867c8d196d611c34e37c7889ee5eb90024741d2"
-          : "3aa976798f6a99b8aaa239a030530206428f9df81503c2a0b1dc925b5defa340";
+          ? "1bff446895679856de39f6d514c9cca8743a9b333cdf741e5d198c6a6cbb70f8"
+          : "194ed026af6197cb5cfe5fe1709f2c297539ca1499c9235ffe5d5cc7bbcc69ef";
       }
       if (migrations.has("0310_channel_project_order.sql")) {
         return includesActivation
