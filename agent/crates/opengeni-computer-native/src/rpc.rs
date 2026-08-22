@@ -493,7 +493,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::Value;
     use sha2::{Digest as _, Sha256};
-    use tokio::io::{duplex, split, AsyncWriteExt as _};
+    use tokio::io::{duplex, split};
 
     use super::*;
     use crate::{
