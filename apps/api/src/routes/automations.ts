@@ -127,6 +127,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const adapter = requireAutomationAdapter(source.adapterId);
     adapter.validateTriggerConfiguration(request.configuration);
+    adapter.validateTriggerParameters(request.parameters);
     for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
       requirePermission(grant, permission);
     }
@@ -154,6 +155,9 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireAutomationAdapter(existing.adapterId).validateTriggerConfiguration(
         request.configuration,
       );
+    }
+    if (request.parameters) {
+      requireAutomationAdapter(existing.adapterId).validateTriggerParameters(request.parameters);
     }
     try {
       const trigger = await updateAutomationTrigger(deps.db, {

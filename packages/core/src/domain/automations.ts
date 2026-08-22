@@ -31,6 +31,7 @@ export type AutomationAdapter = {
   }): AutomationNormalizedEvent;
   validateSourceConfiguration(configuration: Record<string, unknown>): void;
   validateTriggerConfiguration(configuration: Record<string, unknown>): void;
+  validateTriggerParameters(parameters: Record<string, unknown>): void;
   matches(input: { event: AutomationNormalizedEvent; trigger: AutomationTrigger }): boolean;
   render(input: {
     event: AutomationNormalizedEvent;
@@ -74,6 +75,9 @@ export const signedJsonAutomationAdapter: AutomationAdapter = {
   },
   validateTriggerConfiguration: (configuration) => {
     assertConfigurationObject(configuration);
+  },
+  validateTriggerParameters: (parameters) => {
+    assertConfigurationObject(parameters);
   },
   matches: ({ event, trigger }) => trigger.eventTypes.includes(event.eventType),
   render: ({ event, trigger, source }) => {
