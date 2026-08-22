@@ -166,9 +166,10 @@ export type ChannelASession = {
   supportsPty?(): boolean;
   /** Provider-native directory listing. Channel A uses this for depth-1 Files
    *  trees when present so a slow exec data plane cannot stall the dock. */
-  listDir?(args: { path: string; runAs?: string }): Promise<
-    Array<{ name: string; path: string; type: "file" | "dir" | "other" }>
-  >;
+  listDir?(args: {
+    path: string;
+    runAs?: string;
+  }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>>;
 };
 
 export type WorkspaceFileImportRequest = {
@@ -2374,7 +2375,9 @@ export class SandboxChannelAService {
   private async fsListFromNativeListDir(req: FsListRequest): Promise<FsListResponse> {
     const listDir = this.session.listDir;
     if (!listDir) {
-      throw new ChannelAUnavailableError("Workspace files are temporarily unavailable. Retry the file list.");
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file list.",
+      );
     }
     const root = assertSafeRelPathOrRoot(req.path);
     const listed = await listDir({

@@ -111,8 +111,7 @@ describe("signed controller cache", () => {
   const expired =
     "ws://127.0.0.1:28888/sbx-1/7682/1/sigsigsig/v1/browser-sessions/session/targets/t/frames";
   const freshExpires = Math.floor(Date.parse("2099-01-01T00:00:00.000Z") / 1000).toString(36);
-  const fresh =
-    `ws://127.0.0.1:28888/sbx-1/7682/${freshExpires}/sigsigsig/v1/browser-sessions/session/targets/t/frames`;
+  const fresh = `ws://127.0.0.1:28888/sbx-1/7682/${freshExpires}/sigsigsig/v1/browser-sessions/session/targets/t/frames`;
 
   test("does not persist OpenSandbox signed URLs as durable controller cache", () => {
     expect(isOpenSandboxSignedControllerUrl(fresh)).toBe(true);

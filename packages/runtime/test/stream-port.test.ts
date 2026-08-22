@@ -113,9 +113,9 @@ describe("exposedPortAllowsHostFetch", () => {
         "ws://127.0.0.1:28888/sbx-1/7682/s6ph0/sigsigsig/v1/browser-sessions/x",
       ),
     ).toBe(true);
-    expect(
-      exposedPortAllowsHostFetch("ws://127.0.0.1:18090/v1/sandboxes/sbx-1/proxy/7682"),
-    ).toBe(false);
+    expect(exposedPortAllowsHostFetch("ws://127.0.0.1:18090/v1/sandboxes/sbx-1/proxy/7682")).toBe(
+      false,
+    );
     expect(
       exposedPortAllowsHostFetch({
         host: "127.0.0.1",
@@ -132,11 +132,17 @@ describe("exposedPortAllowsHostFetch", () => {
     expect(redactOpenSandboxSignedUriPath("/v1/sandboxes/sbx-1/proxy/7682")).toBe(
       "/v1/sandboxes/sbx-1/proxy/7682",
     );
-    expect(signedEndpointNeedsRefresh("/sbx-1/7682/s6ph0/sigsigsig", signed!.expiresAtSeconds * 1000 - 60_000)).toBe(
-      false,
-    );
     expect(
-      signedEndpointNeedsRefresh("/sbx-1/7682/s6ph0/sigsigsig", signed!.expiresAtSeconds * 1000 - 1_000),
+      signedEndpointNeedsRefresh(
+        "/sbx-1/7682/s6ph0/sigsigsig",
+        signed!.expiresAtSeconds * 1000 - 60_000,
+      ),
+    ).toBe(false);
+    expect(
+      signedEndpointNeedsRefresh(
+        "/sbx-1/7682/s6ph0/sigsigsig",
+        signed!.expiresAtSeconds * 1000 - 1_000,
+      ),
     ).toBe(true);
   });
 });

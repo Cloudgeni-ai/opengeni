@@ -130,10 +130,7 @@ export async function deleteUnpublishedWorkspaceArchiveObject(
   objectStorage: ObjectStorage | null | undefined,
   ref: WorkspaceArchiveObjectRef | undefined,
   metrics?: {
-    onWorkspaceArchiveObject?: (input: {
-      outcome: "deleted_unpublished";
-      backend: string;
-    }) => void;
+    onWorkspaceArchiveObject?: (input: { outcome: "deleted_unpublished"; backend: string }) => void;
   },
 ): Promise<void> {
   if (!objectStorage || !ref) return;

@@ -2084,21 +2084,21 @@ function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolea
     case "azure-blob":
       return Boolean(
         settings.objectStorageAzureConnectionString ||
-          (settings.objectStorageAzureAccountName && settings.objectStorageAzureAccountKey),
+        (settings.objectStorageAzureAccountName && settings.objectStorageAzureAccountKey),
       );
     case "gcs":
       return Boolean(
         settings.objectStorageGcsCredentialsJson ||
-          settings.objectStorageGcsKeyFilename ||
-          settings.objectStorageGcsProjectId,
+        settings.objectStorageGcsKeyFilename ||
+        settings.objectStorageGcsProjectId,
       );
     case "aws-s3":
       return true;
     case "s3-compatible":
       return Boolean(
         settings.objectStorageEndpoint &&
-          settings.objectStorageAccessKeyId &&
-          settings.objectStorageSecretAccessKey,
+        settings.objectStorageAccessKeyId &&
+        settings.objectStorageSecretAccessKey,
       );
     default: {
       const _exhaustive: never = settings.objectStorageBackend;
@@ -2389,7 +2389,9 @@ export function getSettings(): Settings {
     openSandboxTtlSeconds: optional("OPENGENI_OPENSANDBOX_TTL_SECONDS"),
     openSandboxUseServerProxy: optional("OPENGENI_OPENSANDBOX_USE_SERVER_PROXY"),
     openSandboxSignedEndpoints: optional("OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS"),
-    openSandboxSignedEndpointTtlSeconds: optional("OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS"),
+    openSandboxSignedEndpointTtlSeconds: optional(
+      "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS",
+    ),
     openSandboxChannelBPublicBaseUrl: optional("OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL"),
     openSandboxInteractionFrameProxy: optional("OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY"),
     openSandboxPoolRef: optional("OPENGENI_OPENSANDBOX_POOL_REF"),

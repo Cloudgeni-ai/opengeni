@@ -23,7 +23,8 @@ const IMAGE =
   process.env.OPENGENI_OPENSANDBOX_IMAGE ??
   "ogosbpreview1c91.azurecr.io/opengeni-sandbox@sha256:2723fb371ae8de327f50fa0b10a33fdc921056afabfdacc22c804d9924e614c6";
 const BASE_URL = process.env.OPENGENI_OPENSANDBOX_BASE_URL ?? "http://127.0.0.1:18090";
-const PUBLIC_BASE = process.env.OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL ?? "http://127.0.0.1:28888";
+const PUBLIC_BASE =
+  process.env.OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL ?? "http://127.0.0.1:28888";
 const BEARER = "m2-browserd-token";
 const SUBPROTOCOL = "opengeni.test.subprotocol";
 const OUT = ".agent/generated/opensandbox/signed-endpoint-proof.json";
@@ -167,86 +168,87 @@ try {
     return { sandboxId };
   });
   if (created && session) {
-  await step("start-http-auth-server", async () => {
-    await session!.writeFile({ path: "m2-http.py", content: HTTP_PY });
-    const retained = await runWithToolCallCorrelation("m2-http", () =>
-      session!.exec({ cmd: "python3 /workspace/m2-http.py", yieldTimeMs: 0 }),
-    );
-    if (retained.sessionId === undefined) throw new Error("HTTP server did not yield");
-    return { sessionId: retained.sessionId };
-  });
-  await step("start-ws-subprotocol-server", async () => {
-    await session!.writeFile({ path: "m2-ws.py", content: WS_PY });
-    const retained = await runWithToolCallCorrelation("m2-ws", () =>
-      session!.exec({ cmd: "python3 /workspace/m2-ws.py", yieldTimeMs: 0 }),
-    );
-    if (retained.sessionId === undefined) throw new Error("WS server did not yield");
-    return { sessionId: retained.sessionId };
-  });
-  await step("signed-http-authorization", async () => {
-    const endpoint = await session!.resolveExposedPort(8080);
-    const url = endpoint.url!;
-    const path = new URL(url).pathname;
-    if (isLifecycleProxy(path)) throw new Error(`lifecycle proxy path ${path}`);
-    if (!isSignedUri(path)) throw new Error(`not OSEP URI: ${path}`);
-    if (new URL(url).host !== "127.0.0.1:28888") throw new Error(`host rewrite failed: ${url}`);
-    const denied = await retry(30_000, async () => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-      if (response.status !== 401) throw new Error(`expected 401 without bearer, got ${response.status}`);
-      return response.status;
+    await step("start-http-auth-server", async () => {
+      await session!.writeFile({ path: "m2-http.py", content: HTTP_PY });
+      const retained = await runWithToolCallCorrelation("m2-http", () =>
+        session!.exec({ cmd: "python3 /workspace/m2-http.py", yieldTimeMs: 0 }),
+      );
+      if (retained.sessionId === undefined) throw new Error("HTTP server did not yield");
+      return { sessionId: retained.sessionId };
     });
-    const allowed = await retry(15_000, async () => {
-      const response = await fetch(url, {
-        headers: { authorization: `Bearer ${BEARER}` },
-        signal: AbortSignal.timeout(5_000),
+    await step("start-ws-subprotocol-server", async () => {
+      await session!.writeFile({ path: "m2-ws.py", content: WS_PY });
+      const retained = await runWithToolCallCorrelation("m2-ws", () =>
+        session!.exec({ cmd: "python3 /workspace/m2-ws.py", yieldTimeMs: 0 }),
+      );
+      if (retained.sessionId === undefined) throw new Error("WS server did not yield");
+      return { sessionId: retained.sessionId };
+    });
+    await step("signed-http-authorization", async () => {
+      const endpoint = await session!.resolveExposedPort(8080);
+      const url = endpoint.url!;
+      const path = new URL(url).pathname;
+      if (isLifecycleProxy(path)) throw new Error(`lifecycle proxy path ${path}`);
+      if (!isSignedUri(path)) throw new Error(`not OSEP URI: ${path}`);
+      if (new URL(url).host !== "127.0.0.1:28888") throw new Error(`host rewrite failed: ${url}`);
+      const denied = await retry(30_000, async () => {
+        const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+        if (response.status !== 401)
+          throw new Error(`expected 401 without bearer, got ${response.status}`);
+        return response.status;
       });
-      const body = await response.text();
-      if (!response.ok || !body.includes('"ok":true')) {
-        throw new Error(`bearer fetch failed ${response.status} ${body.slice(0, 200)}`);
+      const allowed = await retry(15_000, async () => {
+        const response = await fetch(url, {
+          headers: { authorization: `Bearer ${BEARER}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = await response.text();
+        if (!response.ok || !body.includes('"ok":true')) {
+          throw new Error(`bearer fetch failed ${response.status} ${body.slice(0, 200)}`);
+        }
+        return body;
+      });
+      return {
+        path: redactPath(path),
+        unauthorizedStatus: denied,
+        authorizedBody: allowed,
+        lifecycleProxy: false,
+      };
+    });
+    await step("signed-websocket-subprotocol", async () => {
+      const endpoint = await session!.resolveExposedPort(8765);
+      const url = endpoint.url!.replace(/^http/u, "ws");
+      const path = new URL(url).pathname;
+      if (isLifecycleProxy(path)) throw new Error(`lifecycle proxy path ${path}`);
+      if (!isSignedUri(path)) throw new Error(`not OSEP URI: ${path}`);
+      const result = await retry(30_000, async () => {
+        return await new Promise<{ protocol: string; message: string }>((resolve, reject) => {
+          const ws = new WebSocket(url, [SUBPROTOCOL]);
+          const timer = setTimeout(() => {
+            ws.close();
+            reject(new Error("websocket timeout"));
+          }, 8_000);
+          ws.addEventListener("open", () => {
+            /* wait for payload */
+          });
+          ws.addEventListener("message", (event) => {
+            clearTimeout(timer);
+            const message = typeof event.data === "string" ? event.data : String(event.data);
+            const protocol = ws.protocol;
+            ws.close();
+            resolve({ protocol, message });
+          });
+          ws.addEventListener("error", () => {
+            clearTimeout(timer);
+            reject(new Error(`websocket error protocol=${ws.protocol}`));
+          });
+        });
+      });
+      if (result.protocol !== SUBPROTOCOL) {
+        throw new Error(`subprotocol not preserved: ${result.protocol || "<empty>"}`);
       }
-      return body;
+      return { path: redactPath(path), ...result };
     });
-    return {
-      path: redactPath(path),
-      unauthorizedStatus: denied,
-      authorizedBody: allowed,
-      lifecycleProxy: false,
-    };
-  });
-  await step("signed-websocket-subprotocol", async () => {
-    const endpoint = await session!.resolveExposedPort(8765);
-    const url = endpoint.url!.replace(/^http/u, "ws");
-    const path = new URL(url).pathname;
-    if (isLifecycleProxy(path)) throw new Error(`lifecycle proxy path ${path}`);
-    if (!isSignedUri(path)) throw new Error(`not OSEP URI: ${path}`);
-    const result = await retry(30_000, async () => {
-      return await new Promise<{ protocol: string; message: string }>((resolve, reject) => {
-        const ws = new WebSocket(url, [SUBPROTOCOL]);
-        const timer = setTimeout(() => {
-          ws.close();
-          reject(new Error("websocket timeout"));
-        }, 8_000);
-        ws.addEventListener("open", () => {
-          /* wait for payload */
-        });
-        ws.addEventListener("message", (event) => {
-          clearTimeout(timer);
-          const message = typeof event.data === "string" ? event.data : String(event.data);
-          const protocol = ws.protocol;
-          ws.close();
-          resolve({ protocol, message });
-        });
-        ws.addEventListener("error", () => {
-          clearTimeout(timer);
-          reject(new Error(`websocket error protocol=${ws.protocol}`));
-        });
-      });
-    });
-    if (result.protocol !== SUBPROTOCOL) {
-      throw new Error(`subprotocol not preserved: ${result.protocol || "<empty>"}`);
-    }
-    return { path: redactPath(path), ...result };
-  });
   }
 } finally {
   await (session as OpenSandboxSession | null)?.delete().catch(() => undefined);

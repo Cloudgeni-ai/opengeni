@@ -161,8 +161,7 @@ export function joinExposedPortPath(endpointPath: string | undefined, requestPat
   return `${prefix}${requestPath}`;
 }
 
-const OPENSANDBOX_LIFECYCLE_PROXY_PATH =
-  /\/v1\/sandboxes\/[^/]+\/proxy\/\d+(?:\/|$)/u;
+const OPENSANDBOX_LIFECYCLE_PROXY_PATH = /\/v1\/sandboxes\/[^/]+\/proxy\/\d+(?:\/|$)/u;
 /** OSEP-0011 URI mode: `/{sandbox_id}/{port}/{expires_b36}/{signature}/…`. */
 const OPENSANDBOX_SIGNED_URI_PATH =
   /^\/([^/]{1,128})\/(\d{1,5})\/([0-9a-z]{1,13})\/([0-9a-z]{8,64})(?:\/|$)/iu;

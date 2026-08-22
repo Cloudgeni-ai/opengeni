@@ -86,11 +86,19 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
-import { controllerCacheAllowsHostFetch, controllerCachedUrlIsUsable, shouldPersistControllerDataPlaneUrl, withCachedController } from "../controller-data-plane";
+import {
+  controllerCacheAllowsHostFetch,
+  controllerCachedUrlIsUsable,
+  shouldPersistControllerDataPlaneUrl,
+  withCachedController,
+} from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
-import { createInteractionFrameProxyAttachment, placementUsesInteractionFrameProxy } from "../interaction-frame-proxy";
+import {
+  createInteractionFrameProxyAttachment,
+  placementUsesInteractionFrameProxy,
+} from "../interaction-frame-proxy";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -1034,10 +1042,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     ) {
       return placement;
     }
-    if (
-      placement.lease.backend === "opensandbox" &&
-      deps.settings.openSandboxSignedEndpoints
-    ) {
+    if (placement.lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) {
       if (!placement.lease.controllerDataPlaneUrl) return placement;
       const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
         accountId: grant.accountId,
@@ -1090,10 +1095,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       cachedUrl:
         sandboxGroupId &&
         cachedUrl &&
-        !(
-          placement.lease?.backend === "opensandbox" &&
-          deps.settings.openSandboxSignedEndpoints
-        ) &&
+        !(placement.lease?.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) &&
         controllerCachedUrlIsUsable(cachedUrl)
           ? cachedUrl
           : null,

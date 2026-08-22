@@ -59,7 +59,10 @@ type DeploymentDoc = {
 };
 
 function isServerDeploymentRaw(document: string): boolean {
-  return /^\s*kind:\s*Deployment\s*$/mu.test(document) && /^\s*name:\s*opensandbox-server\s*$/mu.test(document);
+  return (
+    /^\s*kind:\s*Deployment\s*$/mu.test(document) &&
+    /^\s*name:\s*opensandbox-server\s*$/mu.test(document)
+  );
 }
 
 function secretEnv(container: Container, name: string): EnvVar {
@@ -70,7 +73,10 @@ function secretEnv(container: Container, name: string): EnvVar {
   return { name: found.name, valueFrom: { secretKeyRef: { ...found.valueFrom.secretKeyRef } } };
 }
 
-function upsertVolume(volumes: Array<Record<string, unknown>>, volume: Record<string, unknown>): Array<Record<string, unknown>> {
+function upsertVolume(
+  volumes: Array<Record<string, unknown>>,
+  volume: Record<string, unknown>,
+): Array<Record<string, unknown>> {
   const name = volume.name;
   return [...volumes.filter((entry) => entry.name !== name), volume];
 }
@@ -83,7 +89,9 @@ export function injectSecureAccessRuntimeConfig(doc: DeploymentDoc): DeploymentD
   const spec = doc.spec?.template?.spec;
   const main = spec?.containers?.find((container) => container.name === "main");
   if (!spec || !main?.image) {
-    throw new Error("opensandbox-server Deployment is missing spec.template.spec.containers[name=main]");
+    throw new Error(
+      "opensandbox-server Deployment is missing spec.template.spec.containers[name=main]",
+    );
   }
 
   const hasSecureAccessEnv = (main.env ?? []).some(
@@ -119,12 +127,16 @@ export function injectSecureAccessRuntimeConfig(doc: DeploymentDoc): DeploymentD
     ],
   };
 
-  const otherInits = (spec.initContainers ?? []).filter((container) => container.name !== INIT_NAME);
+  const otherInits = (spec.initContainers ?? []).filter(
+    (container) => container.name !== INIT_NAME,
+  );
   spec.initContainers = [...otherInits, initContainer];
 
   main.args = ["--config", RUNTIME_CONFIG_PATH];
   main.env = (main.env ?? []).map((entry) =>
-    entry.name === "SANDBOX_CONFIG_PATH" ? { name: "SANDBOX_CONFIG_PATH", value: RUNTIME_CONFIG_PATH } : entry,
+    entry.name === "SANDBOX_CONFIG_PATH"
+      ? { name: "SANDBOX_CONFIG_PATH", value: RUNTIME_CONFIG_PATH }
+      : entry,
   );
   main.volumeMounts = upsertMount(main.volumeMounts ?? [], {
     name: RUNTIME_VOLUME,
@@ -148,7 +160,9 @@ export function rewriteOpenSandboxManifests(raw: string): string {
     if (!isServerDeploymentRaw(body) && !isServerDeploymentRaw(chunk)) {
       return chunk;
     }
-    const parsed = Bun.YAML.parse(body.startsWith("kind:") || body.startsWith("apiVersion:") ? body : chunk) as DeploymentDoc | DeploymentDoc[];
+    const parsed = Bun.YAML.parse(
+      body.startsWith("kind:") || body.startsWith("apiVersion:") ? body : chunk,
+    ) as DeploymentDoc | DeploymentDoc[];
     const doc = Array.isArray(parsed) ? parsed[0] : parsed;
     if (!doc || doc.kind !== "Deployment" || doc.metadata?.name !== "opensandbox-server") {
       return chunk;

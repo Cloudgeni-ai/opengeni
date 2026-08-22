@@ -184,7 +184,12 @@ import {
   deriveBrowserViewGrantToken,
   deriveComputerSessionControllerTokens,
 } from "../browser-controller-authority";
-import { controllerCacheAllowsHostFetch, controllerCachedUrlIsUsable, shouldPersistControllerDataPlaneUrl, withCachedController } from "../controller-data-plane";
+import {
+  controllerCacheAllowsHostFetch,
+  controllerCachedUrlIsUsable,
+  shouldPersistControllerDataPlaneUrl,
+  withCachedController,
+} from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -201,7 +206,10 @@ import {
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { interactionControlApiError } from "../http/interaction-control-error";
-import { createInteractionFrameProxyAttachment, placementUsesInteractionFrameProxy } from "../interaction-frame-proxy";
+import {
+  createInteractionFrameProxyAttachment,
+  placementUsesInteractionFrameProxy,
+} from "../interaction-frame-proxy";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -2896,10 +2904,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
       return placement;
     }
-    if (
-      placement.lease.backend === "opensandbox" &&
-      deps.settings.openSandboxSignedEndpoints
-    ) {
+    if (placement.lease.backend === "opensandbox" && deps.settings.openSandboxSignedEndpoints) {
       if (!placement.lease.controllerDataPlaneUrl) return placement;
       const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
         accountId: grant.accountId,

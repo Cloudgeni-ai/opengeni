@@ -37204,8 +37204,8 @@ function evaluateColdLostSnapshot(
   const inlineBytes = decodeCanonicalBase64(base64);
   const inlineObjectMismatch = Boolean(
     inlineBytes &&
-      objectRef &&
-      (sha256String(inlineBytes) !== objectRef.sha256 || inlineBytes.length !== objectRef.bytes),
+    objectRef &&
+    (sha256String(inlineBytes) !== objectRef.sha256 || inlineBytes.length !== objectRef.bytes),
   );
   const bytes = inlineBytes;
   const referenceBytes = inlineBytes?.length ?? objectRef?.bytes ?? null;
@@ -44041,7 +44041,9 @@ export async function persistDrainSnapshot(
           : {}),
         ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
-        ...(published.workspaceArchiveRef ? { workspaceArchiveRef: published.workspaceArchiveRef } : {}),
+        ...(published.workspaceArchiveRef
+          ? { workspaceArchiveRef: published.workspaceArchiveRef }
+          : {}),
         resumeState,
         livenessGuard: coldLatePublication ? "cold_late" : "draining",
         previousArchive: rotation.previousArchive,
@@ -44655,7 +44657,9 @@ export async function persistWarmSnapshot(
         captureId: input.captureId,
         ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
-        ...(published.workspaceArchiveRef ? { workspaceArchiveRef: published.workspaceArchiveRef } : {}),
+        ...(published.workspaceArchiveRef
+          ? { workspaceArchiveRef: published.workspaceArchiveRef }
+          : {}),
         resumeState: guard[0]!.resume_state,
         livenessGuard,
         previousArchive: rotation.previousArchive,

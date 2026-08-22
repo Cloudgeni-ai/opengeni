@@ -106,7 +106,10 @@ export function workspaceArchivePayloadPresent(
   sessionState: Record<string, unknown> | null | undefined,
 ): boolean {
   if (!sessionState) return false;
-  if (typeof sessionState.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0) {
+  if (
+    typeof sessionState.workspaceArchive === "string" &&
+    sessionState.workspaceArchive.length > 0
+  ) {
     return true;
   }
   return parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef) !== null;

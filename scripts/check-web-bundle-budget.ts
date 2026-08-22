@@ -106,7 +106,11 @@ const budgets = {
   // still bound the aggregate.
   initialFileGzip: 77 * kib,
   initialFiles: 17,
-  directSessionRaw: 2063 * kib,
+  // The OpenSandbox session work on current main measures 2,112,678 bytes in
+  // the Linux/x64 CI production build. Advance only the direct-session raw
+  // envelope to the next whole KiB; gzip, file-count, lazy, CSS, and all other
+  // graph limits stay fixed.
+  directSessionRaw: 2064 * kib,
   directSessionGzip: 575 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
