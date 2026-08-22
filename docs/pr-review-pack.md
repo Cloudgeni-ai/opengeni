@@ -192,7 +192,9 @@ POST /v1/webhooks/automations/:endpointId
 ```
 
 `DELETE` is an audit-preserving disable. The opt-in SDK surface is
-`@opengeni/sdk/pr-review`.
+`@opengeni/sdk/pr-review`. Registrations and repository bindings own Pack
+sources and triggers, so their setup routes are the only mutation authority;
+the generic automation routes cannot claim or alter those Pack-owned rows.
 
 - Pack, adapter, Skill, verification, and normalization:
   `packages/core/src/domain/packs.ts`, `packages/core/src/domain/pr-review.ts`

@@ -225,6 +225,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    requirePermission(grant, "secrets:write");
     const deleted = await deletePrReviewAppRegistration(db, {
       accountId: grant.accountId,
       workspaceId,

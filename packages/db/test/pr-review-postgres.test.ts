@@ -23,6 +23,7 @@ import {
   PrReviewDispatchAuthorityError,
   recordAutomationEvent,
   resolvePrReviewGitCredential,
+  updateAutomationTrigger,
   updatePrReviewRepositoryBinding,
   type DbClient,
 } from "../src";
@@ -180,6 +181,14 @@ describe("PR Review Pack persistence", () => {
         providerRepositoryId: "101",
       },
     });
+    await expect(
+      updateAutomationTrigger(client.db, {
+        workspaceId: grant.workspaceId,
+        triggerId: binding.triggerId,
+        subjectId: grant.subjectId,
+        request: { expectedRevision: trigger!.revision, status: "disabled" },
+      }),
+    ).rejects.toThrow("Pack-owned automation triggers must be managed");
 
     const headSha = "e".repeat(40);
     const source = (await listAutomationSources(client.db, grant.workspaceId))[0]!;
