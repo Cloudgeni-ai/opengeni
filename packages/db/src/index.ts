@@ -232,6 +232,7 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
   omitOutputOnlyHistoryItemFields,
@@ -393,6 +394,7 @@ export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
+export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
@@ -1251,8 +1253,13 @@ export type BootstrapWorkspaceInput = {
   workspacePermissions?: Permission[];
 };
 
-function samePermissionSet(left: readonly string[], right: readonly Permission[]): boolean {
-  return left.length === right.length && right.every((permission) => left.includes(permission));
+function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
+  if (!Array.isArray(left) || left.length !== right.length) return false;
+  const normalized = normalizeWorkspaceMembershipPermissions(left);
+  return (
+    normalized.length === left.length &&
+    right.every((permission) => normalized.includes(permission))
+  );
 }
 
 export async function bootstrapWorkspace(
@@ -1433,7 +1440,7 @@ export async function bootstrapWorkspace(
         accountId: row.workspace.accountId,
         subjectId: input.subjectId,
         ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         ...(input.accountExternalSource === "opengeni:local"
           ? { principalKind: "human_session" as const }
           : input.accountExternalSource === "opengeni:configured"
@@ -1521,7 +1528,7 @@ async function projectManagedOrganizationAccess(
         accountId: row.workspace.accountId,
         subjectId: input.subjectId,
         subjectLabel: input.subjectLabel,
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         principalKind: "human_session" as const,
       })),
     );
@@ -1872,7 +1879,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       accountId: row.workspace.accountId,
       subjectId,
       subjectLabel,
-      permissions: row.membership.permissions as Permission[],
+      permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
       principalKind: "human_session",
     }));
     const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
@@ -1930,7 +1937,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           accountId: row.workspace.accountId,
           subjectId,
           subjectLabel,
-          permissions: row.membership.permissions as Permission[],
+          permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
           principalKind: "human_session",
         });
       }
@@ -2266,7 +2273,7 @@ export async function getWorkspaceGrant(
         accountId: row.workspace.accountId,
         subjectId: row.membership.subjectId,
         ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
@@ -8358,11 +8365,12 @@ export async function persistProviderOAuthConnection(
             throw new Error("Connection owner no longer has live workspace authority");
           }
           if (membership) {
+            const permissions = normalizeWorkspaceMembershipPermissions(membership.permissions);
             if (
               membership.accountId !== input.accountId ||
               (input.requiredLiveUserPermission &&
-                !membership.permissions.includes(input.requiredLiveUserPermission) &&
-                !membership.permissions.includes("workspace:admin"))
+                !permissions.includes(input.requiredLiveUserPermission) &&
+                !permissions.includes("workspace:admin"))
             ) {
               throw new Error("Connection owner no longer has the required workspace permission");
             }
@@ -63717,7 +63725,7 @@ function mapWorkspaceMember(row: typeof schema.workspaceMemberships.$inferSelect
     subjectId: row.subjectId,
     subjectLabel: row.subjectLabel,
     role: row.role,
-    permissions: row.permissions as Permission[],
+    permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
     createdAt: row.createdAt.toISOString(),
   };
 }
