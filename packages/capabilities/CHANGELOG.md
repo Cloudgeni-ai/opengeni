@@ -1,5 +1,13 @@
 # @opengeni/capabilities
 
+## 0.3.0
+
+### Minor Changes
+
+- f51adf8: Add the reusable first-party local MCP bridge contract and adapter registry,
+  and route Gmail's reviewed REST bridge through the generic adapter selection
+  seam.
+
 ## 0.2.3
 
 ### Patch Changes
