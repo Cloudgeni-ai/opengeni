@@ -4176,6 +4176,7 @@ export const RepositoryResourceRef = z.object({
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  connectionType: z.literal("github_personal").optional(),
   credentialBindingId: GitCredentialBindingId.optional(),
   access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),

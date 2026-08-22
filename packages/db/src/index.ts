@@ -53286,6 +53286,10 @@ function personalConnectionDelegationsForSameSessionSuccessor(
   // grants may be re-admitted under the live DB fences; once remains bound to
   // its original accepted turn and is never copied forward.
   return delegations.filter((delegation) => {
+    // OPE-290 freezes personal GitHub authority only for explicit human/API
+    // work. OPE-294 owns goal, child-result, recovery, and other machine-input
+    // inheritance with a fresh live repository recheck.
+    if (delegation.connectionType === "github_personal") return false;
     const authority = delegation.userDelegation;
     if (!authority) return true;
     if (authority.mode === "once") return false;

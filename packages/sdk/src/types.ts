@@ -463,6 +463,7 @@ export type RepositoryResourceRef = {
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
+  connectionType?: "github_personal" | undefined;
   credentialBindingId?: GitCredentialBindingId | undefined;
   access?: GitRepositoryAccess | undefined;
   repositoryId?: number | string | undefined;

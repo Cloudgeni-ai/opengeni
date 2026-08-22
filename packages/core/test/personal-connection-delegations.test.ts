@@ -13,6 +13,7 @@ import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 import {
   createDb,
   createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   ensureManagedAccessForUser,
   getPersonalGitHubRepositorySelectionState,
@@ -44,6 +45,21 @@ const personalServer = {
     subjectScope: "subject" as const,
   },
 };
+
+async function rejectedErrorChain(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+  } catch (error) {
+    const messages: string[] = [];
+    let current: unknown = error;
+    while (current instanceof Error) {
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.join("\ncaused by: ");
+  }
+  throw new Error("expected operation to reject");
+}
 
 function googleDriveConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   const now = "2026-08-14T00:00:00.000Z";
@@ -473,6 +489,7 @@ describe("personal MCP connection delegation", () => {
         uri: repository.canonicalUrl,
         ref: repository.defaultBranch,
         provider: "github" as const,
+        connectionType: "github_personal" as const,
         credentialBindingId,
         repositoryId: repository.repositoryId,
         access: "write" as const,
@@ -603,6 +620,80 @@ describe("personal MCP connection delegation", () => {
         from scheduled_tasks where id = ${task.id}
       `;
       expect(persistedTask?.delegations).toEqual(frozen);
+
+      const [revisionAuthority] = await sql<
+        Array<{
+          organizationMembershipId: string;
+          membershipAuthorizationRevision: number;
+        }>
+      >`
+        select organization_membership_id as "organizationMembershipId",
+          membership_authorization_revision::int as "membershipAuthorizationRevision"
+        from scheduled_task_revision_authorities
+        where task_id = ${task.id} and task_authority_revision = ${task.authorityRevision}
+      `;
+      if (!revisionAuthority) throw new Error("scheduled task revision authority was not frozen");
+      const [depthPolicy] = await sql<
+        Array<{ maxNestedAgentDepth: number; policySource: "deployment" | "default" }>
+      >`
+        select max_nested_agent_depth::int as "maxNestedAgentDepth",
+          policy_source as "policySource"
+        from nested_agent_depth_configuration where singleton
+      `;
+      if (!depthPolicy) throw new Error("nested-agent depth policy is unavailable");
+      expect(
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            taskAuthorityRevision: task.authorityRevision,
+            taskExecutionDigest: task.executionDigest,
+            triggerType: "manual",
+            producerKey: `personal-github-phase-fence-${crypto.randomUUID()}`,
+            acceptedExecutionSnapshot: {
+              version: 1,
+              task,
+              resolvedModel: "test-model",
+              resolvedReasoningEffort: "medium",
+              resolvedLatencyMode: "standard",
+              resolvedSandboxBackend: "none",
+              resolvedSandboxOs: "linux",
+              resolvedTools: [],
+              resolvedFirstPartyMcpTools: [],
+              resolvedFirstPartyMcpPermissions: [],
+              resolvedVariableSet: null,
+              resolvedRig: null,
+              resolvedSlackBotConnection: null,
+              targetSessionExecution: null,
+              generatedSessionBinding: {
+                createIdempotencyKey: `personal-github-phase-fence:${task.id}`,
+                effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+                nestedAgentDepthPolicySource: depthPolicy.policySource,
+                codexCompactionMode: "portable",
+              },
+              personalConnectionDelegations: frozen,
+              personalResourceAuthoritySubjectId: null,
+              causalHumanSubjectId: subjectId,
+              causalHumanAuthority: {
+                subjectId,
+                organizationMembershipId: revisionAuthority.organizationMembershipId,
+                membershipAuthorizationRevision: revisionAuthority.membershipAuthorizationRevision,
+              },
+              xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+              xaiAuthoritySubjectId: null,
+              connectionAuthoritySubjectId: subjectId,
+              triggerInitiator: { kind: "service", subjectId: "scheduler" },
+              agentRunUsageIdempotencyKey: null,
+              incidentPreflightRequired: false,
+              alertOccurrenceLabels: null,
+            },
+          }),
+        ),
+      ).toContain("scheduled_run_connection_authority_shape_chk");
+      const [scheduledOccurrence] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from scheduled_task_runs where task_id = ${task.id}
+      `;
+      expect(scheduledOccurrence?.count).toBe(0);
 
       await expect(
         validatedScheduledTaskUpdate({
@@ -750,6 +841,7 @@ describe("personal MCP connection delegation", () => {
             uri: "https://github.com/octocat/private-repository",
             ref: "main",
             provider: "github",
+            connectionType: "github_personal",
             credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             repositoryId: "9007199254740993123",
             access: "read",
@@ -779,6 +871,7 @@ describe("personal MCP connection delegation", () => {
             uri: "https://github.com/octocat/private-repository",
             ref: "main",
             provider: "github",
+            connectionType: "github_personal",
             credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             repositoryId: "9007199254740993123",
             access: "read",
@@ -804,6 +897,7 @@ describe("personal MCP connection delegation", () => {
             uri: "https://github.com/octocat/private-repository",
             ref: "main",
             provider: "github",
+            connectionType: "github_personal",
             credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             repositoryId: "9007199254740993123",
             access: "read",

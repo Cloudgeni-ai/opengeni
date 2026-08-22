@@ -19,6 +19,7 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
+import { personalGitHubRepositoryResources } from "@opengeni/core";
 import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
@@ -783,11 +784,20 @@ export function gitHubTokenMintSelection(
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
+  // OPE-290 admits and freezes this authority, but OPE-291 owns the broker and
+  // its immediately-before-use revalidation. Until then, never let a generic
+  // host/App credential callback substitute a token for the personal lane.
+  const personalGitHubResources = new Set<ResourceRef>(
+    personalGitHubRepositoryResources(resources),
+  );
   const byBinding = new Map<string, GitCredentialSelection>();
   const remoteBindings = new Map<string, string>();
   const bindingProviders = new Map<string, GitCredentialProvider>();
   for (const resource of resources) {
     if (resource.kind !== "repository") {
+      continue;
+    }
+    if (personalGitHubResources.has(resource)) {
       continue;
     }
     const provider = repositoryCredentialProvider(resource);

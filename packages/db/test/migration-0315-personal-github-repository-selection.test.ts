@@ -121,16 +121,17 @@ function selected(lastVerifiedAt = new Date().toISOString()) {
 }
 
 describe("migration 0315 personal GitHub repository selection", () => {
-  test("admits the dedicated discriminator only through existing scheduled connection ledgers", async () => {
+  test("admits the dedicated discriminator only for task definitions", async () => {
     const source = await Bun.file(
       new URL("../drizzle/0315_personal_github_repository_selection.sql", import.meta.url),
     ).text();
     expect(source).toContain("scheduled_task_connection_authority_shape_chk");
-    expect(source).toContain("scheduled_run_connection_authority_shape_chk");
-    expect(source.match(/connection_type IN \('mcp', 'github_personal'\)/gu)).toHaveLength(2);
-    expect(source.match(/\) NOT VALID;/gu)).toHaveLength(2);
+    expect(source.match(/connection_type IN \('mcp', 'github_personal'\)/gu)).toHaveLength(1);
+    expect(source.match(/\) NOT VALID;/gu)).toHaveLength(1);
     expect(source).toContain("VALIDATE CONSTRAINT scheduled_task_connection_authority_shape_chk");
-    expect(source).toContain("VALIDATE CONSTRAINT scheduled_run_connection_authority_shape_chk");
+    expect(source).not.toContain(
+      "VALIDATE CONSTRAINT scheduled_run_connection_authority_shape_chk",
+    );
   });
 
   test("keeps bigint repository IDs exact and advances only authority-relevant generations", async () => {

@@ -170,6 +170,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         mountPath,
         ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
         ...(resource.provider ? { provider: resource.provider } : {}),
+        ...(resource.connectionType ? { connectionType: resource.connectionType } : {}),
         ...(resource.credentialBindingId
           ? { credentialBindingId: resource.credentialBindingId }
           : {}),
@@ -239,10 +240,23 @@ export function validateGitHubRepositorySelectionShapes(resources: ResourceRef[]
 
 export type PersonalGitHubRepositoryResource = RepositoryResourceRef & {
   provider: "github";
+  connectionType: "github_personal";
   credentialBindingId: string;
   access: "read" | "write";
   repositoryId: string;
 };
+
+const PERSONAL_GITHUB_BINDING_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function isPersonalGitHubRepositoryCandidate(
+  resource: ResourceRef,
+): resource is RepositoryResourceRef & { provider: "github"; credentialBindingId: string } {
+  if (resource.kind !== "repository" || resource.connectionType !== "github_personal") {
+    return false;
+  }
+  return resource.provider === "github" && resource.credentialBindingId !== undefined;
+}
 
 /**
  * Validate and return the dedicated personal-GitHub repository resource lane.
@@ -254,17 +268,16 @@ export function personalGitHubRepositoryResources(
 ): PersonalGitHubRepositoryResource[] {
   const selected: PersonalGitHubRepositoryResource[] = [];
   for (const resource of resources) {
-    if (
-      resource.kind !== "repository" ||
-      resource.provider !== "github" ||
-      resource.credentialBindingId === undefined
-    ) {
+    if (!isPersonalGitHubRepositoryCandidate(resource)) {
+      if (resource.kind === "repository" && resource.connectionType === "github_personal") {
+        throw new HTTPException(422, {
+          message: "personal GitHub repository resources require the dedicated GitHub provider",
+        });
+      }
       continue;
     }
     if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-        resource.credentialBindingId,
-      ) ||
+      !PERSONAL_GITHUB_BINDING_ID_PATTERN.test(resource.credentialBindingId) ||
       typeof resource.repositoryId !== "string" ||
       !/^[1-9]\d*$/u.test(resource.repositoryId) ||
       (resource.access !== "read" && resource.access !== "write") ||
@@ -334,7 +347,7 @@ function gitHubRepositorySelections(
     if (resource.kind !== "repository") {
       return [];
     }
-    if (resource.provider === "github" && resource.credentialBindingId !== undefined) {
+    if (isPersonalGitHubRepositoryCandidate(resource)) {
       return [];
     }
     const installationRaw =

@@ -987,8 +987,11 @@ FORCE-RLS owner-scoped allowlist behind connection-generation and
 selection-generation CAS; the private catalog is never stored. This phase does
 admit one explicit `github:personal` `connection.use` grant and exact selected-
 repository snapshot into human/API session turns, follow-ups, and scheduled-
-task definitions. The opaque credential binding is never authority, and
-agent-created inheritance remains fail-closed until its dependent lifecycle
+task definitions. Personal resources carry the dedicated, non-colliding
+`connectionType: "github_personal"` discriminator; the mere presence or shape
+of a host-opaque `credentialBindingId` never reclassifies an existing generic
+host or GitHub App resource. The opaque credential binding is never authority,
+and agent-created inheritance remains fail-closed until its dependent lifecycle
 phase. No token, Git transport, or GitHub API tool is exposed yet, so accepted
 authority does not by itself grant repository execution. See
 [`personal-github.md`](personal-github.md).

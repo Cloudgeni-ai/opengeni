@@ -91,8 +91,9 @@ The owner-only repository-authority routes are:
 Generic Connection create/update rejects `github.com` OAuth credentials and
 the reserved personal-GitHub metadata role. A human/API-created session,
 follow-up, or scheduled-task definition that carries a personal GitHub
-repository resource must also carry one explicit `github:personal`
-`connection.use` selection. Admission revalidates the same-organization target
+repository resource uses the explicit, non-colliding
+`connectionType: "github_personal"` discriminator and must also carry one
+explicit `github:personal` `connection.use` selection. Admission revalidates the same-organization target
 grant and exact owner/connection/credential binding, verifies every requested
 provider repository ID and read/write level against the current selected set,
 and freezes the connection generation, selection generation, per-row

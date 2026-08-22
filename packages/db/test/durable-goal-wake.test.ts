@@ -850,7 +850,60 @@ describe("durable active-goal wake", () => {
         },
       ],
     });
-    const delegations = ctx.turn.personalConnectionDelegations;
+    const personalGitHubDelegation: McpPersonalConnectionDelegation = {
+      serverId: "github:personal",
+      connectionId: crypto.randomUUID(),
+      originWorkspaceId: crypto.randomUUID(),
+      ownerSubjectId: ctx.grant.subjectId,
+      providerDomain: "github.com",
+      kind: "oauth2",
+      connectionType: "github_personal",
+      userDelegation: {
+        organizationId: crypto.randomUUID(),
+        authorityId: crypto.randomUUID(),
+        authorityGeneration: 1,
+        workspaceId: crypto.randomUUID(),
+        sessionId: null,
+        action: "connection.use",
+        mode: "always",
+        context: "workspace_shared",
+        authorityEpoch: null,
+        grantId: crypto.randomUUID(),
+        grantGeneration: 1,
+      },
+      personalGitHubRepositorySelection: {
+        credentialBindingId: crypto.randomUUID(),
+        connectionAuthorityGeneration: 1,
+        selectionGeneration: 1,
+        repositories: [
+          {
+            repositoryId: "9007199254740993123",
+            fullName: "octocat/private-repository",
+            canonicalUrl: "https://github.com/octocat/private-repository",
+            ref: "main",
+            access: "read",
+            selectionGeneration: 1,
+          },
+        ],
+      },
+    };
+    const delegations = [...ctx.turn.personalConnectionDelegations, personalGitHubDelegation];
+    // Simulate a snapshot written by the future personal-GitHub phase without
+    // asking today's capture trigger to re-admit authority that OPE-294 has not
+    // activated. The behavior under test is successor projection itself.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        update session_turns
+        set personal_connection_delegations = ${tx.json(delegations)}::jsonb
+        where workspace_id = ${ctx.grant.workspaceId!}
+          and session_id = ${ctx.session.id}
+          and id = ${ctx.turn.id}
+      `;
+    });
+    const successorDelegations = delegations.filter(
+      (delegation) => delegation.connectionType !== "github_personal",
+    );
     await settleIdle(ctx);
 
     expect((await materialize(ctx)).action).toBe("continue");
@@ -866,7 +919,7 @@ describe("durable active-goal wake", () => {
         and session_id = ${ctx.session.id}
         and kind = 'goal_continuation'
     `;
-    expect(materialized?.personal_connection_delegations).toEqual(delegations);
+    expect(materialized?.personal_connection_delegations).toEqual(successorDelegations);
     expect(materialized?.lineage).toMatchObject({ causalTurnId: ctx.turn.id });
 
     const replacementDelegations: McpPersonalConnectionDelegation[] = [
@@ -906,7 +959,7 @@ describe("durable active-goal wake", () => {
         and session_id = ${ctx.session.id}
         and kind = 'goal_continuation'
     `;
-    expect(afterUnrelatedTurn?.personal_connection_delegations).toEqual(delegations);
+    expect(afterUnrelatedTurn?.personal_connection_delegations).toEqual(successorDelegations);
   });
 
   test("terminal settlement atomically arms an admitted-idle goal and its workflow outbox", async () => {

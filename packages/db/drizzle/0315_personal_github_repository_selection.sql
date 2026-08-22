@@ -618,24 +618,7 @@ ALTER TABLE scheduled_task_connection_authority_snapshots
 ALTER TABLE scheduled_task_connection_authority_snapshots
   VALIDATE CONSTRAINT scheduled_task_connection_authority_shape_chk;
 
-ALTER TABLE scheduled_task_run_connection_authority_snapshots
-  DROP CONSTRAINT scheduled_run_connection_authority_shape_chk,
-  ADD CONSTRAINT scheduled_run_connection_authority_shape_chk CHECK (
-    task_authority_revision > 0
-    AND execution_digest ~ '^[0-9a-f]{64}$'
-    AND octet_length(server_id) BETWEEN 1 AND 256
-    AND connection_generation > 0
-    AND (selected_kind IS NULL OR selected_kind IN ('oauth2','api_key','app_install','delegated'))
-    AND (connection_type IS NULL OR connection_type IN ('mcp', 'github_personal'))
-    AND membership_authorization_revision > 0
-    AND authority_generation > 0
-    AND grant_generation > 0
-    AND grant_mode IN ('once', 'session', 'always')
-    AND grant_context IN ('user_private', 'workspace_shared')
-    AND grant_context = session_visibility
-    AND session_visibility IN ('user_private', 'workspace_shared')
-    AND cardinality(selection_sources) > 0
-  ) NOT VALID;
-
-ALTER TABLE scheduled_task_run_connection_authority_snapshots
-  VALIDATE CONSTRAINT scheduled_run_connection_authority_shape_chk;
+-- OPE-294 owns per-occurrence repository-generation revalidation. Keep the
+-- existing run-ledger discriminator unchanged so a task definition can retain
+-- explicit personal GitHub authority while every occurrence still fails closed
+-- before a provider consumer can run.
