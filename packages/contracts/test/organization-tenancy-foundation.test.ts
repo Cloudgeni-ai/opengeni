@@ -3,6 +3,7 @@ import {
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembershipProjection,
   OrganizationMembershipProjection,
+  OrganizationPrivateSessionSettings,
   ResourceAuthorityEnvelope,
   ResourceAuthorityListScope,
   ResourceAuthorityScope,
@@ -10,6 +11,7 @@ import {
   UserResourceAuthorityProjection,
   UserResourceDelegation,
   UserResourceGrantProjection,
+  UpdateOrganizationPrivateSessionSettingsRequest,
   IssueUserResourceGrantRequest,
   ListUserResourceAuthoritiesQuery,
   ListUserResourceAuthoritiesResponse,
@@ -26,6 +28,26 @@ const ids = {
 };
 
 describe("organization tenancy foundation contracts", () => {
+  test("keeps private-session organization settings versioned and strict", () => {
+    expect(
+      OrganizationPrivateSessionSettings.parse({
+        organizationId: ids.organization,
+        enabled: false,
+        available: true,
+        version: 0,
+        updatedAt: "2026-08-20T00:00:00.000Z",
+      }),
+    ).toMatchObject({ enabled: false, available: true, version: 0 });
+    expect(
+      UpdateOrganizationPrivateSessionSettingsRequest.safeParse({
+        enabled: true,
+        expectedVersion: 0,
+        operationId: ids.authority,
+        membershipId: ids.membership,
+      }).success,
+    ).toBe(false);
+  });
+
   test("requires explicit user scope and durable shared-output acknowledgement", () => {
     expect(ListUserResourceAuthoritiesQuery.safeParse({}).success).toBe(false);
     expect(ListUserResourceAuthoritiesQuery.parse({ scope: "user", resourceKind: "rig" })).toEqual({

@@ -109,6 +109,37 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
 ] as const;
+const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
+const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
+  "get_organization_private_session_settings(uuid, text)";
+const ORGANIZATION_PRIVATE_SESSION_SETTINGS_UPDATE_ROUTINE =
+  "update_organization_private_session_settings(uuid, text, boolean, bigint, uuid)";
+const ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES = {
+  [PRIVATE_SESSION_CREATE_POLICY_ROUTINE]: [
+    "organization_memberships",
+    "organization_private_session_settings",
+    "session_tenancy_activations",
+    "workspace_memberships",
+    "workspaces",
+  ],
+  [ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE]: [
+    "managed_accounts",
+    "organization_memberships",
+    "organization_private_session_settings",
+    "session_tenancy_activations",
+  ],
+  [ORGANIZATION_PRIVATE_SESSION_SETTINGS_UPDATE_ROUTINE]: [
+    "managed_accounts",
+    "organization_memberships",
+    "organization_private_session_setting_events",
+    "organization_private_session_settings",
+    "session_tenancy_activations",
+  ],
+} as const;
+const ORGANIZATION_PRIVATE_SESSION_ROUTINES = Object.keys(
+  ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES,
+);
+const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sessions_enabled(uuid)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -388,6 +419,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES,
+  ...ORGANIZATION_PRIVATE_SESSION_ROUTINES,
   ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...USER_RESOURCE_LIFECYCLE_ROUTINES,
@@ -412,6 +444,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
 ] as const;
 
@@ -579,6 +612,8 @@ export const FORCE_RLS_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_private_session_setting_events",
+  "organization_private_session_settings",
   "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -1043,6 +1078,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_private_session_setting_events",
+  "organization_private_session_settings",
   "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -1974,6 +2011,36 @@ export function evaluateRuntimeDatabasePosture(
         const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
           (tableName) => tableByName.get(tableName)!,
         );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
+      (ORGANIZATION_PRIVATE_SESSION_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      if (!tableByName.has("organization_private_session_settings")) {
+        continue;
+      }
+      const authorityTableNames =
+        ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES[
+          routine.name as keyof typeof ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES
+        ];
+      const missingAuthorityTables = authorityTableNames.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(

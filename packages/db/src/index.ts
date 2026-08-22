@@ -26677,11 +26677,14 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
-  if (createRequestedVisibility === "user_private" && input.parentSessionId) {
-    // A private child later proves the owner's live organization membership
-    // after locking the parent session/attempt. Serialize with organization
-    // suspend/offboard before taking any workspace or parent row lock, so the
-    // canonical membership -> session lifecycle cannot form a lock cycle.
+  if (createRequestedVisibility === "user_private") {
+    // Private creation later proves the owner's live organization membership
+    // and, for a fresh top-level organization session, reads the mutable
+    // owner/admin enablement setting. Serialize both checks with organization
+    // settings changes and suspend/offboard before taking any workspace or
+    // parent row lock, so the canonical membership -> session lifecycle cannot
+    // form a lock cycle. A committed keyed replay is still resolved below
+    // before the mutable enablement check opens a fresh-create capability.
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
     );

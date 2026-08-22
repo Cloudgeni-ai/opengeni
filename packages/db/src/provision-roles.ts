@@ -1260,6 +1260,57 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.get_private_session_create_policy(uuid,uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_private_session_create_policy(uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_private_session_create_policy(uuid, uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.get_organization_private_session_settings(uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_organization_private_session_settings(uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_organization_private_session_settings(uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.update_organization_private_session_settings(uuid, text, boolean, bigint, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.update_organization_private_session_settings(uuid, text, boolean, bigint, uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.organization_private_sessions_enabled(uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.organization_private_sessions_enabled(uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.organization_private_sessions_enabled(uuid) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
