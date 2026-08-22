@@ -254,10 +254,12 @@ export function requireLiteralPermission(grant: AccessGrant, permission: Permiss
 }
 
 export function hasLiteralPermission(permissions: Permission[], permission: Permission): boolean {
+  if (!Array.isArray(permissions)) return false;
   return permissions.includes(permission);
 }
 
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+  if (!Array.isArray(permissions)) return false;
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }

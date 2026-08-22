@@ -51,7 +51,7 @@ receipt only after the exact initiating human answered the bound
 `remember:<proposalId>` structured human-input question with `save` on the same
 logical turn, and stamps `authority_kind = human_confirmed` plus the
 human-input request id on the activation receipt. The generation rule
-(migration 0315, and likewise for `confirm_remember_knowledge_claim`): the
+(migration 0316, and likewise for `confirm_remember_knowledge_claim`): the
 answer is bound to the same logical turn and exact proposal, not to one
 execution generation. Resuming the `requires_action` human-input pause always
 increments the turn's execution generation, and a recovery re-claim before the
@@ -99,12 +99,14 @@ content, credentials, or another human's receipts.
 
 Policy revision creation, activation, and rollback plus exact governed-change
 undo require `workspace:admin` and an authenticated human session. The
-Learning & autonomy Workspace State view maps the primary control directly to
-the canonical backend modes (`Off`, `Review first` = `suggest`, and
-`Autonomous` = `automatic`), keeps exact-source overrides under Advanced, and
-uses activation-version CAS for every change. Rollback and undo remain
-destination-native compensating lifecycle operations rather than history
-mutation.
+Learning & autonomy Workspace State view exposes only the workspace learning
+mode, mapped directly to the canonical backend modes (`Off`, `Review first` =
+`suggest`, and `Autonomous` = `automatic`); a mode change creates and activates
+a new revision under activation-version CAS and carries the active revision's
+existing source overrides forward unchanged. Exact-source overrides, rollback,
+and governed-change undo remain API/SDK operations on the `/learning` routes
+with no web UI. Rollback and undo remain destination-native compensating
+lifecycle operations rather than history mutation.
 
 Destination ownership remains:
 
