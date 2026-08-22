@@ -1,5 +1,26 @@
 # @opengeni/api-router
 
+## 2.0.1
+
+### Patch Changes
+
+- b2dd2f7: Bound the remaining request-scoped workspace control-row mutations and make the lock budget a first-class setting: `updateWorkspaceSettings`, `deleteSessionTreeIfQuiescent`, queue move/edit/delete, composer draft save, and the MCP agent message accept an optional `controlLockTimeoutMs` that API routes and core commands pass (lifecycle callers keep the unbounded wait), so a busy workspace yields the same typed retryable 503 `WORKSPACE_CONTROL_BUSY`. `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` is now parsed and validated once at boot by `@opengeni/config` (`workspaceControlLockTimeoutMs`, positive integer ms, default 20000), installed into `@opengeni/db` by `createApp` through `configureWorkspaceControlRequestLockTimeoutMs`, and rendered by the deployment runtime-env generator as an optional passthrough.
+- ab81e47: Allow the managed staging Slack app and bot to use the visibly distinct `OpenGeni Staging` identity. The manifest, runtime configuration, installation verification, durable binding contract, SDK, web projection, and deployment artifacts now preserve one closed environment-qualified display-name setting while production continues to default to `OpenGeni`.
+- Updated dependencies [b2dd2f7]
+- Updated dependencies [ab81e47]
+  - @opengeni/db@3.0.1
+  - @opengeni/core@2.0.1
+  - @opengeni/config@0.18.1
+  - @opengeni/contracts@2.1.1
+  - @opengeni/documents@0.6.8
+  - @opengeni/events@0.3.122
+  - @opengeni/github@0.5.1
+  - @opengeni/runtime@1.2.1
+  - @opengeni/storage@0.2.104
+  - @opengeni/artifact-tool@0.3.3
+  - @opengeni/codemode@0.4.11
+  - @opengeni/observability@0.8.2
+
 ## 2.0.0
 
 ### Major Changes
