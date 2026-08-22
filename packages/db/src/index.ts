@@ -30414,6 +30414,12 @@ function sessionEventProjectionSelect(
     mapClaimedPromptStartsAsUserMessages?: boolean;
   } = {},
 ) {
+  // Drizzle de-qualifies outer columns when they are interpolated inside a
+  // nested scalar subquery. These are intentional correlated references to the
+  // one unaliased outer session_events table used by every caller here.
+  const outerEventWorkspaceId = sql.raw('"session_events"."workspace_id"');
+  const outerEventSessionId = sql.raw('"session_events"."session_id"');
+  const outerEventTurnId = sql.raw('"session_events"."turn_id"');
   const typeInvalid = sql`(
     octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
     or position(E'\\n' in ${schema.sessionEvents.type}) > 0
@@ -30526,9 +30532,9 @@ function sessionEventProjectionSelect(
        and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
        and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
        and claimed_prompt_trigger.type = 'user.message'
-      where claimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
-        and claimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
-        and claimed_prompt_turn.id = ${schema.sessionEvents.turnId}
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
         and claimed_prompt_turn.source in ('user', 'api')
       limit 1
     )
@@ -30543,9 +30549,9 @@ function sessionEventProjectionSelect(
        and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
        and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
        and claimed_prompt_trigger.type = 'user.message'
-      where claimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
-        and claimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
-        and claimed_prompt_turn.id = ${schema.sessionEvents.turnId}
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
         and claimed_prompt_turn.source in ('user', 'api')
       limit 1
     )
@@ -30560,9 +30566,9 @@ function sessionEventProjectionSelect(
        and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
        and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
        and claimed_prompt_trigger.type = 'user.message'
-      where claimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
-        and claimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
-        and claimed_prompt_turn.id = ${schema.sessionEvents.turnId}
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
         and claimed_prompt_turn.source in ('user', 'api')
       limit 1
     )
