@@ -125,7 +125,9 @@ export class AgentBrowserJsonRunner {
     );
     this.browserPidFile = join(this.profileDirectory, "..", "browser.pid");
     this.managedBrowserExecutable =
-      options.environment?.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ?? null;
+      options.environment?.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ??
+      options.browserExecutablePath ??
+      null;
   }
 
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
@@ -354,11 +356,11 @@ export class AgentBrowserJsonRunner {
   }
 }
 
-/** Reap only macOS Chrome instances carrying an exact private OpenGeni profile
- * PID sidecar. A controller restart never adopts an unfenced native process;
- * active durable sessions are rebuilt on their next causal request. */
+/** Reap only browser processes bound to an exact private OpenGeni profile.
+ * A controller restart never adopts an unfenced native process; active durable
+ * sessions are rebuilt on their next causal request. */
 export async function reapManagedBrowserProcesses(rootDirectory: string): Promise<void> {
-  if (process.platform !== "darwin") return;
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
   const sessionsDirectory = join(resolve(rootDirectory), "sessions");
   let entries;
   try {
@@ -374,6 +376,7 @@ export async function reapManagedBrowserProcesses(rootDirectory: string): Promis
       pidFile: join(sessionDirectory, "browser.pid"),
       profileDirectory: join(sessionDirectory, "profile"),
       executablePath: null,
+      discoverByProfile: true,
     });
   }
 }
@@ -509,12 +512,58 @@ async function terminateManagedBrowser(input: {
   pidFile: string;
   profileDirectory: string;
   executablePath: string | null;
+  discoverByProfile?: boolean;
 }): Promise<void> {
-  if (process.platform !== "darwin") return;
-  const pid = await readManagedBrowserPid(input.pidFile);
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  const recordedPid = await readManagedBrowserPid(input.pidFile);
+  const discovered =
+    recordedPid === null &&
+    process.platform === "linux" &&
+    (input.executablePath !== null || input.discoverByProfile === true)
+      ? await findLinuxManagedBrowserProcess(input.profileDirectory, input.executablePath)
+      : null;
+  const pid = recordedPid ?? discovered?.pid ?? null;
   if (pid === null) return;
   if (!(await processRunning(pid))) {
     await rm(input.pidFile, { force: true });
+    return;
+  }
+  const executablePath = input.executablePath ?? discovered?.executablePath ?? null;
+  await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+  signalProcess(pid, "SIGTERM");
+  if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+    await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+    signalProcess(pid, "SIGKILL");
+    if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+      throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
+    }
+  }
+  await rm(input.pidFile, { force: true });
+}
+
+async function assertManagedBrowserIdentity(
+  pid: number,
+  profileDirectory: string,
+  executablePath: string | null,
+): Promise<void> {
+  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  if (process.platform === "linux") {
+    const argv = await linuxProcessArguments(pid);
+    if (
+      !argv.includes(profileArgument) ||
+      argv.some((argument) => argument.startsWith("--type="))
+    ) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "managed browser PID does not identify the exact private profile",
+      );
+    }
+    if (!executablePath || !(await sameExecutable(pid, executablePath))) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "managed browser PID does not identify the configured executable",
+      );
+    }
     return;
   }
   const command = await boundedProcessOutput("/bin/ps", [
@@ -524,46 +573,81 @@ async function terminateManagedBrowser(input: {
     "-o",
     "command=",
   ]);
-  const profileArgument = `--user-data-dir=${resolve(input.profileDirectory)}`;
   if (!command.includes(profileArgument)) {
     throw new AgentBrowserCommandError(
       "process_failed",
       "managed browser PID does not identify the exact private profile",
     );
   }
-  if (input.executablePath && !(await sameExecutable(pid, input.executablePath))) {
+  if (executablePath && !(await sameExecutable(pid, executablePath))) {
     throw new AgentBrowserCommandError(
       "process_failed",
       "managed browser PID does not identify the configured executable",
     );
   }
-  if (!input.executablePath && !isRecognizedMacBrowserCommand(command)) {
+  if (!executablePath && !isRecognizedMacBrowserCommand(command)) {
     throw new AgentBrowserCommandError(
       "process_failed",
       "managed browser PID does not identify a recognized macOS browser",
     );
   }
-  signalProcess(pid, "SIGTERM");
-  if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-    const current = await boundedProcessOutput("/bin/ps", [
-      "-ww",
-      "-p",
-      String(pid),
-      "-o",
-      "command=",
-    ]);
-    if (!current.includes(profileArgument)) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "managed browser identity changed before forced termination",
-      );
+}
+
+async function findLinuxManagedBrowserProcess(
+  profileDirectory: string,
+  executablePath: string | null,
+): Promise<{ pid: number; executablePath: string } | null> {
+  const procEntries = await readdir("/proc", { withFileTypes: true });
+  const matches: Array<{ pid: number; executablePath: string }> = [];
+  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  for (const entry of procEntries) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    let argv: string[];
+    let resolvedExecutable: string;
+    try {
+      argv = await linuxProcessArguments(pid);
+      resolvedExecutable = await realpath(await readlink(`/proc/${pid}/exe`));
+    } catch (error) {
+      if (["EACCES", "ENOENT", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        continue;
+      }
+      throw error;
     }
-    signalProcess(pid, "SIGKILL");
-    if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-      throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
+    if (
+      !argv.includes(profileArgument) ||
+      argv.some((argument) => argument.startsWith("--type="))
+    ) {
+      continue;
     }
+    if (executablePath) {
+      if (resolvedExecutable !== (await realpath(executablePath))) continue;
+    } else if (!isRecognizedLinuxBrowserExecutable(resolvedExecutable)) {
+      continue;
+    }
+    matches.push({ pid, executablePath: resolvedExecutable });
   }
-  await rm(input.pidFile, { force: true });
+  if (matches.length > 1) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "multiple managed browsers identify the exact private profile",
+    );
+  }
+  return matches[0] ?? null;
+}
+
+async function linuxProcessArguments(pid: number): Promise<string[]> {
+  const commandLine = await readFile(`/proc/${pid}/cmdline`);
+  return commandLine
+    .toString("utf8")
+    .split("\0")
+    .filter((argument) => argument.length > 0);
+}
+
+function isRecognizedLinuxBrowserExecutable(executablePath: string): boolean {
+  return ["chrome", "chromium", "chromium-browser", "google-chrome"].includes(
+    basename(executablePath),
+  );
 }
 
 async function readManagedBrowserPid(path: string): Promise<number | null> {
