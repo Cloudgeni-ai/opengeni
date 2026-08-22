@@ -8209,6 +8209,125 @@ describe("runtime event normalization", () => {
     await expect(local!.listTools()).rejects.toThrow("local model tool server is closed");
   });
 
+  test("closes unpublished eager and deferred servers when eager schema freezing fails", async () => {
+    const eagerFailure = new Error("synthetic eager schema failure");
+    let eagerCloseCount = 0;
+    let deferredCloseCount = 0;
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
+        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+      ],
+    });
+    const server = (
+      name: string,
+      listTools: () => Promise<RuntimeMcpTool[]>,
+      onClose: () => void,
+    ): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      async connect() {},
+      async close() {
+        onClose();
+      },
+      listTools,
+      async callTool() {
+        return [];
+      },
+      async invalidateToolsCache() {},
+    });
+
+    await expect(
+      prepareAgentTools(
+        settings,
+        [
+          { kind: "mcp", id: "eager", eager: true },
+          { kind: "mcp", id: "deferred" },
+        ],
+        {
+          deferNonEagerUntilToolDemand: true,
+          localMcpServers: [
+            {
+              id: "eager",
+              server: server(
+                "eager-inner",
+                async () => {
+                  throw eagerFailure;
+                },
+                () => {
+                  eagerCloseCount += 1;
+                },
+              ),
+            },
+            {
+              id: "deferred",
+              server: server(
+                "deferred-inner",
+                async () => [],
+                () => {
+                  deferredCloseCount += 1;
+                },
+              ),
+            },
+          ],
+        },
+      ),
+    ).rejects.toBe(eagerFailure);
+    expect(eagerCloseCount).toBe(1);
+    expect(deferredCloseCount).toBe(1);
+  });
+
+  test("does not close eager servers twice when fully prepared cleanup fails", async () => {
+    const closeFailure = new Error("synthetic eager close failure");
+    let eagerCloseCount = 0;
+    let deferredCloseCount = 0;
+    const makeServer = (name: string, eager: boolean): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      async connect() {},
+      async close() {
+        if (eager) {
+          eagerCloseCount += 1;
+          throw closeFailure;
+        }
+        deferredCloseCount += 1;
+      },
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        return [];
+      },
+      async invalidateToolsCache() {},
+    });
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
+        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+      ],
+    });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "eager", eager: true },
+        { kind: "mcp", id: "deferred" },
+      ],
+      {
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [
+          { id: "eager", server: makeServer("eager-inner", true) },
+          { id: "deferred", server: makeServer("deferred-inner", false) },
+        ],
+      },
+    );
+    await prepared.ready;
+    await expect(prepared.close()).rejects.toBe(closeFailure);
+    expect(eagerCloseCount).toBe(1);
+    expect(deferredCloseCount).toBe(1);
+  });
+
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";
