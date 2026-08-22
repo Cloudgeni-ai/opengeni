@@ -2839,6 +2839,11 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+  held: {
+    label: "Goal held",
+    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    icon: PauseCircleIcon,
+  },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
 };
 

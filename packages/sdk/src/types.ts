@@ -1639,6 +1639,7 @@ export const SESSION_EVENT_TYPES = [
   "goal.paused",
   "goal.resumed",
   "goal.cleared",
+  "goal.held",
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
@@ -2710,6 +2711,7 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
+  | "goal_wait"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -4018,6 +4020,7 @@ export type SessionGoalContinuationReason =
   | "provider_backpressure"
   | "session_cancelled"
   | "system_work_pending"
+  | "held_for_input"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {

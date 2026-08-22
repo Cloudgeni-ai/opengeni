@@ -49882,6 +49882,7 @@ export type SessionGoalContinuationProjection = {
     | "provider_backpressure"
     | "session_cancelled"
     | "system_work_pending"
+    | "held_for_input"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -50007,6 +50008,31 @@ export async function getSessionGoalWithContinuation(
         )
         .limit(1);
 
+      // An agent-declared `goal_wait` hold is current only while its declaring
+      // turn is still the latest finished turn and the deadline is ahead. This
+      // is the same notion the materializer applies under lock.
+      let currentHoldUntil: Date | null = null;
+      if (goal.continuationHoldTurnId && goal.continuationHoldUntil) {
+        const [latestFinishedTurn] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .limit(1);
+        if (
+          latestFinishedTurn?.id === goal.continuationHoldTurnId &&
+          goal.continuationHoldUntil.getTime() > (await transactionNow(tx)).getTime()
+        ) {
+          currentHoldUntil = goal.continuationHoldUntil;
+        }
+      }
+
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
       const base = {
@@ -50074,6 +50100,17 @@ export async function getSessionGoalWithContinuation(
           state: "scheduled",
           reason: "continuation_pending",
           ...base,
+        };
+      } else if (currentHoldUntil) {
+        // The agent asked to wait for child results / external input. The
+        // obligation stays armed (wake > observed) and the delayed workflow
+        // wake fires at the deadline; this is a truthful blocked state, never
+        // a broken invariant.
+        continuation = {
+          state: "blocked",
+          reason: "held_for_input",
+          ...base,
+          nextAttemptAt: currentHoldUntil.toISOString(),
         };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
         continuation = { state: "scheduled", reason: "wake_pending", ...base };
@@ -50382,6 +50419,7 @@ export async function upsertSessionGoal(
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
           continuationWakeRevision: existing.continuationWakeRevision + 1,
+          ...SESSION_GOAL_HOLD_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -50989,6 +51027,7 @@ export async function updateSessionGoal(
         ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
         ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
+        ...SESSION_GOAL_HOLD_CLEARED,
         updatedAt: new Date(),
       })
       .where(
@@ -51341,6 +51380,8 @@ export async function updateSessionGoalWithEvent(
           ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
           version: existing.version + 1,
           objectiveRevision: existing.objectiveRevision + 1,
+          // An applied semantic change supersedes any agent-declared hold.
+          ...SESSION_GOAL_HOLD_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -51413,6 +51454,208 @@ export async function updateSessionGoalWithEvent(
  * revision. The attempt-fenced operation receipt makes a recovered tool call
  * converge on the original event instead of manufacturing progress twice.
  */
+/**
+ * Column set that retires an agent-declared `goal_wait` hold. Spread into every
+ * goal head mutation (status transition, applied semantic revision, replace) so
+ * newer truth never sits behind an older wait.
+ */
+const SESSION_GOAL_HOLD_CLEARED = {
+  continuationHoldTurnId: null,
+  continuationHoldUntil: null,
+  continuationHoldReason: null,
+  continuationHoldSetAt: null,
+} as const;
+
+export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
+export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * The database clock of the current transaction. Hold deadlines are compared
+ * against this rather than the worker's `Date.now()` because the wake-outbox
+ * dispatcher claims rows on Postgres `now()`; one authority avoids clock-skew
+ * re-wake loops right at the deadline.
+ */
+async function transactionNow(tx: Database): Promise<Date> {
+  const rows = await rawRows<{ now: string | Date }>(tx, sql`select now() as now`);
+  const value = rows[0]?.now;
+  if (value === undefined) throw new Error("Failed to read the transaction clock");
+  return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * Agent `goal_wait`: record that the active goal's next continuation should
+ * wait for child results, a message, a human prompt, or the deadline instead of
+ * materializing immediately after the declaring turn ends.
+ *
+ * The hold is bound to the exact caller turn. The materializer honors it only
+ * while that turn is still the latest finished turn and `now < until`; it
+ * never consumes the wake/observed revision ledger. The receipt, goal
+ * mutation, and `goal.held` timeline fact commit under the canonical goal
+ * event-write prefix (control FOR SHARE -> workspace FOR KEY SHARE -> session
+ * FOR NO KEY UPDATE), never a workspace FOR UPDATE. A replacement attempt
+ * replaying the same target-scoped operation key receives the stored result.
+ */
+export async function holdSessionGoalContinuationWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    reason: string;
+    untilSeconds: number;
+    command: {
+      accountId: string;
+      actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+      operationKey: string;
+    };
+  },
+): Promise<{
+  goal: SessionGoal;
+  events: SessionEvent[];
+  operationId: string;
+  replay: boolean;
+  holdTurnId: string;
+  untilAt: string;
+}> {
+  assertSessionGoalFieldBytes(input.reason, SESSION_GOAL_RATIONALE_MAX_BYTES, "goal hold reason");
+  if (!input.reason.trim()) throw new Error("goal hold reason must not be empty");
+  if (
+    !Number.isInteger(input.untilSeconds) ||
+    input.untilSeconds < SESSION_GOAL_HOLD_MIN_SECONDS ||
+    input.untilSeconds > SESSION_GOAL_HOLD_MAX_SECONDS
+  ) {
+    throw new Error(
+      `goal hold untilSeconds must be an integer between ${SESSION_GOAL_HOLD_MIN_SECONDS} and ${SESSION_GOAL_HOLD_MAX_SECONDS}`,
+    );
+  }
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+    withSessionActivitySavepoint(scopedDb, async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const reserved = await reserveSessionCommandReceipt(tx, {
+        accountId: input.command.accountId,
+        workspaceId,
+        actor: input.command.actor,
+        action: "goal.wait",
+        targetSessionId: sessionId,
+        targetTurnId: null,
+        operationKey: input.command.operationKey,
+        canonicalRequestHash: canonicalSessionCommandHash({
+          reason: input.reason,
+          untilSeconds: input.untilSeconds,
+        }),
+        identityScope: "goal_operation",
+      });
+      if (reserved.replay) {
+        const stored = reserved.receipt.result as Record<string, unknown> | null;
+        const parsed = SessionGoalContract.safeParse(stored?.["goal"]);
+        const holdTurnId = typeof stored?.["holdTurnId"] === "string" ? stored["holdTurnId"] : null;
+        const untilAt = typeof stored?.["untilAt"] === "string" ? stored["untilAt"] : null;
+        if (!parsed.success || !holdTurnId || !untilAt) {
+          throw new SessionControlInvariantError(
+            `Goal hold receipt ${reserved.receipt.id} has no valid committed result`,
+          );
+        }
+        return {
+          goal: parsed.data,
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: true,
+          holdTurnId,
+          untilAt,
+        };
+      }
+      await assertAgentCommandAuthorityInTransaction(tx, {
+        workspaceId,
+        actor: input.command.actor,
+        targetSessionId: sessionId,
+        action: "goal",
+      });
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) throw new Error("this session has no goal; use goal_set first");
+      if (existing.status !== "active") {
+        throw new Error("session goal is not active; only an active goal can wait");
+      }
+      const now = new Date();
+      const until = new Date(now.getTime() + input.untilSeconds * 1000);
+      const [updated] = await tx
+        .update(schema.sessionGoals)
+        .set({
+          continuationHoldTurnId: input.command.actor.turnId,
+          continuationHoldUntil: until,
+          continuationHoldReason: input.reason,
+          continuationHoldSetAt: now,
+          updatedAt: now,
+        })
+        .where(eq(schema.sessionGoals.id, existing.id))
+        .returning();
+      if (!updated) throw new Error(`Session goal not found: ${sessionId}`);
+      const goal = mapSessionGoal(updated);
+      const untilAt = until.toISOString();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: input.command.actor.turnId,
+              turnGeneration: input.command.actor.executionGeneration,
+              turnAttemptId: input.command.actor.attemptId,
+              turnAssociation: "current",
+              sequence: session.lastSequence + 1,
+              type: "goal.held",
+              payload: {
+                goalId: goal.id,
+                turnId: input.command.actor.turnId,
+                untilAt,
+                reason: input.reason,
+                actor: "agent",
+              },
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      if (!event) throw new Error("Failed to append goal.held event");
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+        result: { goal, eventId: event.id, holdTurnId: input.command.actor.turnId, untilAt },
+      });
+      return {
+        goal,
+        events: [mapEvent(event)],
+        operationId: reserved.receipt.id,
+        replay: false,
+        holdTurnId: input.command.actor.turnId,
+        untilAt,
+      };
+    }),
+  );
+}
+
 export async function recordSessionGoalProgressWithEvent(
   db: Database,
   workspaceId: string,
@@ -51661,6 +51904,9 @@ export async function setSessionGoalStatus(
         status: input.status,
         version: existing.version + 1,
         updatedAt: new Date(),
+        // Every lifecycle transition is newer truth than an agent-declared
+        // goal_wait hold; a human redirect must never sit behind it.
+        ...SESSION_GOAL_HOLD_CLEARED,
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
@@ -52119,6 +52365,10 @@ export async function evaluateGoalContinuation(
 
 export type MaterializeGoalContinuationResult =
   | { action: "none" | "queue"; events: [] }
+  // An agent-declared `goal_wait` hold is current: no continuation was
+  // materialized, the wake/observed ledger is untouched, and a delayed
+  // workflow wake is armed at the hold deadline.
+  | { action: "held"; events: []; holdTurnId: string; holdUntil: Date }
   | { action: "paused"; events: SessionEvent[] }
   | {
       action: "continue";
@@ -52363,6 +52613,91 @@ export async function materializeGoalContinuation(
         );
         if (capacityWait || xaiCapacityWait) {
           return { action: "none", events: [] } as const;
+        }
+
+        // Pending machine input (a child result, agent message, schedule, ...)
+        // is real model input that the next claim delivers. It wins over a
+        // synthesized continuation and over any agent-declared hold, and it
+        // closes the peek/materialize race because both serialize on the
+        // session lock. Mirror `peekSessionWork`: after a failed context
+        // compaction ordinary pending input is inert until newer truth, so do
+        // not spin the workflow on it here either.
+        const [pendingMachineInput] = await tx
+          .select({ id: schema.sessionSystemUpdates.id })
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+            ),
+          )
+          .limit(1);
+        if (
+          pendingMachineInput &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx,
+            input.workspaceId,
+            input.sessionId,
+            "context_compaction_failed",
+          ))
+        ) {
+          return { action: "queue", events: [] } as const;
+        }
+
+        if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
+          const [latestFinishedTurn] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+            .limit(1);
+          const holdUntil = goalRead.continuationHoldUntil;
+          // Compare against the transaction's database clock: the wake-outbox
+          // dispatcher fires on DB `now()`, so a worker clock ahead of or
+          // behind Postgres cannot re-hold past the deadline or re-wake early.
+          const dbNow = await transactionNow(tx);
+          if (
+            latestFinishedTurn?.id === goalRead.continuationHoldTurnId &&
+            holdUntil.getTime() > dbNow.getTime()
+          ) {
+            // The declaring turn is still the newest finished truth and its
+            // deadline has not passed: leave the obligation armed (the wake
+            // revision stays unconsumed so a crash cannot lose it) and make
+            // sure a delayed workflow wake exists at the deadline. Re-arming on
+            // every idle evaluation is required: an earlier immediate wake
+            // (e.g. a child result) delivered in between advances the
+            // outbox's delivered revision and would otherwise drop the
+            // deadline row; the outbox coalesces an undelivered earlier wake
+            // with `least(next_attempt_at, notBefore)`.
+            await enqueueSessionWorkflowWakeInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+              reason: "goal_hold_deadline",
+              notBefore: holdUntil,
+            });
+            return {
+              action: "held",
+              events: [],
+              holdTurnId: goalRead.continuationHoldTurnId,
+              holdUntil,
+            } as const;
+          }
+          // A newer turn finished after the hold was declared, or the deadline
+          // passed: retire the hold in this same transaction and continue
+          // exactly as before.
+          await tx
+            .update(schema.sessionGoals)
+            .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
+            .where(eq(schema.sessionGoals.id, goalRead.id));
         }
 
         let goalWakeRevision = goalRead.continuationWakeRevision;

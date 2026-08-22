@@ -2170,6 +2170,52 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
   });
 
+  test("agent goal.held is suppressed like the other agent goal tool events", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-wait",
+          name: "opengeni__goal_wait",
+          arguments: { reason: "two children still running", untilSeconds: 900 },
+        }),
+        event("agent.toolCall.output", { id: "call-wait", output: "ok" }),
+        event("goal.held", {
+          goalId: "goal-1",
+          turnId: "turn-1",
+          untilAt: "2026-01-01T00:15:00.000Z",
+          reason: "two children still running",
+          actor: "agent",
+        }),
+      ]),
+    );
+    expect(groups.filter((group) => group.kind === "item")).toHaveLength(0);
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(
+      activities[0]!.items
+        .filter((item): item is ToolCallItem => item.kind === "tool-call")
+        .map((item) => item.name),
+    ).toEqual(["opengeni__goal_wait"]);
+  });
+
+  test("non-agent goal.held renders a held landmark with its reason", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.held", {
+        goalId: "goal-1",
+        turnId: "turn-1",
+        untilAt: "2026-01-01T00:15:00.000Z",
+        reason: "waiting for the nightly build",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "held",
+      text: "waiting for the nightly build",
+    });
+  });
+
   test("goal.continuation still renders a landmark", () => {
     reset();
     const items = buildTimeline([

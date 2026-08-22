@@ -85,6 +85,9 @@ import {
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
+  holdSessionGoalContinuationWithEvent,
+  SESSION_GOAL_HOLD_MAX_SECONDS,
+  SESSION_GOAL_HOLD_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -376,6 +379,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -2647,6 +2651,64 @@ function registerGoalTools(
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
       return json({ ...goal, operationId, replay });
+    },
+  );
+
+  server.registerTool(
+    "goal_wait",
+    {
+      description:
+        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+      inputSchema: {
+        reason: goalRationale,
+        untilSeconds: z4
+          .number()
+          .int()
+          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
+          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+        idempotencyKey: z4.string().uuid().optional(),
+      },
+    },
+    async ({ reason, untilSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      const context = exactAgentCommandContext(grant, sessionId);
+      // Without a caller-supplied key the operation is idempotent per (goal
+      // target, turn, exact arguments): a replacement attempt replaying the
+      // same call receives the stored result instead of re-stamping the hold,
+      // while a genuinely new same-turn wait (different reason/deadline) is a
+      // new operation whose later hold wins.
+      const operationKey =
+        idempotencyKey ??
+        `goal-wait:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, untilSeconds }))
+          .digest("hex")
+          .slice(0, 32)}`;
+      const { goal, events, operationId, replay, untilAt } =
+        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+          reason,
+          untilSeconds,
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey,
+          },
+        });
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({
+        status: "held",
+        goalId: goal.id,
+        untilAt,
+        operationId,
+        replay,
+        nextAction:
+          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+      });
     },
   );
 
