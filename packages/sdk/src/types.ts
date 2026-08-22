@@ -454,6 +454,8 @@ export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /** Exact immutable commit that repository materialization must produce. */
+  expectedCommitSha?: string | undefined;
   /**
    * Optional workspace-relative override. When omitted, OpenGeni persists
    * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
@@ -5589,6 +5591,100 @@ export type PackInstallation = {
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
+};
+
+// --- OpenGeni Review Bot ------------------------------------------------------------
+
+export type PrReviewProvider = GitCredentialProvider;
+export type PrReviewCredentialKind = "github_app" | "provider_token";
+export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
+
+export type CreatePrReviewAppRegistrationRequest = {
+  name: string;
+  provider: PrReviewProvider;
+  providerBaseUrl?: string | undefined;
+  appId?: string | undefined;
+  credentialKind: PrReviewCredentialKind;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret: string;
+  webhookUsername?: string | undefined;
+};
+
+export type UpdatePrReviewAppRegistrationRequest = {
+  name?: string | undefined;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret?: string | undefined;
+  webhookUsername?: string | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type PrReviewAppRegistration = {
+  id: string;
+  sourceId: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  provider: PrReviewProvider;
+  providerBaseUrl: string;
+  appId: string | null;
+  credentialKind: PrReviewCredentialKind;
+  hasCredential: boolean;
+  accessTokenExpiresAt: string | null;
+  webhookAuthKind: PrReviewWebhookAuthKind;
+  hasWebhookSecret: boolean;
+  webhookUsername: string | null;
+  webhookPath: string;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreatePrReviewRepositoryBindingRequest = {
+  registrationId: string;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string | number;
+  installationId?: string | number | undefined;
+  projectId?: string | number | undefined;
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type UpdatePrReviewRepositoryBindingRequest = {
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type PrReviewRepositoryBinding = {
+  id: string;
+  triggerId: string;
+  accountId: string;
+  workspaceId: string;
+  registrationId: string;
+  provider: PrReviewProvider;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string;
+  installationId: string | null;
+  projectId: string | null;
+  model: string | null;
+  additionalInstructions: string | null;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListPrReviewConfigurationResponse = {
+  registrations: PrReviewAppRegistration[];
+  repositories: PrReviewRepositoryBinding[];
 };
 
 export type EnablePackRequest = {

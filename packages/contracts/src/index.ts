@@ -3431,6 +3431,11 @@ export const GitCredentialRepositoryRef = z.object({
   access: GitRepositoryAccess.optional(),
   uri: z.string().min(1),
   ref: z.string().min(1),
+  /** Immutable commit the caller expects `ref` to materialize. */
+  expectedCommitSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .optional(),
   repositoryId: GitProviderRepositoryId.optional(),
   installationId: GitProviderRepositoryId.optional(),
   projectId: GitProviderRepositoryId.optional(),
@@ -4188,6 +4193,15 @@ export const RepositoryResourceRef = z.object({
   kind: z.literal("repository"),
   uri: z.string().min(1),
   ref: z.string().min(1),
+  /**
+   * Optional immutable Git object fence. Repository materialization must fail
+   * when the checked-out HEAD is not this exact commit. Event-driven sessions
+   * use it to prevent a mutable PR branch from changing underneath a review.
+   */
+  expectedCommitSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .optional(),
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
@@ -7883,14 +7897,15 @@ function scheduledTaskBoundedString(maxBytes: number, label: string) {
 }
 
 /** Ingress-bounded task name for create/update requests. */
-export const ScheduledTaskNameInput =
-  /* @__PURE__ */ scheduledTaskBoundedString(SCHEDULED_TASK_NAME_MAX_BYTES, "scheduled task name");
+export const ScheduledTaskNameInput = /* @__PURE__ */ scheduledTaskBoundedString(
+  SCHEDULED_TASK_NAME_MAX_BYTES,
+  "scheduled task name",
+);
 /** Ingress-bounded task metadata for create/update requests. */
-export const ScheduledTaskMetadataInput =
-  /* @__PURE__ */ scheduledTaskBoundedJsonObject(
-    SCHEDULED_TASK_METADATA_MAX_BYTES,
-    "scheduled task metadata",
-  );
+export const ScheduledTaskMetadataInput = /* @__PURE__ */ scheduledTaskBoundedJsonObject(
+  SCHEDULED_TASK_METADATA_MAX_BYTES,
+  "scheduled task metadata",
+);
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   return {
@@ -8306,49 +8321,48 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest =
-  /* @__PURE__ */ withVariableSetIdAlias({
-    name: ScheduledTaskNameInput.optional(),
-    schedule: ScheduledTaskScheduleSpec.optional(),
-    runMode: ScheduledTaskRunMode.optional(),
-    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-    action: ScheduledTaskAction.optional(),
-    targetSessionId: z.string().uuid().nullable().optional(),
-    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
-    agentConfig: ScheduledTaskAgentConfigInput.optional(),
-    status: ScheduledTaskStatus.optional(),
-    variableSetId: z.string().uuid().nullable().optional(),
-    environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); null clears it. Its active version is
-    // resolved per fire, so an update takes effect on the next dispatch.
-    rigId: z.string().uuid().nullable().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }).superRefine((value, context) => {
-    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-      context.addIssue({
-        code: "custom",
-        path: ["targetSessionId"],
-        message: "targetSessionId requires runMode=existing_session",
-      });
-    }
-    if (value.runMode === "existing_session" && value.targetSessionId === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["targetSessionId"],
-        message: "targetSessionId cannot be null when runMode=existing_session",
-      });
-    }
-    if (
-      value.agentConfig?.goal &&
-      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["agentConfig", "goal"],
-        message: "agentConfig.goal cannot be used with an existing-session target",
-      });
-    }
-  });
+export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
+  name: ScheduledTaskNameInput.optional(),
+  schedule: ScheduledTaskScheduleSpec.optional(),
+  runMode: ScheduledTaskRunMode.optional(),
+  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  action: ScheduledTaskAction.optional(),
+  targetSessionId: z.string().uuid().nullable().optional(),
+  connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+  agentConfig: ScheduledTaskAgentConfigInput.optional(),
+  status: ScheduledTaskStatus.optional(),
+  variableSetId: z.string().uuid().nullable().optional(),
+  environmentId: z.string().uuid().nullable().optional(),
+  // The rig each run binds to (M3); null clears it. Its active version is
+  // resolved per fire, so an update takes effect on the next dispatch.
+  rigId: z.string().uuid().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, context) => {
+  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.targetSessionId === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId cannot be null when runMode=existing_session",
+    });
+  }
+  if (
+    value.agentConfig?.goal &&
+    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
+});
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -9102,6 +9116,204 @@ export const PackInstallation = z.object({
   updatedAt: z.string(),
 });
 export type PackInstallation = z.infer<typeof PackInstallation>;
+
+// ============ OpenGeni Review Bot — provider-neutral pull-request review automation ============
+
+export const OPENGENI_PR_REVIEW_PACK_ID = "pr-review" as const;
+export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
+
+export const PrReviewProvider = GitCredentialProvider;
+export type PrReviewProvider = z.infer<typeof PrReviewProvider>;
+
+export const PrReviewCredentialKind = /* @__PURE__ */ z.enum(["github_app", "provider_token"]);
+export type PrReviewCredentialKind = z.infer<typeof PrReviewCredentialKind>;
+
+export const PrReviewWebhookAuthKind = /* @__PURE__ */ z.enum([
+  "hmac_sha256",
+  "shared_token",
+  "basic",
+]);
+export type PrReviewWebhookAuthKind = z.infer<typeof PrReviewWebhookAuthKind>;
+
+const PrReviewSecretInput = /* @__PURE__ */ (() => z.string().min(16).max(65_536))();
+
+export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      provider: PrReviewProvider,
+      providerBaseUrl: z.string().url().max(2048).optional(),
+      appId: z.string().trim().min(1).max(512).optional(),
+      credentialKind: PrReviewCredentialKind,
+      privateKey: PrReviewSecretInput.optional(),
+      accessToken: PrReviewSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: PrReviewSecretInput,
+      webhookUsername: z.string().min(1).max(512).optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.provider === "github" && value.credentialKind !== "github_app") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitHub PR Review registrations require a dedicated GitHub App",
+        });
+      }
+      if (value.provider === "github" && (!value.appId || !value.privateKey)) {
+        context.addIssue({
+          code: "custom",
+          path: [!value.appId ? "appId" : "privateKey"],
+          message: "GitHub PR Review registrations require the dedicated App ID and private key",
+        });
+      }
+      if (value.provider !== "github" && value.credentialKind !== "provider_token") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitLab and Azure DevOps PR Review registrations require a provider token",
+        });
+      }
+      if (value.credentialKind === "provider_token" && !value.accessToken) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessToken"],
+          message: "provider_token credentials require accessToken",
+        });
+      }
+      if (
+        value.credentialKind === "github_app" &&
+        (value.accessToken !== undefined || value.privateKey === undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [value.accessToken !== undefined ? "accessToken" : "privateKey"],
+          message: "GitHub App credentials require privateKey and cannot include accessToken",
+        });
+      }
+      if (value.credentialKind === "provider_token" && value.privateKey !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["privateKey"],
+          message: "provider_token credentials cannot include a GitHub privateKey",
+        });
+      }
+      if (value.provider === "github" && value.accessTokenExpiresAt !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessTokenExpiresAt"],
+          message: "GitHub App registrations do not use accessTokenExpiresAt",
+        });
+      }
+      if (value.provider === "azure_devops" && !value.webhookUsername) {
+        context.addIssue({
+          code: "custom",
+          path: ["webhookUsername"],
+          message: "Azure DevOps service hooks require a Basic authentication username",
+        });
+      }
+    }))();
+export type CreatePrReviewAppRegistrationRequest = z.infer<
+  typeof CreatePrReviewAppRegistrationRequest
+>;
+
+export const UpdatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      accessToken: PrReviewSecretInput.optional(),
+      privateKey: PrReviewSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: PrReviewSecretInput.optional(),
+      webhookUsername: z.string().min(1).max(512).optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "PR Review registration update must change at least one field",
+    }))();
+export type UpdatePrReviewAppRegistrationRequest = z.infer<
+  typeof UpdatePrReviewAppRegistrationRequest
+>;
+
+export const PrReviewAppRegistration = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    provider: PrReviewProvider,
+    providerBaseUrl: z.string().url(),
+    appId: z.string().nullable(),
+    credentialKind: PrReviewCredentialKind,
+    hasCredential: z.boolean(),
+    accessTokenExpiresAt: z.string().nullable(),
+    webhookAuthKind: PrReviewWebhookAuthKind,
+    hasWebhookSecret: z.boolean(),
+    webhookUsername: z.string().nullable(),
+    webhookPath: z.string(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
+export type PrReviewAppRegistration = z.infer<typeof PrReviewAppRegistration>;
+
+export const CreatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      registrationId: z.string().uuid(),
+      repositoryUri: z.string().url().max(2048),
+      repositoryFullName: z.string().trim().min(1).max(1024),
+      providerRepositoryId: z.union([z.string().min(1).max(512), z.number().int().positive()]),
+      installationId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      projectId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).default("active"),
+    })
+    .strict())();
+export type CreatePrReviewRepositoryBindingRequest = z.infer<
+  typeof CreatePrReviewRepositoryBindingRequest
+>;
+
+export const UpdatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "PR Review repository update must change at least one field",
+    }))();
+export type UpdatePrReviewRepositoryBindingRequest = z.infer<
+  typeof UpdatePrReviewRepositoryBindingRequest
+>;
+
+export const PrReviewRepositoryBinding = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    triggerId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    registrationId: z.string().uuid(),
+    provider: PrReviewProvider,
+    repositoryUri: z.string(),
+    repositoryFullName: z.string(),
+    providerRepositoryId: z.string(),
+    installationId: z.string().nullable(),
+    projectId: z.string().nullable(),
+    model: z.string().nullable(),
+    additionalInstructions: z.string().nullable(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
+export type PrReviewRepositoryBinding = z.infer<typeof PrReviewRepositoryBinding>;
 
 export const EnablePackRequest = withVariableSetIdAlias({
   variableSetId: z.string().uuid().optional(),
@@ -14409,8 +14621,9 @@ function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
   return factory();
 }
 
-export const ModelCapabilitySupportV1 =
-  /* @__PURE__ */ defineModelContractSchema(() => z.enum(["supported", "unsupported", "unknown"]));
+export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["supported", "unsupported", "unknown"]),
+);
 export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
 
 export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -14458,29 +14671,28 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
-export const ModelCredentialSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.union([
-      z
-        .object({
-          kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
-        })
-        .strict(),
-      z
-        .object({
-          kind: z.literal("connected_subscription"),
-          provider: z.enum(["codex", "xai"]),
-        })
-        .strict(),
-      z
-        .object({
-          kind: z.literal("workspace_connection"),
-          mechanism: z.literal("api_key"),
-        })
-        .strict(),
-    ]),
-  );
+export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.union([
+    z
+      .object({
+        kind: z.literal("deployment"),
+        mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("connected_subscription"),
+        provider: z.enum(["codex", "xai"]),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("workspace_connection"),
+        mechanism: z.literal("api_key"),
+      })
+      .strict(),
+  ]),
+);
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
 const TurnExecutionCredentialSourceV1 = z.union([
@@ -14493,35 +14705,31 @@ const TurnExecutionCredentialSourceV1 = z.union([
     .strict(),
 ]);
 
-export const ModelBillingAttributionV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z
-      .object({
-        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
-        metering: z.enum(["opengeni_credits", "external"]),
-      })
-      .strict(),
-  );
+export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+      metering: z.enum(["opengeni_credits", "external"]),
+    })
+    .strict(),
+);
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
-export const TurnExecutionModelSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
 
-export const TurnExecutionReasoningSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**
@@ -14723,60 +14931,59 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
 );
 export type ClientModel = z.infer<typeof ClientModel>;
 
-export const ModelCredentialReadinessV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z
-      .object({
-        status: z.enum(["ready", "not_ready", "error"]),
-        reason: z
-          .enum([
-            "missing_credential",
-            "needs_reauth",
-            "prerequisites_missing",
-            "resolver_error",
-            "observation_stale",
-          ])
-          .nullable(),
-        basis: z.enum(["configuration", "connection", "resolver"]),
-        checkedAt: z.string().datetime().nullable(),
-      })
-      .strict()
-      .superRefine((readiness, context) => {
-        if ((readiness.status === "ready") !== (readiness.reason === null)) {
-          context.addIssue({
-            code: "custom",
-            path: ["reason"],
-            message: "ready credential state requires no reason; non-ready state requires a reason",
-          });
-        }
-        if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
-          context.addIssue({
-            code: "custom",
-            path: ["reason"],
-            message:
-              "credential errors require resolver_error and resolver_error requires error status",
-          });
-        }
-        if (
-          readiness.basis === "resolver" &&
-          readiness.status === "ready" &&
-          readiness.checkedAt === null
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["checkedAt"],
-            message: "resolver readiness requires an observation timestamp",
-          });
-        }
-        if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
-          context.addIssue({
-            code: "custom",
-            path: ["checkedAt"],
-            message: "a stale observation requires its observation timestamp",
-          });
-        }
-      }),
-  );
+export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      status: z.enum(["ready", "not_ready", "error"]),
+      reason: z
+        .enum([
+          "missing_credential",
+          "needs_reauth",
+          "prerequisites_missing",
+          "resolver_error",
+          "observation_stale",
+        ])
+        .nullable(),
+      basis: z.enum(["configuration", "connection", "resolver"]),
+      checkedAt: z.string().datetime().nullable(),
+    })
+    .strict()
+    .superRefine((readiness, context) => {
+      if ((readiness.status === "ready") !== (readiness.reason === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message: "ready credential state requires no reason; non-ready state requires a reason",
+        });
+      }
+      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message:
+            "credential errors require resolver_error and resolver_error requires error status",
+        });
+      }
+      if (
+        readiness.basis === "resolver" &&
+        readiness.status === "ready" &&
+        readiness.checkedAt === null
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "resolver readiness requires an observation timestamp",
+        });
+      }
+      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "a stale observation requires its observation timestamp",
+        });
+      }
+    }),
+);
 export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
 
 export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -14799,23 +15006,21 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
-export const WorkspaceModelCatalogModel =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    ClientModel.extend({
-      credentialReadiness: ModelCredentialReadinessV1,
-      /** Exact workspace-policy verdict without exposing provider identity. */
-      policyAllowed: z.boolean().optional(),
-      availability: ModelAvailabilityV1,
-    }),
-  );
+export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  ClientModel.extend({
+    credentialReadiness: ModelCredentialReadinessV1,
+    /** Exact workspace-policy verdict without exposing provider identity. */
+    policyAllowed: z.boolean().optional(),
+    availability: ModelAvailabilityV1,
+  }),
+);
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
-export const WorkspaceModelCatalogResponse =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.object({
-      models: z.array(WorkspaceModelCatalogModel),
-    }),
-  );
+export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    models: z.array(WorkspaceModelCatalogModel),
+  }),
+);
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**

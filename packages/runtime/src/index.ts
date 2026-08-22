@@ -8076,6 +8076,7 @@ export function repositoryUsesSandboxClone(
   }
   return (
     settings.sandboxBackend === "modal" ||
+    Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
     Boolean(resource.provider)
   );
@@ -9001,6 +9002,7 @@ export function repositoryCloneCommand(
     '  uri="$2"',
     '  ref="$3"',
     '  subpath="$4"',
+    '  expected_commit="${5:-}"',
     '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
     // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
     // proof of a completed materialization: an interrupted clone (worker crash /
@@ -9010,8 +9012,11 @@ export function repositoryCloneCommand(
     // the mount path before the repo exists). Subpath extracts are not git repos —
     // for those the plain non-empty check stands (no stronger signal available).
     '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-    '      echo "Repository resource already present at $target"',
-    "      return 0",
+    '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+    '        echo "Repository resource already present at $target"',
+    "        return 0",
+    "      fi",
+    '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
     "    fi",
     '    echo "Re-materializing partial repository resource at $target" >&2',
     '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
@@ -9039,6 +9044,11 @@ export function repositoryCloneCommand(
     '    echo "Repository resource fetch failed for $target" >&2',
     "    exit 1",
     "  fi",
+    '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+    '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
+    '    rm -rf "$tmp"',
+    "    exit 1",
+    "  fi",
     '  if [ -n "$subpath" ]; then',
     '    if [ ! -e "$tmp/$subpath" ]; then',
     '      echo "Repository subpath not found: $subpath" >&2',
@@ -9061,7 +9071,7 @@ export function repositoryCloneCommand(
     // accept it; a non-empty non-repo survivor here is a mount point the manifest
     // re-filled — install into it by content copy instead of rename.
     '    if [ -e "$target" ]; then',
-    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
     '        rm -rf "$tmp"',
     '        echo "Repository resource already present at $target"',
     "        return 0",
@@ -9106,6 +9116,7 @@ export function repositoryCloneCommand(
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
+        shellQuote(resource.expectedCommitSha ?? ""),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {

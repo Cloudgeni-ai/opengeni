@@ -155,6 +155,7 @@ describe("release schema contract", () => {
       "0317_session_goal_continuation_hold.sql",
       "0318_session_turn_startup_milestones.sql",
       "0319_event_triggered_automations.sql",
+      "0317_pr_review_pack.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -361,6 +361,7 @@
         "@opengeni/runtime": "workspace:*",
         "@opengeni/storage": "workspace:*",
         "hono": "^4.12.18",
+        "zod": "^4.2.1",
       },
       "devDependencies": {
         "better-auth": "^1.6.14",

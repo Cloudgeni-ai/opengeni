@@ -9699,6 +9699,147 @@ export const githubInstallationRepositories = pgTable(
   }),
 );
 
+export const prReviewAppRegistrations = pgTable(
+  "pr_review_app_registrations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    provider: text("provider").notNull(),
+    providerBaseUrl: text("provider_base_url").notNull(),
+    appId: text("app_id"),
+    credentialKind: text("credential_kind").notNull(),
+    credentialEncrypted: text("credential_encrypted"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    webhookAuthKind: text("webhook_auth_kind").notNull(),
+    webhookUsername: text("webhook_username"),
+    status: text("status").notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceRegistration: uniqueIndex("pr_review_app_registrations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceRegistrationProvider: uniqueIndex(
+      "pr_review_app_registrations_workspace_id_provider_uq",
+    ).on(table.workspaceId, table.id, table.provider),
+    workspaceProviderName: uniqueIndex("pr_review_app_registrations_workspace_provider_name_uq").on(
+      table.workspaceId,
+      table.provider,
+      table.name,
+    ),
+    workspaceStatus: index("pr_review_app_registrations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    providerCheck: check(
+      "pr_review_app_registrations_provider_chk",
+      sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
+    ),
+    credentialCheck: check(
+      "pr_review_app_registrations_credential_chk",
+      sql`(
+        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null)
+        or
+        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null)
+      )`,
+    ),
+    webhookAuthCheck: check(
+      "pr_review_app_registrations_webhook_auth_chk",
+      sql`(
+        (${table.provider} = 'github' and ${table.webhookAuthKind} = 'hmac_sha256')
+        or (${table.provider} = 'gitlab' and ${table.webhookAuthKind} = 'shared_token')
+        or (${table.provider} = 'azure_devops' and ${table.webhookAuthKind} = 'basic' and ${table.webhookUsername} is not null)
+      )`,
+    ),
+    statusCheck: check(
+      "pr_review_app_registrations_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_app_registrations_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const prReviewRepositoryBindings = pgTable(
+  "pr_review_repository_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    triggerId: uuid("trigger_id").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    registrationId: uuid("registration_id").notNull(),
+    provider: text("provider").notNull(),
+    repositoryUri: text("repository_uri").notNull(),
+    repositoryFullName: text("repository_full_name").notNull(),
+    providerRepositoryId: text("provider_repository_id").notNull(),
+    installationId: text("installation_id"),
+    projectId: text("project_id"),
+    model: text("model"),
+    additionalInstructions: text("additional_instructions"),
+    status: text("status").notNull().default("active"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceBinding: uniqueIndex("pr_review_repository_bindings_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceBindingRegistrationProvider: uniqueIndex(
+      "pr_review_repo_workspace_registration_provider_uq",
+    ).on(table.workspaceId, table.id, table.registrationId, table.provider),
+    registrationRepository: uniqueIndex("pr_review_repository_bindings_registration_repo_uq").on(
+      table.registrationId,
+      table.providerRepositoryId,
+    ),
+    triggerIdentity: uniqueIndex("pr_review_repository_bindings_trigger_uq").on(table.triggerId),
+    workspaceStatus: index("pr_review_repository_bindings_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    providerCheck: check(
+      "pr_review_repository_bindings_provider_chk",
+      sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
+    ),
+    statusCheck: check(
+      "pr_review_repository_bindings_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_repository_bindings_workspace_account_fk",
+    }).onDelete("cascade"),
+    registration: foreignKey({
+      columns: [table.workspaceId, table.registrationId, table.provider],
+      foreignColumns: [
+        prReviewAppRegistrations.workspaceId,
+        prReviewAppRegistrations.id,
+        prReviewAppRegistrations.provider,
+      ],
+      name: "pr_review_repository_bindings_registration_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
 export const usageEvents = pgTable(
   "usage_events",
   {

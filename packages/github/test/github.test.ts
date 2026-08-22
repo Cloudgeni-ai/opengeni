@@ -5,6 +5,7 @@ import {
   authorizeGitHubAppUser,
   authorizeGitHubInstallationBinding,
   createGitHubAppInstallationTokenWithExpiry,
+  createGitHubAppInstallationTokenWithSigningSettings,
   createSignedState,
   discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
@@ -378,6 +379,43 @@ describe("GitHub app manifest helpers", () => {
         { installationId: 123, repositoryIds: [456] },
       );
       expect(result).toEqual({ token: "ghs_test", expiresAt: "2026-07-14T11:00:00Z" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("keeps platform-App configuration strict while allowing a separate signing-only App", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const signingSettings = {
+      githubAppId: "98765",
+      githubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    };
+    await expect(
+      createGitHubAppInstallationTokenWithExpiry(signingSettings as any, {
+        installationId: 123,
+        repositoryIds: [456],
+      }),
+    ).rejects.toMatchObject({
+      missing: expect.arrayContaining([
+        "OPENGENI_GITHUB_CLIENT_ID",
+        "OPENGENI_GITHUB_CLIENT_SECRET",
+        "OPENGENI_GITHUB_APP_SLUG",
+      ]),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json(
+        { token: "ghs_prReview", expires_at: "2026-07-14T11:00:00Z" },
+        { status: 201 },
+      )) as typeof fetch;
+    try {
+      await expect(
+        createGitHubAppInstallationTokenWithSigningSettings(signingSettings, {
+          installationId: 123,
+          repositoryIds: [456],
+        }),
+      ).resolves.toEqual({ token: "ghs_prReview", expiresAt: "2026-07-14T11:00:00Z" });
     } finally {
       globalThis.fetch = originalFetch;
     }
