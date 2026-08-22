@@ -107,9 +107,9 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
-  // the Linux/x64 CI production build. Advance only the direct-session raw
-  // envelope to the next whole KiB; gzip, file-count, lazy, CSS, and all other
-  // graph limits stay fixed.
+  // the Linux/x64 CI production build. That change advanced only the
+  // direct-session raw envelope to the next whole KiB; its gzip, file-count,
+  // lazy, CSS, and all other graph limits stayed fixed at that point.
   // Personal GitHub repository authority adds the typed selection and consent
   // methods to the shared SDK client. Combined with current main, the exact
   // macOS/arm64 production graph measures 2,115,776 raw / 589,075 gzip bytes.
