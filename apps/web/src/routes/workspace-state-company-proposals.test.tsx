@@ -239,7 +239,9 @@ describe("Company profile pending proposals", () => {
     expect(text).toContain("Pending proposals");
     expect(text).toContain("Organization company profile");
     expect(text).toContain("Mission: Current mission.");
-    expect(text).toContain("Only organization owners and admins can edit or activate");
+    expect(text).toContain(
+      "Editing, activation, and rollback require a direct organization owner or admin session.",
+    );
 
     const pendingActivate = container.querySelector(
       '[aria-label="Pending company profile proposals"] button',

@@ -1544,12 +1544,9 @@ export function WorkspaceStateRoute({
 }) {
   const context = useAppContext();
   const { client } = context;
-  const workspaceGrant = context.accessContext.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManageCompanyProfile = Boolean(
-    workspaceGrant?.accountId &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  const canManageCompanyProfile = canManageOrganizationCompanyProfile(
+    context.accessContext,
+    workspaceId,
   );
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();

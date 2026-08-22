@@ -229,7 +229,6 @@ import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { registerRememberTools } from "./remember";
-import { registerCompanyProfileTools } from "./company-profile";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
@@ -796,20 +795,6 @@ export function buildOpenGeniMcpServer(
         workspaceId: grant.workspaceId,
         ...attempt,
       },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
-    registerCompanyProfileTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
-      },
-      actorSubjectId: grant.subjectId,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },

@@ -246,11 +246,12 @@ export function canManageOrganizationCompanyProfile(
   workspaceId: string,
 ): boolean {
   if (!context || context.mode !== "managed") return false;
-  const workspaceGrant = context.workspaceGrants.find(
+  const matchingWorkspaceGrants = context.workspaceGrants.filter(
     (candidate) => candidate.workspaceId === workspaceId,
   );
+  if (matchingWorkspaceGrants.length !== 1) return false;
+  const workspaceGrant = matchingWorkspaceGrants[0]!;
   if (
-    !workspaceGrant ||
     workspaceGrant.subjectId !== context.subjectId ||
     workspaceGrant.principalKind !== "human_session" ||
     workspaceGrant.metadata?.delegated === true ||

@@ -20,7 +20,7 @@ Canonical implementation:
 - explicit owner/admin-confirmed agent administration:
   `packages/core/src/domain/company-profile-agent-admin.ts`,
   `apps/api/src/mcp/company-profile-agent-admin.ts`, and migration
-  `0317_human_confirmed_company_profile_agent_admin.sql`;
+  `0318_human_confirmed_company_profile_agent_admin.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
 - admin presentation: the existing Company Brain / Workspace State route at
@@ -35,10 +35,13 @@ workspace admin, session creation, provenance, documents, collections, memory,
 and preference records never widen organization authority.
 
 Reads require `workspace:read` in a workspace belonging to the account. Human
-administration requires a direct authenticated human session with the exact
-account's `account:admin`; `workspace:admin`, delegated services, agent attempt
-grants, and API-key identity cannot activate or roll back through the admin
-route.
+administration requires the canonical managed-cookie human session plus the
+exact account's current active organization membership role `owner` or `admin`.
+The route deliberately does not require or grant the broader `account:admin`
+permission. Ordinary members, `workspace:admin` alone, delegated sessions,
+services, agent-attempt grants, API keys, revoked roles, subject/account drift,
+and cross-organization requests cannot create, edit, activate, or roll back
+through the direct-human route.
 
 An exact live agent attempt may administer the profile only through the
 separate `company_profile_propose` → structured human input →
@@ -105,7 +108,7 @@ writer receives `COMPANY_PROFILE_CONFLICT`; it never silently overwrites newer
 truth.
 
 Agent-admin proposals and confirmations add no second mutation mechanism.
-Migration `0317` routes the confirmed operation through the same
+Migration `0318` routes the confirmed operation through the same
 `company_profile_apply_activation` lifecycle function, attributes the event to
 the confirming human, and retains compare-and-swap behavior. Its receipt tables
 are FORCE-RLS, immutable, and have no direct runtime table privileges; the
@@ -156,21 +159,26 @@ The operation identity is the router attempt id, so exact router retry converges
 without duplicate profile state. The router remains responsible for attempt-ledger
 receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
-## Agent proposals
+## Agent proposals and confirmation
 
-The first-party `company_profile_propose` tool (`apps/api/src/mcp/company-profile.ts`,
-over `proposeCompanyProfile` in `packages/db/src/company-profile.ts`) is the
-agent-facing path the Company Brain "Create with OpenGeni" prompt directs a
-session to. It registers only for exact worker-signed agent attempts with
-`workspace:read` plus `sessions:control`, takes the complete proposed profile
-(omitted list keys are derived from the entry content and de-duplicated), and
-appends exactly one inactive `proposal` revision with `durable_learning`
-provenance and source id `agent-attempt:<attemptId>`. It is idempotent by
-operation id plus canonical request fingerprint, never changes the head or
-activation events, and has no active-authority mode. Activation stays with a
-direct organization `account:admin` through the existing activation route; the
-Company Brain → Company profile & goals view lists such revisions under
-"Pending proposals" with their content and an Activate action for admins.
+The first-party `company_profile_propose` and `company_profile_confirm` tools
+(`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
+Company Brain "Create with OpenGeni" prompt directs a session to. They register
+only for exact worker-signed agent attempts with `workspace:read` plus
+`sessions:control`. Proposal input is the complete profile; omitted list keys are
+derived from entry content and de-duplicated before the exact canonical profile
+is hashed. The proposal appends one inactive revision with `agent_admin`
+provenance and returns the exact structured-human-input payload. It never changes
+the head or activation events.
+
+Only `company_profile_confirm`, after the initiating owner/admin answered the
+bound question with `activate`, can move the head. It revalidates the live
+attempt, current organization role, proposal receipt/hash, human-input request,
+and active-head compare-and-swap baseline. The Company Brain → Company profile &
+goals view also lists inactive revisions under "Pending proposals" so a current
+direct owner/admin can review and activate them manually through the same
+lifecycle. The older `proposeCompanyProfile` persistence helper remains a
+proposal-only internal seam and is not the registered first-party MCP path.
 
 ## Exact-attempt prompt delivery and precedence
 

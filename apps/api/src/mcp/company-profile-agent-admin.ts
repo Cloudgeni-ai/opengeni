@@ -4,6 +4,7 @@ import {
   COMPANY_PROFILE_REASON_MAX_CHARS,
   COMPANY_PROFILE_SCALAR_MAX_CHARS,
   COMPANY_PROFILE_STABLE_KEY_MAX_CHARS,
+  CompanyProfileContent,
   type CompanyProfileAgentAttempt,
 } from "@opengeni/contracts";
 import {
@@ -13,6 +14,7 @@ import {
 import type { Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { resolveCompanyProfileEntries } from "./company-profile";
 
 type JsonResult = (value: unknown) => {
   content: { type: "text"; text: string }[];
@@ -27,23 +29,21 @@ export type RegisterCompanyProfileAgentAdminToolsInput = {
   router?: Pick<ReturnType<typeof createCompanyProfileAgentAdminRouter>, "propose" | "confirm">;
 };
 
+const scalar = z.string().trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS).nullable();
 const entry = z.object({
-  key: z
-    .string()
-    .trim()
-    .min(1)
-    .max(COMPANY_PROFILE_STABLE_KEY_MAX_CHARS)
-    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+  key: z.string().trim().min(1).max(COMPANY_PROFILE_STABLE_KEY_MAX_CHARS).optional(),
   content: z.string().trim().min(1).max(COMPANY_PROFILE_ENTRY_MAX_CHARS),
 });
-const profile = z.object({
-  identity: z.string().trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS).nullable(),
-  mission: z.string().trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS).nullable(),
-  products: z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT),
-  customers: z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT),
-  goals: z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT),
-  constraints: z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT),
-});
+const entries = z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT);
+const DEFAULT_PROPOSAL_REASON = "Activate agent-proposed organization company profile";
+
+function boundedIssueMessage(error: z.ZodError): string {
+  return error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join(".") || "profile"}: ${issue.message}`)
+    .join("; ")
+    .slice(0, 1_024);
+}
 
 /**
  * Register the explicit owner/admin-confirmed organization profile path. This
@@ -59,17 +59,46 @@ export function registerCompanyProfileAgentAdminTools(
     "company_profile_propose",
     {
       description:
-        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. This creates only an immutable inactive proposal for the exact live turn of an organization owner/admin and does not use workspace learning policy. Show the proposed profile to the user first. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
+        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. Omitted list keys are derived from content. This creates only an immutable inactive proposal for the exact live turn of an organization owner/admin and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
       inputSchema: {
         operationId: z.string().uuid(),
-        profile,
-        reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+        identity: scalar,
+        mission: scalar,
+        products: entries,
+        customers: entries,
+        goals: entries,
+        constraints: entries,
+        reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS).optional(),
       },
     },
     async (request) => {
       await input.authorize();
+      const parsed = CompanyProfileContent.safeParse({
+        identity: request.identity,
+        mission: request.mission,
+        products: resolveCompanyProfileEntries(request.products),
+        customers: resolveCompanyProfileEntries(request.customers),
+        goals: resolveCompanyProfileEntries(request.goals),
+        constraints: resolveCompanyProfileEntries(request.constraints),
+      });
+      if (!parsed.success) {
+        return input.json({
+          status: "not_proposed",
+          code: "invalid_profile",
+          message: boundedIssueMessage(parsed.error),
+        });
+      }
       try {
-        return input.json(await router.propose({ attempt: input.attempt, request }));
+        return input.json(
+          await router.propose({
+            attempt: input.attempt,
+            request: {
+              operationId: request.operationId,
+              profile: parsed.data,
+              reason: request.reason ?? DEFAULT_PROPOSAL_REASON,
+            },
+          }),
+        );
       } catch (error) {
         if (error instanceof CompanyProfileAgentAdminError) {
           return input.json({ status: "not_proposed", code: error.code, message: error.message });

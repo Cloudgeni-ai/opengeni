@@ -113,7 +113,12 @@ describe("company-profile agent administration MCP tools", () => {
     expect([...h.handlers.keys()]).toEqual(["company_profile_propose", "company_profile_confirm"]);
     const result = await h.handlers.get("company_profile_propose")!({
       operationId: PROPOSE_OPERATION_ID,
-      profile: profile(),
+      identity: profile().identity,
+      mission: profile().mission,
+      products: [],
+      customers: [],
+      goals: [{ content: "Reach 99.99% decision availability." }],
+      constraints: [],
       reason: "The owner explicitly requested this organization profile.",
     });
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({
@@ -126,7 +131,15 @@ describe("company-profile agent administration MCP tools", () => {
         attempt: ATTEMPT,
         request: {
           operationId: PROPOSE_OPERATION_ID,
-          profile: profile(),
+          profile: {
+            ...profile(),
+            goals: [
+              {
+                key: "reach-99.99-decision-availability",
+                content: "Reach 99.99% decision availability.",
+              },
+            ],
+          },
           reason: "The owner explicitly requested this organization profile.",
         },
       },

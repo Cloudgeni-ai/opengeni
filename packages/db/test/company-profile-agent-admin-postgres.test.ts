@@ -221,7 +221,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 describe("company-profile agent administration", () => {
   test("declares an explicit organization authority independent of governed learning", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0317_human_confirmed_company_profile_agent_admin.sql", import.meta.url),
+      new URL("../drizzle/0318_human_confirmed_company_profile_agent_admin.sql", import.meta.url),
       "utf8",
     );
     expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

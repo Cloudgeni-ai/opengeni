@@ -132,8 +132,11 @@ describe("Company Brain first-party MCP policy", () => {
     expect(registeredToolNames(denied)).toEqual([]);
   });
 
-  test("company_profile_propose requires exact agent-attempt authority plus its own permissions", () => {
-    const selected: FirstPartyMcpToolName[] = ["company_profile_propose"];
+  test("company-profile administration tools require exact agent-attempt authority and permissions", () => {
+    const selected: FirstPartyMcpToolName[] = [
+      "company_profile_propose",
+      "company_profile_confirm",
+    ];
     expect(
       registeredToolNames(buildOpenGeniMcpServer(deps(), grant(["workspace:read"], selected))),
     ).toEqual([]);
@@ -141,7 +144,7 @@ describe("Company Brain first-party MCP policy", () => {
       registeredToolNames(
         buildOpenGeniMcpServer(deps(), grant(["workspace:read", "sessions:control"], selected)),
       ),
-    ).toEqual(["company_profile_propose"]);
+    ).toEqual(["company_profile_confirm", "company_profile_propose"]);
     const humanGrant = grant(["workspace:read", "sessions:control"], selected);
     humanGrant.principalKind = "human";
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
