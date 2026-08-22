@@ -217,6 +217,16 @@ is the authoritative pending-request read model. See
 
 Human session-list pages are bounded independently of event/history storage: ordinary rows are cursor-paginated, while the personal pinned section returns at most the 100 newest matching pins and sets `pinnedTruncated` when older pins are omitted. The legacy array-shaped HTTP response also reports that fact in `x-opengeni-pinned-truncated` without changing its body. Tree aggregates reject more than 600 roots per call, are bounded per returned root, and are cycle-safe; `treeStats.truncated` makes every reported count a lower bound whenever node/depth/cycle defense omits traversal work. Canonical: `packages/db/src/index.ts` (`listSessionsForSubject`, `sessionTreeStatsForSessions`) and `packages/contracts/src/index.ts` (`SessionListResponse`).
 
+Agent discovery preserves the prompt-claim boundary: compact `queuedPromptCount`
+reports waiting human/API work, while `sessions_list` `includeLastMessage` and the
+MCP `session_events` monitoring read omit a human/API `user.message` whose turn
+was never claimed (`session_turns.started_at IS NULL`: still queued, or deleted,
+edited, or cancelled before any claim), because such a prompt was never model
+input. Once the turn is claimed the exact stored row is visible at its original
+sequence; nothing is remapped. REST event pages, SSE, and forensic reads never
+apply the filter, and stored events are never modified
+(`excludeUnclaimedHumanPromptEventFilter` in `packages/db/src/index.ts`).
+
 Workspace-level knowledge is a separate store again: `knowledge_memories` holds curated and agent-written, workspace-scoped memory records. Workspace Memory V1 makes the agent/product lane **active by default** through one deterministic write gate (`saveWorkspaceMemory`): preserve accepted text exactly, apply exact/near dedup, enforce the active-record cap, optionally supersede, then persist. The older `proposed → approved/rejected` lifecycle remains for the curated docs-MCP lane (`memory_propose` and human review); agent-visible memory is `active ∪ approved`. Corrections retire records as `superseded` or `archived`, and pinned records rank first in the per-turn working set. Usage counters (`usage_count`, `last_used_at`) are bumped on memory search and feed ranking/decay work.
 
 Migration 0152 adds the database/domain foundation for composable knowledge without changing those V1 contracts: typed `workspace`/`user`/`role`/`session`/`ephemeral` scopes, hierarchical namespaces, normalized labels, typed provenance/relationship edges, immutable creator facts, and append-only deterministic apply/revert evidence. All three memory-governance tables use FORCE RLS; missing selector context denies, relationships require both endpoints visible, lifecycle evidence is exact-actor visible, and secret-bearing memory fields never enter lifecycle state. This is a maintenance cutover because typed-scope-local dedup replaces the V1 workspace-global unique identity. API/SDK/MCP, retrieval/injection, prompts, automatic learning, and UI remain later slices. The structured preference registry and workspace instruction-policy backend remain separate authorities. See [`hierarchical-memory.md`](hierarchical-memory.md).

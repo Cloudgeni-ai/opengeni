@@ -4,7 +4,10 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
+  type AccessGrant,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -18,6 +21,7 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 let shared: SharedTestDatabase;
 let client: DbClient;
 let mcp: unknown;
+let grant: AccessGrant;
 let workspaceId: string;
 let sessionId: string;
 
@@ -52,7 +56,7 @@ beforeAll(async () => {
     workspaceName: "Session event MCP workspace",
     subjectId: `session-events-mcp-subject-${suffix}`,
   });
-  const grant = access.workspaceGrants[0]!;
+  grant = access.workspaceGrants[0]!;
   workspaceId = grant.workspaceId;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
@@ -234,6 +238,81 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
         payloadMode: "summary",
       }),
     ).rejects.toThrow("Session not found");
+  });
+
+  test("monitoring omits a queued human prompt that forensic reads and REST keep exact", async () => {
+    const queued = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "queued prompt fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const queuedText = "private prompt waiting behind the queue";
+    const accepted = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: queued.id,
+            subjectId: grant.subjectId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: queuedText,
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+
+    const monitoring = await callMcpTool<{ events: Array<{ id: string; type: string }> }>(
+      "session_events",
+      { sessionId: queued.id, direction: "before", limit: 50 },
+    );
+    expect(JSON.stringify(monitoring)).not.toContain(queuedText);
+    expect(monitoring.events.map((event) => event.type)).toContain("turn.queued");
+    expect(monitoring.events.some((event) => event.id === accepted.acceptedEventId)).toBeFalse();
+
+    const forensic = await callMcpTool<{
+      events: Array<{ id: string; type: string; payload: { text?: string } }>;
+    }>("session_events", {
+      sessionId: queued.id,
+      direction: "before",
+      limit: 50,
+      mode: "forensic",
+      payloadMode: "full",
+    });
+    expect(forensic.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: accepted.acceptedEventId,
+          type: "user.message",
+          payload: expect.objectContaining({ text: queuedText }),
+        }),
+      ]),
+    );
+
+    const listed = await callMcpTool<{
+      sessions: Array<{
+        id: string;
+        queuedPromptCount: number;
+        latestMessage: { type: string; preview: string | null } | null;
+      }>;
+    }>("sessions_list", { includeLastMessage: true, limit: 100 });
+    expect(listed.sessions.find((session) => session.id === queued.id)).toMatchObject({
+      queuedPromptCount: 1,
+      latestMessage: null,
+    });
   });
 
   test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {
