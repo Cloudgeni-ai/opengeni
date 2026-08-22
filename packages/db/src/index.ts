@@ -26693,6 +26693,29 @@ async function createSessionInTransaction(
       subjectId: input.createdBy.subjectId,
     });
   }
+  const tenancyViewer = input.subjectId
+    ? {
+        subjectId: input.subjectId,
+        activated: await sessionTenancyProductActivated(
+          tx as unknown as Database,
+          input.workspaceId,
+        ),
+      }
+    : undefined;
+  const mapCreateResultSession = async (
+    row: typeof schema.sessions.$inferSelect,
+    mcpServers: SessionMcpServerMetadata[],
+  ): Promise<Session> =>
+    await mapSessionWithControl(
+      tx,
+      row,
+      mcpServers,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tenancyViewer,
+    );
   if (createIdempotencyKey !== null) {
     // Keyed admission retains the control -> advisory order used by old
     // binaries during the rolling migration. The database depth trigger takes
@@ -26723,7 +26746,7 @@ async function createSessionInTransaction(
       ]);
       await input.beforeCreateCommit?.(tx, existing.id);
       return {
-        session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+        session: await mapCreateResultSession(existing, grouped.get(existing.id) ?? []),
         created: false,
         denied: false,
       };
@@ -26922,7 +26945,7 @@ async function createSessionInTransaction(
         ]);
         await input.beforeCreateCommit?.(tx, existing.id);
         return {
-          session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+          session: await mapCreateResultSession(existing, grouped.get(existing.id) ?? []),
           created: false,
           denied: false,
         };
@@ -26955,7 +26978,7 @@ async function createSessionInTransaction(
   });
   await input.beforeCreateCommit?.(tx, inserted.id);
   return {
-    session: await mapSessionWithControl(tx, inserted, mcpServers),
+    session: await mapCreateResultSession(inserted, mcpServers),
     created: true,
     denied: false,
   };
