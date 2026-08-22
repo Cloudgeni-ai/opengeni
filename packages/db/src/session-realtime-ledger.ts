@@ -15,7 +15,10 @@ import {
   SessionRealtimeConflictError,
   type AssertSessionRealtimeOwnerInput,
 } from "./session-realtime";
-import { lockSessionEventWriteRows, lockWorkspaceInferenceControl } from "./session-control";
+import {
+  lockSessionEventWriteRows,
+  lockWorkspaceInferenceControlForAdmission,
+} from "./session-control";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 
@@ -159,6 +162,8 @@ export type SessionRealtimeInboundEntryInput = {
 };
 
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
+  /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+  controlLockTimeoutMs?: number;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -1320,8 +1325,16 @@ export async function syncSessionRealtimeLedgerInTransaction(
     throw new Error("Realtime ledger batch exceeds the server limit");
   }
   // Realtime sync may admit canonical Steer work. Preserve the global lock
-  // order before owner proof locks the session row.
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  // order before owner proof locks the session row. The prefix is shared while
+  // the session branch is active; the delegation Send below re-enters the same
+  // admission helper and observes this already-held prefix.
+  await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   const mode = await assertSessionRealtimeOwnerInTransaction(db, input);
   if (mode.connectionEpoch !== input.connectionEpoch) {
     throw new SessionRealtimeConflictError(

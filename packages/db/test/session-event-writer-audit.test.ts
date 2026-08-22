@@ -561,6 +561,9 @@ function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): num
     ),
     ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "share"),
     ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "update"),
+    // Send/Steer admission: shared prefix for an active branch, exclusive for a
+    // paused one, decided inside the helper before any other lock.
+    ...callPositions(functionNode, "lockWorkspaceInferenceControlForAdmission"),
     ...callPositions(functionNode, "lockChildLifecycleOutboxWriteRowsTx"),
   ].sort((left, right) => left - right);
 }
