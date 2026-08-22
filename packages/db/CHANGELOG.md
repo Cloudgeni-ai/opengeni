@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 3.0.1
+
+### Patch Changes
+
+- b2dd2f7: Bound the remaining request-scoped workspace control-row mutations and make the lock budget a first-class setting: `updateWorkspaceSettings`, `deleteSessionTreeIfQuiescent`, queue move/edit/delete, composer draft save, and the MCP agent message accept an optional `controlLockTimeoutMs` that API routes and core commands pass (lifecycle callers keep the unbounded wait), so a busy workspace yields the same typed retryable 503 `WORKSPACE_CONTROL_BUSY`. `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` is now parsed and validated once at boot by `@opengeni/config` (`workspaceControlLockTimeoutMs`, positive integer ms, default 20000), installed into `@opengeni/db` by `createApp` through `configureWorkspaceControlRequestLockTimeoutMs`, and rendered by the deployment runtime-env generator as an optional passthrough.
+- Updated dependencies [b2dd2f7]
+  - @opengeni/config@0.18.1
+
 ## 3.0.0
 
 ### Major Changes
