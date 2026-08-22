@@ -1469,6 +1469,20 @@ credential, and content values remain only in authenticated durable events.
 The database returns a milestone receipt only when the current transaction
 inserted the first canonical current-association checkpoint, so ordinary
 attempt recovery and callback replay cannot deterministically double-count it.
+That decision is a per-turn ledger, `session_turn_startup_milestones` (one row
+per turn, milestone, outcome; migration 0318): the event-append or settlement
+transaction performs `insert ... on conflict do nothing returning` for each
+checkpoint it inserted, and only a returned row is a receipt, measured from the
+turn's durable `created_at` to the canonical event's own `occurred_at`. It
+never re-reads the turn's `session_events` rows, so the cost is O(1) per model
+request instead of O(events in the turn) inside the transaction that holds the
+workspace inference-control row. The terminal failed first-byte outcome is
+fenced on ledger state (a provider-dispatch row exists and no completed
+first-byte row exists). A turn whose `turn.started` was already durable before
+a ledger-aware writer touched it (in flight across the ledger rollout) is
+sealed once with `pre_ledger_history` sentinel rows after one bounded probe for
+an earlier current `turn.started`, and emits no further startup receipts rather
+than re-observing a checkpoint with a duration equal to its age.
 A terminal `turn.failed` after provider dispatch contributes one bounded failed
 first-byte sample only when the logical turn produced no canonical byte in any
 attempt. A recoverable pre-byte attempt and a later tool-loop failure after a
