@@ -84,6 +84,7 @@ import {
 } from "../src/activities/sandbox-lease";
 import {
   maybePersistWarmWorkspaceSnapshot,
+  persistSandboxDeadlineRotationCheckpoint,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
 import type { ActivityServices } from "../src/activities/types";
@@ -5501,4 +5502,308 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       }
     }
   }, 180_000);
+
+  // The orderly provider-deadline rotation checkpoint (the turn-side path that
+  // licenses SandboxDeadlineRotationError): rotation requested mid-turn with
+  // the holder intact checkpoints; with the holder missing at the same
+  // epoch/instance the defense-in-depth reinstate makes the checkpoint succeed
+  // instead of silently skipping on `attempt_fenced`; a changed epoch never
+  // captures and never inserts a holder.
+  function modalCheckpointSession(snapshotId: string) {
+    let captureCalls = 0;
+    return {
+      session: {
+        state: { workspacePersistence: "snapshot_filesystem" },
+        modal: {
+          cpClient: {
+            workspaceNameLookup: async () => ({ workspaceName: "opengeni-test", username: "" }),
+          },
+          profile: { serverUrl: "https://modal.test" },
+          environmentName: () => "main",
+        },
+        persistWorkspace: async () => {
+          captureCalls += 1;
+          return new TextEncoder().encode(
+            `MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"${snapshotId}","workspace_persistence":"snapshot_filesystem"}`,
+          );
+        },
+      },
+      captures: () => captureCalls,
+    };
+  }
+
+  test("(1b-rotation-checkpoint) rotation requested with the holder intact produces the orderly checkpoint", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-rotation-intact";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 21,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    const box = modalCheckpointSession("im-rotation-intact");
+    const result = await persistSandboxDeadlineRotationCheckpoint(
+      {
+        db,
+        settings: testSettings({ sandboxSnapshotIntervalMs: 1, sandboxSnapshotTimeoutMs: 5_000 }),
+      },
+      {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        sandboxGroupId: ids.groupId,
+      },
+      box.session,
+      { leaseEpoch: 21, instanceId },
+    );
+    expect(result.holder).toBe("present");
+    expect(result.checkpointed).toBe(true);
+    expect(box.captures()).toBe(1);
+    expect(result.lease).toMatchObject({
+      liveness: "warm",
+      leaseEpoch: 21,
+      archiveComplete: true,
+      archiveCapture: null,
+    });
+    expect(await holderCount(ids.workspaceId, ids.groupId, "turn")).toBe(1);
+  }, 60_000);
+
+  test("(1b-rotation-checkpoint-lost-holder) a lost holder at the same epoch/instance is reinstated so the checkpoint still succeeds", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-rotation-lost-holder";
+    // The holder was already dropped and the lease fell to draining (rotation
+    // grace is zero) - exactly the post-release state the reaper would act on.
+    const leaseId = await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      turnHolders: 0,
+      leaseEpoch: 22,
+      expiresInMs: -1,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    const box = modalCheckpointSession("im-rotation-lost-holder");
+    const baseIds = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      attemptId: attempt.attemptId,
+      sandboxGroupId: ids.groupId,
+    };
+    const settings = testSettings({
+      sandboxSnapshotIntervalMs: 1,
+      sandboxSnapshotTimeoutMs: 5_000,
+    });
+    // Without reinstatement the warm capture cannot claim (attempt_fenced).
+    expect(
+      await maybePersistWarmWorkspaceSnapshot({ db, settings }, baseIds, box.session, 22),
+    ).toBe(false);
+    expect(box.captures()).toBe(0);
+
+    const result = await persistSandboxDeadlineRotationCheckpoint(
+      { db, settings },
+      baseIds,
+      box.session,
+      { leaseEpoch: 22, instanceId },
+    );
+    expect(result.holder).toBe("reinstated");
+    expect(result.checkpointed).toBe(true);
+    expect(box.captures()).toBe(1);
+    expect(await holderCount(ids.workspaceId, ids.groupId, "turn")).toBe(1);
+    expect(result.lease).toMatchObject({
+      liveness: "warm",
+      leaseEpoch: 22,
+      instanceId,
+      archiveComplete: true,
+    });
+    // A second pass is idempotent: holder present, no extra provider capture.
+    const again = await persistSandboxDeadlineRotationCheckpoint(
+      { db, settings },
+      baseIds,
+      box.session,
+      { leaseEpoch: 22, instanceId },
+    );
+    expect(again.holder).toBe("present");
+    expect(again.checkpointed).toBe(true);
+    expect(box.captures()).toBe(1);
+  }, 60_000);
+
+  test("(1b-rotation-checkpoint-fenced) a changed epoch/instance never captures and never reinstates a holder", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-rotation-fenced";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 0,
+      turnHolders: 0,
+      leaseEpoch: 23,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    const box = modalCheckpointSession("im-rotation-fenced");
+    const settings = testSettings({
+      sandboxSnapshotIntervalMs: 1,
+      sandboxSnapshotTimeoutMs: 5_000,
+    });
+    const baseIds = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      attemptId: attempt.attemptId,
+      sandboxGroupId: ids.groupId,
+    };
+    for (const expected of [
+      { leaseEpoch: 22, instanceId },
+      { leaseEpoch: 23, instanceId: "box-someone-else" },
+    ]) {
+      const result = await persistSandboxDeadlineRotationCheckpoint(
+        { db, settings },
+        baseIds,
+        box.session,
+        expected,
+      );
+      expect(result.holder).toBe("lease_fenced");
+      expect(result.checkpointed).toBe(false);
+    }
+    expect(box.captures()).toBe(0);
+    expect(await holderCount(ids.workspaceId, ids.groupId, "turn")).toBe(0);
+  }, 60_000);
+
+  test("(1b-rotation-admission) a mutation admitted under a requested rotation fails rotation_in_progress, not lease_fenced", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const instanceId = "box-rotation-admission";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 24,
+      expiresInMs: 600_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 24,
+      expectedInstanceId: instanceId,
+    };
+    const rotating = await advanceWorkspaceGeneration(db, {
+      ...identity,
+      operation: "writeDuringRotation",
+    }).catch((error) => error);
+    expect(rotating).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((rotating as SandboxWorkspaceMutationFencedError).code).toBe("rotation_in_progress");
+    // A genuine epoch/instance mismatch keeps the historical code.
+    const stale = await advanceWorkspaceGeneration(db, {
+      ...identity,
+      expectedEpoch: 23,
+      operation: "staleEpoch",
+    }).catch((error) => error);
+    expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("lease_fenced");
+    const otherBox = await advanceWorkspaceGeneration(db, {
+      ...identity,
+      expectedInstanceId: "box-other",
+      operation: "otherInstance",
+    }).catch((error) => error);
+    expect((otherBox as SandboxWorkspaceMutationFencedError).code).toBe("lease_fenced");
+  }, 60_000);
+
+  test("(1a-rotation-reason) the box-terminated event carries the drain reason", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    await insertLease(ids, {
+      liveness: "warm",
+      refcount: 0,
+      leaseEpoch: 15,
+      expiresInMs: 600_000,
+      instanceId: "box-terminated-reason",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-terminated-reason" } },
+      },
+    });
+    await admin`
+      update sandbox_leases set
+        provider_created_at = now() - interval '30 minutes',
+        provider_deadline_at = now() + interval '30 minutes'
+      where workspace_id = ${ids.workspaceId}
+        and sandbox_group_id = ${ids.groupId}`;
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+    await reapSandboxLeases();
+    expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 15 });
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    const events = await admin<Array<{ payload: Record<string, unknown> }>>`
+      select payload from session_events
+      where workspace_id = ${ids.workspaceId}
+        and session_id = ${attempt.sessionId}
+        and type = 'sandbox.box.terminated'`;
+    expect(events).toHaveLength(1);
+    expect(events[0]!.payload).toMatchObject({
+      actor: "reaper",
+      instanceId: "box-terminated-reason",
+      drainReason: "provider_deadline",
+    });
+  }, 60_000);
 });

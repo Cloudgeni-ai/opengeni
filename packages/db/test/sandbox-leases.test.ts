@@ -20,6 +20,7 @@ import {
   failWarmingToCold,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
+  heartbeatLeaseHolderStatus,
   markSandboxFileResourcesMaterialized,
   markSandboxCheckpointArtifactDeletePending,
   markSandboxRestoreVerifying,
@@ -34,6 +35,7 @@ import {
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   reArmDrainingLease,
+  reinstateTurnLeaseHolder,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   replaceWorkspaceArchiveCaptureAfterProof,
@@ -352,6 +354,60 @@ afterAll(async () => {
   }
   await shared?.release();
 }, 180_000);
+
+// A live canonical `claimed`/`running` attempt on a session of the group: the
+// exact writer chain the LIVE_CANONICAL_TURN_HOLDER predicate, the reaper, and
+// reinstateTurnLeaseHolder all require. Returns the canonical holder id.
+async function seedLiveCanonicalAttempt(input: {
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+  sessionId: string;
+  state?: "claimed" | "running";
+}): Promise<{ turnId: string; attemptId: string; holderId: string }> {
+  const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  await seedSession({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    groupId: input.groupId,
+    sessionId: input.sessionId,
+    status: "running",
+    initialMessage: "live canonical attempt fixture",
+  });
+  await admin`
+    insert into session_turns (
+      id, account_id, workspace_id, session_id, trigger_event_id,
+      temporal_workflow_id, status, source, position, prompt, resources,
+      tools, model, reasoning_effort, sandbox_backend, metadata, lineage,
+      execution_generation
+    ) values (
+      ${turnId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId},
+      ${crypto.randomUUID()}, ${`session-${input.sessionId}`}, 'running', 'user',
+      1, 'live canonical attempt fixture', '[]'::jsonb, '[]'::jsonb,
+      'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
+    )`;
+  await admin.begin(async (tx) => {
+    await tx`
+      update sessions set active_turn_id = ${turnId}
+      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}`;
+    await tx`
+      update session_turns set active_attempt_id = ${attemptId}
+      where workspace_id = ${input.workspaceId} and id = ${turnId}`;
+    await tx`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id,
+        execution_generation, state, temporal_workflow_id,
+        temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${turnId},
+        1, ${input.state ?? "running"}, ${`session-${input.sessionId}`}, ${crypto.randomUUID()}, '2',
+        0, '{}'::jsonb
+      )`;
+  });
+  return { turnId, attemptId, holderId: `turn-attempt:${attemptId}` };
+}
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(0-delete) workspace deletion atomically refuses live leases and returns durable schedule cleanup ids", async () => {
@@ -6128,5 +6184,323 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       workspace: { status: "ready" },
     });
     expect(adopted.lease?.recovery.continuity).toBeUndefined();
+  }, 60_000);
+
+  test("(2a-status) heartbeat status separates holder liveness from lease extension", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-status",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-status",
+      leaseTtlMs: 45_000,
+    });
+    const leaseId = committed.lease!.id;
+    const epoch = committed.lease!.leaseEpoch;
+    const base = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn" as const,
+      holderId: "turn-status",
+      leaseTtlMs: 999_000,
+    };
+    const holderRow = async () =>
+      (
+        await admin<Array<{ expires_at: Date; last_heartbeat_at: Date }>>`
+          select lease.expires_at, holder.last_heartbeat_at
+          from sandbox_leases lease
+          join sandbox_lease_holders holder on holder.lease_id = lease.id
+          where lease.id = ${leaseId} and holder.kind = 'turn' and holder.holder_id = 'turn-status'`
+      )[0]!;
+
+    // Ordinary warm lease: holder alive AND lease extended.
+    expect(await heartbeatLeaseHolderStatus(db, { ...base, expectedEpoch: epoch })).toEqual({
+      holderAlive: true,
+      leaseExtended: true,
+      fence: null,
+    });
+    // Stale epoch: the holder row is still touched, but the lease is not ours.
+    expect(await heartbeatLeaseHolderStatus(db, { ...base, expectedEpoch: epoch + 7 })).toEqual({
+      holderAlive: true,
+      leaseExtended: false,
+      fence: "epoch",
+    });
+
+    // Rotation requested: the holder stays alive (last_heartbeat_at advances),
+    // the lease TTL is NOT extended, and the boolean form still says false.
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    await admin`
+      update sandbox_lease_holders set last_heartbeat_at = now() - interval '1 hour'
+      where lease_id = ${leaseId} and holder_id = 'turn-status'`;
+    const before = await holderRow();
+    expect(await heartbeatLeaseHolderStatus(db, { ...base, expectedEpoch: epoch })).toEqual({
+      holderAlive: true,
+      leaseExtended: false,
+      fence: "rotation_requested",
+    });
+    const after = await holderRow();
+    expect(after.last_heartbeat_at.getTime()).toBeGreaterThan(before.last_heartbeat_at.getTime());
+    expect(after.expires_at.getTime()).toBe(before.expires_at.getTime());
+    expect(await heartbeatLeaseHolder(db, { ...base, expectedEpoch: epoch })).toBe(false);
+
+    // Draining at the same epoch: alive holder, liveness fence.
+    await admin`update sandbox_leases set liveness = 'draining' where id = ${leaseId}`;
+    expect(await heartbeatLeaseHolderStatus(db, { ...base, expectedEpoch: epoch })).toEqual({
+      holderAlive: true,
+      leaseExtended: false,
+      fence: "liveness",
+    });
+    await admin`update sandbox_leases set liveness = 'warm' where id = ${leaseId}`;
+
+    // Holder deleted: the only signal that licenses release.
+    await admin`
+      delete from sandbox_lease_holders where lease_id = ${leaseId} and holder_id = 'turn-status'`;
+    expect(await heartbeatLeaseHolderStatus(db, { ...base, expectedEpoch: epoch })).toEqual({
+      holderAlive: false,
+      leaseExtended: false,
+      fence: "holder_gone",
+    });
+    expect(
+      await heartbeatLeaseHolderStatus(db, {
+        ...base,
+        sandboxGroupId: crypto.randomUUID(),
+        expectedEpoch: epoch,
+      }),
+    ).toEqual({ holderAlive: false, leaseExtended: false, fence: "lease_missing" });
+  }, 60_000);
+
+  test("(2c) a rotation requested under live turn holders is never drainable until every holder releases", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const first = await seedLiveCanonicalAttempt({
+      accountId,
+      workspaceId,
+      groupId,
+      sessionId: crypto.randomUUID(),
+    });
+    const second = await seedLiveCanonicalAttempt({
+      accountId,
+      workspaceId,
+      groupId,
+      sessionId: crypto.randomUUID(),
+    });
+    const holderInput = (holder: { holderId: string }, sessionId: string) => ({
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn" as const,
+      holderId: holder.holderId,
+      subjectId: sessionId,
+      backend: "modal" as const,
+      leaseTtlMs: 45_000,
+    });
+    const firstSessionId = (
+      await admin<{ session_id: string }[]>`
+        select session_id from session_turn_attempts where id = ${first.attemptId}`
+    )[0]!.session_id;
+    const secondSessionId = (
+      await admin<{ session_id: string }[]>`
+        select session_id from session_turn_attempts where id = ${second.attemptId}`
+    )[0]!.session_id;
+    await acquireLease(db, holderInput(first, firstSessionId));
+    await acquireLease(db, holderInput(second, secondSessionId));
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-shared-rotation",
+      leaseTtlMs: 45_000,
+    });
+    const epoch = committed.lease!.leaseEpoch;
+    await admin`
+      update sandbox_leases set
+        provider_created_at = now() - interval '23 hours',
+        provider_deadline_at = now() + interval '30 minutes'
+      where id = ${committed.lease!.id}`;
+    await requestDueSandboxRotationsGlobal(db, 60 * 60_000, 500);
+    expect((await readLease(db, workspaceId, groupId))?.rotationReason).toBe("provider_deadline");
+
+    const reap = async () =>
+      await reapStaleLeaseHoldersGlobal(db, {
+        viewerHolderTtlMs: 90_000,
+        turnHolderTtlMs: 90_000,
+        idleGraceMs: 45_000,
+      });
+    const drainable = async () => (await reap()).some((row) => row.sandboxGroupId === groupId);
+
+    // Both owners keep heartbeating: alive, rotation-fenced, never released.
+    for (const holder of [first, second]) {
+      expect(
+        await heartbeatLeaseHolderStatus(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: holder.holderId,
+          leaseTtlMs: 45_000,
+          expectedEpoch: epoch,
+        }),
+      ).toEqual({ holderAlive: true, leaseExtended: false, fence: "rotation_requested" });
+    }
+    expect(await drainable()).toBe(false);
+    expect(await drainable()).toBe(false);
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "warm",
+      turn_holders: 2,
+      refcount: 2,
+    });
+
+    // One owner finishes its checkpoint and releases: still held by the other.
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: first.holderId,
+      idleGraceMs: 45_000,
+    });
+    expect(await drainable()).toBe(false);
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "warm",
+      turn_holders: 1,
+    });
+
+    // The final release under a requested rotation skips the idle grace and the
+    // next sweep returns the box for capture-and-terminate.
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: second.holderId,
+      idleGraceMs: 45_000,
+    });
+    expect((await readRow(workspaceId, groupId))?.liveness).toBe("draining");
+    expect(await drainable()).toBe(true);
+  }, 60_000);
+
+  test("(2d) reinstateTurnLeaseHolder restores only the exact live attempt holder at the established epoch/instance", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const sessionId = crypto.randomUUID();
+    const live = await seedLiveCanonicalAttempt({ accountId, workspaceId, groupId, sessionId });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: live.holderId,
+      subjectId: sessionId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-reinstate",
+      leaseTtlMs: 45_000,
+    });
+    const leaseId = committed.lease!.id;
+    const epoch = committed.lease!.leaseEpoch;
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${leaseId}`;
+    const input = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId,
+      attemptId: live.attemptId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "box-reinstate",
+      leaseTtlMs: 45_000,
+    };
+    const holderCount = async () =>
+      Number(
+        (
+          await admin<{ n: number }[]>`
+            select count(*)::int as n from sandbox_lease_holders
+            where lease_id = ${leaseId} and holder_id = ${live.holderId}`
+        )[0]!.n,
+      );
+
+    expect((await reinstateTurnLeaseHolder(db, input)).status).toBe("present");
+
+    // Lost holder on a still-warm lease (another holder kept it warm): put back.
+    await admin`delete from sandbox_lease_holders where lease_id = ${leaseId}`;
+    expect(await holderCount()).toBe(0);
+    const reinstated = await reinstateTurnLeaseHolder(db, input);
+    expect(reinstated.status).toBe("reinstated");
+    expect(await holderCount()).toBe(1);
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "warm",
+      turn_holders: 1,
+      refcount: 1,
+    });
+
+    // Lost holder that already dropped the lease to draining (rotation grace is
+    // zero): re-armed to warm under the same epoch, like a late arrival.
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: live.holderId,
+      idleGraceMs: 45_000,
+    });
+    expect((await readRow(workspaceId, groupId))?.liveness).toBe("draining");
+    const rearmed = await reinstateTurnLeaseHolder(db, input);
+    expect(rearmed.status).toBe("reinstated");
+    expect(rearmed.status === "reinstated" && rearmed.lease.liveness).toBe("warm");
+    expect(await readRow(workspaceId, groupId)).toMatchObject({
+      liveness: "warm",
+      lease_epoch: epoch,
+      turn_holders: 1,
+    });
+
+    // Exact fences: another epoch or instance is never touched.
+    expect(
+      (await reinstateTurnLeaseHolder(db, { ...input, expectedEpoch: epoch + 1 })).status,
+    ).toBe("lease_fenced");
+    expect(
+      (await reinstateTurnLeaseHolder(db, { ...input, expectedInstanceId: "box-other" })).status,
+    ).toBe("lease_fenced");
+    // A capture/teardown claim owns the lease: never re-arm behind it. (The
+    // 0184 teardown marker is the rolling projection of a draining capture
+    // claim that old and new admission both honor.)
+    await admin`update sandbox_leases set rotation_reason = 'teardown_claim' where id = ${leaseId}`;
+    expect((await reinstateTurnLeaseHolder(db, input)).status).toBe("capture_in_progress");
+    await admin`update sandbox_leases set rotation_reason = 'provider_deadline' where id = ${leaseId}`;
+    // A superseded attempt has no holder to restore.
+    await admin.begin(async (tx) => {
+      await tx`
+        update session_turn_attempts set
+          state = 'closed', outcome = 'interrupted_recoverable',
+          closed_at = now(), quiesced_at = now(), updated_at = now()
+        where id = ${live.attemptId}`;
+      await tx`
+        update session_turns set status = 'recovering', active_attempt_id = null, updated_at = now()
+        where workspace_id = ${workspaceId} and id = ${live.turnId}`;
+      await tx`delete from sandbox_lease_holders where lease_id = ${leaseId}`;
+    });
+    expect((await reinstateTurnLeaseHolder(db, input)).status).toBe("attempt_fenced");
+    expect(await holderCount()).toBe(0);
   }, 60_000);
 });

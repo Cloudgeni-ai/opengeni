@@ -36,7 +36,7 @@ import {
   failSandboxRematerialization,
   failWarmingToCold,
   getSandboxSessionEnvelope,
-  heartbeatLeaseHolder,
+  heartbeatLeaseHolderStatus,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
@@ -44,6 +44,7 @@ import {
   readLease,
   registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
+  reinstateTurnLeaseHolder,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
@@ -79,6 +80,7 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
+import type { Observability } from "@opengeni/observability";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   collectWorkspaceArchiveObjectKeys,
@@ -124,6 +126,12 @@ export type SandboxResumeServices = {
    * ID-only logical base instead of selecting the provider default. */
   logicalFallbackSettings?: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /** Structured logger for lifecycle decisions (holder release reasons). Falls
+   * back to the console when a lean caller passes none. */
+  observability?: Pick<Observability, "info" | "warn">;
+  /** Test seam only: cadence of the private holder-liveness loop (default 10 s).
+   * Production keeps the default; the dead-worker reap horizon assumes it. */
+  holderLivenessIntervalMs?: number;
   /**
    * The logical turn-attempt lifetime, not merely the provider request lifetime.
    * Some provider SDK calls cannot be interrupted. Aborting this signal still
@@ -594,6 +602,93 @@ function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | nul
     sessionState.workspaceArchive,
     existing?.version === 1 ? Date.parse(existing.capturedAt) : Date.now(),
   );
+}
+
+export type SandboxDeadlineRotationCheckpointResult = {
+  /** The exact established epoch still carries a requested rotation and a
+   * complete current-generation archive: the turn may abort orderly. */
+  checkpointed: boolean;
+  /** What the defense-in-depth holder step observed before the capture. */
+  holder: Awaited<ReturnType<typeof reinstateTurnLeaseHolder>>["status"];
+  lease: Awaited<ReturnType<typeof readLease>>;
+};
+
+/**
+ * The orderly provider-deadline rotation checkpoint for one running turn. The
+ * turn-side lease heartbeat calls this once it observes a rotation-fenced lease
+ * at its established epoch/instance; `checkpointed: true` licenses the
+ * SandboxDeadlineRotationError abort that hands the same logical turn to the
+ * cold successor.
+ *
+ * Defense in depth: the warm capture claim requires exactly this turn's holder.
+ * If that holder was lost while the attempt is still the active writer (a stale
+ * release, a reap race), `reinstateTurnLeaseHolder` puts it back under the
+ * exact epoch/instance fence before the capture, so a lost holder cannot
+ * silently disable the orderly abort and leave the reaper to terminate the box
+ * under the running turn. Never captures when the epoch/instance changed.
+ */
+export async function persistSandboxDeadlineRotationCheckpoint(
+  services: SandboxResumeServices,
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    sandboxGroupId: string;
+  },
+  session: unknown,
+  expected: { leaseEpoch: number; instanceId: string },
+  signal?: AbortSignal,
+): Promise<SandboxDeadlineRotationCheckpointResult> {
+  const { db, settings } = services;
+  // A cancelled attempt must never briefly regain its holder: its eager
+  // cancellation listener may already have released it, and reinstating here
+  // would pin the lease behind an attempt that is being torn down.
+  if (signal?.aborted) {
+    return { checkpointed: false, holder: "attempt_fenced", lease: null };
+  }
+  const reinstated = await reinstateTurnLeaseHolder(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sandboxGroupId: ids.sandboxGroupId,
+    sessionId: ids.sessionId,
+    attemptId: ids.attemptId,
+    expectedEpoch: expected.leaseEpoch,
+    expectedInstanceId: expected.instanceId,
+    leaseTtlMs: settings.sandboxLeaseTtlMs,
+  });
+  if (reinstated.status === "reinstated") {
+    const message = "sandbox rotation checkpoint reinstated the live turn holder";
+    const fields = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      leaseEpoch: expected.leaseEpoch,
+      liveness: reinstated.lease.liveness,
+    };
+    if (services.observability) services.observability.warn(message, fields);
+    else console.warn(message, fields);
+  }
+  if (reinstated.status !== "present" && reinstated.status !== "reinstated") {
+    return { checkpointed: false, holder: reinstated.status, lease: null };
+  }
+  await maybePersistWarmWorkspaceSnapshot(
+    services,
+    ids,
+    session,
+    expected.leaseEpoch,
+    signal,
+    true,
+  );
+  const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+  const checkpointed =
+    lease?.leaseEpoch === expected.leaseEpoch &&
+    lease.instanceId === expected.instanceId &&
+    lease.rotationRequestedAt !== null &&
+    lease.archiveComplete &&
+    signal?.aborted !== true;
+  return { checkpointed, holder: reinstated.status, lease };
 }
 
 /**
@@ -1124,40 +1219,92 @@ export async function resumeBoxForTurn(
       });
     await providerRenewalInFlight;
   };
+  // Release ONLY on holder death. `heartbeatLeaseHolderStatus` separates "this
+  // holder is gone / its attempt is no longer the active writer" from "the lease
+  // could not be extended" (rotation requested, draining, another epoch). The
+  // second is NOT a reason to release: once a provider-deadline rotation is
+  // requested the lease heartbeat is fenced by design while the still-running
+  // turn checkpoints, and the turn-side heartbeat owns that orderly
+  // SandboxDeadlineRotationError abort. Dropping the live holder here instead
+  // flips the lease to draining under the running turn, the reaper terminates
+  // the box, and the checkpoint then fails `attempt_fenced` (the staging
+  // ~61-minute box-age failure). Both loops therefore converge on
+  // "holder alive -> never release"; this loop keeps touching the holder.
+  const releaseDeadHolder = (reason: string): void => {
+    const message = "sandbox resume holder released: holder no longer live";
+    const fields = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      holderKind: kind,
+      reason,
+    };
+    if (services.observability) services.observability.warn(message, fields);
+    else console.warn(message, fields);
+    void release().catch(() => undefined);
+  };
   holderLivenessTimer = setInterval(() => {
     const heartbeat = holderLeaseHeartbeat;
-    const refresh = heartbeat
-      ? heartbeatLeaseHolder(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sandboxGroupId: ids.sandboxGroupId,
-          kind,
-          holderId,
-          expectedEpoch: heartbeat.expectedEpoch,
-          leaseTtlMs: heartbeat.leaseTtlMs,
+    if (heartbeat) {
+      void heartbeatLeaseHolderStatus(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        kind,
+        holderId,
+        expectedEpoch: heartbeat.expectedEpoch,
+        leaseTtlMs: heartbeat.leaseTtlMs,
+      })
+        .then((status) => {
+          if (heartbeat !== holderLeaseHeartbeat) return;
+          if (!status.holderAlive) {
+            // Reaped, released, or its exact attempt is no longer the active
+            // writer. Stop this otherwise-unbounded provider operation and
+            // idempotently drop any remaining holder state.
+            releaseDeadHolder(status.fence);
+            return;
+          }
+          if (status.fence === "epoch") {
+            // The lease epoch never regresses: a newer epoch means the box this
+            // holder was registered against is definitively superseded (lost
+            // instance replaced, re-established by a later turn). The holder
+            // row is stale authority for an instance that no longer exists;
+            // drop it promptly instead of pinning a successor's lease.
+            releaseDeadHolder(status.fence);
+            return;
+          }
+          // The box is still serving this live holder: keep the provider TTL
+          // renewed while the lease is ours (extended, or only rotation-fenced at
+          // the same epoch). A liveness fence (draining at our epoch) means the
+          // reaper now governs the instance; keep the holder but leave its
+          // expiry alone.
+          if (status.leaseExtended || status.fence === "rotation_requested") {
+            void maybeRenewProviderExpiration().catch(() => undefined);
+          }
         })
-      : touchLeaseHolder(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sandboxGroupId: ids.sandboxGroupId,
-          kind,
-          holderId,
-        });
-    void refresh
+        .catch(() => undefined);
+      return;
+    }
+    void touchLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      kind,
+      holderId,
+    })
       .then((touched) => {
+        if (heartbeat !== holderLeaseHeartbeat) return;
         // A canonical turn holder is rejected once its exact attempt is no
-        // longer the active writer. Stop this otherwise-unbounded provider
-        // operation and idempotently drop any remaining holder state.
-        if (!touched && heartbeat === holderLeaseHeartbeat) {
-          void release().catch(() => undefined);
+        // longer the active writer (touch is attempt-fenced only; it never
+        // consults lease authority, so false here always means holder death).
+        if (!touched) {
+          releaseDeadHolder("holder_gone");
           return;
         }
-        if (touched && heartbeat === holderLeaseHeartbeat) {
-          void maybeRenewProviderExpiration().catch(() => undefined);
-        }
+        void maybeRenewProviderExpiration().catch(() => undefined);
       })
       .catch(() => undefined);
-  }, 10_000);
+  }, services.holderLivenessIntervalMs ?? 10_000);
   if ("unref" in holderLivenessTimer && typeof holderLivenessTimer.unref === "function") {
     holderLivenessTimer.unref();
   }
