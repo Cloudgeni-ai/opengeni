@@ -299,7 +299,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         deps.slackFetch ?? fetch,
       );
       stage = "credential_verification";
-      const verified = await verifyOpenGeniSlackBotCredential(token, deps.slackFetch ?? fetch);
+      const verified = await verifyOpenGeniSlackBotCredential(
+        token,
+        deps.slackFetch ?? fetch,
+        new Date(),
+        settings.slackBotDisplayName,
+      );
       stage = "permission_recheck";
       await requireSlackInstallCallbackGrant(db, state);
       stage = "persistence";

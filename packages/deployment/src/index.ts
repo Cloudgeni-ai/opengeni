@@ -2194,6 +2194,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
+    valueEnv("OPENGENI_SLACK_BOT_DISPLAY_NAME", env.OPENGENI_SLACK_BOT_DISPLAY_NAME),
     valueEnv("OPENGENI_SLACK_COMMAND", env.OPENGENI_SLACK_COMMAND),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||

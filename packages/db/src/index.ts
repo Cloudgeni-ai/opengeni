@@ -9157,7 +9157,7 @@ export async function listSlackInstallationBindings(
         slackTeamName: binding.slackTeamName,
         botId: binding.botId,
         botUserId: binding.botUserId,
-        botDisplayName: "OpenGeni" as const,
+        botDisplayName: binding.botDisplayName as "OpenGeni" | "OpenGeni Staging",
         state: binding.state,
         quarantineReason: binding.quarantineReason,
         version: binding.version,

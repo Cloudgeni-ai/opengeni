@@ -8,6 +8,7 @@ import {
   hasOpenGeniSlackBotSearchScopes,
   type AccessGrant,
   type ConnectionMetadata,
+  type OpenGeniSlackBotDisplayName,
   type OpenGeniSlackBotConnectionMetadata,
 } from "@opengeni/contracts";
 import {
@@ -369,6 +370,7 @@ export async function verifyOpenGeniSlackBotCredential(
   token: string,
   fetchImpl: FetchLike = fetch,
   now: Date = new Date(),
+  expectedDisplayName: OpenGeniSlackBotDisplayName = "OpenGeni",
 ): Promise<VerifiedOpenGeniSlackBot> {
   const authResponse = await slackApiFetch(fetchImpl, "auth.test", token, {});
   const grantedScopes = parseGrantedScopes(authResponse.response.headers.get("x-oauth-scopes"));
@@ -391,10 +393,10 @@ export async function verifyOpenGeniSlackBotCredential(
   }
   const profile = slackRecord(user.profile);
   const displayName = slackString(profile?.display_name) || slackString(profile?.real_name);
-  if (displayName !== "OpenGeni") {
+  if (displayName !== expectedDisplayName) {
     throw new SlackBotCredentialVerificationError(
       "identity_mismatch",
-      'Slack bot display name must be exactly "OpenGeni"',
+      `Slack bot display name must be exactly ${JSON.stringify(expectedDisplayName)}`,
     );
   }
 
@@ -407,7 +409,7 @@ export async function verifyOpenGeniSlackBotCredential(
       slackTeamName,
       botUserId,
       botId,
-      botDisplayName: "OpenGeni",
+      botDisplayName: expectedDisplayName,
       verifiedAt: now.toISOString(),
     },
   };

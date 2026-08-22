@@ -900,6 +900,14 @@ describe("OpenGeni Slack bot credential verification", () => {
     expect(exact.calls.map((call) => call.method)).toEqual(["auth.test", "users.info"]);
     expect(exact.calls.every((call) => call.query === "")).toBe(true);
 
+    const staging = await verifyOpenGeniSlackBotCredential(
+      fixtureBotToken(),
+      fakeSlack({ displayName: "OpenGeni Staging" }).fetch,
+      new Date("2026-01-02T03:04:05.000Z"),
+      "OpenGeni Staging",
+    );
+    expect(staging.metadata.botDisplayName).toBe("OpenGeni Staging");
+
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),

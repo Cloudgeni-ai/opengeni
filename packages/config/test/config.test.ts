@@ -419,6 +419,7 @@ describe("OpenGeni Slack interaction settings", () => {
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+    OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
     OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
@@ -427,6 +428,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
+    expect(settings.slackBotDisplayName).toBe("OpenGeni Staging");
     expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
@@ -439,7 +441,11 @@ describe("OpenGeni Slack interaction settings", () => {
   });
 
   test("defaults and validates the signed Slack slash command", () => {
+    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("OpenGeni");
     expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
+    expect(() =>
+      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Preview" }, () => getSettings()),
+    ).toThrow();
     expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
   });
 });

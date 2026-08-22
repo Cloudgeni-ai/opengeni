@@ -5,7 +5,7 @@ One configured Slack app can serve Slack's hosted MCP and OpenGeni's separate bo
 | Connection | Slack author | OpenGeni ownership | Intended use |
 | --- | --- | --- | --- |
 | Personal hosted Slack MCP | The Slack human who authenticated, with Slack's configured app attribution | The exact authenticating OpenGeni subject | Interactive personal Slack tools only, including private-channel, DM, and MPIM search |
-| OpenGeni workspace bot | The `OpenGeni` bot user | The one OpenGeni workspace that installed it | Shared agents, first-party bot tools, bot-token public search, and explicitly bound scheduled tasks |
+| OpenGeni workspace bot | The deployment's configured bot user (`OpenGeni` in production, `OpenGeni Staging` in managed staging) | The one OpenGeni workspace that installed it | Shared agents, first-party bot tools, bot-token public search, and explicitly bound scheduled tasks |
 
 The two authorities are never substituted for one another. Nothing reads or posts until the capability is enabled or the bot is installed and an agent invokes a tool.
 
@@ -16,7 +16,7 @@ The two authorities are never substituted for one another. Nothing reads or post
 Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing internal app may be reused for hosted MCP and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
 
 1. Set the production Slack app name to `OpenGeni`. Use an environment-qualified app name such as `OpenGeni Staging` for a non-production deployment so administrators can distinguish simultaneous installations.
-2. Set the bot user display name to exactly `OpenGeni`.
+2. Set the bot user display name to the deployment's exact configured identity: `OpenGeni` in production or `OpenGeni Staging` in managed staging.
 3. Configure both exact redirect URLs:
    - `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` for hosted MCP OAuth.
    - `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/slack/callback` for workspace-bot installation.
@@ -25,6 +25,7 @@ Slack renders the message author from the OAuth principal and renders `Sent usin
    - `OPENGENI_SLACK_CLIENT_ID`
    - `OPENGENI_SLACK_CLIENT_SECRET`
    - `OPENGENI_SLACK_SIGNING_SECRET` (required before workspace-bot installation is offered, because Events API, commands, shortcuts, and interactive actions all depend on signature verification)
+   - `OPENGENI_SLACK_BOT_DISPLAY_NAME` (`OpenGeni` by default; `OpenGeni Staging` in managed staging)
    - `OPENGENI_INTEGRATIONS_ENABLED=true`
    - `OPENGENI_INTEGRATIONS_STATE_SECRET`
    - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`
@@ -164,12 +165,13 @@ The production defaults above are customizable for a separate non-production app
 ```bash
 OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai \
 OPENGENI_SLACK_APP_NAME='OpenGeni Staging' \
+OPENGENI_SLACK_BOT_DISPLAY_NAME='OpenGeni Staging' \
 OPENGENI_SLACK_COMMAND=/opengeni-staging \
 OPENGENI_SLACK_SHORTCUT_NAME='Open in OpenGeni Staging' \
 bun run slack:manifest
 ```
 
-This changes the provider app name, slash command, shortcut label, and every provider callback URL. Keep `OPENGENI_SLACK_COMMAND` set to the same exact command in the API runtime so signed command delivery and the generated provider manifest cannot drift. The bot user's display name remains exactly `OpenGeni` for credential verification. For managed Kubernetes, `bun run deployment:runtime-artifacts` carries `OPENGENI_SLACK_CLIENT_ID`, `OPENGENI_SLACK_CLIENT_SECRET`, `OPENGENI_SLACK_SIGNING_SECRET`, and `OPENGENI_SLACK_COMMAND` into the generated runtime environment. Populate the three credential values from the matching environment's Slack app before publishing the runtime Secret; a staging release must never reuse the production triplet.
+This changes the provider app name, bot display name, slash command, shortcut label, and every provider callback URL. Keep `OPENGENI_SLACK_BOT_DISPLAY_NAME` and `OPENGENI_SLACK_COMMAND` set to the same exact values in the API runtime so installation verification, signed command delivery, and the generated provider manifest cannot drift. For managed Kubernetes, `bun run deployment:runtime-artifacts` carries `OPENGENI_SLACK_CLIENT_ID`, `OPENGENI_SLACK_CLIENT_SECRET`, `OPENGENI_SLACK_SIGNING_SECRET`, `OPENGENI_SLACK_BOT_DISPLAY_NAME`, and `OPENGENI_SLACK_COMMAND` into the generated runtime environment. Populate the three credential values from the matching environment's Slack app before publishing the runtime Secret; a staging release must never reuse the production triplet.
 
 Generate the canonical JSON manifest with `bun run slack:manifest`. It defaults to the managed `https://app.opengeni.ai` base URL. Self-hosted deployments set their stable HTTPS `OPENGENI_PUBLIC_BASE_URL` before running the same command; every redirect, command, event, and interaction URL is derived from that value. The bot scopes remain the narrow first-party bot allowlist; the separate user scopes cover the full current Slack-hosted MCP tool catalog and `settings.is_mcp_enabled` enables that provider surface. Bot verification evaluates only the granted bot-token scopes, so hosted-MCP user scopes do not widen the bot principal. `reactions:read` is read-only and exists only for optional reaction summon; `reactions:write` belongs only to the hosted-MCP user principal. `search:read.public`, `search:read.files`, and `search:read.users` are the bot-token scopes Slack's Real-time Search API accepts (`OPENGENI_SLACK_BOT_SEARCH_SCOPES`); `search:read.private`, `search:read.im`, and `search:read.mpim` are user-token only and stay on the personal principal. Do not enable Socket Mode or token rotation, or add bot-side `channels:join`, `chat:write.public`, `chat:write.customize`, administrative, or enterprise-search scopes; Slack's native "Invite Them" prompt handles channels the bot has not joined. The canonical bot allowlist accepts the required manifest scopes plus the explicitly safe extras `team:read`, `reactions:read`, and the three bot search scopes; every other bot extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection. Like `reactions:read`, the search scopes are requested but not required for eligibility: an installation made before they were requested keeps working for mentions, commands, DMs, shortcuts, and tools, and gains bot search only after a reinstall with the canonical manifest (`hasOpenGeniSlackBotSearchScopes`).
 

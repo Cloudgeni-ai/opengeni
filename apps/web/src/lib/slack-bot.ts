@@ -13,7 +13,7 @@ export type OpenGeniSlackBotUiMetadata = {
   slackTeamName: string;
   botId: string;
   botUserId: string;
-  botDisplayName: "OpenGeni";
+  botDisplayName: "OpenGeni" | "OpenGeni Staging";
 };
 
 export function openGeniSlackBotUiMetadata(
@@ -33,7 +33,7 @@ export function openGeniSlackBotUiMetadata(
     typeof metadata.slackTeamName !== "string" ||
     typeof metadata.botId !== "string" ||
     typeof metadata.botUserId !== "string" ||
-    metadata.botDisplayName !== "OpenGeni"
+    (metadata.botDisplayName !== "OpenGeni" && metadata.botDisplayName !== "OpenGeni Staging")
   ) {
     return null;
   }
@@ -73,7 +73,7 @@ export function preferredOpenGeniSlackBotConnection(
  */
 export function openGeniSlackBotConnectionLabel(connection: ConnectionMetadata): string | null {
   const metadata = openGeniSlackBotUiMetadata(connection);
-  return metadata ? `${metadata.slackTeamName} · OpenGeni` : null;
+  return metadata ? `${metadata.slackTeamName} · ${metadata.botDisplayName}` : null;
 }
 
 export type OpenGeniSlackBotConnectionOption = {
@@ -114,7 +114,8 @@ export function openGeniSlackBotConnectionOptions(
     const metadata = openGeniSlackBotUiMetadata(connection);
     return metadata ? [{ connection, metadata }] : [];
   });
-  const named = (row: (typeof rows)[number]) => `${row.metadata.slackTeamName} · OpenGeni`;
+  const named = (row: (typeof rows)[number]) =>
+    `${row.metadata.slackTeamName} · ${row.metadata.botDisplayName}`;
   const withTeamId = (row: (typeof rows)[number]) => `${named(row)} · ${row.metadata.slackTeamId}`;
   const byName = tally(rows, named);
   const byTeamId = tally(rows, withTeamId);
