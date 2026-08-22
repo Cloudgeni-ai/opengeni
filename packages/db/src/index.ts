@@ -1464,6 +1464,7 @@ async function projectManagedOrganizationAccess(
     subjectId: string;
     subjectLabel: string;
     organizationMemberships: OrganizationMemberType[];
+    preferredDefaultWorkspaceId?: string | null;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const activeOrganizationMemberships = input.organizationMemberships.flatMap(
@@ -1549,8 +1550,13 @@ async function projectManagedOrganizationAccess(
     organizationAccounts.map((organization) => [organization.id, organization.name]),
   );
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
   const defaultWorkspaceId =
-    workspaceGrants.find((grant) => grant.accountId === defaultAccountId)?.workspaceId ?? null;
+    workspaceGrants.find(
+      (grant) =>
+        grant.accountId === defaultAccountId &&
+        grant.workspaceId === input.preferredDefaultWorkspaceId,
+    )?.workspaceId ?? defaultPersonalWorkspaceId;
   return {
     accessContext: {
       mode: "managed",
@@ -1608,11 +1614,41 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
+    const [fallbackAccount] = await tx
+      .select({ id: schema.managedAccounts.id })
+      .from(schema.managedAccounts)
+      .where(
+        and(
+          eq(schema.managedAccounts.externalSource, "better-auth:user"),
+          eq(schema.managedAccounts.externalId, input.userId),
+        ),
+      )
+      .limit(1);
     if (existingOrganizationMemberships.some((membership) => membership.status === "active")) {
+      const firstActiveMembership = existingOrganizationMemberships.find(
+        (membership) => membership.status === "active" && membership.personalWorkspaceId !== null,
+      );
+      let preferredDefaultWorkspaceId: string | null = null;
+      if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
+        await setRlsContext(txDb, { accountId: fallbackAccount.id, workspaceId: null });
+        const [legacyDefaultWorkspace] = await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(
+            and(
+              eq(schema.workspaces.accountId, fallbackAccount.id),
+              eq(schema.workspaces.externalSource, "better-auth:user"),
+              eq(schema.workspaces.externalId, `${input.userId}:default`),
+            ),
+          )
+          .limit(1);
+        preferredDefaultWorkspaceId = legacyDefaultWorkspace?.id ?? null;
+      }
       return await projectManagedOrganizationAccess(txDb, {
         subjectId,
         subjectLabel,
         organizationMemberships: existingOrganizationMemberships,
+        preferredDefaultWorkspaceId,
       });
     }
     if (
@@ -1620,16 +1656,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         (membership) => membership.status === "suspended" || membership.status === "revoked",
       )
     ) {
-      const [fallbackAccount] = await tx
-        .select({ id: schema.managedAccounts.id })
-        .from(schema.managedAccounts)
-        .where(
-          and(
-            eq(schema.managedAccounts.externalSource, "better-auth:user"),
-            eq(schema.managedAccounts.externalId, input.userId),
-          ),
-        )
-        .limit(1);
       if (
         fallbackAccount &&
         existingOrganizationMemberships.some(

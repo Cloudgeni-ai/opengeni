@@ -611,6 +611,15 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       body: JSON.stringify({ accountId: connected.id, expectedVersion: 3 }),
     });
     expect(disabledEnable.status).toBe(409);
+
+    const accessAfterSharedWorkspace = await api.request("/v1/access/me", {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(accessAfterSharedWorkspace.status).toBe(200);
+    expect((await accessAfterSharedWorkspace.json()) as AccessContext).toMatchObject({
+      defaultAccountId: accountId,
+      defaultWorkspaceId: context.defaultWorkspaceId,
+    });
   });
 
   test("owner cookie works; overview/allocator never consume; another admin and nonhuman auth fail closed", async () => {

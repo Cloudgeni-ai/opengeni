@@ -311,6 +311,7 @@ describe("migration 0314 unregistered organization invitations", () => {
       emailVerified: true,
     });
     expect(access.accessContext.defaultAccountId).toBe(organizationId);
+    expect(access.accessContext.defaultWorkspaceId).toBe(accepted.membership.personalWorkspaceId);
     expect(
       access.accessContext.workspaceGrants.some(
         (grant) =>
