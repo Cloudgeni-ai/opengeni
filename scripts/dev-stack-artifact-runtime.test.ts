@@ -258,6 +258,24 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain('--lease-id "${COMPOSE_PROJECT_NAME}"');
     expect(source).toContain('--lease-pid "$$"');
     expect(source).toContain('--lease-token "${opengeni_dev_stack_token}"');
+    // A copied pre-measurement 6gb cap is below one build's working set and
+    // would make every start rebuild the image; the launcher treats it as unset.
+    expect(source).toContain('if [ "${OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX:-}" = "6gb" ]; then');
+    // Opt-in shared Cargo target cache: absolute path only, and one distinct
+    // subdirectory per Cargo workspace so the kernel and relay never mix.
+    expect(source).toContain('if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then');
+    expect(source).toContain('echo "OPENGENI_DEV_CARGO_TARGET_DIR must be an absolute path." >&2');
+    expect(source).toContain(
+      'artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")',
+    );
+    expect(source).toContain(
+      'relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")',
+    );
+    expect(source).toContain(
+      'env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}"',
+    );
+    expect(source).toContain('env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}"');
+    expect(source).toContain("unset OPENGENI_DEV_SANDBOX_BUILD_CACHE_MAX");
     expect(imagePreparation).toContain('"buildx"');
     expect(imagePreparation).toContain('"build"');
     expect(imagePreparation).toContain('"--bootstrap"');

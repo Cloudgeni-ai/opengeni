@@ -409,7 +409,7 @@ describe("structured human-input runtime boundary", () => {
               prompt: "Choose one",
               options: [{ id: "a", label: "A" }],
               required: true,
-              allowOther: false,
+              allowOther: true,
             },
           ],
           allowSkip: true,
@@ -607,7 +607,7 @@ describe("structured human-input runtime boundary", () => {
             {
               ...validQuestions[0],
               required: true,
-              allowOther: false,
+              allowOther: true,
             },
           ],
           allowSkip: false,

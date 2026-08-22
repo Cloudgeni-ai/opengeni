@@ -184,6 +184,85 @@ variable "aks_rollout" {
   }
 }
 
+variable "sandbox_node_pool" {
+  description = "Optional dedicated autoscaling AKS user pool for OpenSandbox workload Pods. Disabled by default; fixed scheduling labels and taint match deploy/stacks/opensandbox-batchsandbox-template.yaml."
+  type = object({
+    enabled                         = optional(bool, false)
+    name                            = optional(string, "sandbox")
+    vm_size                         = optional(string, "Standard_D4ds_v5")
+    min_count                       = optional(number, 0)
+    max_count                       = optional(number, 20)
+    max_pods                        = optional(number, 110)
+    zones                           = optional(set(string), [])
+    os_disk_size_gb                 = optional(number, 128)
+    os_disk_type                    = optional(string, "Ephemeral")
+    temporary_name_for_rotation     = optional(string)
+    node_pool_upgrade_max_surge     = optional(string, "10%")
+    node_pool_upgrade_drain_minutes = optional(number, 0)
+    node_pool_upgrade_soak_minutes  = optional(number, 0)
+  })
+  default = {}
+
+  validation {
+    condition = (
+      can(regex("^[a-z][a-z0-9]{0,11}$", var.sandbox_node_pool.name)) &&
+      var.sandbox_node_pool.name != "system"
+    )
+    error_message = "sandbox_node_pool.name must be a non-system 1-12 character lowercase alphanumeric AKS pool name."
+  }
+
+  validation {
+    condition = (
+      var.sandbox_node_pool.min_count >= 0 &&
+      var.sandbox_node_pool.max_count >= 1 &&
+      var.sandbox_node_pool.min_count <= var.sandbox_node_pool.max_count &&
+      var.sandbox_node_pool.max_count <= 1000 &&
+      floor(var.sandbox_node_pool.min_count) == var.sandbox_node_pool.min_count &&
+      floor(var.sandbox_node_pool.max_count) == var.sandbox_node_pool.max_count
+    )
+    error_message = "sandbox_node_pool autoscaling bounds must be whole numbers with 0 <= min_count <= max_count <= 1000."
+  }
+
+  validation {
+    condition = (
+      var.sandbox_node_pool.max_pods >= 10 &&
+      var.sandbox_node_pool.max_pods <= 250 &&
+      floor(var.sandbox_node_pool.max_pods) == var.sandbox_node_pool.max_pods
+    )
+    error_message = "sandbox_node_pool.max_pods must be a whole number between 10 and 250."
+  }
+
+  validation {
+    condition = (
+      var.sandbox_node_pool.os_disk_size_gb >= 30 &&
+      var.sandbox_node_pool.os_disk_size_gb <= 2048 &&
+      floor(var.sandbox_node_pool.os_disk_size_gb) == var.sandbox_node_pool.os_disk_size_gb
+    )
+    error_message = "sandbox_node_pool.os_disk_size_gb must be a whole number between 30 and 2048."
+  }
+
+  validation {
+    condition     = contains(["Ephemeral", "Managed"], var.sandbox_node_pool.os_disk_type)
+    error_message = "sandbox_node_pool.os_disk_type must be Ephemeral or Managed."
+  }
+
+  validation {
+    condition = alltrue([
+      for zone in var.sandbox_node_pool.zones : contains(["1", "2", "3"], zone)
+    ])
+    error_message = "sandbox_node_pool.zones may contain only Azure availability zones 1, 2, and 3."
+  }
+
+  validation {
+    condition = var.sandbox_node_pool.temporary_name_for_rotation == null ? true : (
+      can(regex("^[a-z][a-z0-9]{0,11}$", var.sandbox_node_pool.temporary_name_for_rotation)) &&
+      var.sandbox_node_pool.temporary_name_for_rotation != "system" &&
+      var.sandbox_node_pool.temporary_name_for_rotation != var.sandbox_node_pool.name
+    )
+    error_message = "sandbox_node_pool.temporary_name_for_rotation must be a different non-system 1-12 character lowercase alphanumeric pool name."
+  }
+}
+
 variable "key_vault" {
   description = "Key Vault settings."
   type = object({

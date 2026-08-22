@@ -113,6 +113,7 @@ import {
   recordCreditBalanceGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
+  recordOpenSandboxKubernetesInventoryGauges,
   recordRetainedProcessInventoryGauges,
   recordRetainedProcessReconciliation,
   recordSandboxCheckpointArtifactGauges,
@@ -126,8 +127,19 @@ import {
   recordSandboxOrphansTerminated,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
+  runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
-import { providerIdentityFromResumeState } from "../sandbox-routing";
+import {
+  inspectOpenSandboxKubernetesInventory,
+  type OpenSandboxKubernetesInventory,
+} from "../opensandbox-kubernetes-inventory";
+import type { ObjectStorage } from "@opengeni/storage";
+import {
+  collectWorkspaceArchiveObjectKeys,
+  deleteUnpublishedWorkspaceArchiveObject,
+  deleteWorkspaceArchiveObjectKeys,
+  putVersion1TarArchiveOrInline,
+} from "../sandbox-archive-storage";
 
 export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 
@@ -218,6 +230,10 @@ export type SweepModalOrphansFn = (
   observability: ActivityServices["observability"],
 ) => Promise<number>;
 
+export type InspectOpenSandboxKubernetesInventoryFn = (input: {
+  namespace: string;
+}) => Promise<OpenSandboxKubernetesInventory>;
+
 export type SandboxLeaseActivityOptions = {
   /** Override the provider terminate (tests spy this; defaults to the real
    *  resume-by-id + provider stop()). */
@@ -225,6 +241,8 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override the read-only bounded OpenSandbox Kubernetes projection. */
+  inspectOpenSandboxKubernetesInventory?: InspectOpenSandboxKubernetesInventoryFn;
   /** Override only the read-only provider process probe. The canonical DB
    * settlement remains real in tests and production. */
   probeRetainedProcess?: RetainedProcessProbeFn;
@@ -437,6 +455,8 @@ export function createSandboxLeaseActivities(
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const inspectOpenSandboxInventory =
+    options.inspectOpenSandboxKubernetesInventory ?? inspectOpenSandboxKubernetesInventory;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
@@ -529,7 +549,7 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability } = await services();
+      const { db, settings, observability, objectStorage } = await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -552,6 +572,7 @@ export function createSandboxLeaseActivities(
           terminateBox,
           probeDrainableProvider,
           captureAttempt,
+          objectStorage,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -624,7 +645,12 @@ export function createSandboxLeaseActivities(
       if (!settings.sandboxOwnershipEnabled) {
         // Inventory remains useful while provider ownership is intentionally
         // disabled, and this scheduled activity is its single projection owner.
-        await refreshQueueLeaseAndCreditGauges(db, observability);
+        await refreshQueueLeaseAndCreditGauges(
+          db,
+          settings,
+          observability,
+          inspectOpenSandboxInventory,
+        );
         return {
           metered,
           forceDrained,
@@ -693,7 +719,12 @@ export function createSandboxLeaseActivities(
         },
       );
 
-      await refreshQueueLeaseAndCreditGauges(db, observability);
+      await refreshQueueLeaseAndCreditGauges(
+        db,
+        settings,
+        observability,
+        inspectOpenSandboxInventory,
+      );
 
       if (
         input.examined > 0 ||
@@ -1273,7 +1304,7 @@ export async function probeRetainedProcessAtProvider(
   if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
-  if (providerIdentityFromResumeState(lease.resumeState) !== process.providerInstanceId) {
+  if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== process.providerInstanceId) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
 
@@ -1543,7 +1574,9 @@ async function accrueWarmTick(
 
 async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
+  inspectOpenSandboxInventory: InspectOpenSandboxKubernetesInventoryFn,
 ): Promise<void> {
   await Promise.all([
     (async () => {
@@ -1594,6 +1627,24 @@ async function refreshQueueLeaseAndCreditGauges(
         await countExpiredDrainingSandboxLeases(db),
       );
     }),
+    ...(settings.sandboxBackend === "opensandbox" &&
+    settings.openSandboxKubernetesInventoryNamespace
+      ? [
+          refreshSandboxInventoryGauge(
+            observability,
+            "opensandbox_kubernetes",
+            "OpenSandbox Kubernetes",
+            async () => {
+              recordOpenSandboxKubernetesInventoryGauges(
+                observability,
+                await inspectOpenSandboxInventory({
+                  namespace: settings.openSandboxKubernetesInventoryNamespace!,
+                }),
+              );
+            },
+          ),
+        ]
+      : []),
     (async () => {
       try {
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
@@ -1847,6 +1898,7 @@ async function terminateDrainableBox(
   terminateBox: TerminateBoxFn,
   probeDrainableProvider: DrainableProviderProbeFn,
   attempt: SandboxDrainCaptureAttempt,
+  objectStorage: ObjectStorage | null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -2102,6 +2154,7 @@ async function terminateDrainableBox(
     if (!lease.instanceId || !captureClaim) {
       return { wrote: false, archiveRevision: null };
     }
+    const archiveMetrics = runtimeMetricsHooksForObservability(observability);
     let checkpointArtifactId: string | null = null;
     if (
       archiveBase64 &&
@@ -2148,12 +2201,59 @@ async function terminateDrainableBox(
       if (!archiveMetadata) {
         throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
       }
-      result = await persistDrainSnapshot(db, {
-        ...baseInput,
-        workspaceArchive: archiveBase64,
-        workspaceArchiveMeta: archiveMetadata,
-        ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
-      });
+      const priorKeys = collectWorkspaceArchiveObjectKeys(
+        (lease.resumeState as Record<string, unknown> | null | undefined) ?? null,
+      );
+      let workspaceArchiveRef:
+        | Awaited<ReturnType<typeof putVersion1TarArchiveOrInline>>["workspaceArchiveRef"]
+        | undefined;
+      try {
+        const published = await putVersion1TarArchiveOrInline({
+          backend: lease.backend,
+          objectStorage,
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          archive: {
+            bytes: Buffer.from(archiveBase64, "base64"),
+            descriptor: archiveMetadata,
+            base64: archiveBase64,
+          },
+          metrics: archiveMetrics,
+        });
+        workspaceArchiveRef = published.workspaceArchiveRef;
+        result = await persistDrainSnapshot(db, {
+          ...baseInput,
+          workspaceArchiveMeta: archiveMetadata,
+          ...published,
+          ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
+        });
+        if (published.workspaceArchiveRef && objectStorage) {
+          if (!result.wrote) {
+            await deleteUnpublishedWorkspaceArchiveObject(
+              objectStorage,
+              published.workspaceArchiveRef,
+              archiveMetrics,
+            );
+          } else {
+            const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
+            const afterKeys = collectWorkspaceArchiveObjectKeys(
+              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+            );
+            await deleteWorkspaceArchiveObjectKeys(
+              objectStorage,
+              [...priorKeys].filter((key) => !afterKeys.has(key)),
+            ).catch(() => undefined);
+          }
+        }
+      } catch (error) {
+        await deleteUnpublishedWorkspaceArchiveObject(
+          objectStorage,
+          workspaceArchiveRef,
+          archiveMetrics,
+        );
+        throw error;
+      }
     }
     if (!result.wrote && checkpointArtifactId) {
       await markSandboxCheckpointArtifactDeletePending(db, {

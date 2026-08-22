@@ -6,11 +6,21 @@
     "opengeni": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceRevision", "dashboards"],
+      "required": ["sourceRevision", "opensandbox", "dashboards"],
       "properties": {
         "sourceRevision": {
           "type": "string",
           "maxLength": 128
+        },
+        "opensandbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "namespace", "metricsService"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string", "minLength": 1 },
+            "metricsService": { "type": "string", "minLength": 1 }
+          }
         },
         "dashboards": {
           "type": "object",

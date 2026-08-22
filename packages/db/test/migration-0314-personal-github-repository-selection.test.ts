@@ -120,7 +120,7 @@ function selected(lastVerifiedAt = new Date().toISOString()) {
   };
 }
 
-describe("migration 0313 personal GitHub repository selection", () => {
+describe("migration 0314 personal GitHub repository selection", () => {
   test("keeps bigint repository IDs exact and advances only authority-relevant generations", async () => {
     if (!available) return;
     const owner = await fixture();

@@ -12,7 +12,6 @@ import {
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
-  CalendarClockIcon,
   ChevronRightIcon,
   CircleDashedIcon,
   Clock3Icon,
@@ -21,7 +20,6 @@ import {
   FolderPlusIcon,
   FolderOpenIcon,
   ListFilterIcon,
-  Loader2Icon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
@@ -45,6 +43,8 @@ import {
 } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
+import { RailTrailingMetadata, SessionRowContent } from "@/components/rail/session-row-content";
+export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -89,6 +89,7 @@ import {
 import {
   cancelSessionRowRevealIntent,
   consumeSessionRowRevealIntent,
+  requestSessionComposerFocus,
   sessionFocusAttribute,
   shouldRecordSessionRowFocusIntent,
   shouldMoveSessionRowFocus,
@@ -102,7 +103,9 @@ import {
 } from "@/lib/session-pins";
 import {
   applySessionAttentionProjection,
+  localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
+  subscribeToLocalSessionDeliveryAttention,
   subscribeToSessionAttentionChanges,
   type SessionAttentionProjection,
 } from "@/lib/session-attention";
@@ -349,6 +352,16 @@ export function SessionList() {
   const [attentionOverrides, setAttentionOverrides] = useState<
     ReadonlyMap<string, SessionAttentionProjection>
   >(() => new Map());
+  const [localDeliveryAttention, setLocalDeliveryAttention] = useState<ReadonlyMap<string, number>>(
+    () => localSessionDeliveryAttentionCounts(rail.workspaceId),
+  );
+  useEffect(() => {
+    const refreshLocalDeliveryAttention = () => {
+      setLocalDeliveryAttention(localSessionDeliveryAttentionCounts(rail.workspaceId));
+    };
+    refreshLocalDeliveryAttention();
+    return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
+  }, [rail.workspaceId]);
   const archiving = useRef(new Set<string>());
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
@@ -1561,6 +1574,7 @@ export function SessionList() {
                 <SessionGroup
                   label="Pinned"
                   nodes={pinnedNodes}
+                  localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
                   focusIndex={focusIndex}
@@ -1615,6 +1629,7 @@ export function SessionList() {
                   sectionExpanded={!collapsedChannelSections.has(section.key)}
                   onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
+                  localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
                   focusIndex={focusIndex}
@@ -1638,6 +1653,7 @@ export function SessionList() {
                   <SessionGroup
                     label="Active"
                     nodes={forest.running}
+                    localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
                     activeSessionId={activeSessionId}
                     focusIndex={focusIndex}
@@ -1660,6 +1676,7 @@ export function SessionList() {
                     key={bucket.group}
                     label={bucket.label}
                     nodes={bucket.sessions}
+                    localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
                     activeSessionId={activeSessionId}
                     focusIndex={focusIndex}
@@ -1689,6 +1706,7 @@ export function SessionList() {
                 sectionExpanded={archivedOpen}
                 onToggleSection={() => setArchivedOpen((current) => !current)}
                 nodes={archivedNodes}
+                localDeliveryAttention={localDeliveryAttention}
                 flat={flat}
                 activeSessionId={activeSessionId}
                 focusIndex={focusIndex}
@@ -1799,6 +1817,7 @@ function SessionGroup(props: {
   sectionExpanded?: boolean;
   onToggleSection?: () => void;
   nodes: SessionTreeNode[];
+  localDeliveryAttention: ReadonlyMap<string, number>;
   flat: Session[];
   activeSessionId: string | null;
   focusIndex: number;
@@ -1819,7 +1838,7 @@ function SessionGroup(props: {
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
   const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
-  const summary = summarizeRailNodes(props.nodes);
+  const summary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
   const collapsedSelection = props.channelHeader
     ? findSessionTreeNode(props.nodes, props.activeSessionId)
     : null;
@@ -1949,6 +1968,7 @@ function SessionGroup(props: {
             <SessionTreeRow
               key={node.session.id}
               node={node}
+              localDeliveryAttention={props.localDeliveryAttention}
               depth={0}
               flat={props.flat}
               activeSessionId={props.activeSessionId}
@@ -1976,6 +1996,7 @@ function SessionGroup(props: {
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
 function SessionTreeRow(props: {
   node: SessionTreeNode;
+  localDeliveryAttention: ReadonlyMap<string, number>;
   depth: number;
   flat: Session[];
   activeSessionId: string | null;
@@ -2002,7 +2023,7 @@ function SessionTreeRow(props: {
   const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
   const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
-  const aggregateStatus = summarizeRailNodes([node]);
+  const aggregateStatus = summarizeRailNodes([node], props.localDeliveryAttention);
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
   // A collapsed branch keeps only its selected descendant visible, rendered as
@@ -2042,6 +2063,7 @@ function SessionTreeRow(props: {
           {collapsedSelectedNode ? (
             <SessionTreeRow
               node={collapsedSelectedNode}
+              localDeliveryAttention={props.localDeliveryAttention}
               depth={props.depth + 1}
               flat={props.flat}
               activeSessionId={props.activeSessionId}
@@ -2065,6 +2087,7 @@ function SessionTreeRow(props: {
                 <SessionTreeRow
                   key={child.session.id}
                   node={child}
+                  localDeliveryAttention={props.localDeliveryAttention}
                   depth={props.depth + 1}
                   flat={props.flat}
                   activeSessionId={props.activeSessionId}
@@ -2276,34 +2299,19 @@ function SessionRow(props: {
             onFocus={props.onFocus}
             onClick={(event) => {
               if (isModifiedNavigationClick(event)) return;
+              if (!rail.isMobile) {
+                requestSessionComposerFocus(rail.workspaceId, props.session.id);
+              }
               rail.setDrawerOpen(false);
             }}
             className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
-            <span className="sr-only">{stateLabel}. </span>
-            {/* Let long titles run toward the metadata and dissolve under a
-                short edge mask. This preserves more of the useful title than
-                a hard ellipsis while keeping the icon columns untouched. */}
-            <span className="flex min-w-0 flex-1 flex-col leading-tight">
-              <span
-                className="block overflow-hidden whitespace-nowrap"
-                style={{
-                  maskImage: "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
-                  WebkitMaskImage:
-                    "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
-                }}
-              >
-                {title}
-              </span>
-              {rail.isMobile ? (
-                <span className="mt-0.5 truncate text-2xs font-normal text-fg-muted">
-                  {[stateLabel, depthLabel, descendantLabel, relativeTime]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              ) : null}
-            </span>
-            <RailTrailingMetadata
+            <SessionRowContent
+              title={title}
+              stateLabel={stateLabel}
+              depthLabel={depthLabel}
+              descendantLabel={descendantLabel}
+              mobile={rail.isMobile}
               summary={props.aggregateStatus}
               scheduled={Boolean(scheduledTaskIdOf(props.session))}
               relativeTime={rail.isMobile ? undefined : relativeTime}
@@ -2580,76 +2588,6 @@ function RowActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-/** The one descendant-aware status marker shared by rows and section headers. */
-function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
-  if (summary.kind === "neutral") return null;
-  if (summary.kind === "active") {
-    return (
-      <Loader2Icon
-        aria-hidden="true"
-        className="size-3 shrink-0 animate-spin text-fg-subtle motion-reduce:animate-none"
-      />
-    );
-  }
-  if (summary.kind === "active_work") {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-flex size-2.5 shrink-0 rounded-full border border-brand"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(-12deg, var(--og-color-accent) 0 2px, transparent 2px 3.5px)",
-        }}
-      />
-    );
-  }
-  const tone =
-    summary.kind === "needs_attention"
-      ? "bg-status-waiting"
-      : summary.kind === "failed"
-        ? "bg-status-failed"
-        : "bg-brand";
-  return (
-    <span
-      aria-hidden="true"
-      className={cn("relative inline-flex size-2 shrink-0 rounded-full", tone)}
-    />
-  );
-}
-
-function RailTrailingMetadata({
-  summary,
-  scheduled = false,
-  relativeTime,
-}: {
-  summary: RailAggregateStatus;
-  scheduled?: boolean;
-  relativeTime?: string | undefined;
-}) {
-  const hasStatusMarker = summary.kind !== "neutral";
-  return (
-    <span className="flex w-[3.625rem] shrink-0 items-center">
-      <span className="grid w-[3.625rem] shrink-0 grid-cols-[0.875rem_0.75rem_1.5rem] items-center gap-1">
-        <span className="flex size-3.5 items-center justify-center">
-          {scheduled && hasStatusMarker ? (
-            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
-          ) : null}
-        </span>
-        <span className="flex size-3 items-center justify-center" title={summary.label}>
-          {hasStatusMarker ? (
-            <RailAggregateDot summary={summary} />
-          ) : scheduled ? (
-            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
-          ) : null}
-        </span>
-        <span className="w-6 text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
-          {relativeTime}
-        </span>
-      </span>
-    </span>
   );
 }
 

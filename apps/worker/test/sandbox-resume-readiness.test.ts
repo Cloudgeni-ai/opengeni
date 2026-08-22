@@ -48,6 +48,18 @@ describe("sandbox exec readiness", () => {
     expect(commands).toEqual(["true"]);
   });
 
+  test("probes OpenSandbox before the lease is published warm", async () => {
+    const commands: string[] = [];
+    await waitForSandboxExecReadiness(
+      established("opensandbox", async ({ cmd }) => {
+        commands.push(cmd);
+        return { output: "", exitCode: 0 };
+      }),
+      100,
+    );
+    expect(commands).toEqual(["true"]);
+  });
+
   test("rejects a resolved Modal exec with a nonzero exit code", async () => {
     await expect(
       waitForSandboxExecReadiness(
@@ -72,7 +84,7 @@ describe("sandbox exec readiness", () => {
     expect(calls).toBe(2);
   });
 
-  test("polls an exact yielded readiness process instead of rejecting it", async () => {
+  test("polls an exact yielded Modal readiness process instead of rejecting it", async () => {
     const writes: Array<{
       sessionId: number;
       chars?: string;
@@ -93,6 +105,34 @@ describe("sandbox exec readiness", () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       sessionId: 7,
+      chars: "",
+      maxOutputTokens: 1_000,
+    });
+    expect(writes[0]!.yieldTimeMs).toBeGreaterThan(0);
+    expect(writes[0]!.yieldTimeMs).toBeLessThanOrEqual(500);
+  });
+
+  test("polls an exact yielded OpenSandbox readiness process instead of rejecting it", async () => {
+    const writes: Array<{
+      sessionId: number;
+      chars?: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }> = [];
+    await waitForSandboxExecReadiness(
+      established(
+        "opensandbox",
+        async () => ({ output: "", sessionId: 11 }),
+        async (args) => {
+          writes.push(args);
+          return { output: "", exitCode: 0 };
+        },
+      ),
+      500,
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      sessionId: 11,
       chars: "",
       maxOutputTokens: 1_000,
     });
@@ -131,7 +171,22 @@ describe("sandbox exec readiness", () => {
     expect((error as Error).message).not.toContain("capacity");
   });
 
-  test("does not probe other backends", async () => {
+  test("bounds an OpenSandbox exec RPC that never returns", async () => {
+    const pending = new Promise<never>(() => undefined);
+    const error = await waitForSandboxExecReadiness(
+      established("opensandbox", () => pending),
+      10,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandboxWarmingTimeoutError);
+    expect(error).toMatchObject({
+      backend: "opensandbox",
+      timeoutMs: 10,
+      stage: "exec_readiness",
+    });
+  });
+
+  test("does not probe synchronous backends", async () => {
     let called = false;
     await waitForSandboxExecReadiness(
       established("unix_local", async () => {

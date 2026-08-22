@@ -26,6 +26,17 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         resources: stableValue(item.resources),
         tools: stableValue(item.tools),
       };
+    case "human-input":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        requestId: item.requestId,
+        occurredAt: item.occurredAt,
+        questions: stableValue(item.questions),
+        response: stableValue(item.response),
+        answers: stableValue(item.answers),
+      };
     case "agent-message":
     case "reasoning":
       return {

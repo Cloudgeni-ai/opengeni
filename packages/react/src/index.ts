@@ -321,6 +321,8 @@ export type {
   AuthNeededItem,
   ContextCompactionItem,
   GoalItem,
+  HumanInputAnswerSummary,
+  HumanInputItem,
   MachineInputBatchItem,
   MachineInputMember,
   NoticeItem,
@@ -484,10 +486,14 @@ export type { GeneratedVideoPlayerProps } from "./components/generated-video-pla
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type { UserMessageBodyProps } from "./components/user-message-body";
-export { Markdown } from "./components/markdown";
+export {
+  Markdown,
+  sandboxFileLocationFromHref,
+  sandboxFilePathFromHref,
+} from "./components/markdown";
+export type { MarkdownProps, SandboxFileLocation } from "./components/markdown";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
-export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type {
   SessionStatusProps,

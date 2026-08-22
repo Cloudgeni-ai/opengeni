@@ -40,7 +40,7 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
   title: "Input required",
   /** Multi-question chrome has no default subtitle; hosts may still override. */
   description: "",
-  submit: "Continue",
+  submit: "Send answers",
   skip: "Skip",
   submitting: "Submitting…",
   other: "Other",
@@ -367,6 +367,8 @@ function HumanInputRequestForm({
                   <div key={question.id} data-human-input-question={question.id}>
                     <QuestionControls
                       question={question}
+                      questionNumber={null}
+                      labelledBy={titleId}
                       draft={drafts[question.id] ?? emptyDraft()}
                       fieldId={`${formId}-${index}`}
                       error={validationErrors[question.id]}
@@ -389,6 +391,8 @@ function HumanInputRequestForm({
                 >
                   <QuestionControls
                     question={question}
+                    questionNumber={index + 1}
+                    labelledBy={undefined}
                     draft={drafts[question.id] ?? emptyDraft()}
                     fieldId={`${formId}-${index}`}
                     error={validationErrors[question.id]}
@@ -452,6 +456,8 @@ function HumanInputRequestForm({
 
 function QuestionControls({
   question,
+  questionNumber,
+  labelledBy,
   draft,
   fieldId,
   error,
@@ -464,6 +470,8 @@ function QuestionControls({
   onUpdate,
 }: {
   question: HumanInputQuestion;
+  questionNumber: number | null;
+  labelledBy: string | undefined;
   draft: HumanInputAnswerDraft;
   fieldId: string;
   error: string | undefined;
@@ -477,6 +485,13 @@ function QuestionControls({
 }) {
   const errorId = `${fieldId}-error`;
   const helpId = `${fieldId}-help`;
+  const labelId = `${fieldId}-label`;
+  const promptId = `${fieldId}-prompt`;
+  const otherChoiceId = `${fieldId}-other-choice`;
+  const otherLabelId = `${fieldId}-other-label`;
+  const otherTextId = `${fieldId}-other-text`;
+  const visibleLabel = question.label ?? question.prompt;
+  const controlLabelId = showPromptChrome ? labelId : labelledBy;
   const hint =
     question.kind === "multi_select"
       ? messages.selectionHint(
@@ -486,6 +501,7 @@ function QuestionControls({
       : null;
   const describedBy =
     [
+      question.label && showPromptChrome ? promptId : null,
       question.helpText && showPromptChrome ? helpId : null,
       hint ? `${fieldId}-hint` : null,
       error ? errorId : null,
@@ -498,10 +514,15 @@ function QuestionControls({
         <>
           <div className="flex flex-wrap items-baseline gap-x-2">
             <label
+              id={labelId}
               htmlFor={question.kind === "text" ? fieldId : undefined}
               className="text-og-sm font-medium text-og-fg"
             >
-              {question.label ?? question.prompt}
+              {questionNumber === null ? null : (
+                <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
+              )}
+              {questionNumber === null ? null : " "}
+              {visibleLabel}
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -513,7 +534,11 @@ function QuestionControls({
               ) : null}
             </label>
           </div>
-          {question.label ? <p className="text-og-sm text-og-fg-muted">{question.prompt}</p> : null}
+          {question.label ? (
+            <p id={promptId} className="text-og-sm text-og-fg-muted">
+              {question.prompt}
+            </p>
+          ) : null}
           {question.helpText ? (
             <p id={helpId} className="text-og-xs text-og-fg-subtle">
               {question.helpText}
@@ -554,6 +579,7 @@ function QuestionControls({
             }))
           }
           aria-invalid={Boolean(error)}
+          aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
           autoFocus={autoFocus}
           rows={2}
@@ -562,6 +588,7 @@ function QuestionControls({
       ) : (
         <div
           role={question.kind === "single_select" ? "radiogroup" : "group"}
+          aria-labelledby={controlLabelId}
           aria-describedby={describedBy}
           className="flex flex-col gap-0.5"
         >
@@ -611,49 +638,59 @@ function QuestionControls({
               </label>
             );
           })}
-          {question.allowOther ? (
-            <label
-              className={cn(
-                "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
-                draft.otherSelected
-                  ? "bg-og-status-waiting/12 text-og-fg"
-                  : "text-og-fg hover:bg-og-surface-1/80",
-              )}
-            >
+          <div
+            className={cn(
+              "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
+              draft.otherSelected
+                ? "bg-og-status-waiting/12 text-og-fg"
+                : "text-og-fg hover:bg-og-surface-1/80",
+            )}
+          >
+            <input
+              id={otherChoiceId}
+              type={question.kind === "single_select" ? "radio" : "checkbox"}
+              name={question.kind === "single_select" ? fieldId : undefined}
+              aria-labelledby={otherLabelId}
+              checked={draft.otherSelected}
+              autoFocus={autoFocus && firstOption && question.options.length === 0}
+              onChange={(event) =>
+                onUpdate((current) => ({
+                  ...current,
+                  otherSelected: event.target.checked,
+                  ...(question.kind === "single_select" && event.target.checked
+                    ? { values: [] }
+                    : {}),
+                }))
+              }
+              className="mt-2 accent-og-accent"
+            />
+            <span className="min-w-0 flex-1">
+              <label
+                id={otherLabelId}
+                htmlFor={otherChoiceId}
+                className="block text-og-sm font-medium"
+              >
+                {messages.other}
+              </label>
+              <label htmlFor={otherTextId} className="sr-only">
+                {messages.other} answer for {visibleLabel}
+              </label>
               <input
-                type={question.kind === "single_select" ? "radio" : "checkbox"}
-                name={question.kind === "single_select" ? fieldId : undefined}
-                checked={draft.otherSelected}
-                autoFocus={autoFocus && firstOption && question.options.length === 0}
+                id={otherTextId}
+                type="text"
+                value={draft.other}
+                disabled={!draft.otherSelected || busy}
+                placeholder="Type a value…"
                 onChange={(event) =>
                   onUpdate((current) => ({
                     ...current,
-                    otherSelected: event.target.checked,
-                    ...(question.kind === "single_select" && event.target.checked
-                      ? { values: [] }
-                      : {}),
+                    other: event.target.value,
                   }))
                 }
-                className="mt-2 accent-og-accent"
+                className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
               />
-              <span className="min-w-0 flex-1">
-                <span className="block text-og-sm font-medium">{messages.other}</span>
-                <input
-                  type="text"
-                  value={draft.other}
-                  disabled={!draft.otherSelected || busy}
-                  placeholder="Type a value…"
-                  onChange={(event) =>
-                    onUpdate((current) => ({
-                      ...current,
-                      other: event.target.value,
-                    }))
-                  }
-                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
-                />
-              </span>
-            </label>
-          ) : null}
+            </span>
+          </div>
         </div>
       )}
       {error ? (
@@ -676,12 +713,13 @@ export function answersFromDrafts(
   for (const question of questions) {
     const draft = drafts[question.id] ?? emptyDraft();
     const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other.trim() : "";
-    const supplied = values.length + (other ? 1 : 0);
+    const other = draft.otherSelected ? draft.other : "";
+    const hasOther = Boolean(other.trim());
+    const supplied = values.length + (hasOther ? 1 : 0);
 
     // Other-selected-but-empty must win over generic "required" — otherwise the
     // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !other) {
+    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
       errors[question.id] = messages.otherRequired;
       continue;
     }
@@ -706,7 +744,7 @@ export function answersFromDrafts(
       answers.push({
         questionId: question.id,
         values,
-        ...(other ? { other } : {}),
+        ...(hasOther ? { other } : {}),
       });
     }
   }

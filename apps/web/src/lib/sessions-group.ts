@@ -34,6 +34,14 @@ export function isRunningStatus(status: SessionStatus): boolean {
   return RUNNING_STATUSES.has(status);
 }
 
+function hasActiveEffectiveControl(session: Session): boolean {
+  return (session.effectiveControl?.state ?? "active") === "active";
+}
+
+function isEffectivelyRunning(session: Session): boolean {
+  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+}
+
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
 export function sessionActivityTime(session: Session): number {
   const updated = Date.parse(session.updatedAt);
@@ -112,11 +120,9 @@ export type GroupedSessions = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
-  const running = sessions
-    .filter((session) => isRunningStatus(session.status))
-    .sort(compareSessionActivity);
+  const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
   const rest = sessions
-    .filter((session) => !isRunningStatus(session.status))
+    .filter((session) => !isEffectivelyRunning(session))
     .sort(compareSessionActivity);
 
   const buckets = new Map<SessionRecencyGroup, Session[]>();
@@ -160,6 +166,7 @@ export type SessionTreeNode = {
 };
 
 export type RailAggregateStatusKind =
+  | "send_failed"
   | "needs_attention"
   | "failed"
   | "active"
@@ -178,6 +185,7 @@ export type RailAggregateStatus = {
 
 type RailStatusCounts = {
   total: number;
+  sendFailed: number;
   attention: number;
   failed: number;
   active: number;
@@ -185,16 +193,21 @@ type RailStatusCounts = {
   activeWork: number;
 };
 
-function ownRailStatusCounts(session: Session): RailStatusCounts {
+function ownRailStatusCounts(
+  session: Session,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): RailStatusCounts {
   return {
     total: 1,
+    sendFailed: localDeliveryAttention.get(session.id) ?? 0,
     attention: session.status === "requires_action" ? 1 : 0,
     failed: session.status === "failed" ? 1 : 0,
     active:
-      session.status === "running" ||
-      session.status === "queued" ||
-      session.status === "recovering" ||
-      session.status === "waiting_capacity"
+      hasActiveEffectiveControl(session) &&
+      (session.status === "running" ||
+        session.status === "queued" ||
+        session.status === "recovering" ||
+        session.status === "waiting_capacity")
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -204,6 +217,7 @@ function ownRailStatusCounts(session: Session): RailStatusCounts {
 
 function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts): void {
   target.total += source.total;
+  target.sendFailed += source.sendFailed;
   target.attention += source.attention;
   target.failed += source.failed;
   target.active += source.active;
@@ -211,8 +225,11 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.activeWork += source.activeWork;
 }
 
-function railStatusCounts(node: SessionTreeNode): RailStatusCounts {
-  const counts = ownRailStatusCounts(node.session);
+function railStatusCounts(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): RailStatusCounts {
+  const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
   const stats = node.session.treeStats;
   if (stats) {
     counts.total += stats.totalDescendants;
@@ -227,26 +244,63 @@ function railStatusCounts(node: SessionTreeNode): RailStatusCounts {
     // ordinary spawned children, so include only those extra roots here.
     for (const child of node.children) {
       if (child.session.parentSessionId !== node.session.id) {
-        addRailStatusCounts(counts, railStatusCounts(child));
+        addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      } else {
+        counts.sendFailed += loadedLocalDeliveryFailureCount(child, localDeliveryAttention);
       }
     }
   } else {
-    for (const child of node.children) addRailStatusCounts(counts, railStatusCounts(child));
+    for (const child of node.children) {
+      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+    }
   }
   return counts;
 }
 
+/**
+ * Durable treeStats already account for ordinary descendants' lifecycle state,
+ * but browser-local delivery failures have no server aggregate. Fold only that
+ * local fact through the loaded child tree so collapsed parents stay truthful.
+ */
+function loadedLocalDeliveryFailureCount(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): number {
+  return (
+    (localDeliveryAttention.get(node.session.id) ?? 0) +
+    node.children.reduce(
+      (total, child) => total + loadedLocalDeliveryFailureCount(child, localDeliveryAttention),
+      0,
+    )
+  );
+}
+
 /** One status for a collapsed parent or workstream, including all descendants. */
-export function summarizeRailNodes(nodes: readonly SessionTreeNode[]): RailAggregateStatus {
+export function summarizeRailNodes(
+  nodes: readonly SessionTreeNode[],
+  localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
+): RailAggregateStatus {
   const counts: RailStatusCounts = {
     total: 0,
+    sendFailed: 0,
     attention: 0,
     failed: 0,
     active: 0,
     unread: 0,
     activeWork: 0,
   };
-  for (const node of nodes) addRailStatusCounts(counts, railStatusCounts(node));
+  for (const node of nodes) {
+    addRailStatusCounts(counts, railStatusCounts(node, localDeliveryAttention));
+  }
+
+  if (counts.sendFailed > 0) {
+    return {
+      kind: "send_failed",
+      count: counts.sendFailed,
+      total: counts.total,
+      label: `${counts.sendFailed} message${counts.sendFailed === 1 ? "" : "s"} not sent`,
+    };
+  }
 
   if (counts.attention > 0) {
     return {
@@ -427,10 +481,10 @@ export function groupSessionsForBrowse(
 ): SessionForest {
   const now = options.now ?? new Date();
   const running = sessions
-    .filter((session) => isRunningStatus(session.status))
+    .filter(isEffectivelyRunning)
     .sort(compareSessionActivity)
     .map((session) => ({ session, children: [], hasActiveDescendant: false }));
-  const rest = sessions.filter((session) => !isRunningStatus(session.status));
+  const rest = sessions.filter((session) => !isEffectivelyRunning(session));
   if (groupBy === "created") {
     const buckets = new Map<SessionRecencyGroup, Session[]>();
     for (const session of rest) {
@@ -510,7 +564,7 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
   const summarizedActive = Boolean(
     stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
   );
-  return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
+  return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
 
 /** Bucket already-built roots using the rail's activity and recency rules. */
@@ -693,12 +747,13 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
 
 function subtreeCounts(node: SessionTreeNode): RemovedCounts {
   const status = node.session.status;
+  const active = hasActiveEffectiveControl(node.session);
   const counts: RemovedCounts = {
     total: 1,
-    running: status === "running" || status === "recovering" ? 1 : 0,
-    queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
+    running: active && (status === "running" || status === "recovering") ? 1 : 0,
+    queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
-    paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
+    paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
   };
   const stats = node.session.treeStats;

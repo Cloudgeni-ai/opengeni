@@ -119,14 +119,15 @@ export type FleetOperationAvailability = "ready" | "wakeable" | "recovering" | "
  * A fleet member as the agent + the dock see it (the M8b/M9 UI seam — the
  * `sandboxes_list` response entry the dock renders). STABLE shape: the dock keys
  * on `id`, renders `name`/`kind`/`liveness`, and marks `active`. The session's own
- * Modal group box is a synthetic entry with `id: groupId`, `kind: "modal"`, and a
- * null `enrollmentId`; an enrolled machine carries its sandbox + enrollment ids.
+ * managed group box is a synthetic entry with `id: groupId`, its actual
+ * provisioned backend kind, and a null `enrollmentId`; an enrolled machine
+ * carries its sandbox + enrollment ids.
  */
 export type FleetSandboxEntry = {
   /** The sandbox id used as the attach/swap/run_on `target`. For the session's
    *  own group box this is the group id (a null active pointer == this box). */
   id: string;
-  kind: "modal" | "selfhosted";
+  kind: "modal" | "selfhosted" | "opensandbox";
   name: string;
   liveness: FleetLiveness;
   /** True for the session's currently-active sandbox (the routing target). */
@@ -316,7 +317,12 @@ export async function listFleet(
             : "wakeable";
     entries.push({
       id: ctx.sessionGroupId,
-      kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
+      kind:
+        ctx.sessionBackend === "selfhosted"
+          ? "selfhosted"
+          : ctx.sessionBackend === "opensandbox"
+            ? "opensandbox"
+            : "modal",
       name: "session sandbox",
       liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
       active: groupActive,

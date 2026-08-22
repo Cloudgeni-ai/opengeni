@@ -10,6 +10,7 @@ import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
 import {
   modelToolResultOverflowError,
   projectAttemptToolResultForCaller,
+  spilledModelToolResult,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type SpillOversizedModelToolResult,
@@ -123,5 +124,23 @@ describe("attempt tool result caller projection", () => {
     ]);
     expect(wrapped).toBeDefined();
     expect(await wrapped!.execute({}, context("model"))).toEqual(smallResult());
+  });
+});
+
+describe("spilledModelToolResult", () => {
+  test("projects the cwd-relative shell path while durable receipts stay virtual", () => {
+    const filename = toolResultSpillFilename(OPERATION_ID);
+    const projected = spilledModelToolResult({
+      type: "tool_result_spilled",
+      sandboxPath: toolResultSpillSandboxPath(filename),
+      fileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      byteSize: 64,
+      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+    });
+    expect(projected.structuredContent).toMatchObject({
+      type: "tool_result_spilled",
+      sandboxPath: `tool-results/${filename}`,
+    });
+    expect(JSON.stringify(projected)).not.toContain("/workspace/tool-results/");
   });
 });

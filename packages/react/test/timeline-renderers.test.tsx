@@ -67,6 +67,113 @@ describe("context compaction rendering", () => {
   });
 });
 
+describe("structured human-input history", () => {
+  test("keeps an answered request visible outside the collapsed steps", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: "human-input-call",
+            name: "request_human_input",
+            arguments: {
+              questions: [{ id: "environment", kind: "single_select", prompt: "Where?" }],
+            },
+          }),
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-1",
+              toolCallId: "human-input-call",
+              questions: [
+                {
+                  id: "environment",
+                  kind: "single_select",
+                  label: "Environment",
+                  prompt: "Where?",
+                  options: [{ id: "staging", label: "Staging" }],
+                },
+                {
+                  id: "verification",
+                  kind: "text",
+                  label: "Verification",
+                  prompt: "What should be checked?",
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-1",
+            response: {
+              outcome: "answered",
+              answers: [
+                {
+                  questionId: "environment",
+                  values: [],
+                  other: "Customer sandbox eu-42",
+                },
+                {
+                  questionId: "verification",
+                  values: ["Run migration smoke tests before handoff."],
+                },
+              ],
+            },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "human-input-call",
+            output: JSON.stringify({ requestId: "request-1", outcome: "answered" }),
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Agent asked");
+    expect(text).toContain("You answered");
+    expect(text).toContain("Environment");
+    expect(text).toContain("Customer sandbox eu-42");
+    expect(text).toContain("Verification");
+    expect(text).toContain("Run migration smoke tests before handoff.");
+    expect(text.match(/1\.\s*Environment/g)).toHaveLength(2);
+    expect(text.match(/2\.\s*Verification/g)).toHaveLength(2);
+    const steps = turnSummaryTrigger(r.container);
+    expect(steps).toBeNull();
+    expect(r.container.querySelector('[data-human-input-history="request-1"]')).not.toBeNull();
+    await r.unmount();
+  });
+
+  test("keeps fallback multi-answer labels visible when the request is outside the page", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-before-window",
+            response: {
+              outcome: "answered",
+              answers: [
+                { questionId: "release_channel", values: ["canary"] },
+                { questionId: "verification_plan", values: ["Run the smoke suite"] },
+              ],
+            },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+
+    const history = r.container.querySelector('[data-human-input-history="request-before-window"]');
+    const text = history?.textContent ?? "";
+    expect(text).toMatch(/1\.\s*Release Channel/);
+    expect(text).toContain("canary");
+    expect(text).toMatch(/2\.\s*Verification Plan/);
+    expect(text).toContain("Run the smoke suite");
+    await r.unmount();
+  });
+});
+
 describe("durable generated-video timeline", () => {
   test("renders the terminal system update with native zero-copy playback", async () => {
     const artifactId = "55555555-5555-4555-8555-555555555555";
@@ -470,7 +577,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Not sent");
+    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.className).toContain(
+      "text-og-status-failed",
+    );
     const buttons = [...r.container.querySelectorAll("button")];
     const retry = buttons.find((button) => button.textContent === "Retry");
     const remove = buttons.find((button) => button.textContent === "Remove");

@@ -123,15 +123,21 @@ export {
 export {
   NATIVE_SNAPSHOT_PREFIXES,
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA,
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
   encodeNativeSnapshotRef,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
+  workspaceArchiveObjectKey,
+  workspaceArchivePayloadPresent,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,
   type NativeSnapshotRef,
   type TarWorkspaceArchiveDescriptor,
   type WorkspaceArchiveDescriptor,
+  type WorkspaceArchiveObjectRef,
   type WorkspaceTreeFingerprint,
 } from "./sandbox-snapshots";
 
@@ -152,11 +158,12 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
-// enrolled as a first-class sandbox).
+// enrolled as a first-class sandbox), then `opensandbox` (an optional
+// Kubernetes-native provisioned sandbox provider).
 export const SandboxBackend = z.enum([
   "docker",
   "modal",
@@ -169,6 +176,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "opensandbox",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -194,6 +202,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   cloudflare: ["sandboxId"],
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
+  opensandbox: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -596,6 +605,36 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
     nativeBucketMount: false,
     persistable: false,
+    supportsRunAs: false,
+  },
+  // Optional Kubernetes-native provisioned sandbox through OpenSandbox.
+  // Desktop-class when the box image includes ttyd/browserd/Xvfb: PTY over ttyd,
+  // noVNC and browserd over signed URI-mode ingress. OpenGeni owns persistence
+  // through its portable tar checkpoint path in object storage; native
+  // OpenSandbox pause/resume and snapshots are deliberately not used.
+  opensandbox: {
+    backend: "opensandbox",
+    backendId: "opensandbox",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
     supportsRunAs: false,
   },
 };
@@ -1126,7 +1165,9 @@ export const PersonalResourceAttachmentIntent = z
 export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
 
 function requireEstablishedPersonalResourceEpoch(
-  value: { personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined },
+  value: {
+    personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
+  },
   context: z.RefinementCtx,
 ): void {
   if (
@@ -4309,6 +4350,25 @@ export function defaultRepositoryMountPath(
   );
 }
 
+/** Virtual SDK/UI workspace root. Provisioned boxes mount this path; Connected Machines do not. */
+export const VIRTUAL_WORKSPACE_ROOT = "/workspace" as const;
+
+/**
+ * Cwd-relative path for shell/exec prompts. Durable receipts and `sandbox:` UI
+ * links keep the virtual `/workspace/...` form. Every backend already starts the
+ * shell in that frame (provisioned boxes at `/workspace`, Connected Machines at
+ * `sessions.working_dir`), so advertising the absolute virtual root ENOENTs on a
+ * machine and is redundant on a box.
+ */
+export function sandboxShellPath(virtualPath: string): string {
+  if (virtualPath === VIRTUAL_WORKSPACE_ROOT) return ".";
+  if (virtualPath.startsWith(`${VIRTUAL_WORKSPACE_ROOT}/`)) {
+    const relative = virtualPath.slice(VIRTUAL_WORKSPACE_ROOT.length + 1);
+    return relative.length > 0 ? relative : ".";
+  }
+  return virtualPath;
+}
+
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
 export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
 
@@ -6279,10 +6339,20 @@ export function renderUserMessageContentForModel(
   if (!context && !goalContext) return visibleContent;
   return [
     ...(goalContext
-      ? [{ type: "input_text" as const, text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`,
+          },
+        ]
       : []),
     ...(context
-      ? [{ type: "input_text" as const, text: `${MODEL_CONTEXT_LABEL}\n${context}` }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: `${MODEL_CONTEXT_LABEL}\n${context}`,
+          },
+        ]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -6500,6 +6570,31 @@ export const NewSessionDraftOptions = z.object({
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
 
+/**
+ * Actor-private successful-create history for the new-session composer. Project
+ * entries and their machine entries are MRU ordered. A null target means the
+ * managed sandbox; a null working directory means the machine's launch root.
+ */
+export const NewSessionSelectionHistory = z.object({
+  projects: z
+    .array(
+      z.object({
+        channelId: z.string().uuid().nullable(),
+        targetSandboxId: z.string().uuid().nullable(),
+        machines: z
+          .array(
+            z.object({
+              sandboxId: z.string().uuid(),
+              workingDir: z.string().min(1).max(4096).nullable(),
+            }),
+          )
+          .max(20),
+      }),
+    )
+    .max(50),
+});
+export type NewSessionSelectionHistory = z.infer<typeof NewSessionSelectionHistory>;
+
 /** Actor-private, server-authoritative composer state before a session exists. */
 export const NewSessionDraft = z.object({
   revision: z.number().int().nonnegative(),
@@ -6512,6 +6607,7 @@ export const NewSessionDraft = z.object({
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
   options: NewSessionDraftOptions,
+  selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
   updatedAt: z.string().nullable(),
 });
 export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
@@ -7661,7 +7757,10 @@ export function scheduledOccurrencePayloadUtf8Bytes(agentConfig: {
 function scheduledTaskBoundedJsonObject(maxBytes: number, label: string) {
   return z.record(z.string(), z.unknown()).superRefine((value, context) => {
     if (scheduledTaskJsonUtf8Bytes(value) > maxBytes) {
-      context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+      context.addIssue({
+        code: "custom",
+        message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+      });
     }
   });
 }
@@ -7672,21 +7771,23 @@ function scheduledTaskBoundedString(maxBytes: number, label: string) {
     .min(1)
     .superRefine((value, context) => {
       if (scheduledTaskUtf8Bytes(value) > maxBytes) {
-        context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+        context.addIssue({
+          code: "custom",
+          message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+        });
       }
     });
 }
 
 /** Ingress-bounded task name for create/update requests. */
-export const ScheduledTaskNameInput = /* @__PURE__ */ scheduledTaskBoundedString(
-  SCHEDULED_TASK_NAME_MAX_BYTES,
-  "scheduled task name",
-);
+export const ScheduledTaskNameInput =
+  /* @__PURE__ */ scheduledTaskBoundedString(SCHEDULED_TASK_NAME_MAX_BYTES, "scheduled task name");
 /** Ingress-bounded task metadata for create/update requests. */
-export const ScheduledTaskMetadataInput = /* @__PURE__ */ scheduledTaskBoundedJsonObject(
-  SCHEDULED_TASK_METADATA_MAX_BYTES,
-  "scheduled task metadata",
-);
+export const ScheduledTaskMetadataInput =
+  /* @__PURE__ */ scheduledTaskBoundedJsonObject(
+    SCHEDULED_TASK_METADATA_MAX_BYTES,
+    "scheduled task metadata",
+  );
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   return {
@@ -7828,7 +7929,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
     resolvedFirstPartyMcpPermissions: z.array(Permission),
     resolvedVariableSet: z
-      .object({ id: z.string().uuid(), generation: z.number().int().positive() })
+      .object({
+        id: z.string().uuid(),
+        generation: z.number().int().positive(),
+      })
       .strict()
       .nullable(),
     resolvedRig: z
@@ -7837,7 +7941,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         versionId: z.string().uuid(),
         defaultVariableSets: z
           .array(
-            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+            z
+              .object({
+                id: z.string().uuid(),
+                generation: z.number().int().positive(),
+              })
+              .strict(),
           )
           .max(25),
       })
@@ -7893,7 +8002,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         rigVersionId: z.string().uuid().nullable(),
         rigDefaultVariableSets: z
           .array(
-            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+            z
+              .object({
+                id: z.string().uuid(),
+                generation: z.number().int().positive(),
+              })
+              .strict(),
           )
           .max(25),
         maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
@@ -12511,8 +12625,11 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
-    /** Workspace-visible by default. Private creation is an activated,
-     * managed-cookie owning-human capability and commits atomically. */
+    /** Top-level omission is workspace-visible. Agent-child omission inherits
+     * the exact parent visibility; cross-visibility child creation is rejected.
+     * Top-level private creation is an activated managed-cookie owning-human
+     * capability, while a private child uses an exact live-parent-attempt
+     * database capability. Both commit atomically. */
     visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or
@@ -12588,9 +12705,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // is an independent create).
     idempotencyKey: z.string().min(1).max(200).optional(),
     // The exact actor-private pre-session draft revision represented by this
-    // create. The durable initializer consumes only this revision. A newer draft
-    // written by a sibling tab survives, while every failed pre-initialization
-    // create leaves the submitted draft intact.
+    // create. An ordinary create consumes only this revision. A realtime create
+    // preserves the editable draft and atomically updates only successful-create
+    // selection history. A newer sibling draft survives, while every failed
+    // pre-initialization create leaves the submitted draft intact.
     expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
     // A child may lower its inherited limit freely; an increase requires
     // workspace:admin and is checked again at the DB transaction boundary.
@@ -12721,6 +12839,9 @@ export const HumanInputQuestion = z
     helpText: z.string().max(2048).nullable().optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
+    // Retained on the wire for older hosts. OpenGeni's stock runtime and
+    // surfaces always expose Other for choice questions, including requests
+    // that were persisted before that became the default behavior.
     allowOther: z.boolean().default(false),
     // Selection bounds only — agents invent useless text char mins/maxes.
     // Answer strings stay platform-capped on HumanInputAnswer (~8192).
@@ -13593,7 +13714,7 @@ export const MachineState = z.enum([
 ]);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum(["modal", "selfhosted"]);
+export const MachineKind = z.enum(["modal", "selfhosted", "opensandbox"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.

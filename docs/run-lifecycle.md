@@ -618,7 +618,9 @@ Claim, interruption, and event-writing settlement share one lock order:
 the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
 UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
 `FOR UPDATE`. Generic audit/title appends skip the control row but use the same
-workspace-key-share prefix. Event inserts also touch the workspace through their
+workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
+before insert so its turn/attempt FK checks cannot invert against event writers;
+retry only that idempotent prepare transaction on `40P01`/`40001`. Event inserts also touch the workspace through their
 foreign keys, so acquiring it later would reintroduce a claim/preemption
 deadlock; the session lock excludes competing mutation while remaining compatible
 with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
@@ -700,6 +702,14 @@ parked indefinitely. When the selected root is a child, the same transaction
 also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
+Every child terminal result remains a durable pending machine input even when it
+arrives late. It may autonomously wake an idle parent only while the parent has
+an active goal, which is the durable obligation to keep working. A no-goal
+parent whose ordinary turn completed, a paused or completed goal, and an
+already-failed parent are settled authority: the result stays pending for a
+later human/new-goal turn and cannot manufacture a new inference or rewrite the
+settled public status by itself. A result arriving while the parent turn is live
+remains available to that turn's ordinary loop.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1177,11 +1187,14 @@ audit reads may return it, so it is never a secret boundary.
    [`image-generation.md`](image-generation.md).
    Model-visible tool results stay at or below 1 MiB. Overflow is a successful
    tool: exact serialized bytes become a workspace File, a current-turn copy
-   lands at `/workspace/tool-results/<operationId>.json` when compute is
-   active, and history/events keep the compact `{ sandboxPath, fileId,
-   byteSize, mediaType }` receipt. Later turns do not rematerialize; retrieve
-   old bytes through Files MCP plus shell. Spill write failure is a bounded
-   `result_too_large` error and never puts the huge payload in history.
+   lands at `tool-results/<operationId>.json` relative to the shell cwd (the
+   durable rematerialization path remains the virtual
+   `/workspace/tool-results/<operationId>.json`), and history/events keep the
+   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
+   `sandboxPath` is that cwd-relative shell path. Later turns do not
+   rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
+   failure is a bounded `result_too_large` error and never puts the huge payload
+   in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and

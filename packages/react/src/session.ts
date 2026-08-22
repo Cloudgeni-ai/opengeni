@@ -102,6 +102,8 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  HumanInputAnswerSummary,
+  HumanInputItem,
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,

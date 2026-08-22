@@ -209,7 +209,7 @@ OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 
 The public endpoint is embedded in browser-facing signed URLs. The internal endpoint is used by API and worker storage requests, while the sandbox endpoint is supplied to Docker agent containers. The two private endpoints may share the same address when those processes use one Docker network. Presigned URLs generated for one host are not safely interchangeable with another because the host is part of the S3 signature.
 
-`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`.
+`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`. `bun run dev:down` stops only that worktree's containers; `bun run dev:clean` also removes its data volumes and sandbox image tags.
 
 For production deployments, use the native provider object store instead of running Garage or MinIO manually:
 
@@ -232,6 +232,19 @@ rollback compatibility. The registry Secret lookup uses the configured `OPENGENI
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
+
+For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private
+`OPENGENI_OPENSANDBOX_BASE_URL`, `OPENGENI_OPENSANDBOX_API_KEY`, an
+immutable `OPENGENI_OPENSANDBOX_IMAGE` digest, and configured object storage.
+Kubernetes deployments can use the optional pinned upstream platform wrapper
+under `deploy/stacks`; it keeps the lifecycle service private and its lifecycle
+routes Secret-backed. Exec and files stay on that ClusterIP server-proxy.
+Channel B uses signed URI-mode ingress when
+`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (default off: lifecycle proxy,
+in-box curl, and API frame-proxy). OpenSandbox v1 uses exact ID-addressed
+attach, renewable provider TTL, and portable `/workspace` tar archives in
+object storage. A desktop-class image advertises ttyd PTY and
+desktop/recording; native OpenSandbox snapshots and `runAs` stay unavailable.
 
 ## Deployment
 

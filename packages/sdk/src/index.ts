@@ -732,6 +732,7 @@ export type {
   MoveSessionQueueItemRequest,
   NewSessionDraft,
   NewSessionDraftOptions,
+  NewSessionSelectionHistory,
   SaveComposerDraftRequest,
   SubmitComposerDraftRequest,
   SubmitComposerDraftResponse,

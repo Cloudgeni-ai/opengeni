@@ -6,6 +6,7 @@ import {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   decodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
   type NativeSnapshotDescriptor,
   type NativeSnapshotRef,
   type TarWorkspaceArchiveDescriptor,
@@ -209,6 +210,40 @@ export function readVerifiedWorkspaceArchive(
   };
 }
 
+/** Fetch object-storage tar bytes into the in-memory restore envelope. Legacy
+ * inline base64 is left unchanged. Both payloads must agree when both exist. */
+export async function inlineWorkspaceArchiveForRestore(
+  sessionState: Record<string, unknown>,
+  getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array } | null>,
+): Promise<Record<string, unknown>> {
+  const ref = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
+  if (!ref) return sessionState;
+  const object = await getObjectBytes(ref.key);
+  if (!object) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_base64_invalid",
+      `workspace archive object ${ref.key} is missing`,
+    );
+  }
+  const actualHash = sha256(object.bytes);
+  if (object.bytes.length !== ref.bytes || actualHash !== ref.sha256) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_hash_mismatch",
+      `workspace archive object ${ref.key} failed SHA-256/size verification`,
+    );
+  }
+  const base64 = Buffer.from(object.bytes).toString("base64");
+  const inline = sessionState.workspaceArchive;
+  if (typeof inline === "string" && inline.length > 0 && inline !== base64) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_hash_mismatch",
+      "inline workspace archive and object-storage ref disagree",
+    );
+  }
+  readVerifiedWorkspaceArchive(base64, sessionState.workspaceArchiveMeta);
+  return { ...sessionState, workspaceArchive: base64 };
+}
+
 function stdoutFromExecResult(value: unknown): string {
   if (typeof value === "string") {
     const delimiter = /\r?\nOutput:\r?\n/u.exec(value);
@@ -279,7 +314,7 @@ function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
   const script = String.raw`set -eu
 cd /workspace
 digest=$(LC_ALL=C tar ${tarExcludes.join(" ")} --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf - . | sha256sum | awk "{print \$1}")
-entries=$(find . -xdev -mindepth 1 ${findPrefix}-printf x | wc -c | tr -d " ")
+entries=$(find . -xdev -mindepth 1 ${findPrefix}! \( -type s -o -type p -o -type b -o -type c \) -printf x | wc -c | tr -d " ")
 files=$(find . -xdev ${findPrefix}-type f -printf x | wc -c | tr -d " ")
 bytes=$(find . -xdev ${findPrefix}-type f -printf "%s\n" | awk "{s+=\$1} END {printf \"%.0f\", s+0}")
 printf "OPENGENI_WORKSPACE_FINGERPRINT_V1 %s %s %s %s\n" "$digest" "$entries" "$files" "$bytes"`;

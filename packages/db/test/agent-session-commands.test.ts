@@ -4,18 +4,22 @@ import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
+  addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   getActiveSessionHistoryItems,
   getSessionQueueSnapshot,
+  getSession,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
+  setSessionGoalStatus,
   settleSessionAttemptInterruptions,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
@@ -352,6 +356,169 @@ describe("attempt-fenced Agent session commands", () => {
       parentSessionId: parent.session.id,
       parentTurnId: parent.turn.id,
       turnId: childClaim.turn.id,
+    });
+  });
+
+  test("a late child result stays pending without restarting a settled no-goal parent", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await submit(grant, parent.id, "finish parent work");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `late-child:${crypto.randomUUID()}`,
+      summary: "Late child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (update.reason === "session_cancelled") {
+      throw new Error("settled parent was unexpectedly cancelled");
+    }
+
+    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(await getSession(client.db, grant.workspaceId!, parent.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: null,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, parent.id),
+    ).toEqual([expect.objectContaining({ id: update.update.id, state: "pending" })]);
+  });
+
+  test("a child result still wakes an idle parent with an active goal", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      text: "active parent objective",
+      createdBy: "api",
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `active-child:${crypto.randomUUID()}`,
+      summary: "Active-goal child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(update).toMatchObject({ added: true, shouldWake: true });
+  });
+
+  test("paused and completed goals cannot be restarted by a child result", async () => {
+    const grant = await fixture();
+    for (const goalStatus of ["paused", "completed"] as const) {
+      const parent = await makeSession(grant);
+      await createSessionGoal(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: parent.id,
+        text: `${goalStatus} parent objective`,
+        createdBy: "api",
+      });
+      await setSessionGoalStatus(client.db, grant.workspaceId!, parent.id, {
+        status: goalStatus,
+        ...(goalStatus === "paused"
+          ? { rationale: "wait for human direction" }
+          : { evidence: "objective already complete" }),
+      });
+      const update = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: parent.id,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `${goalStatus}-child:${crypto.randomUUID()}`,
+        summary: "Late child completed",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+      });
+      expect(update).toMatchObject({ added: true, shouldWake: false });
+    }
+  });
+
+  test("a failed parent cannot be restarted by a child result", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    await submit(grant, parent.id, "parent turn that fails");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "expected parent failure" } }],
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: parent.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `failed-child:${crypto.randomUUID()}`,
+      summary: "Late child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(await getSession(client.db, grant.workspaceId!, parent.id)).toMatchObject({
+      status: "failed",
+      activeTurnId: null,
     });
   });
 

@@ -39,6 +39,7 @@ import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 // Manifest (see the `state` field below); selfhosted exec routes over NATS and
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
+import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   agentErrorToControlError,
@@ -409,8 +410,8 @@ export interface SelfhostedExecResult {
   stderr: string;
   exitCode: number | null;
   /** True when the agent killed the child at the exec deadline. Additive to the
-   *  Channel-A superset (consumers that don't read it are unaffected); `execCommand`
-   *  reads it to surface the deadline hint on the stdout-only SDK path. */
+   *  Channel-A superset (consumers that don't read it are unaffected); `exec()`
+   *  places the deadline hint on stderr so Channel-A stdout stays byte-exact. */
   timedOut?: boolean;
 }
 
@@ -1045,25 +1046,27 @@ export class SelfhostedSession {
   // the ACTIVE session once the routing proxy resolves selfhosted. They reuse the
   // exec/fs ops above; the machine owns its filesystem (materialization is a no-op).
 
-  /** SDK shell capability `execCommand`: run a command and return its stdout (the
-   *  `exec_command` tool). Selfhosted exec is non-interactive (no PTY) — `tty` is
-   *  ignored; `supportsPty()` is false so the SDK never offers a stdin session.
+  /** SDK shell capability `execCommand`: the `exec_command` tool. Selfhosted exec
+   *  is non-interactive (no PTY) — `tty` is ignored; `supportsPty()` is false so
+   *  the SDK never offers a stdin session.
    *
-   *  On a DEADLINE timeout the SDK path is stdout-only (the model sees `result.output`
-   *  and nothing else), so the deadline hint that `exec()` puts on stderr would be
-   *  invisible — a >deadline command would return `{"output":""}` and the model would
-   *  conclude "no output" with no idea it was killed. So when the result timed out we
-   *  surface the hint HERE, on stdout: the hint alone when stdout is empty, or appended
-   *  after a newline when there is partial output (a timed-out result is already not
-   *  cleanly parseable — silence is worse than an explanatory suffix). The structured
-   *  `exec()` result is left untouched for the Channel-A parsers. */
+   *  Docker/unix-local return `formatExecResponse` (exit code + combined
+   *  stdout/stderr). This path must match that contract: returning raw stdout
+   *  made `ls` ENOENT and `npx --help` look like success with empty output.
+   *  The structured `exec()` result stays split for Channel-A parsers; the
+   *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
+    const startedAt = Date.now();
     const result = await this.exec(args);
-    if (result.timedOut && this.effectiveExecDeadlineMs > 0) {
-      const hint = execDeadlineHint(Math.round(this.effectiveExecDeadlineMs / 1000));
-      return result.output ? `${result.output}\n${hint}` : hint;
-    }
-    return result.output;
+    const exitCode =
+      typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
+        ? result.exitCode
+        : 1;
+    return formatExecResponse({
+      output: joinExecCommandOutput(result.stdout, result.stderr),
+      wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
+      exitCode,
+    });
   }
 
   /**
@@ -1906,6 +1909,10 @@ function selfhostedPlacementPrivatePath(value: unknown): string {
     throw new TypeError("selfhosted placement-private path is invalid");
   }
   return value;
+}
+
+function joinExecCommandOutput(stdout: string, stderr: string): string {
+  return [stdout, stderr].filter((value) => value.trim().length > 0).join("\n");
 }
 
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {

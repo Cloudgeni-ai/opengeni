@@ -1362,6 +1362,14 @@ Print the ordered install plan with:
 bun run deployment:observability -- --profile single-node
 ```
 
+On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
+`--opensandbox`. The additional values overlay enables kube-state-metrics for
+the pinned `Pool` CRD plus a `ServiceMonitor` for the controller metrics
+Service. The OpenGeni control worker separately projects BatchSandbox and
+workload-Pod state into fixed-label aggregate gauges through namespace-scoped,
+list-only Kubernetes RBAC. The base wrapper leaves this optional integration
+off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
+
 The wrapper plan installs only the monitoring platform; it never reconciles
 OpenGeni workloads and never runs application hooks. After it is ready, include
 `deploy/observability/opengeni.values.example.yaml` in the next ordinary
@@ -1471,6 +1479,7 @@ Use this boundary when building a production cluster:
 | Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
 | TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
 | Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
+| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the OpenGeni app chart |
 
 The runtime secret must provide values such as:
 
@@ -1496,6 +1505,128 @@ The runtime secret must provide values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### Optional OpenSandbox Kubernetes provider
+
+OpenSandbox is an additive provisioned backend; production Modal behavior and
+defaults are unchanged. It is installed only when a Kubernetes deployment
+contract explicitly selects `sandbox.backend=opensandbox`. The stack wrapper:
+
+- downloads exact upstream source commit
+  `88004c989e334ffd7811acbe193cddcd9014f14e` and verifies the source, CRD,
+  deterministic chart, and image digests from
+  `deploy/stacks/opensandbox-source.lock`;
+- installs the official upstream controller/server chart into
+  `opensandbox-system`, with sandbox CRs and Pods in `opensandbox`;
+- enables the controller's native metrics endpoint and installs a private
+  `opensandbox-controller-metrics` ClusterIP Service;
+- keeps the lifecycle service `ClusterIP`-only and loads its API key from the
+  `opensandbox-api-key` Secret;
+- enables the ClusterIP ingress gateway in URI mode with OSEP-0011 signed
+  endpoints for Channel B (browserd, noVNC, ttyd). Exec and files stay on the
+  private lifecycle server-proxy. Put a TLS terminator in front of that ClusterIP
+  in production; do not fork the upstream Service to LoadBalancer;
+- stores signing keys in the `opensandbox-secure-access` Secret (`keys` +
+  `active-key`), never in git or the server ConfigMap. Official server
+  `v0.2.2` ignores `OPENSANDBOX_SECURE_ACCESS_*`; the image post-renderer
+  adds an initContainer that materializes `[ingress.secure_access]` into a
+  writable runtime TOML from that Secret;
+- Helm 3 can `helm upgrade --post-renderer scripts/operator/opensandbox-image-post-renderer.sh`.
+  Helm 4 treats `--post-renderer` as a plugin name, so render with
+  `helm template ... | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -`;
+- mounts a generic BatchSandbox template, or the Azure-specific variant that
+  selects/tolerates the dedicated sandbox node pool.
+
+Required runtime values are:
+
+```bash
+OPENGENI_SANDBOX_BACKEND=opensandbox
+OPENGENI_OPENSANDBOX_API_KEY=...
+OPENGENI_OPENSANDBOX_IMAGE=ghcr.io/your-org/opengeni-sandbox@sha256:...
+```
+
+The platform plan supplies
+`OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local`.
+`OPENGENI_OPENSANDBOX_TTL_SECONDS` defaults to 3,600 seconds and is renewed only
+while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
+reaping is primary; provider expiry is a leak backstop.
+
+OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
+`/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
+keeps the SHA-256 descriptor plus an object ref. Object storage is required when
+this backend is active: missing storage fails closed at boot and on capture rather
+than writing tar bytes into `resume_state`. Native OpenSandbox pause/resume,
+snapshots, and immutable rig-image builds are deliberately not used. A desktop-class box
+image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
+interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
+JSON and streams use signed URI-mode ingress when
+`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true`. That flag defaults off so ClusterIP-only
+operators keep the lifecycle `/proxy/` path, in-box curl, and API frame-proxy.
+Signed mode never falls back to those compensations. Prove Channel B signed HTTP
+Bearer passthrough and WebSocket subprotocol preservation with
+`bun run deployment:opensandbox-signed-endpoint-proof` against the preview ClusterIP
+lifecycle + ingress port-forwards. The script writes a redacted JSON artifact and
+must not log signatures or browserd tokens. The
+Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
+is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
+exact retained provider command. `runAs` remains unavailable.
+
+Prepare/render the pinned upstream chart without cluster mutation. Helm 3
+accepts `--post-renderer <script>`. Helm 4 treats that flag as a plugin name,
+so pipe the template through the script:
+
+```bash
+scripts/operator/prepare-opensandbox-chart.sh .agent/generated/opensandbox
+kubectl -n opensandbox-system create configmap opensandbox-secure-access-runtime-config \
+  --from-file=materialize-secure-access-config.py=scripts/operator/opensandbox-materialize-secure-access-config.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+helm template opensandbox .agent/generated/opensandbox/opensandbox-0.2.0.tgz \
+  --namespace opensandbox-system \
+  --values deploy/stacks/official-opensandbox.values.yaml \
+  | scripts/operator/opensandbox-image-post-renderer.sh
+```
+
+When the optional observability wrapper is used, install it after the
+OpenSandbox CRDs and metrics Service:
+
+```bash
+kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml
+bun run deployment:observability -- --profile single-node --opensandbox
+```
+
+The OpenGeni `PrometheusRule` then adds backend-fenced alerts for create and
+warming failures, Pool depletion, Pending and unschedulable workload Pods,
+immutable-image pull failures, controller reconcile/readiness/restarts,
+provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
+deletion finalizers, and BatchSandboxes surviving their provider expiry.
+Per-workload thresholds use fresh fixed-label aggregates from the control
+worker. Raw BatchSandbox, workload-Pod, and container series in the
+`opensandbox` namespace are dropped before TSDB ingestion; opaque lifecycle IDs
+stay in correlated worker logs and are not metric labels.
+
+For the custom-Kubernetes portability path, `deploy/stacks/k3s-source.lock`
+pins the installer, checksum manifests, and amd64/arm64 binaries for k3s
+`v1.36.1+k3s1`. On a fresh Linux VM, copy the repository checkout and run:
+
+```bash
+sudo scripts/operator/bootstrap-opensandbox-k3s.sh
+```
+
+The script verifies every downloaded byte before installation, disables only
+the bundled Traefik component, waits for Kubernetes readiness, and writes a
+root-only kubeconfig. `scripts/operator/destroy-opensandbox-k3s.sh` removes the
+k3s installation; isolated preview automation should still delete the entire
+VM resource group afterward.
+
+The Azure reference module exposes `sandbox_node_pool`, disabled by default. An
+enabled pool uses label `opengeni.ai/sandbox-pool=opensandbox`, taint
+`opengeni.ai/sandbox=true:NoSchedule`, and explicit autoscaling bounds including
+scale-to-zero. Size 5/50/500 profiles from CPU, memory, pod/IP density, daemon
+overhead, utilization, disruption margin, quota, and cost; a 500 lightweight
+profile is not evidence for 500 desktop rigs. An Azure deployment that selects
+OpenSandbox must enable this pool because its Azure BatchSandbox template pins
+workloads to that scheduling contract. Generic Kubernetes and k3s use the
+unconstrained template instead.
 
 Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
 `OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a

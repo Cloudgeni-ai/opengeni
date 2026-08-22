@@ -5,9 +5,13 @@ import { join } from "node:path";
 import process from "node:process";
 
 import {
+  builderGcConfig,
+  builderNodeName,
   developmentSandboxDiskPolicy,
+  parseByteSize,
   planDevelopmentSandboxImageRetention,
   processOwnsLease,
+  readBuiltImageDigests,
 } from "./prepare-development-sandbox-image";
 
 const image = (id: string, createdAt: string, tags: string[], managed = false) => ({
@@ -26,8 +30,10 @@ afterEach(async () => {
 
 describe("development sandbox image disk policy", () => {
   test("uses a dedicated bounded builder and a small source-image history by default", () => {
+    // One full sandbox build keeps roughly 10-14 GB of BuildKit records; a cap
+    // below that working set makes every start evict and rebuild the image.
     expect(developmentSandboxDiskPolicy({})).toEqual({
-      cacheLimit: "6gb",
+      cacheLimit: "24gb",
       imageRetention: 3,
     });
   });
@@ -87,7 +93,11 @@ describe("development sandbox image disk policy", () => {
     expect(plan.removeTags).toEqual(["opengeni-sandbox:local-111111111111-new"]);
   });
 
-  test("always builds through the fixed serialized builder and converges cache on both sides", async () => {
+  async function runPrepare(
+    fakeDockerBody: string,
+    imageTag = "opengeni-sandbox:local-aaaaaaaaaaaa-test-stack",
+    builderMissing = true,
+  ) {
     const root = await mkdtemp(join(tmpdir(), "opengeni-sandbox-image-test-"));
     temporaryRoots.push(root);
     const log = join(root, "docker.log");
@@ -96,7 +106,8 @@ describe("development sandbox image disk policy", () => {
       docker,
       `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
-if [ "$*" = "buildx inspect opengeni-development-sandbox" ]; then exit 1; fi
+${builderMissing ? 'if [ "$*" = "buildx inspect opengeni-development-sandbox" ]; then exit 1; fi' : ""}
+${fakeDockerBody}
 exit 0
 `,
     );
@@ -109,7 +120,7 @@ exit 0
         "--repository-root",
         new URL("..", import.meta.url).pathname,
         "--image",
-        "opengeni-sandbox:local-aaaaaaaaaaaa-test-stack",
+        imageTag,
         "--runtime-bundle",
         ".opengeni/no-artifact-runtime-for-this-source",
         "--source-sha",
@@ -132,16 +143,153 @@ exit 0
         stderr: "pipe",
       },
     );
-    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const calls = await Bun.file(log).text();
+    return { exitCode, stdout, stderr, calls };
+  }
+
+  // The fake builder records the digests BuildKit reports for the cached
+  // result whenever it is asked for a metadata file.
+  const fakeMetadataBuild = `case "$*" in buildx\\ build\\ *--metadata-file\\ *)
+  metadata="$(printf '%s\\n' "$*" | sed -E 's/.*--metadata-file ([^ ]+).*/\\1/')"
+  printf '{"containerimage.digest":"sha256:%s","containerimage.config.digest":"sha256:%s"}' "$(printf '1%.0s' $(seq 1 64))" "$(printf '2%.0s' $(seq 1 64))" > "$metadata" ;;
+esac`;
+
+  test("always builds through the fixed serialized builder and converges cache on both sides", async () => {
+    const { exitCode, stderr, calls } = await runPrepare(fakeMetadataBuild);
     expect(stderr).toBe("");
     expect(exitCode).toBe(0);
-    const calls = await Bun.file(log).text();
-    expect(calls).toContain("buildx create --name opengeni-development-sandbox");
+    // A missing builder is created with the explicit GC policy for the cap.
+    const node = builderNodeName({ cacheLimit: "24gb", imageRetention: 3 });
+    expect(calls).toContain(
+      `buildx create --name opengeni-development-sandbox --node ${node} --driver docker-container --buildkitd-config`,
+    );
+    expect(calls).not.toContain("buildx rm");
     expect(calls).toContain("buildx inspect opengeni-development-sandbox --bootstrap");
     expect(calls.match(/buildx prune/g)).toHaveLength(2);
-    expect(calls).toContain("buildx build --builder opengeni-development-sandbox --load");
+    expect(calls).toContain(
+      "buildx build --builder opengeni-development-sandbox --provenance=false --sbom=false",
+    );
+    expect(calls).toContain(
+      "--output type=image,name=opengeni-sandbox:local-aaaaaaaaaaaa-test-stack,push=false --metadata-file",
+    );
+    expect(calls).toContain(
+      "image inspect --format {{.Id}} opengeni-sandbox:local-aaaaaaaaaaaa-test-stack",
+    );
+    // The fake daemon holds no such image yet, so the exact result is exported.
+    expect(calls).toContain("--load -t opengeni-sandbox:local-aaaaaaaaaaaa-test-stack .");
     expect(calls).toContain("buildx stop opengeni-development-sandbox");
-    expect(calls).not.toContain("image inspect opengeni-sandbox");
+  });
+
+  test("skips the export when the daemon already holds the exact cached result", async () => {
+    for (const [store, id] of [
+      ["containerd", `sha256:${"1".repeat(64)}`],
+      ["classic", `sha256:${"2".repeat(64)}`],
+    ] as const) {
+      const { exitCode, stdout, stderr, calls } = await runPrepare(
+        `${fakeMetadataBuild}
+case "$*" in image\\ inspect\\ --format\\ {{.Id}}\\ opengeni-sandbox:*) printf '%s\\n' "${id}" ;; esac`,
+      );
+      expect(stderr, store).toBe("");
+      expect(exitCode, store).toBe(0);
+      expect(calls, store).toContain("--metadata-file");
+      expect(calls, store).not.toContain("--load");
+      expect(stdout, store).toContain("already current");
+      expect(calls.match(/buildx prune/g), store).toHaveLength(2);
+      expect(calls, store).toContain("buildx stop opengeni-development-sandbox");
+    }
+  });
+
+  test("exports again when the daemon holds a different image under the same tag", async () => {
+    const { exitCode, calls } = await runPrepare(
+      `${fakeMetadataBuild}
+case "$*" in image\\ inspect\\ --format\\ {{.Id}}\\ opengeni-sandbox:*) printf 'sha256:%s\\n' "$(printf '3%.0s' $(seq 1 64))" ;; esac`,
+    );
+    expect(exitCode).toBe(0);
+    expect(calls).toContain("--load -t opengeni-sandbox:local-aaaaaaaaaaaa-test-stack .");
+  });
+
+  test("keeps a builder whose node already carries the configured GC policy", async () => {
+    const node = builderNodeName({ cacheLimit: "24gb", imageRetention: 3 });
+    const { exitCode, stderr, calls } = await runPrepare(
+      `case "$*" in "buildx inspect opengeni-development-sandbox") printf 'Name:          opengeni-development-sandbox\nDriver:        docker-container\n\nNodes:\nName:                  ${node}\nEndpoint:              desktop-linux\n'; exit 0 ;; esac`,
+      undefined,
+      false,
+    );
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    expect(calls).not.toContain("buildx create");
+    expect(calls).not.toContain("buildx rm");
+  });
+
+  test("recreates a builder whose GC policy no longer matches the configured cap", async () => {
+    const staleNode = builderNodeName({ cacheLimit: "6gb", imageRetention: 3 });
+    const node = builderNodeName({ cacheLimit: "24gb", imageRetention: 3 });
+    const { exitCode, stdout, calls } = await runPrepare(
+      `case "$*" in "buildx inspect opengeni-development-sandbox") printf 'Name:          opengeni-development-sandbox\n\nNodes:\nName:                  ${staleNode}\n'; exit 0 ;; esac`,
+      undefined,
+      false,
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Recreating the OpenGeni sandbox builder");
+    const removal = calls.indexOf("buildx rm --force opengeni-development-sandbox");
+    const create = calls.indexOf(
+      `buildx create --name opengeni-development-sandbox --node ${node}`,
+    );
+    expect(removal).toBeGreaterThan(-1);
+    expect(create).toBeGreaterThan(removal);
+  });
+
+  test("falls back to the legacy --config flag on older buildx plugins", async () => {
+    const { exitCode, stderr, calls } = await runPrepare(
+      `${fakeMetadataBuild}
+case "$*" in buildx\\ create\\ *--buildkitd-config\\ *) echo "unknown flag: --buildkitd-config" >&2; exit 125 ;; esac`,
+    );
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    const modern = calls.indexOf("--buildkitd-config");
+    const legacy = calls.indexOf("--driver docker-container --config ");
+    expect(modern).toBeGreaterThan(-1);
+    expect(legacy).toBeGreaterThan(modern);
+  });
+
+  test("renders one explicit GC policy equal to the cap and parses go-units sizes", () => {
+    const config = builderGcConfig({ cacheLimit: "24gb", imageRetention: 3 });
+    expect(config).toContain("[worker.oci]");
+    expect(config).toContain("gc = true");
+    expect(config).toContain('reservedSpace = "24gb"');
+    expect(config).toContain('maxUsedSpace = "24gb"');
+    expect(builderNodeName({ cacheLimit: "24gb", imageRetention: 3 })).not.toBe(
+      builderNodeName({ cacheLimit: "6gb", imageRetention: 3 }),
+    );
+    expect(parseByteSize("24gb")).toBe(24 * 1024 ** 3);
+    expect(parseByteSize("512MiB")).toBe(512 * 1024 ** 2);
+    expect(parseByteSize("1.5GB")).toBe(Math.round(1.5 * 1024 ** 3));
+    expect(() => parseByteSize("lots")).toThrow("Unsupported byte size");
+  });
+
+  test("reads only well-formed digests from the builder metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-sandbox-image-metadata-"));
+    temporaryRoots.push(root);
+    const metadataFile = join(root, "metadata.json");
+    expect(await readBuiltImageDigests(metadataFile)).toEqual(new Set());
+    await writeFile(metadataFile, "not json");
+    expect(await readBuiltImageDigests(metadataFile)).toEqual(new Set());
+    await writeFile(
+      metadataFile,
+      JSON.stringify({
+        "containerimage.digest": `sha256:${"1".repeat(64)}`,
+        "containerimage.config.digest": "sha256:short",
+        "buildx.build.ref": "builder/node/ref",
+      }),
+    );
+    expect(await readBuiltImageDigests(metadataFile)).toEqual(
+      new Set([`sha256:${"1".repeat(64)}`]),
+    );
   });
 
   test("still converges the dedicated cache and stops the builder after a failed build", async () => {
@@ -282,7 +430,11 @@ exit 0
         .split("\n")
         .filter((line) => /^(?:BEGIN|END) /u.test(line))
         .map((line) => line.split(" ", 1)[0]);
-      expect(phases).toEqual(["BEGIN", "END", "BEGIN", "END"]);
+      // Each contender resolves the cached result and then exports it (two
+      // builder invocations); the maintenance lock keeps them from interleaving.
+      expect(phases).toHaveLength(8);
+      expect(phases.filter((_, index) => index % 2 === 0)).toEqual(Array(4).fill("BEGIN"));
+      expect(phases.filter((_, index) => index % 2 === 1)).toEqual(Array(4).fill("END"));
       const lease = (await Bun.file(
         join(root, "opengeni-development-sandbox-maintenance", "leases", "shared-stack.json"),
       ).json()) as { pid: number; token: string };

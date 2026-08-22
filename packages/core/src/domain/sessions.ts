@@ -66,6 +66,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  getSessionAuthorityProjection,
   SessionIdConflictError,
   NewSessionDraftConflictError,
   getSessionSpawnDenialByIdempotencyKey,
@@ -702,6 +703,19 @@ export async function createAndStartSessionWithOutcome(input: {
     subjectId: string;
     expectedRevision: number;
     expectedSnapshot: NewSessionDraftSnapshot;
+    acceptedSelection: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
+  } | null;
+  rememberNewSessionSelection?: {
+    subjectId: string;
+    acceptedSelection: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
   } | null;
   // A child may lower its inherited nested-agent depth limit freely; increases
   // are authorized by the caller's workspace:admin grant and checked again by
@@ -893,6 +907,19 @@ async function finishStartSession(
       subjectId: string;
       expectedRevision: number;
       expectedSnapshot: NewSessionDraftSnapshot;
+      acceptedSelection: {
+        channelId: string | null;
+        targetSandboxId: string | null;
+        workingDir: string | null;
+      };
+    } | null;
+    rememberNewSessionSelection?: {
+      subjectId: string;
+      acceptedSelection: {
+        channelId: string | null;
+        targetSandboxId: string | null;
+        workingDir: string | null;
+      };
     } | null;
   },
   session: Session,
@@ -971,6 +998,7 @@ async function finishStartSession(
         }
       : null,
     consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
+    rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
     deferInitialTurn: input.deferInitialTurn === true,
   });
   await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
@@ -1251,7 +1279,9 @@ export async function postUserMessageTurn(input: {
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               ...(input.personalResourceAttachment
-                ? { personalResourceAttachment: input.personalResourceAttachment }
+                ? {
+                    personalResourceAttachment: input.personalResourceAttachment,
+                  }
                 : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
             }),
@@ -1385,6 +1415,26 @@ export function resolveChildGoalFromAcceptedSnapshot(
   };
 }
 
+export function resolveSessionCreateVisibility(input: {
+  requestedVisibility: "private" | "workspace";
+  visibilityProvided: boolean;
+  parentVisibility: "user_private" | "workspace_shared" | null;
+}): "user_private" | "workspace_shared" {
+  if (input.parentVisibility === "user_private") {
+    if (input.visibilityProvided && input.requestedVisibility !== "private") {
+      throw new Error("A private parent cannot create a workspace-visible child");
+    }
+    return "user_private";
+  }
+  if (input.parentVisibility === "workspace_shared") {
+    if (input.visibilityProvided && input.requestedVisibility === "private") {
+      throw new Error("A workspace-visible parent cannot create a private child");
+    }
+    return "workspace_shared";
+  }
+  return input.requestedVisibility === "private" ? "user_private" : "workspace_shared";
+}
+
 export async function createSessionForRequestWithOutcome(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -1394,9 +1444,12 @@ export async function createSessionForRequestWithOutcome(
 ): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
-  if (payload.visibility === "private") {
+  const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
+  if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
     if (!authorization) {
-      throw new HTTPException(403, { message: "managed human session required" });
+      throw new HTTPException(403, {
+        message: "managed human session required",
+      });
     }
     await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
     if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {
@@ -1439,11 +1492,6 @@ export async function createSessionForRequestWithOutcome(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
-  if (payload.visibility === "private" && parentSessionId) {
-    throw new HTTPException(422, {
-      message: "Agent-created child sessions cannot be private",
-    });
-  }
   if (parentSessionId) {
     try {
       await requireSessionAuthorization(deps, grant, {
@@ -1462,6 +1510,26 @@ export async function createSessionForRequestWithOutcome(
   if (parentSessionId && !parentSession) {
     throw new HTTPException(404, {
       message: `parent session not found in workspace: ${parentSessionId}`,
+    });
+  }
+  const parentAuthority = parentSession
+    ? await getSessionAuthorityProjection(db, workspaceId, parentSession.id)
+    : null;
+  if (parentSession && !parentAuthority) {
+    throw new HTTPException(403, {
+      message: "parent session authority is unavailable",
+    });
+  }
+  let effectiveVisibility: "user_private" | "workspace_shared";
+  try {
+    effectiveVisibility = resolveSessionCreateVisibility({
+      requestedVisibility: payload.visibility,
+      visibilityProvided,
+      parentVisibility: parentAuthority?.visibility ?? null,
+    });
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid child visibility",
     });
   }
   const creationInitiator = creationInitiatorForGrant(grant);
@@ -1487,7 +1555,10 @@ export async function createSessionForRequestWithOutcome(
     try {
       effectiveGoal = resolveChildGoalFromAcceptedSnapshot(
         payload.goal,
-        parentCallingTurn?.goalSnapshot ?? { state: "none", capturedAt: "unavailable" },
+        parentCallingTurn?.goalSnapshot ?? {
+          state: "none",
+          capturedAt: "unavailable",
+        },
       );
     } catch (error) {
       throw new HTTPException(422, {
@@ -1523,7 +1594,9 @@ export async function createSessionForRequestWithOutcome(
     workspaceId,
     settings,
     inheritedPersonalConnectionDelegations
-      ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+      ? {
+          personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+        }
       : { subjectId: grant.subjectId },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
@@ -1550,7 +1623,6 @@ export async function createSessionForRequestWithOutcome(
   // written rows without it. Compare it only when the create request supplied
   // the field explicitly; the parsed schema default must not manufacture a
   // mismatch for a legacy draft.
-  const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   const requestedTools = validateToolRefs(
     toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
     runtimeSettings,
@@ -2119,7 +2191,7 @@ export async function createSessionForRequestWithOutcome(
       workflowClient,
       accountId: grant.accountId,
       workspaceId,
-      visibility: payload.visibility === "private" ? "user_private" : "workspace_shared",
+      visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
@@ -2183,11 +2255,27 @@ export async function createSessionForRequestWithOutcome(
           }
         : null,
       consumeNewSessionDraft:
-        payload.expectedNewSessionDraftRevision !== undefined
+        payload.expectedNewSessionDraftRevision !== undefined && payload.startMode !== "realtime"
           ? {
               subjectId: grant.subjectId,
               expectedRevision: payload.expectedNewSessionDraftRevision,
               expectedSnapshot: expectedNewSessionDraftSnapshot!,
+              acceptedSelection: {
+                channelId,
+                targetSandboxId: payload.targetSandboxId ?? null,
+                workingDir: payload.targetSandboxId ? (payload.workingDir ?? null) : null,
+              },
+            }
+          : null,
+      rememberNewSessionSelection:
+        payload.expectedNewSessionDraftRevision !== undefined && payload.startMode === "realtime"
+          ? {
+              subjectId: grant.subjectId,
+              acceptedSelection: {
+                channelId,
+                targetSandboxId: payload.targetSandboxId ?? null,
+                workingDir: payload.targetSandboxId ? (payload.workingDir ?? null) : null,
+              },
             }
           : null,
     });
@@ -2401,7 +2489,9 @@ export async function acceptSessionUserMessageWithOutcome(
     workspaceId,
     settings,
     inheritedPersonalConnectionDelegations
-      ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+      ? {
+          personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+        }
       : { subjectId: grant.subjectId },
   );
   const personalConnectionDelegations = await freezePersonalConnectionDelegations({

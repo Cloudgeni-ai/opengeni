@@ -170,6 +170,48 @@ export async function openPrivateSessionCreateCapability(
   return { capabilityId, ownerMembershipId };
 }
 
+/** Open the exact transaction-local capability for one private child insert. */
+export async function openPrivateChildSessionCreateCapability(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    parentSessionId: string;
+    actorTurnId: string;
+    actorAttemptId: string;
+    actorExecutionGeneration: number;
+  },
+): Promise<{ capabilityId: string; ownerMembershipId: string; ownerSubjectId: string }> {
+  const rows = await rawRows<{
+    capabilityId: string;
+    ownerMembershipId: string;
+    ownerSubjectId: string;
+  }>(
+    db,
+    sql`select
+      capability_id as "capabilityId",
+      owner_membership_id as "ownerMembershipId",
+      owner_subject_id as "ownerSubjectId"
+    from open_private_child_session_create_capability(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.sessionId}::uuid,
+      ${input.parentSessionId}::uuid,
+      ${input.actorTurnId}::uuid,
+      ${input.actorAttemptId}::uuid,
+      ${input.actorExecutionGeneration}::integer
+    )`,
+  );
+  const capabilityId = rows[0]?.capabilityId;
+  const ownerMembershipId = rows[0]?.ownerMembershipId;
+  const ownerSubjectId = rows[0]?.ownerSubjectId;
+  if (!capabilityId || !ownerMembershipId || !ownerSubjectId) {
+    throw new Error("Private child session create capability was not returned");
+  }
+  return { capabilityId, ownerMembershipId, ownerSubjectId };
+}
+
 export async function closePrivateSessionCreateCapability(
   db: Database,
   capabilityId: string,

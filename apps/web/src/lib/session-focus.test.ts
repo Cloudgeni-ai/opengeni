@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   cancelSessionRowRevealIntent,
+  clearSessionComposerFocusIntent,
+  consumeSessionComposerFocusIntent,
   consumeSessionRowRevealIntent,
+  requestSessionComposerFocus,
+  sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
   shouldMoveSessionRowFocus,
   shouldRecordSessionRowFocusIntent,
   shouldRestoreSessionFocus,
@@ -12,21 +17,91 @@ const SESSION_ID = "session-26";
 
 function fakeElement(
   attributes: Record<string, string | null> = {},
-  options: { connected?: boolean; closestSessionMenu?: string | null } = {},
+  options: {
+    connected?: boolean;
+    closestSessionMenu?: string | null;
+    closestSessionRow?: string | null;
+  } = {},
 ): HTMLElement {
   const connected = options.connected ?? true;
   const menu =
     options.closestSessionMenu === undefined
       ? null
       : fakeElement({ "data-session-menu": options.closestSessionMenu });
+  const row =
+    options.closestSessionRow === undefined
+      ? null
+      : fakeElement({ "data-session-row": options.closestSessionRow });
   return {
     isConnected: connected,
     getAttribute: (name: string) => attributes[name] ?? null,
-    closest: () => menu,
+    closest: (selector: string) => (selector === "[data-session-row]" ? row : menu),
   } as unknown as HTMLElement;
 }
 
 describe("session pin focus restoration", () => {
+  test("records and consumes one exact session-composer navigation intent", () => {
+    clearSessionComposerFocusIntent();
+    requestSessionComposerFocus("workspace-a", SESSION_ID);
+    expect(consumeSessionComposerFocusIntent("workspace-a", "other-session")).toBeNull();
+    expect(consumeSessionComposerFocusIntent("workspace-a", SESSION_ID)).toMatchObject({
+      workspaceId: "workspace-a",
+      sessionId: SESSION_ID,
+    });
+    expect(consumeSessionComposerFocusIntent("workspace-a", SESSION_ID)).toBeNull();
+  });
+
+  test("allows the explicit row click to hand focus to chat, but no dialog or other control", () => {
+    const body = fakeElement();
+    expect(
+      shouldFocusSessionComposer(
+        fakeElement({}, { closestSessionRow: SESSION_ID }),
+        SESSION_ID,
+        body,
+        false,
+      ),
+    ).toBe(true);
+    expect(shouldFocusSessionComposer(body, SESSION_ID, body, false)).toBe(true);
+    expect(
+      shouldFocusSessionComposer(
+        fakeElement({}, { closestSessionRow: "other-session" }),
+        SESSION_ID,
+        body,
+        false,
+      ),
+    ).toBe(false);
+    expect(
+      shouldFocusSessionComposer(
+        fakeElement({}, { closestSessionRow: SESSION_ID }),
+        SESSION_ID,
+        body,
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  test("limits rail-click composer focus to an actionable desktop session", () => {
+    const eligible = {
+      viewportWidth: 1280,
+      coarsePointer: false,
+      terminal: false,
+      requiresAction: false,
+      pendingHumanInput: false,
+      pendingApproval: false,
+    };
+    expect(sessionComposerFocusIntentIsEligible(eligible)).toBe(true);
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, viewportWidth: 900 })).toBe(false);
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, coarsePointer: true })).toBe(false);
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, terminal: true })).toBe(false);
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, requiresAction: true })).toBe(false);
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, pendingHumanInput: true })).toBe(
+      false,
+    );
+    expect(sessionComposerFocusIntentIsEligible({ ...eligible, pendingApproval: true })).toBe(
+      false,
+    );
+  });
+
   test("consumes one explicit row reveal without turning repeated data churn into scrolling", () => {
     let scrollCalls = 0;
     const rows = Array.from({ length: 3_800 }, (_, index) => ({

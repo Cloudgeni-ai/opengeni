@@ -213,6 +213,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       input,
       settings,
       db,
+      objectStorage,
       observability,
       cancellationSignal,
       activityContext,

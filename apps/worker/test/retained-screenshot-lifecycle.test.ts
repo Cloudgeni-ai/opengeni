@@ -340,6 +340,22 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained screenshot lifecycle fences", () => {
+  test("parallel prepares on the same turn serialize instead of failing", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const prepared = await Promise.all([
+      prepareArtifact(fixture, memory.storage),
+      prepareArtifact(fixture, memory.storage),
+    ]);
+    expect(new Set(prepared.map((row) => row.artifact.artifactId)).size).toBe(2);
+    expect(prepared.every((row) => row.created && row.artifact.status === "pending")).toBeTrue();
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: SCREENSHOT.sizeBytes * 2,
+      readyBytes: 0,
+    });
+  }, 180_000);
+
   test("session cascade preserves object, file, lifecycle evidence, and quota until owned cleanup", async () => {
     if (!available) return;
     const fixture = await freshTurn();

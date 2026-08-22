@@ -390,7 +390,9 @@ describe("workbench browser acceptance", () => {
           const selectedRect = selectedTab?.getBoundingClientRect();
           const tablistRect = tablist?.getBoundingClientRect();
           const workspaceRect = workspace?.getBoundingClientRect();
-          const chrome = workspace?.firstElementChild?.getBoundingClientRect();
+          const chromeHeader = workspace
+            ?.querySelector<HTMLElement>("[data-dock-chrome] > :first-child")
+            ?.getBoundingClientRect();
           return {
             pageOverflow: document.documentElement.scrollWidth - viewport.width,
             selectedTabClipped:
@@ -409,7 +411,7 @@ describe("workbench browser acceptance", () => {
               workspaceRect.top < -1 ||
               workspaceRect.right > viewport.width + 1 ||
               workspaceRect.bottom > viewport.height + 1,
-            chromeHeight: chrome?.height ?? null,
+            chromeHeaderHeight: chromeHeader?.height ?? null,
           };
         });
         if (
@@ -421,8 +423,8 @@ describe("workbench browser acceptance", () => {
           failures.push({ width, height, audit });
         }
         if (width >= 640 && width < 1024) {
-          expect(audit.chromeHeight).not.toBeNull();
-          expect(audit.chromeHeight ?? Infinity).toBeLessThanOrEqual(52);
+          expect(audit.chromeHeaderHeight).not.toBeNull();
+          expect(audit.chromeHeaderHeight ?? Infinity).toBeLessThanOrEqual(52);
         }
         if (width === 375 || width === 2560) {
           await capturePageScreenshot(page, {
@@ -523,7 +525,7 @@ describe("workbench browser acceptance", () => {
     }
   }, 30_000);
 
-  test("Unicode paths and long host tabs remain bounded and keyboard-scroll into view", async () => {
+  test("Unicode paths and long host tabs remain bounded in the vertical activity rail", async () => {
     const context = await browser.newContext({
       viewport: { width: 320, height: 720 },
       isMobile: true,
@@ -536,11 +538,9 @@ describe("workbench browser acceptance", () => {
       });
       await waitForWorkbenchVisualReady(page);
       const tablist = page.getByRole("tablist");
-      expect(await tablist.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
+      expect(await tablist.getAttribute("aria-orientation")).toBe("vertical");
+      expect(await tablist.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
         true,
-      );
-      expect(await tablist.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe(
-        "none",
       );
 
       const changes = page.getByRole("tab", { name: /Changes/ });
@@ -551,9 +551,6 @@ describe("workbench browser acceptance", () => {
       });
       expect(await trailing.getAttribute("aria-selected")).toBe("true");
       expect(await tabIsFullyVisible(trailing)).toBe(true);
-      expect(await tablist.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe(
-        "none",
-      );
 
       await page.keyboard.press("Home");
       const leading = page.getByRole("tab", { name: "Deployments and observability" });
@@ -718,7 +715,7 @@ describe("workbench browser acceptance", () => {
     const tabs = page.getByRole("tablist").getByRole("tab");
     expect(await tabs.nth(0).evaluate((tab) => tab === document.activeElement)).toBe(true);
     await tabs.nth(0).focus();
-    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
     expect(await tabs.nth(1).getAttribute("aria-selected")).toBe("true");
     expect(await tabs.nth(1).getAttribute("tabindex")).toBe("0");
     const panelId = await tabs.nth(1).getAttribute("aria-controls");
@@ -729,7 +726,7 @@ describe("workbench browser acceptance", () => {
 
     await page.keyboard.press("End");
     expect(await tabs.last().getAttribute("aria-selected")).toBe("true");
-    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
     expect(await tabs.nth(0).getAttribute("aria-selected")).toBe("true");
 
     const dialog = page.locator('[role="dialog"][aria-label="Workspace"]');
@@ -737,7 +734,7 @@ describe("workbench browser acceptance", () => {
     expect(await primary.getAttribute("inert")).not.toBeNull();
     expect(await primary.getAttribute("aria-hidden")).toBe("true");
     const dialogHandle = await dialog.elementHandle();
-    await page.getByRole("button", { name: "Close workspace" }).click();
+    await page.getByRole("button", { name: "Hide workspace" }).click();
     await expectEventually(async () => page.locator('[title="Open workspace"]:focus').count());
     expect(await dialog.getAttribute("hidden")).not.toBeNull();
     expect(await primary.getAttribute("inert")).toBeNull();
@@ -776,9 +773,9 @@ describe("workbench browser acceptance", () => {
       await expectEventually(async () => (await chrome.getAttribute("data-compact")) === "true");
       const tabs = page.getByRole("tablist").getByRole("tab");
       await tabs.first().focus();
-      await page.keyboard.press("ArrowRight");
-      await page.keyboard.press("ArrowRight");
-      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
       const browserTab = page.getByRole("tab", { name: "Browser" });
       expect(await browserTab.isVisible()).toBe(true);
       expect(await browserTab.getAttribute("aria-selected")).toBe("true");
@@ -822,7 +819,7 @@ describe("workbench browser acceptance", () => {
     expect(await surface.getAttribute("role")).toBeNull();
     expect(await primary.getAttribute("inert")).toBeNull();
     expect(await primary.getAttribute("aria-hidden")).toBeNull();
-    await page.getByTitle("Collapse").click();
+    await page.getByTitle("Hide workspace").click();
     await expectEventually(async () => page.locator('[title="Open workspace"]:focus').count());
     expect(await surface.getAttribute("aria-hidden")).toBe("true");
     expect(await surfaceHandle?.evaluate((element) => element.isConnected)).toBe(true);

@@ -54,6 +54,35 @@ if [ ! -f "$HOME/.config/mimeapps.list" ]; then
   printf '[Default Applications]\nx-scheme-handler/http=opengeni-browser.desktop\nx-scheme-handler/https=opengeni-browser.desktop\ntext/html=opengeni-browser.desktop\nx-scheme-handler/about=opengeni-browser.desktop\nx-scheme-handler/unknown=opengeni-browser.desktop\n' \
     > "$HOME/.config/mimeapps.list"
 fi
+# A fresh /workspace HOME has no xfce4-desktop xfconf. Without it xfdesktop keeps
+# a 10x10 manager window and never maps the 1280x800 Desktop child, so the
+# paintable-frame gate sees ~21 KB forever. Seed the canonical wallpaper before
+# startxfce4 so the first session paints.
+if [ ! -f "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" ] && \
+   [ -f /usr/share/backgrounds/xfce/xfce-blue.jpg ]; then
+  mkdir -p "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml"
+  cat > "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="image-style" type="int" value="5"/>
+        </property>
+      </property>
+      <property name="monitorscreen" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="image-style" type="int" value="5"/>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+EOF
+fi
 
 # FAST PRE-CHECK (lock-free): if the stack is ALREADY up — websockify (the one
 # exposed port) AND x11vnc are both listening — re-print the marker and exit 0

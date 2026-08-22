@@ -20,10 +20,48 @@ function session(patch: Partial<Session> & Pick<Session, "id">): Session {
     pinnedAt: null,
     pinVersion: 0,
     createdBy: { kind: "subject", subjectId: "user:test" },
+    effectiveControl: activeControl(),
     createdAt: "2026-08-01T00:00:00.000Z",
     updatedAt: "2026-08-01T00:00:00.000Z",
     ...patch,
   } as Session;
+}
+
+function activeControl(): Session["effectiveControl"] {
+  return {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+}
+
+function pausedControl(): Session["effectiveControl"] {
+  const blocker = {
+    kind: "session" as const,
+    sessionId: "paused",
+    displayName: "Paused here",
+    actor: null,
+    reason: null,
+    changedAt: null,
+    revision: 1,
+  };
+  return {
+    ...activeControl(),
+    state: "paused",
+    controlVersion: 1,
+    controlEtag: "paused-1",
+    directState: "paused",
+    primaryBlocker: blocker,
+    blockers: [blocker],
+    resumeOptions: [],
+  };
 }
 
 const CHANNELS = [
@@ -86,6 +124,45 @@ describe("channelRailSections", () => {
 });
 
 describe("summarizeRailNodes", () => {
+  test("shows a local message delivery failure without calling the session failed", () => {
+    const forest = buildRailForest([session({ id: "delivery-failed", status: "idle" })]);
+    const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+    expect(summarizeRailNodes(nodes, new Map([["delivery-failed", 2]]))).toEqual({
+      kind: "send_failed",
+      count: 2,
+      total: 1,
+      label: "2 messages not sent",
+    });
+    expect(nodes[0]?.session.status).toBe("idle");
+  });
+
+  test("keeps a loaded child's local failure visible through server tree stats", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root",
+        treeStats: {
+          directChildren: 1,
+          totalDescendants: 1,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          truncated: false,
+        },
+      }),
+      session({ id: "child", parentSessionId: "root" }),
+    ]);
+    const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+
+    expect(summarizeRailNodes(nodes, new Map([["child", 1]]))).toEqual({
+      kind: "send_failed",
+      count: 1,
+      total: 2,
+      label: "1 message not sent",
+    });
+  });
+
   test("uses the highest-priority hidden descendant state", () => {
     const forest = buildRailForest([
       session({
@@ -117,6 +194,27 @@ describe("summarizeRailNodes", () => {
     expect(summarizeRailNodes(forest.running)).toMatchObject({
       kind: "active",
       label: "1 working",
+    });
+  });
+
+  test("does not count a paused queued child as working", () => {
+    const forest = buildRailForest([
+      session({ id: "root" }),
+      session({
+        id: "paused",
+        parentSessionId: "root",
+        status: "queued",
+        effectiveControl: pausedControl(),
+      }),
+    ]);
+    const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+
+    expect(forest.running).toEqual([]);
+    expect(summarizeRailNodes(nodes)).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 2,
+      label: "Read",
     });
   });
 

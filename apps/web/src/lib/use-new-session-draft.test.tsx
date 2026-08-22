@@ -42,6 +42,7 @@ function remote(
   return {
     revision,
     ...editable(overrides),
+    selectionHistory: { projects: [] },
     updatedAt: revision === 0 ? null : "2026-07-20T00:00:00.000Z",
   };
 }
@@ -129,7 +130,11 @@ describe("useNewSessionDraft", () => {
           remote(4, {
             text: "restore me",
             resources: [
-              { kind: "repository", uri: "https://example.com/repo.git", ref: "main" },
+              {
+                kind: "repository",
+                uri: "https://example.com/repo.git",
+                ref: "main",
+              },
               { kind: "file", fileId: readyId, mountPath: `files/${readyId}` },
               { kind: "file", fileId: foreignId },
               { kind: "file", fileId: failedId },
@@ -219,7 +224,10 @@ describe("useNewSessionDraft", () => {
       pending = hook.result.current.draft.flush();
     });
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ expectedRevision: 1, text: "newest local edit" });
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 1,
+      text: "newest local edit",
+    });
 
     await hook.rerender({ hydrateResources: (resources) => [...resources] });
     await flush();
@@ -251,7 +259,10 @@ describe("useNewSessionDraft", () => {
     expect(requests).toHaveLength(0);
     await flush(180);
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ expectedRevision: 0, text: "autosave" });
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 0,
+      text: "autosave",
+    });
     await hook.unmount();
   });
 
@@ -340,7 +351,10 @@ describe("useNewSessionDraft", () => {
     await actRun(() => hook.result.current.draft.flush());
     await actRun(() => hook.result.current.draft.resolveConflict("keep_mine"));
 
-    expect(requests.at(-1)).toMatchObject({ expectedRevision: 5, text: "mine" });
+    expect(requests.at(-1)).toMatchObject({
+      expectedRevision: 5,
+      text: "mine",
+    });
     expect(hook.result.current.value.text).toBe("mine");
     expect(hook.result.current.draft.revision).toBe(6);
     expect(hook.result.current.draft.conflict).toBeNull();
@@ -356,7 +370,10 @@ describe("useNewSessionDraft", () => {
           reads += 1;
           return reads === 1
             ? remote(1, { text: "initial" })
-            : remote(7, { text: "remote wins", resources: [{ kind: "file", fileId }] });
+            : remote(7, {
+                text: "remote wins",
+                resources: [{ kind: "file", fileId }],
+              });
         },
         saveNewSessionDraft: async () => {
           throw conflict();
@@ -397,7 +414,10 @@ describe("useNewSessionDraft", () => {
     expect(flushed && hook.result.current.draft.isCurrentSignature(flushed.signature)).toBe(false);
     const preserved = await actRun(() => hook.result.current.draft.flush());
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ expectedRevision: 1, text: "edited in flight" });
+    expect(requests[1]).toMatchObject({
+      expectedRevision: 1,
+      text: "edited in flight",
+    });
     expect(preserved?.revision).toBe(2);
     expect(preserved && hook.result.current.draft.isCurrentSignature(preserved.signature)).toBe(
       true,
@@ -469,7 +489,10 @@ describe("useNewSessionDraft", () => {
       flushed: expect.objectContaining({ revision: 3 }),
     });
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ expectedRevision: 2, text: "newer local edit" });
+    expect(requests[1]).toMatchObject({
+      expectedRevision: 2,
+      text: "newer local edit",
+    });
     expect(hook.result.current.draft.revision).toBe(3);
     expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
@@ -587,7 +610,10 @@ describe("useNewSessionDraft", () => {
     await actRun(() => hook.result.current.setValue(editable({ text: "newer local edit" })));
     await flush(520);
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ expectedRevision: 1, text: "newer local edit" });
+    expect(requests[1]).toMatchObject({
+      expectedRevision: 1,
+      text: "newer local edit",
+    });
 
     let acknowledgement!: ReturnType<(typeof hook.result.current.draft)["acknowledgeConsumed"]>;
     await actRun(() => {
@@ -604,7 +630,10 @@ describe("useNewSessionDraft", () => {
       flushed: expect.objectContaining({ revision: 3 }),
     });
     expect(requests).toHaveLength(3);
-    expect(requests[2]).toMatchObject({ expectedRevision: 2, text: "newer local edit" });
+    expect(requests[2]).toMatchObject({
+      expectedRevision: 2,
+      text: "newer local edit",
+    });
     expect(hook.result.current.draft.conflict).toBeNull();
     expect(hook.result.current.draft.error).toBeNull();
     await hook.unmount();
@@ -641,13 +670,49 @@ describe("useNewSessionDraft", () => {
     await flush();
     await actRun(() => hook.result.current.setValue(editable({ text: "actor a" })));
     const pendingFlush = hook.result.current.draft.flush();
-    const clientB = client({ getNewSessionDraft: async () => remote(9, { text: "actor b" }) });
+    const clientB = client({
+      getNewSessionDraft: async () => remote(9, { text: "actor b" }),
+    });
     await hook.rerender({ client: clientB, workspaceId: WORKSPACE_A });
     await flush();
     await actRun(() => firstSave.resolve(remote(2, { text: "stale actor a" })));
     await actRun(async () => await pendingFlush);
     expect(hook.result.current.value.text).toBe("actor b");
     expect(hook.result.current.draft.revision).toBe(9);
+    await hook.unmount();
+  });
+
+  test("reload before catalogs are ready does not fetch", async () => {
+    let reads = 0;
+    const draftClient = client({
+      getNewSessionDraft: async () => {
+        reads += 1;
+        return remote(1, { text: "hydrated" });
+      },
+    });
+    const hook = await renderHook(
+      (props: { resourceHydrationReady: boolean }) => {
+        const [value, setValue] = useState(() => editable());
+        const draft = useNewSessionDraft({
+          client: draftClient,
+          workspaceId: WORKSPACE_A,
+          value,
+          onApplyRemote: setValue,
+          restoreReadyFiles: () => {},
+          resourceHydrationReady: props.resourceHydrationReady,
+        });
+        return { draft, value };
+      },
+      { resourceHydrationReady: false },
+    );
+    expect(reads).toBe(0);
+    expect(hook.result.current.draft.loading).toBe(true);
+
+    await hook.rerender({ resourceHydrationReady: true });
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.value.text).toBe("hydrated");
+    expect(hook.result.current.draft.loading).toBe(false);
     await hook.unmount();
   });
 });

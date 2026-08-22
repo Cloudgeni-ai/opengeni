@@ -345,6 +345,35 @@ describe("SandboxFiles guarded-file routing", () => {
     expect(selectedFile(r.container)).toBe("README.md");
     await r.unmount();
   });
+
+  test("a requested line opens the file and highlights that row", async () => {
+    const files = filesResult({
+      readFile: async (path) => ({
+        path,
+        encoding: "utf8",
+        content: "alpha\nbeta\ngamma\ndelta\n",
+        sizeBytes: 24,
+        truncated: false,
+        isBinary: false,
+        revision: 0,
+      }),
+    });
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={gitResult()}
+        requestedPath="README.md"
+        requestedLine={3}
+        requestedPathRequestId={1}
+      />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md:3");
+    const focused = r.container.querySelector("[data-opengeni-focus-line]");
+    expect(focused?.getAttribute("data-opengeni-file-line")).toBe("3");
+    expect(focused?.textContent).toContain("gamma");
+    await r.unmount();
+  });
 });
 
 describe("DiffView (@deprecated alias)", () => {

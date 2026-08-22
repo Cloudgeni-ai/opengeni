@@ -22,6 +22,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BugIcon,
   CheckIcon,
   Loader2Icon,
   MenuIcon,
@@ -89,7 +90,15 @@ import {
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import {
+  consumeSessionComposerFocusIntent,
+  FOCUS_SESSION_COMPOSER_EVENT,
+  sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
+  type SessionComposerFocusIntent,
+} from "@/lib/session-focus";
+import {
   applySessionAttentionProjection,
+  updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
@@ -610,6 +619,28 @@ export function SessionRoute({
     pollIntervalMs: 30_000,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  const sandboxFileRequestSeq = useRef(0);
+  const [sandboxFileRequest, setSandboxFileRequest] = useState<{
+    path: string;
+    line: number;
+    requestId: number;
+  } | null>(null);
+  useEffect(() => {
+    setSandboxFileRequest(null);
+  }, [sessionId]);
+  const setInspectorOpen = context.setInspectorOpen;
+  const openSandboxFileAtLine = useCallback(
+    (path: string, line: number) => {
+      sandboxFileRequestSeq.current += 1;
+      setSandboxFileRequest({
+        path,
+        line,
+        requestId: sandboxFileRequestSeq.current,
+      });
+      setInspectorOpen(true);
+    },
+    [setInspectorOpen],
+  );
 
   if (!session) {
     if (loadError) {
@@ -634,6 +665,7 @@ export function SessionRoute({
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          openFileRequest={sandboxFileRequest}
           onOpenNavigation={() => {
             context.setInspectorOpen(false);
             rail.setDrawerOpen(true);
@@ -694,6 +726,7 @@ export function SessionRoute({
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
+      onOpenSandboxFile={openSandboxFileAtLine}
     />
   );
 
@@ -708,6 +741,7 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        openFileRequest={sandboxFileRequest}
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -746,6 +780,11 @@ function SessionDock(props: {
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
+  openFileRequest?: {
+    path: string;
+    line?: number | null;
+    requestId: number;
+  } | null;
 }) {
   const context = useAppContext();
   const dockLayoutStorageId = sessionDockLayoutStorageId(
@@ -787,12 +826,8 @@ function SessionDock(props: {
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
-      label: (
-        <span className="inline-flex items-center gap-1.5">
-          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
-          <span>Artifacts</span>
-        </span>
-      ),
+      label: "Artifacts",
+      icon: <PanelsTopLeftIcon />,
       ...(artifactSummaries.length > 0
         ? {
             badge: (
@@ -821,6 +856,7 @@ function SessionDock(props: {
     trailingTabs.push({
       id: "debug",
       label: "Debug",
+      icon: <BugIcon />,
       content: (
         <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -843,6 +879,7 @@ function SessionDock(props: {
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
       mobileLeadingControl={
         <Button
           type="button"
@@ -967,6 +1004,7 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
+  onOpenSandboxFile: (path: string, line: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -1004,7 +1042,76 @@ function SessionChatPane(props: {
     },
     [context.client, props.session.id, props.session.workspaceId],
   );
+  const onOpenSandboxFile = props.onOpenSandboxFile;
+  const handleSandboxFile = useCallback(
+    async (path: string, line?: number) => {
+      if (line != null && line > 0) {
+        onOpenSandboxFile(path, line);
+        return;
+      }
+      await downloadSandboxFile(path);
+    },
+    [downloadSandboxFile, onOpenSandboxFile],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  useEffect(() => {
+    const onFocusRequest = (event: Event) => {
+      const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
+      if (
+        detail?.workspaceId === props.session.workspaceId &&
+        detail.sessionId === props.session.id
+      ) {
+        setComposerFocusSignal(detail.nonce);
+      }
+    };
+    globalThis.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+    return () => globalThis.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+  }, [props.session.id, props.session.workspaceId]);
+  useEffect(() => {
+    const intent = consumeSessionComposerFocusIntent(props.session.workspaceId, props.session.id);
+    if (!intent) return;
+    if (
+      !sessionComposerFocusIntentIsEligible({
+        viewportWidth: globalThis.innerWidth,
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)").matches ?? false,
+        terminal,
+        requiresAction: props.session.status === "requires_action",
+        pendingHumanInput: props.humanInput.requests.length > 0,
+        pendingApproval: props.approvals.length > 0,
+      })
+    ) {
+      return;
+    }
+    const frame = globalThis.requestAnimationFrame(() => {
+      const textarea = composerRegionRef.current?.querySelector("textarea");
+      if (!textarea || textarea.disabled) return;
+      const dialogOpen = Boolean(
+        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
+      );
+      if (
+        !shouldFocusSessionComposer(
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          props.session.id,
+          document.body,
+          dialogOpen,
+        )
+      ) {
+        return;
+      }
+      textarea.focus();
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [
+    composerFocusSignal,
+    props.approvals.length,
+    props.humanInput.requests.length,
+    props.session.id,
+    props.session.status,
+    props.session.workspaceId,
+    terminal,
+  ]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -1338,17 +1445,32 @@ function SessionChatPane(props: {
     setComposerModel,
     setComposerReasoningEffort,
   ]);
+  const acceptedClientEventIds = useMemo(
+    () =>
+      new Set(
+        props.events
+          .filter((event) => event.type === "user.message" && event.clientEventId)
+          .map((event) => event.clientEventId as string),
+      ),
+    [props.events],
+  );
+  const failedOptimisticMessageCount = (composer.optimisticMessages ?? []).filter(
+    (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
+  ).length;
+  useEffect(() => {
+    updateLocalSessionDeliveryAttention({
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      failedMessageCount: failedOptimisticMessageCount,
+    });
+  }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const acceptedClientEventIds = new Set(
-      props.events
-        .filter((event) => event.type === "user.message" && event.clientEventId)
-        .map((event) => event.clientEventId as string),
-    );
     const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
       .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
       .map((message) => ({
         kind: "user-message",
         id: `optimistic:${message.clientEventId}`,
+        reconciliationKey: `user-message:${message.clientEventId}`,
         text: message.text,
         annotations: message.annotations.map((annotation, ordinal) => ({
           ...annotation,
@@ -1369,7 +1491,7 @@ function SessionChatPane(props: {
         },
       }));
     return [...props.timeline, ...optimisticItems];
-  }, [composer, props.events, props.timeline]);
+  }, [acceptedClientEventIds, composer, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
@@ -1410,15 +1532,11 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText
-            text={text}
-            streaming={item.streaming}
-            onSandboxFile={downloadSandboxFile}
-          />
+          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
         </div>
       );
     },
-    [downloadSandboxFile, props.session.workspaceId],
+    [handleSandboxFile, props.session.workspaceId],
   );
 
   return (
@@ -1447,11 +1565,6 @@ function SessionChatPane(props: {
               workspaceId={props.session.workspaceId}
             />
           ) : null}
-          {props.session.tenancy ? (
-            <Suspense fallback={null}>
-              <LazySessionRouteAuxiliary session={props.session} events={props.events} />
-            </Suspense>
-          ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
               className="h-full"
@@ -1476,6 +1589,21 @@ function SessionChatPane(props: {
               loadingOldest={props.loadingOldest}
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
+              trailingState={
+                props.humanInput.requests.length > 0 &&
+                props.session.status === "requires_action" ? (
+                  <div className="pb-1" data-human-input-timeline-surface="">
+                    <HumanInputSurface
+                      requests={props.humanInput.requests}
+                      respondingRequestId={props.humanInput.respondingRequestId}
+                      error={props.humanInput.mutationError?.message}
+                      onSubmit={(requestId, response) =>
+                        props.humanInput.respond(requestId, response).then(() => undefined)
+                      }
+                    />
+                  </div>
+                ) : undefined
+              }
               emptyState={
                 props.queue.stoppingPreviousAttempt ? (
                   <EmptyState
@@ -1571,23 +1699,6 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {/* Structured questions are tool output, not approvals: answer/skip
-          resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger.
-          Parallel requests step one-at-a-time inside HumanInputSurface. */}
-      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
-          <HumanInputSurface
-            requests={props.humanInput.requests}
-            respondingRequestId={props.humanInput.respondingRequestId}
-            error={props.humanInput.mutationError?.message}
-            onSubmit={(requestId, response) =>
-              props.humanInput.respond(requestId, response).then(() => undefined)
-            }
-          />
-        </div>
-      ) : null}
-
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
@@ -1607,7 +1718,7 @@ function SessionChatPane(props: {
         </div>
       </div>
 
-      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+      <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <PersonalResourceAttachmentControl
             controller={personalAttachment}

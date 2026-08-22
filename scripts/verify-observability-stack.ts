@@ -12,6 +12,7 @@ interface Args {
   grafanaPodSelector: string;
   grafanaSidecarContainer: string;
   grafanaDashboardDirectory: string;
+  opensandbox: boolean;
   skipLiveApis: boolean;
 }
 
@@ -35,10 +36,15 @@ interface Service {
   spec: { ports?: Array<{ name?: string; port: number }> };
 }
 
+interface PrometheusQueryRow {
+  metric: Record<string, string>;
+  value: [number, string];
+}
+
 const dashboardDirectory = "deploy/observability/dashboards";
 const monitoringSelector = "opengeni.ai/monitoring=enabled";
 const dashboardSelector = "opengeni.ai/dashboard-source=canonical";
-const requiredRules = [
+const baseRequiredRules = [
   "opengeni:sandbox_leases:fresh_max",
   "opengeni:sandbox_checkpoint_artifacts:fresh_max",
   "opengeni:workload_node:present",
@@ -60,8 +66,25 @@ const requiredRules = [
   "OpenGeniNodeContainerRuntimeErrors",
   "OpenGeniNodeNotReady",
 ] as const;
+const opensandboxRequiredRules = [
+  "opengeni:opensandbox_batchsandboxes:fresh_max",
+  "opengeni:opensandbox_workload_pods:fresh_max",
+  "opengeni:opensandbox_cleanup_stuck:fresh_max",
+  "opengeni:opensandbox_expiration_overdue:fresh_max",
+  "OpenGeniOpenSandboxApiThrottled",
+  "OpenGeniOpenSandboxTtlRenewalFailed",
+  "OpenGeniOpenSandboxPoolDepleted",
+  "OpenGeniOpenSandboxInventoryStale",
+  "OpenGeniOpenSandboxPodPending",
+  "OpenGeniOpenSandboxImagePullFailed",
+  "OpenGeniOpenSandboxControllerError",
+  "OpenGeniOpenSandboxCapacityExhausted",
+  "OpenGeniOpenSandboxCleanupStuck",
+  "OpenGeniOpenSandboxExpirationOverdue",
+] as const;
 
 const args = parseArgs(process.argv.slice(2));
+const requiredRules = [...baseRequiredRules, ...(args.opensandbox ? opensandboxRequiredRules : [])];
 const sourceRevision = args.sourceRevision ?? process.env.OPENGENI_SOURCE_REVISION ?? gitHead();
 const chartDefinition = Bun.YAML.parse(
   await Bun.file("deploy/observability/Chart.yaml").text(),
@@ -166,6 +189,16 @@ const requiredPlatformServiceMonitors = requiredPlatformApplicationNames.map((ap
   );
   return matches[0] as { metadata: KubernetesMetadata };
 });
+if (args.opensandbox) {
+  const matches = platformServiceMonitors.filter((serviceMonitor) =>
+    serviceMonitor.metadata.name.endsWith("-opensandbox-controller"),
+  );
+  assert(
+    matches.length === 1,
+    `expected one selected OpenSandbox controller ServiceMonitor, found ${matches.length}`,
+  );
+  requiredPlatformServiceMonitors.push(matches[0] as { metadata: KubernetesMetadata });
+}
 
 const prometheusRules = kubectlJson<
   KubernetesList<{
@@ -248,6 +281,58 @@ if (!args.skipLiveApis) {
         );
       }
     }
+
+    if (args.opensandbox) {
+      const aggregateRows = await waitForPrometheusQuery(
+        baseUrl,
+        '{__name__=~"opengeni:opensandbox_(batchsandboxes|workload_pods|cleanup_stuck|expiration_overdue):fresh_max"}',
+        (rows) => rows.length === 12,
+        "the 12 fixed-label OpenSandbox workload aggregate series",
+      );
+      const aggregateNames = new Set(aggregateRows.map((row) => row.metric.__name__));
+      for (const name of opensandboxRequiredRules.slice(0, 4)) {
+        assert(aggregateNames.has(name), `Prometheus query did not return ${name}`);
+      }
+      const forbiddenLabels = new Set([
+        "attempt_id",
+        "batchsandbox",
+        "provider_instance_id",
+        "sandbox_id",
+        "session_id",
+        "workspace_id",
+      ]);
+      for (const row of aggregateRows) {
+        for (const label of Object.keys(row.metric)) {
+          assert(
+            !forbiddenLabels.has(label),
+            `${row.metric.__name__ ?? "OpenSandbox aggregate"} exposes forbidden label ${label}`,
+          );
+        }
+      }
+      await waitForPrometheusQuery(
+        baseUrl,
+        'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}',
+        (rows) => rows.some((row) => Number(row.value[1]) > 0),
+        "a completed OpenSandbox Kubernetes inventory refresh",
+      );
+      for (const [query, description] of [
+        ['count({__name__=~"opensandbox_batchsandbox_.*"})', "BatchSandbox exporter series"],
+        [
+          'count({namespace="opensandbox",__name__=~"kube_pod_.*"})',
+          "OpenSandbox workload kube-state-metrics Pod series",
+        ],
+        [
+          'count({namespace="opensandbox",__name__=~"container_.*|prober_.*"})',
+          "OpenSandbox workload kubelet container/probe series",
+        ],
+      ] as const) {
+        const rows = await prometheusQuery(baseUrl, query);
+        assert(
+          rows.reduce((sum, row) => sum + Number(row.value[1]), 0) === 0,
+          `${description} must be absent from Prometheus`,
+        );
+      }
+    }
   };
   if (args.prometheusUrl) {
     await verifyPrometheus(args.prometheusUrl);
@@ -288,6 +373,7 @@ console.log(
         .sort(),
       prometheusRules: prometheusRules.map((item) => item.metadata.name).sort(),
       liveApisVerified: !args.skipLiveApis,
+      opensandboxVerified: args.opensandbox,
     },
     null,
     2,
@@ -432,6 +518,35 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function prometheusQuery(baseUrl: string, query: string): Promise<PrometheusQueryRow[]> {
+  const url = new URL("/api/v1/query", baseUrl);
+  url.searchParams.set("query", query);
+  const response = await fetchJson<{
+    status?: string;
+    error?: string;
+    data?: { result?: PrometheusQueryRow[] };
+  }>(url.toString());
+  assert(response.status === "success", `Prometheus query failed: ${response.error ?? query}`);
+  assert(response.data?.result, `Prometheus query returned no result: ${query}`);
+  return response.data.result;
+}
+
+async function waitForPrometheusQuery(
+  baseUrl: string,
+  query: string,
+  ready: (rows: PrometheusQueryRow[]) => boolean,
+  description: string,
+): Promise<PrometheusQueryRow[]> {
+  const deadline = Date.now() + 120_000;
+  let rows: PrometheusQueryRow[] = [];
+  while (Date.now() < deadline) {
+    rows = await prometheusQuery(baseUrl, query);
+    if (ready(rows)) return rows;
+    await Bun.sleep(2_000);
+  }
+  throw new Error(`timed out waiting for ${description}; last result count=${rows.length}`);
+}
+
 async function freePort(): Promise<number> {
   const server = Bun.serve({ port: 0, fetch: () => new Response("reserved") });
   const port = server.port;
@@ -486,12 +601,17 @@ function parseArgs(values: string[]): Args {
     grafanaPodSelector: "app.kubernetes.io/name=grafana",
     grafanaSidecarContainer: "grafana",
     grafanaDashboardDirectory: "/tmp/dashboards/OpenGeni",
+    opensandbox: false,
     skipLiveApis: false,
   };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (value === "--skip-live-apis") {
       out.skipLiveApis = true;
+      continue;
+    }
+    if (value === "--opensandbox") {
+      out.opensandbox = true;
       continue;
     }
     const [key, inline] = value.split("=", 2);

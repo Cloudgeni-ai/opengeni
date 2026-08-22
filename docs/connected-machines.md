@@ -44,7 +44,11 @@ The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
-worktrees under that path as it needs them).
+worktrees under that path as it needs them). Structured cwd/fs ops rewrite the
+virtual `/workspace` frame via `toMachinePath`. Model-facing shell paths are
+cwd-relative (`.opengeni/files/...`); durable receipts and `sandbox:` UI links
+keep `/workspace/...`. `execCommand` returns the SDK banner with combined
+stdout/stderr and exit code.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
@@ -156,6 +160,13 @@ structural: it accepts an optional `machineTarget` object containing required
 flat REST/SDK fields above. Consequently the model cannot generate a standalone
 `workingDir`. This is a model-contract hardening only; existing REST/SDK callers
 continue to use the flat fields.
+
+For the web new-session composer, the actor-private backend draft remembers
+only successful creates: the last project, that project's last managed or
+machine target, and the last working directory for every project+machine pair.
+Switching projects or machines restores the matching nested choice. Absolute
+host paths remain tied to the exact machine id and are never reused on another
+machine.
 
 ## Discover machines + metrics
 

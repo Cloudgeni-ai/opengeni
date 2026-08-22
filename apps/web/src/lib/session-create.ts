@@ -24,6 +24,7 @@ import {
 import type {
   CreateSessionRequest,
   NewSessionDraftOptions,
+  NewSessionSelectionHistory,
   PersonalResourceAttachmentIntent,
 } from "@opengeni/sdk";
 
@@ -63,6 +64,34 @@ export type ConnectedMachineTarget = {
 };
 
 export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
+
+export function rememberedProjectCompute(
+  history: NewSessionSelectionHistory,
+  channelId: string | null,
+): ComputeTarget | null {
+  const project = history.projects.find((candidate) => candidate.channelId === channelId);
+  if (!project) return null;
+  if (!project.targetSandboxId) return { kind: "sandbox", backend: "" };
+  const machine = project.machines.find(
+    (candidate) => candidate.sandboxId === project.targetSandboxId,
+  );
+  return {
+    kind: "machine",
+    sandboxId: project.targetSandboxId,
+    folder: machine?.workingDir ? { kind: "path", path: machine.workingDir } : { kind: "root" },
+  };
+}
+
+export function rememberedMachineFolder(
+  history: NewSessionSelectionHistory,
+  channelId: string | null,
+  sandboxId: string,
+): MachineFolder {
+  const machine = history.projects
+    .find((project) => project.channelId === channelId)
+    ?.machines.find((candidate) => candidate.sandboxId === sandboxId);
+  return machine?.workingDir ? { kind: "path", path: machine.workingDir } : { kind: "root" };
+}
 
 export type SessionDraft = {
   visibility: "private" | "workspace";
@@ -249,7 +278,9 @@ export function buildCreateSessionRequest(
       ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
       : {}),
     ...(input.submission.personalResourceAttachment
-      ? { personalResourceAttachment: input.submission.personalResourceAttachment }
+      ? {
+          personalResourceAttachment: input.submission.personalResourceAttachment,
+        }
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
@@ -341,7 +372,11 @@ export function submissionFromSessionDraft(
       ...mcp,
       ...visibleTools,
     },
-    options: { targetSandboxId: null, workingDir: null, visibility: draft.visibility },
+    options: {
+      targetSandboxId: null,
+      workingDir: null,
+      visibility: draft.visibility,
+    },
     omitWorkspaceResources: false,
   };
 }
@@ -485,6 +520,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   blaxel: "Blaxel",
   cloudflare: "Cloudflare",
   vercel: "Vercel",
+  opensandbox: "OpenSandbox",
 };
 
 function backendLabel(backend: SandboxBackend): string {

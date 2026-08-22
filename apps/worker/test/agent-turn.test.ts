@@ -2989,6 +2989,9 @@ describe("lazy sandbox provisioner single-flight", () => {
     const onDemandEstablishBody = establishSource.slice(onDemandAt, lazyBinderDefinitionAt);
     expect(onDemandEstablishBody).not.toContain("await sandboxState.resumeManagedGroupBox()");
     expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
+    expect(establishSource).toContain(
+      "onSandboxLost: publishSandboxLost,\n                objectStorage,",
+    );
   });
 
   test("personal-connection membership uses named live-authority, not a bare grant join", async () => {
