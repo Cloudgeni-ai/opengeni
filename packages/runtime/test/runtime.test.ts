@@ -4035,6 +4035,14 @@ describe("runtime event normalization", () => {
     expect(command).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
+    // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
+    // fail the clone because `remote set-head` rejects it.
+    expect(command).toContain(
+      'if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+    );
+    expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null');
+    expect(command).toContain('if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then');
+    expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
     expect(command).toContain("ensure_git");

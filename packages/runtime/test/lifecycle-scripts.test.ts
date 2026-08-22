@@ -49,6 +49,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     },
+    ref = "main",
   ): string {
     const generated = repositoryCloneCommand([
       { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
@@ -60,7 +61,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
-    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
+    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' '${ref}' ''`;
   }
 
   function setupScript(
@@ -1064,6 +1065,98 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         existsSync(parent) ? readdirSync(parent).filter((f) => f.includes(".tmp.")) : [],
       ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("clone script guards origin/HEAD behind the remote-tracking ref check and keeps fetch + checkout failure-gated", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/repo.git",
+        ref: "pull/1720/head",
+        mountPath: "repos/github.com/acme/repo",
+      },
+    ]);
+    const lines = command.split("\n");
+    const fetchIndex = lines.findIndex((line) =>
+      line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
+    );
+    const guardIndex = lines.findIndex((line) =>
+      line.includes('if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"'),
+    );
+    const setHeadIndex = lines.findIndex((line) =>
+      line.includes('git -C "$tmp" remote set-head origin "$ref"'),
+    );
+    const checkoutIndex = lines.findIndex((line) =>
+      line.includes('if ! git -C "$tmp" checkout --detach FETCH_HEAD'),
+    );
+
+    expect(fetchIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeGreaterThan(fetchIndex);
+    expect(setHeadIndex).toBe(guardIndex + 1);
+    expect(lines[setHeadIndex + 1]).toBe("  fi");
+    expect(checkoutIndex).toBeGreaterThan(setHeadIndex);
+    // set-head never shares the failure gate with fetch or checkout.
+    expect(lines[fetchIndex]).not.toContain("set-head");
+    expect(lines[checkoutIndex]).not.toContain("set-head");
+    expect(lines[setHeadIndex]).not.toContain("exit 1");
+    expect(
+      lines.filter((line) =>
+        line.includes('echo "Repository resource fetch failed for $target" >&2'),
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("clone by branch sets origin/HEAD; PR ref and commit SHA clone without origin/HEAD (previously set-head failed the clone)", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
+    try {
+      const origin = makeOrigin(root);
+      const sha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      // GitHub-style PR ref outside refs/heads/: fetchable, never remote-tracked.
+      execFileSync("git", ["-C", origin, "update-ref", "refs/pull/1/head", sha]);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const env = { HOME: home };
+      const cases: { ref: string; expectOriginHead: boolean }[] = [
+        { ref: "main", expectOriginHead: true },
+        { ref: "pull/1/head", expectOriginHead: false },
+        { ref: sha, expectOriginHead: false },
+      ];
+      for (const [index, { ref, expectOriginHead }] of cases.entries()) {
+        const target = join(root, "ws", "repos", "acme", `repo-${index}`);
+        const run = runScript(
+          cloneScriptWithTarget(target, `file://${origin}`, undefined, ref),
+          env,
+        );
+        expect({ ref, status: run.status, output: run.output }).toEqual({
+          ref,
+          status: 0,
+          output: expect.stringContaining(`Repository resource ready at ${target}`),
+        });
+        expect(existsSync(join(target, "README.md"))).toBe(true);
+        expect(
+          execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        ).toBe(sha);
+        const originHead = (() => {
+          try {
+            return execFileSync(
+              "git",
+              ["-C", target, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"],
+              { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            ).trim();
+          } catch {
+            return null;
+          }
+        })();
+        expect({ ref, originHead }).toEqual({ ref, originHead: expectOriginHead ? sha : null });
+        expect(
+          readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+        ).toEqual([]);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
