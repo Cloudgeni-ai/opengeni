@@ -69,9 +69,16 @@ export default defineConfig({
               // A few tiny primitives are shared by the initial composer and
               // the active-session route. Pin that boundary so entry-aware
               // merging cannot use an icon or label helper to pull the full
-              // session workbench into startup.
+              // session workbench into startup. The composer-launch and
+              // transcription helpers plus their three icons are the startup
+              // graph's only genuine session-group needs; pinning them keeps
+              // the entry chunk from importing any entry-aware session
+              // subgroup at all, so re-bucketing inside the session group
+              // (for example when another lazy route, like the Company Brain
+              // prompt, starts sharing the model-policy helpers) can no
+              // longer fold the composer stack into the initial graph.
               name: "session-shared-primitives",
-              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:git-branch|rotate-cw|server)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability|composer-launch)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:git-branch|rotate-cw|server|file-code-corner|shrink|video)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
