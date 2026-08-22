@@ -249,6 +249,6 @@ CREATE POLICY automation_runs_tenant ON automation_runs
 CREATE POLICY automation_run_event_links_tenant ON automation_run_event_links
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
-CREATE POLICY automation_runs_session_visibility ON automation_runs AS RESTRICTIVE
+CREATE POLICY session_visibility_isolation ON automation_runs AS RESTRICTIVE
   USING (session_reference_visible(account_id, workspace_id, session_id))
   WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));

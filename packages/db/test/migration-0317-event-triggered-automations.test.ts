@@ -28,7 +28,7 @@ describe("migration 0317 event-triggered automations", () => {
     expect(source).toContain("automation_triggers_pack_installation_fk");
     expect(source).toContain("automation_sources_pack_installation_fk");
     expect(source).toContain("pack_connector_id");
-    expect(source).toContain("CREATE POLICY automation_runs_session_visibility");
+    expect(source).toContain("CREATE POLICY session_visibility_isolation ON automation_runs");
     for (const table of tenantTables) {
       expect(source).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
       expect(FORCE_RLS_TABLES).toContain(table);
