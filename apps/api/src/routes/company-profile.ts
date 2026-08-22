@@ -42,7 +42,7 @@ async function parseBody<S extends z.ZodType>(context: Context, schema: S): Prom
   return parsed.data;
 }
 
-function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
+export function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
   const { grant } = access;
   if (
     !access.contextIntegrity ||

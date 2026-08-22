@@ -26,7 +26,7 @@ the setting is off.
 
 First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
 
-- `company_profile_propose` - records one inactive organization company-profile proposal (`durable_learning` provenance, `agent-attempt:<attemptId>` source) for an exact agent attempt; it never activates, and an organization account admin activates it from Company Brain → Company profile & goals (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-profile administration for an exact agent attempt whose live turn was initiated by the organization owner: `propose` stages one inactive immutable full-profile revision (`agent_admin` provenance) and returns the exact `request_human_input` payload; `confirm` activates it only after that same human answered `activate`, through the existing profile lifecycle with immutable receipts (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 

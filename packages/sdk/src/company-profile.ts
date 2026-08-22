@@ -21,7 +21,10 @@ export type CompanyProfileRevision = CompanyProfileRevisionIdentity & {
   accountId: string;
   intent: "active" | "proposal";
   profile: CompanyProfileContent;
-  provenance: { source: "human" | "durable_learning" | "migration"; sourceId: string | null };
+  provenance: {
+    source: "human" | "agent_admin" | "durable_learning" | "migration";
+    sourceId: string | null;
+  };
   supersedesRevisionId: string | null;
   createdBySubjectId: string;
   createdAt: string;

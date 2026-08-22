@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { HumanInputQuestion } from "./index";
 
 export const COMPANY_PROFILE_SCALAR_MAX_CHARS = 2_048;
 export const COMPANY_PROFILE_ENTRY_MAX_CHARS = 1_024;
@@ -103,7 +104,12 @@ export type CompanyProfileContent = z.infer<typeof CompanyProfileContent>;
 export const CompanyProfileRevisionIntent = z.enum(["active", "proposal"]);
 export type CompanyProfileRevisionIntent = z.infer<typeof CompanyProfileRevisionIntent>;
 
-export const CompanyProfileProvenanceSource = z.enum(["human", "durable_learning", "migration"]);
+export const CompanyProfileProvenanceSource = z.enum([
+  "human",
+  "agent_admin",
+  "durable_learning",
+  "migration",
+]);
 export type CompanyProfileProvenanceSource = z.infer<typeof CompanyProfileProvenanceSource>;
 
 export const CompanyProfilePrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
@@ -239,6 +245,74 @@ export const CompanyProfileMutationResponse = z.object({
   event: CompanyProfileActivationEvent.nullable(),
 });
 export type CompanyProfileMutationResponse = z.infer<typeof CompanyProfileMutationResponse>;
+
+export const COMPANY_PROFILE_AGENT_APPROVE_OPTION = "activate" as const;
+export const COMPANY_PROFILE_AGENT_REJECT_OPTION = "skip" as const;
+
+export const CompanyProfileAgentAttempt = z
+  .object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    agentSubjectId: z.string().trim().min(1).max(1_024),
+  })
+  .strict();
+export type CompanyProfileAgentAttempt = z.infer<typeof CompanyProfileAgentAttempt>;
+
+export const CompanyProfileAgentProposalRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    profile: CompanyProfileContent,
+    reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+  })
+  .strict();
+export type CompanyProfileAgentProposalRequest = z.infer<typeof CompanyProfileAgentProposalRequest>;
+
+// z.lazy avoids an import cycle because HumanInputQuestion is declared in the
+// root contracts module that re-exports this file.
+export const CompanyProfileAgentHumanInputPrompt = z.object({
+  questions: z.array(z.lazy(() => HumanInputQuestion)).length(1),
+  allowSkip: z.literal(false),
+});
+export type CompanyProfileAgentHumanInputPrompt = z.infer<
+  typeof CompanyProfileAgentHumanInputPrompt
+>;
+
+export const CompanyProfileAgentProposalReceipt = z.object({
+  status: z.literal("confirmation_required"),
+  operationId: z.string().uuid(),
+  proposalReceiptId: z.string().uuid(),
+  revision: CompanyProfileRevision,
+  humanInput: CompanyProfileAgentHumanInputPrompt,
+  confirmWith: z.literal("company_profile_confirm"),
+  replayed: z.boolean(),
+});
+export type CompanyProfileAgentProposalReceipt = z.infer<typeof CompanyProfileAgentProposalReceipt>;
+
+export const CompanyProfileAgentConfirmRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    proposalReceiptId: z.string().uuid(),
+    humanInputRequestId: z.string().uuid(),
+  })
+  .strict();
+export type CompanyProfileAgentConfirmRequest = z.infer<typeof CompanyProfileAgentConfirmRequest>;
+
+export const CompanyProfileAgentConfirmationReceipt = z.object({
+  status: z.literal("activated"),
+  operationId: z.string().uuid(),
+  confirmationReceiptId: z.string().uuid(),
+  proposalReceiptId: z.string().uuid(),
+  humanInputRequestId: z.string().uuid(),
+  mutation: CompanyProfileMutationResponse,
+  replayed: z.boolean(),
+});
+export type CompanyProfileAgentConfirmationReceipt = z.infer<
+  typeof CompanyProfileAgentConfirmationReceipt
+>;
 
 export const CompanyProfileDiffRequest = z
   .object({ fromRevisionId: z.string().uuid(), toRevisionId: z.string().uuid() })
