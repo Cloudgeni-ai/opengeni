@@ -341,10 +341,21 @@ store. Canonical: `packages/contracts/src/knowledge.ts`,
 
 Migrations 0218 and 0219 add the staged organization-tenancy foundation and
 managed-human lifecycle dual-write. The physical `managed_accounts.id` remains
-the organization identifier; each Better Auth managed human now converges on
-one same-organization `organization_memberships` row and one deterministic
-personal-workspace lifecycle pointer, while stable user-resource authority
-still belongs to the organization membership rather than that workspace.
+the organization identifier; a managed human converges on one membership and
+one deterministic personal-workspace lifecycle pointer in every organization
+they join, while stable user-resource authority still belongs to the
+organization membership rather than that workspace. A self-service user with
+no membership or pending invitation receives the legacy `better-auth:user`
+organization. Maintenance migration 0314 binds pending invitations only after
+the exact Better Auth email is verified, suppresses that fallback while an
+invitation is pending, appends immutable exact-subject binding evidence, and
+accepts the invited user directly into the inviting organization with any
+selected shared-workspace grants. Invitation creation
+and signup convergence share one normalized-email advisory fence before the
+canonical organization locks, so a committing invitation cannot race the
+fallback organization decision. Public invitation projections never expose
+target registration state. All API/control/turn-worker database sessions must
+be drained before 0314, and a pre-0314 image must never restart after it commits.
 The four tenancy tables remain FORCE-RLS with no direct `opengeni_app` table
 DML; the only runtime write path is the target-schema-local,
 PUBLIC-revoked `ensure_managed_human_personal_workspace` SECURITY DEFINER
@@ -378,7 +389,7 @@ The managed-human-only `GET /v1/organization-memberships` route exposes just
 the exact active membership, organization, and personal-workspace identifiers
 returned by that provisioning capability; it is unavailable to API keys and
 delegated principals and does not expose retention, grant, or resource state.
-Migration 0263 adds registered-user invitations with exact-subject acceptance,
+Migration 0263 adds exact-subject invitation acceptance,
 owner/admin/member roles, revision-fenced suspension/reactivation/offboarding,
 and versioned retention policy. Input-bound operation receipts make retries
 idempotent and immutable lifecycle events retain bounded evidence. Suspension

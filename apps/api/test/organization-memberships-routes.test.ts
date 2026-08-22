@@ -54,7 +54,7 @@ beforeAll(async () => {
           headers: new Headers(),
           response: {
             session: { id: authSessionId },
-            user: { id: userId, email, name: "Organization member" },
+            user: { id: userId, email, name: "Organization member", emailVerified: true },
           },
         }),
       },
@@ -143,6 +143,7 @@ describe("organization membership routes", () => {
                 id: targetUserId,
                 email: targetEmail,
                 name: "Invitation target",
+                emailVerified: true,
               },
             },
           }),
@@ -169,14 +170,31 @@ describe("organization membership routes", () => {
       id: string;
       revision: number;
     };
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedBeforeBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedBeforeBinding?.targetSubjectId).toBeNull();
     const targetInvitations = await targetApp.request("http://x/v1/organization-invitations", {
       headers: { cookie: "session=present" },
     });
     expect(targetInvitations.status).toBe(200);
-    expect(await targetInvitations.json()).toMatchObject({
-      invitations: [expect.objectContaining({ id: invitation.id })],
-      nextCursor: null,
-    });
+    const targetInvitationsBody = (await targetInvitations.json()) as {
+      invitations: Array<{ id: string; revision: number }>;
+      nextCursor: string | null;
+    };
+    expect(targetInvitationsBody.nextCursor).toBeNull();
+    const listedInvitation = targetInvitationsBody.invitations.find(
+      (candidate) => candidate.id === invitation.id,
+    );
+    expect(listedInvitation).toBeDefined();
+    expect(listedInvitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedAfterBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedAfterBinding?.targetSubjectId).toBe(`user:${targetUserId}`);
     expect(
       (
         await targetApp.request("http://x/v1/organization-invitations?limit=101", {
@@ -194,7 +212,7 @@ describe("organization membership routes", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          expectedRevision: invitation.revision,
+          expectedRevision: listedInvitation!.revision,
           operationId: crypto.randomUUID(),
         }),
       },
@@ -283,6 +301,39 @@ describe("organization membership routes", () => {
       );
       expect(rejectedRetention.status).toBe(422);
     }
+  });
+
+  test("creates a non-enumerating invitation before the email is registered", async () => {
+    if (!app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const email = `not-registered-${crypto.randomUUID()}@example.test`;
+    const response = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        name: "Future teammate",
+        initialWorkspaceIds: [],
+        role: "member",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(response.status).toBe(201);
+    const invitation = await response.json();
+    expect(invitation).toMatchObject({
+      targetEmail: email,
+      targetName: "Future teammate",
+      initialWorkspaceIds: [],
+      status: "pending",
+    });
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
   });
 
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {

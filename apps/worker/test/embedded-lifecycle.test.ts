@@ -377,6 +377,7 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_index_obligations",
           "knowledge_source_sync_states",
           "knowledge_sources",
+          "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",
           "organization_membership_operation_receipts",

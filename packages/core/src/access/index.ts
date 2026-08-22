@@ -332,6 +332,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         userId: session.user.id,
         email: session.user.email,
         name: session.user.name,
+        emailVerified: session.user.emailVerified,
       });
       canonicalManagedCookieContexts.add(context);
       return context;

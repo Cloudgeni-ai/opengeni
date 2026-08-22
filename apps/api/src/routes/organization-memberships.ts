@@ -22,9 +22,9 @@ import {
 } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
+  bindPendingOrganizationInvitationsForVerifiedEmail,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  getManagedUserByEmail,
   getOrganizationAdministrationOverview,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -104,6 +104,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         userId: session.user.id,
         email: session.user.email,
         name: session.user.name,
+        emailVerified: session.user.emailVerified,
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
@@ -121,7 +122,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organization-invitations", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
+    const { session, subjectId } = await requireManagedHuman(context, deps);
     const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
     if (!query.success) {
       throw new HTTPException(422, {
@@ -129,6 +130,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       });
     }
     try {
+      if (session.user.emailVerified) {
+        await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
+          subjectId,
+          email: session.user.email,
+        });
+      }
       return context.json(
         ListOrganizationInvitationsPageResponse.parse(
           await listSelfOrganizationInvitations(deps.db, {
@@ -196,27 +203,16 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
     try {
-      // Authenticate organization administration before resolving a platform
-      // email address, so this endpoint cannot become a registered-user oracle.
-      await listOrganizationInvitations(deps.db, {
-        organizationId,
-        actorSubjectId: subjectId,
-        limit: 1,
-      });
-      const targetUserId = await getManagedUserByEmail(deps.db, payload.email);
-      if (!targetUserId) {
-        throw new HTTPException(404, {
-          message: "invitations currently require an existing registered user",
-        });
-      }
       return context.json(
         OrganizationInvitation.parse(
           await createOrganizationInvitation(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
             operationId: payload.operationId,
-            targetSubjectId: `user:${targetUserId}`,
+            targetSubjectId: null,
             targetEmail: payload.email.trim().toLowerCase(),
+            ...(payload.name === undefined ? {} : { targetName: payload.name }),
+            initialWorkspaceIds: payload.initialWorkspaceIds,
             role: payload.role,
             expiresAt: payload.expiresAt,
           }),
@@ -259,10 +255,16 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.post("/v1/organization-invitations/:invitationId/accept", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
+    const { session, subjectId } = await requireManagedHuman(context, deps);
     const invitationId = parseId(InvitationId, context.req.param("invitationId"), "invitation id");
     const payload = await parseBody(context, AcceptOrganizationInvitationRequest);
     try {
+      if (session.user.emailVerified) {
+        await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
+          subjectId,
+          email: session.user.email,
+        });
+      }
       const invitation = await getSelfOrganizationInvitation(deps.db, {
         subjectId,
         invitationId,

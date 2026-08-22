@@ -607,8 +607,13 @@ export const organizationMembershipInvitations = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    targetSubjectId: text("target_subject_id").notNull(),
+    targetSubjectId: text("target_subject_id"),
     targetEmail: text("target_email").notNull(),
+    targetName: text("target_name"),
+    initialWorkspaceIds: uuid("initial_workspace_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
     role: text("role").notNull().default("member"),
     status: text("status").notNull().default("pending"),
     revision: bigint("revision", { mode: "number" }).notNull().default(1),
@@ -625,6 +630,9 @@ export const organizationMembershipInvitations = pgTable(
     ),
     pendingTarget: uniqueIndex("organization_membership_invitations_pending_target_uq")
       .on(table.accountId, table.targetSubjectId)
+      .where(sql`${table.status} = 'pending' AND ${table.targetSubjectId} IS NOT NULL`),
+    pendingEmail: uniqueIndex("organization_membership_invitations_pending_email_uq")
+      .on(table.accountId, table.targetEmail)
       .where(sql`${table.status} = 'pending'`),
     accountCreated: index("organization_membership_invitations_account_created_idx").on(
       table.accountId,
@@ -662,6 +670,44 @@ export const organizationMembershipInvitations = pgTable(
       "organization_membership_invitations_acceptance_check",
       sql`(${table.status} = 'accepted' and ${table.acceptedMembershipId} is not null)
         or (${table.status} <> 'accepted' and ${table.acceptedMembershipId} is null)`,
+    ),
+  }),
+);
+
+export const organizationInvitationBindingEvents = pgTable(
+  "organization_invitation_binding_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    invitationId: uuid("invitation_id").notNull(),
+    targetSubjectId: text("target_subject_id").notNull(),
+    resultingRevision: bigint("resulting_revision", { mode: "number" }).notNull(),
+    boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    invitation: foreignKey({
+      name: "organization_invitation_binding_events_invitation_fk",
+      columns: [table.invitationId, table.accountId],
+      foreignColumns: [
+        organizationMembershipInvitations.id,
+        organizationMembershipInvitations.accountId,
+      ],
+    }).onDelete("restrict"),
+    invitationIdentity: uniqueIndex("organization_invitation_binding_events_invitation_uq").on(
+      table.accountId,
+      table.invitationId,
+    ),
+    subjectValid: check(
+      "organization_invitation_binding_events_subject_check",
+      sql`${table.targetSubjectId} = btrim(${table.targetSubjectId})
+        and ${table.targetSubjectId} like 'user:%'
+        and octet_length(convert_to(${table.targetSubjectId}, 'UTF8')) between 6 and 1024`,
+    ),
+    revisionValid: check(
+      "organization_invitation_binding_events_revision_check",
+      sql`${table.resultingRevision} > 1`,
     ),
   }),
 );

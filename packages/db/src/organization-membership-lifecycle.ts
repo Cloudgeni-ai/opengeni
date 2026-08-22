@@ -556,13 +556,48 @@ export async function listOrganizationInvitations(
 export async function createOrganizationInvitation(
   db: Database,
   input: CommandBase & {
-    targetSubjectId: string;
+    targetSubjectId: string | null;
     targetEmail: string;
+    targetName?: string;
+    initialWorkspaceIds?: string[];
     role: OrganizationMembershipRole;
     expiresAt: string;
   },
 ): Promise<OrganizationInvitationType> {
-  return OrganizationInvitation.parse(await runCommand(db, { action: "invite", ...input }));
+  const command = { action: "invite", ...input };
+  const result = await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select create_organization_invitation_v2(
+          ${JSON.stringify(command)}::jsonb
+        ) as result`,
+      );
+      if (!row) throw new Error("Organization invitation command returned no result");
+      return row.result;
+    },
+  );
+  return OrganizationInvitation.parse(result);
+}
+
+export async function bindPendingOrganizationInvitationsForVerifiedEmail(
+  db: Database,
+  input: { subjectId: string; email: string },
+): Promise<number> {
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    await setSubjectRlsContext(txDb, input.subjectId);
+    const [row] = await rawRows<{ result: number | string }>(
+      txDb,
+      sql`select bind_pending_organization_invitations_for_verified_email(
+        ${input.subjectId}::text, ${input.email}::text
+      ) as result`,
+    );
+    return Number(row?.result ?? 0);
+  });
 }
 
 export async function acceptOrganizationInvitation(
@@ -575,8 +610,19 @@ export async function acceptOrganizationInvitation(
   // `accept` inserts the invited human's personal workspace, so like
   // suspend/offboard it acquires workspace rows and can be inside a lock cycle
   // with an ordinary workspace writer. It needs the identical replay.
+  const command = { action: "accept", ...input };
   const result = await withOrganizationLifecycleDeadlockReplay(async () =>
-    runCommand(db, { action: "accept", ...input }),
+    withRlsContext(db, { accountId: input.organizationId, workspaceId: null }, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select accept_organization_invitation_v2(
+            ${JSON.stringify(command)}::jsonb
+          ) as result`,
+      );
+      if (!row) throw new Error("Organization invitation acceptance returned no result");
+      return row.result;
+    }),
   );
   return {
     invitation: OrganizationInvitation.parse((result as { invitation?: unknown }).invitation),
