@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 const migrationUrl = new URL(
-  "../drizzle/0315_human_confirmed_activation_resumed_generation.sql",
+  "../drizzle/0316_human_confirmed_activation_resumed_generation.sql",
   import.meta.url,
 );
 
@@ -25,7 +25,7 @@ function functionBody(sql: string, name: string): string {
   return sql.slice(start, end);
 }
 
-describe("migration 0315 human-confirmed activation across the resume generation", () => {
+describe("migration 0316 human-confirmed activation across the resume generation", () => {
   test("accepts later generations of the same logical turn for the live attempt and the answered row", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
