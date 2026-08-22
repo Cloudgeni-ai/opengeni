@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployment-preview
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deployment-preview
+  template:
+    metadata:
+      labels:
+        app: deployment-preview
+    spec:
+      hostNetwork: true
+      containers:
+        - name: api
+          image: ghcr.io/example/deployment-preview:latest
+          securityContext:
+            privileged: true
+          ports:
+            - containerPort: 3000
