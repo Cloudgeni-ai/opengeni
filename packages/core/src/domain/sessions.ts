@@ -131,6 +131,7 @@ import {
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import {
+  getManagedHumanPrivateSessionCreatePolicy,
   requireCanonicalManagedHuman,
   requireManagedHumanPrivateSessionCreate,
 } from "../application/session-tenancy";
@@ -1019,7 +1020,11 @@ async function finishStartSession(
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
     null;
   return {
-    session: { ...persisted, initialTurnId },
+    session: {
+      ...persisted,
+      ...(session.tenancy ? { tenancy: session.tenancy } : {}),
+      initialTurnId,
+    },
     changed: started.changed,
   };
 }
@@ -1427,6 +1432,7 @@ export function resolveSessionCreateVisibility(input: {
   requestedVisibility: "private" | "workspace";
   visibilityProvided: boolean;
   parentVisibility: "user_private" | "workspace_shared" | null;
+  personalWorkspace?: boolean;
 }): "user_private" | "workspace_shared" {
   if (input.parentVisibility === "user_private") {
     if (input.visibilityProvided && input.requestedVisibility !== "private") {
@@ -1440,6 +1446,7 @@ export function resolveSessionCreateVisibility(input: {
     }
     return "workspace_shared";
   }
+  if (input.personalWorkspace) return "user_private";
   return input.requestedVisibility === "private" ? "user_private" : "workspace_shared";
 }
 
@@ -1453,13 +1460,28 @@ export async function createSessionForRequestWithOutcome(
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
-  if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
+  let personalWorkspace = false;
+  if (!grant.metadata?.["sessionId"] && authorization?.canonicalManagedHumanSession) {
+    const policy = await getManagedHumanPrivateSessionCreatePolicy(
+      deps,
+      authorization,
+      workspaceId,
+    );
+    personalWorkspace = policy.personalWorkspace;
+  }
+  if ((payload.visibility === "private" || personalWorkspace) && !grant.metadata?.["sessionId"]) {
     if (!authorization) {
       throw new HTTPException(403, {
         message: "managed human session required",
       });
     }
-    await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
+    if (!personalWorkspace && !payload.idempotencyKey) {
+      // A committed keyed success must replay after an owner/admin disables
+      // new organization-private creates. The database admission transaction
+      // checks the durable success/denial ledger before opening the mutable
+      // private-create capability; fresh keys still fail closed there.
+      await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
+    }
     if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {
       throw new HTTPException(422, {
         message: "Only-me sessions require their own sandbox",
@@ -1531,9 +1553,10 @@ export async function createSessionForRequestWithOutcome(
   let effectiveVisibility: "user_private" | "workspace_shared";
   try {
     effectiveVisibility = resolveSessionCreateVisibility({
-      requestedVisibility: payload.visibility,
-      visibilityProvided,
+      requestedVisibility: personalWorkspace ? "private" : payload.visibility,
+      visibilityProvided: personalWorkspace || visibilityProvided,
       parentVisibility: parentAuthority?.visibility ?? null,
+      personalWorkspace,
     });
   } catch (error) {
     throw new HTTPException(422, {

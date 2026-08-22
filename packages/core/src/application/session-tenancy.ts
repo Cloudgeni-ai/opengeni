@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import {
   forkSessionContent,
+  getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
   sessionTenancyProductActivated,
@@ -65,16 +66,32 @@ export async function getManagedHumanSessionCreateCapabilities(
       return SessionTenancyCreateCapabilities.parse({
         activated: false,
         canCreatePrivate: false,
+        personalWorkspace: false,
         reason: "managed_session_required",
       });
     }
     throw error;
   }
-  const activated = await sessionTenancyProductActivated(deps.db, workspaceId);
+  const policy = await getManagedHumanPrivateSessionCreatePolicy(deps, authorization, workspaceId);
+  const activated = policy.personalWorkspace || policy.organizationEnabled;
   return SessionTenancyCreateCapabilities.parse({
     activated,
     canCreatePrivate: activated,
+    personalWorkspace: policy.personalWorkspace,
     reason: activated ? "available" : "not_activated",
+  });
+}
+
+export async function getManagedHumanPrivateSessionCreatePolicy(
+  deps: Pick<SessionTenancyDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+) {
+  requireCanonicalManagedHuman(authorization, workspaceId);
+  requirePermission(authorization.grant, "sessions:create");
+  return await getPrivateSessionCreatePolicy(deps.db, {
+    workspaceId,
+    actorSubjectId: authorization.grant.subjectId,
   });
 }
 
@@ -82,8 +99,12 @@ export async function requireManagedHumanPrivateSessionCreate(
   deps: Pick<SessionTenancyDependencies, "db">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
-): Promise<void> {
-  await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:create"]);
+): Promise<{ personalWorkspace: boolean }> {
+  const policy = await getManagedHumanPrivateSessionCreatePolicy(deps, authorization, workspaceId);
+  if (!policy.personalWorkspace && !policy.organizationEnabled) {
+    throw new SessionTenancyNotActivatedError();
+  }
+  return { personalWorkspace: policy.personalWorkspace };
 }
 
 async function requireSessionTenancyMutationGate(

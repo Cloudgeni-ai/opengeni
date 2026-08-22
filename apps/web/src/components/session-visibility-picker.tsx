@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 export type SessionTenancyCreateCapabilitiesView = {
   activated: boolean;
   canCreatePrivate: boolean;
+  personalWorkspace: boolean;
   reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
 };
 

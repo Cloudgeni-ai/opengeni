@@ -562,6 +562,59 @@ export const sessionTenancyActivations = pgTable(
   }),
 );
 
+export const organizationPrivateSessionSettings = pgTable(
+  "organization_private_session_settings",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedByMembershipId: uuid("updated_by_membership_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    updater: foreignKey({
+      name: "organization_private_session_settings_updater_fk",
+      columns: [table.updatedByMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    versionValid: check(
+      "organization_private_session_settings_version_check",
+      sql`${table.version} > 0`,
+    ),
+  }),
+);
+
+export const organizationPrivateSessionSettingEvents = pgTable(
+  "organization_private_session_setting_events",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    requestedEnabled: boolean("requested_enabled").notNull(),
+    expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
+    resultEnabled: boolean("result_enabled").notNull(),
+    resultVersion: bigint("result_version", { mode: "number" }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    changed: boolean("changed").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actor: foreignKey({
+      name: "organization_private_session_setting_events_actor_fk",
+      columns: [table.actorMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    versionsValid: check(
+      "organization_private_session_setting_events_versions_check",
+      sql`${table.expectedVersion} >= 0 and ${table.resultVersion} > 0`,
+    ),
+  }),
+);
+
 export const organizationUserRetentionPolicies = pgTable(
   "organization_user_retention_policies",
   {
@@ -4060,6 +4113,7 @@ export const sessionSpawnDenials = pgTable(
     subjectId: text("subject_id"),
     code: text("code").notNull(),
     idempotencyKey: text("idempotency_key"),
+    organizationPrivateSessionDenialReason: text("organization_private_session_denial_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -4079,6 +4133,11 @@ export const sessionSpawnDenials = pgTable(
     idempotency: uniqueIndex("session_spawn_denials_workspace_idempotency_idx")
       .on(table.workspaceId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} is not null`),
+    organizationPrivateSessionDenialReasonValid: check(
+      "session_spawn_denials_organization_private_reason_check",
+      sql`${table.organizationPrivateSessionDenialReason} is null
+        or ${table.organizationPrivateSessionDenialReason} = 'organization_private_sessions_disabled'`,
+    ),
     workspaceAccount: foreignKey({
       name: "session_spawn_denials_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],

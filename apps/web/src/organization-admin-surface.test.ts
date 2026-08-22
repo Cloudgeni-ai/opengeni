@@ -29,6 +29,12 @@ describe("organization administration surface", () => {
     ]) {
       expect(adminSource).toContain(`.${method}(`);
     }
+    for (const helper of [
+      "getOrganizationPrivateSessionSettings",
+      "updateOrganizationPrivateSessionSettings",
+    ]) {
+      expect(adminSource).toContain(`${helper}(`);
+    }
     expect(adminSource).not.toContain("personalWorkspaceId");
     expect(adminSource).toContain("Stable masked identifier");
     expect(adminSource).toContain("Profile name and email are unavailable from this API.");

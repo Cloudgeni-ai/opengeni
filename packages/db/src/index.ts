@@ -148,8 +148,10 @@ import type {
 } from "@opengeni/contracts";
 import {
   closePrivateSessionCreateCapability,
+  getPrivateSessionCreatePolicy,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
+  SessionTenancyNotActivatedError,
   sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
@@ -26617,6 +26619,11 @@ async function existingSpawnDenialForKey(
       ),
     )
     .limit(1);
+  if (
+    existing?.organizationPrivateSessionDenialReason === "organization_private_sessions_disabled"
+  ) {
+    throw new SessionTenancyNotActivatedError();
+  }
   return existing ? mapSessionSpawnDenial(existing) : null;
 }
 
@@ -26664,11 +26671,14 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
-  if (createRequestedVisibility === "user_private" && input.parentSessionId) {
-    // A private child later proves the owner's live organization membership
-    // after locking the parent session/attempt. Serialize with organization
-    // suspend/offboard before taking any workspace or parent row lock, so the
-    // canonical membership -> session lifecycle cannot form a lock cycle.
+  if (createRequestedVisibility === "user_private") {
+    // Private creation later proves the owner's live organization membership
+    // and, for a fresh top-level organization session, reads the mutable
+    // owner/admin enablement setting. Serialize both checks with organization
+    // settings changes and suspend/offboard before taking any workspace or
+    // parent row lock, so the canonical membership -> session lifecycle cannot
+    // form a lock cycle. A committed keyed replay is still resolved below
+    // before the mutable enablement check opens a fresh-create capability.
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
     );
@@ -26692,6 +26702,40 @@ async function createSessionInTransaction(
       subjectId: input.createdBy.subjectId,
     });
   }
+  let tenancyViewer: { subjectId: string; activated: boolean } | undefined;
+  if (input.subjectId) {
+    let activated = await sessionTenancyProductActivated(
+      tx as unknown as Database,
+      input.workspaceId,
+    );
+    if (
+      !activated &&
+      createRequestedVisibility === "user_private" &&
+      input.createdBy?.kind === "subject" &&
+      input.createdBy.subjectId === input.subjectId
+    ) {
+      const policy = await getPrivateSessionCreatePolicy(tx as unknown as Database, {
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.subjectId,
+      });
+      activated = policy.personalWorkspace || policy.platformAvailable;
+    }
+    tenancyViewer = { subjectId: input.subjectId, activated };
+  }
+  const mapCreateResultSession = async (
+    row: typeof schema.sessions.$inferSelect,
+    mcpServers: SessionMcpServerMetadata[],
+  ): Promise<Session> =>
+    await mapSessionWithControl(
+      tx,
+      row,
+      mcpServers,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tenancyViewer,
+    );
   if (createIdempotencyKey !== null) {
     // Keyed admission retains the control -> advisory order used by old
     // binaries during the rolling migration. The database depth trigger takes
@@ -26722,7 +26766,7 @@ async function createSessionInTransaction(
       ]);
       await input.beforeCreateCommit?.(tx, existing.id);
       return {
-        session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+        session: await mapCreateResultSession(existing, grouped.get(existing.id) ?? []),
         created: false,
         denied: false,
       };
@@ -26921,7 +26965,7 @@ async function createSessionInTransaction(
         ]);
         await input.beforeCreateCommit?.(tx, existing.id);
         return {
-          session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+          session: await mapCreateResultSession(existing, grouped.get(existing.id) ?? []),
           created: false,
           denied: false,
         };
@@ -26954,7 +26998,7 @@ async function createSessionInTransaction(
   });
   await input.beforeCreateCommit?.(tx, inserted.id);
   return {
-    session: await mapSessionWithControl(tx, inserted, mcpServers),
+    session: await mapCreateResultSession(inserted, mcpServers),
     created: true,
     denied: false,
   };
