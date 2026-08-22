@@ -2172,6 +2172,24 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   });
 });
 
+describe("workspace control lock timeout", () => {
+  test("defaults to 20 s and honors a positive integer override", () => {
+    expect(withEnv({}, () => getSettings()).workspaceControlLockTimeoutMs).toBe(20_000);
+    expect(
+      withEnv({ OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: "45000" }, () => getSettings())
+        .workspaceControlLockTimeoutMs,
+    ).toBe(45_000);
+  });
+
+  test("rejects non-positive and non-integer values at boot with a clear message", () => {
+    for (const value of ["0", "-5", "1.5", "abc", "20s"]) {
+      expect(() =>
+        withEnv({ OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: value }, () => getSettings()),
+      ).toThrow(/OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer/);
+    }
+  });
+});
+
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
   const original = process.env;
   process.env = { ...env };

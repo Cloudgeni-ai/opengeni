@@ -18,7 +18,11 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let admin: postgres.Sql;
-let priorLockTimeoutEnv: string | undefined;
+
+// Keep the request-scoped control-prefix budget short so the bounded wait
+// expires quickly; the production default is 20 s. The value flows the
+// production way: Settings -> createApp -> @opengeni/db, no env mutation.
+const LOCK_TIMEOUT_MS = 300;
 
 setDefaultTimeout(60_000);
 
@@ -33,18 +37,9 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   admin = postgres(shared.adminUrl, { max: 2, prepare: false });
-  // Keep the request-scoped control-prefix budget short so the bounded wait
-  // expires quickly; the production default is 20 s.
-  priorLockTimeoutEnv = process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS;
-  process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS = "300";
 }, 180_000);
 
 afterAll(async () => {
-  if (priorLockTimeoutEnv === undefined) {
-    delete process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS;
-  } else {
-    process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS = priorLockTimeoutEnv;
-  }
   await admin?.end();
   await client?.close();
   await shared?.release();
@@ -53,7 +48,11 @@ afterAll(async () => {
 function app() {
   const noop = async () => undefined;
   return createApp({
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      workspaceControlLockTimeoutMs: LOCK_TIMEOUT_MS,
+    }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {
@@ -95,7 +94,7 @@ async function fixture() {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
-      permissions: ["sessions:read", "sessions:control"],
+      permissions: ["sessions:read", "sessions:control", "workspace:admin"],
       principalKind: "human_session",
       exp: Math.floor(Date.now() / 1000) + 3_600,
     })}`,
@@ -131,7 +130,7 @@ async function expectBusyEnvelope(response: Response) {
     status: 503,
     code: "upstream_unavailable",
     retryable: true,
-    details: { code: "WORKSPACE_CONTROL_BUSY", lockTimeoutMs: 300 },
+    details: { code: "WORKSPACE_CONTROL_BUSY", lockTimeoutMs: LOCK_TIMEOUT_MS },
   });
   expect(body.error.outcomeUnknown).not.toBe(true);
   expect(body.error.message).toContain("busy");
@@ -189,6 +188,73 @@ describe("workspace control busy HTTP mapping", () => {
           method: "POST",
           headers: value.headers,
           body: JSON.stringify({ text: "blocked steer", clientEventId: crypto.randomUUID() }),
+        },
+      );
+      await expectBusyEnvelope(response);
+    } finally {
+      await release();
+    }
+  });
+
+  test("PATCH /settings renders the retryable 503 envelope and succeeds on retry", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const url = `http://x/v1/workspaces/${value.workspaceId}/settings`;
+    const request = () =>
+      app().request(url, {
+        method: "PATCH",
+        headers: value.headers,
+        body: JSON.stringify({ maxNestedAgentDepth: 2 }),
+      });
+    const release = await holdControlRow(value.workspaceId);
+    try {
+      const started = Date.now();
+      await expectBusyEnvelope(await request());
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      await release();
+    }
+    // Nothing was applied by the refused attempt; the retry is an ordinary
+    // settings narrowing once the exclusive prefix is free.
+    const retried = await request();
+    expect(retried.status).toBe(200);
+    const body = (await retried.json()) as { settings?: { maxNestedAgentDepth?: number } };
+    expect(body.settings?.maxNestedAgentDepth).toBe(2);
+  });
+
+  test("DELETE /sessions/:id renders the retryable 503 envelope and is retryable", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const url = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.session.id}`;
+    const request = () => app().request(url, { method: "DELETE", headers: value.headers });
+    const release = await holdControlRow(value.workspaceId);
+    try {
+      await expectBusyEnvelope(await request());
+    } finally {
+      await release();
+    }
+    // The bounded refusal never reached the tree checks: the retry runs the
+    // ordinary quiescence evaluation (the fixture still has its queued first
+    // turn, so it is refused as an ordinary 409, not a busy 503).
+    const retried = await request();
+    expect(retried.status).toBe(409);
+  });
+
+  test("POST /queue/:turnId/move renders the retryable 503 envelope", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const release = await holdControlRow(value.workspaceId);
+    try {
+      const response = await app().request(
+        `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.session.id}/queue/${crypto.randomUUID()}/move`,
+        {
+          method: "POST",
+          headers: value.headers,
+          body: JSON.stringify({
+            clientEventId: crypto.randomUUID(),
+            expectedQueueVersion: 0,
+            beforeTurnId: null,
+          }),
         },
       );
       await expectBusyEnvelope(response);

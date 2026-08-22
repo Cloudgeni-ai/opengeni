@@ -713,9 +713,18 @@ export async function saveComposerDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<ComposerDraftRow> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -776,9 +785,18 @@ export async function moveQueuedTurnInTransaction(
     expectedQueueVersion: number;
     actor: SessionCommandActor;
     operationKey: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<QueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -912,9 +930,18 @@ export async function deleteSessionQueueItemInTransaction(
     actor: SessionCommandActor;
     operationKey: string;
     reason?: string | null;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<QueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1045,9 +1072,18 @@ export async function editQueuedTurnInTransaction(
     replaceDraft: boolean;
     actor: SessionCommandActor;
     operationKey: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<EditQueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -2274,9 +2310,18 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",

@@ -2170,6 +2170,13 @@ export async function updateWorkspaceSettings(
   db: Database,
   workspaceId: string,
   patch: Record<string, unknown>,
+  options: {
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
+  } = {},
 ): Promise<Workspace> {
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
@@ -2194,7 +2201,11 @@ export async function updateWorkspaceSettings(
           // Keep settings writers in the same control-row -> workspace-row order
           // as session admission. This makes a narrowing atomic with respect to
           // every create that could otherwise observe a mixed policy snapshot.
-          await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "update");
+          await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "update", {
+            ...(options.controlLockTimeoutMs !== undefined
+              ? { lockTimeoutMs: options.controlLockTimeoutMs }
+              : {}),
+          });
           const [row] = await tx
             .update(schema.workspaces)
             .set({
@@ -27087,7 +27098,17 @@ export type DeleteSessionTreeIfQuiescentResult =
  */
 export async function deleteSessionTreeIfQuiescent(
   db: Database,
-  input: { workspaceId: string; subjectId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     * Exceeding it throws `WorkspaceControlBusyError` before any row is read.
+     */
+    controlLockTimeoutMs?: number;
+  },
 ): Promise<DeleteSessionTreeIfQuiescentResult> {
   try {
     return await withWorkspaceSubjectRls(
@@ -27101,7 +27122,11 @@ export async function deleteSessionTreeIfQuiescent(
           // takes this row FOR SHARE, so the update lock also fences a new
           // descendant or shared-sandbox peer from appearing after our tree
           // and group checks.
-          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update", {
+            ...(input.controlLockTimeoutMs !== undefined
+              ? { lockTimeoutMs: input.controlLockTimeoutMs }
+              : {}),
+          });
           const [root] = await tx
             .select({
               id: schema.sessions.id,
@@ -27320,6 +27345,9 @@ export async function deleteSessionTreeIfQuiescent(
         typeof current === "object" && "code" in current
           ? (current as { code?: unknown }).code
           : undefined;
+      // A bounded control-prefix wait surfaces as `WorkspaceControlBusyError`
+      // (code WORKSPACE_CONTROL_BUSY) with no `cause`, so the only 55P03 that
+      // reaches this chain is the NOWAIT tree lock below: live sandbox activity.
       if (code === "55P03") return { status: "live_sandboxes" };
       if (code === "23503" || code === "42501" || code === "55000") {
         return { status: "externally_referenced" };

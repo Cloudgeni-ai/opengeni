@@ -7,12 +7,15 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  deleteSessionTreeIfQuiescent,
   evaluateSessionControl,
   lockWorkspaceInferenceControl,
   lockWorkspaceInferenceControlForAdmission,
   mutateSessionControlInTransaction,
+  moveQueuedTurnInTransaction,
   mutateWorkspaceControlInTransaction,
   submitHumanPromptInTransaction,
+  updateWorkspaceSettings,
   WorkspaceControlBusyError,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
@@ -411,6 +414,63 @@ describe("workspace control lock fairness", () => {
       );
       expect(row?.value).toBe("0");
     });
+  });
+
+  test("settings, tree deletion, and queue commands honor the request budget only when passed", async () => {
+    const { grant, sessions } = await fixture();
+    const reserved = await admin.reserve();
+    let holding = true;
+    await reserved`begin`;
+    await reserved`select 1 from workspace_inference_controls where workspace_id = ${grant.workspaceId} for update`;
+    try {
+      const started = Date.now();
+      // Exclusive takers: settings narrowing and quiescent tree deletion.
+      await expect(
+        updateWorkspaceSettings(
+          client.db,
+          grant.workspaceId,
+          { maxNestedAgentDepth: 1 },
+          { controlLockTimeoutMs: 250 },
+        ),
+      ).rejects.toBeInstanceOf(WorkspaceControlBusyError);
+      await expect(
+        deleteSessionTreeIfQuiescent(client.db, {
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+          sessionId: sessions[0]!,
+          controlLockTimeoutMs: 250,
+        }),
+      ).rejects.toBeInstanceOf(WorkspaceControlBusyError);
+      // Shared taker: queue move fails before it ever reads the turn.
+      await expect(
+        withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+          moveQueuedTurnInTransaction(db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: sessions[0]!,
+            turnId: crypto.randomUUID(),
+            beforeTurnId: null,
+            expectedQueueVersion: 0,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            controlLockTimeoutMs: 250,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(WorkspaceControlBusyError);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      // Without a budget the same settings write keeps waiting (lifecycle
+      // semantics) and commits once the holder releases.
+      const unbounded = updateWorkspaceSettings(client.db, grant.workspaceId, {
+        maxNestedAgentDepth: 1,
+      });
+      expect(await settledWithin(unbounded, 400)).toBe(false);
+      holding = false;
+      await reserved`rollback`;
+      expect((await unbounded).settings.maxNestedAgentDepth).toBe(1);
+    } finally {
+      if (holding) await reserved`rollback`;
+      reserved.release();
+    }
   });
 
   test("a nested admission inside an exclusive admission keeps the exclusive prefix", async () => {
