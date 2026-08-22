@@ -21,17 +21,25 @@ CREATE TABLE automation_sources (
   webhook_secret_encrypted text NOT NULL,
   status text NOT NULL DEFAULT 'active',
   version integer NOT NULL DEFAULT 1,
+  pack_installation_id uuid,
+  pack_connector_id text,
   created_by_subject_id text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT automation_sources_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT automation_sources_pack_installation_fk
+    FOREIGN KEY (workspace_id, pack_installation_id)
+    REFERENCES pack_installations(workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT automation_sources_shape_chk CHECK (
     status IN ('active', 'disabled') AND version > 0
     AND octet_length(name) BETWEEN 1 AND 512
     AND octet_length(adapter_id) BETWEEN 1 AND 128
     AND octet_length(created_by_subject_id) BETWEEN 1 AND 4096
     AND jsonb_typeof(configuration) = 'object'
+    AND ((pack_installation_id IS NULL AND pack_connector_id IS NULL)
+      OR (pack_installation_id IS NOT NULL
+        AND octet_length(pack_connector_id) BETWEEN 1 AND 128))
   )
 );
 CREATE UNIQUE INDEX automation_sources_endpoint_uq ON automation_sources(endpoint_id);

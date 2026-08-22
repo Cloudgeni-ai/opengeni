@@ -7,11 +7,13 @@ import {
   createAutomationTrigger,
   createDb,
   deleteWorkspace,
+  enablePackInstallation,
   ensureManagedAccessForUser,
   listAutomationRuns,
   listAutomationSources,
   listAutomationTriggers,
   recordAutomationEvent,
+  updateAutomationSource,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -62,6 +64,41 @@ describe("automation persistence", () => {
         configuration: {},
       },
     });
+    expect(source).toMatchObject({
+      packInstallationId: null,
+      packConnectorId: null,
+    });
+    const packInstallation = await enablePackInstallation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      packId: "automation-test-pack",
+      installedBySubjectId: grant.subjectId,
+    });
+    const packSource = await createAutomationSource(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBySubjectId: grant.subjectId,
+      webhookSecretEncrypted: "pack-test-ciphertext",
+      packInstallationId: packInstallation.id,
+      packConnectorId: "events",
+      request: {
+        name: "Pack events",
+        adapterId: "signed-json.v1",
+        webhookSecret: "not-stored-in-plaintext",
+        configuration: {},
+      },
+    });
+    expect(packSource).toMatchObject({
+      packInstallationId: packInstallation.id,
+      packConnectorId: "events",
+    });
+    await expect(
+      updateAutomationSource(client.db, {
+        workspaceId: grant.workspaceId,
+        sourceId: packSource.id,
+        request: { status: "disabled" },
+      }),
+    ).resolves.toBeNull();
     const trigger = await createAutomationTrigger(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -195,7 +232,7 @@ describe("automation persistence", () => {
       acceptedExecution,
     });
     expect(sameRun).toMatchObject({ duplicate: true, run: { id: firstRun.run.id } });
-    expect(await listAutomationSources(client.db, grant.workspaceId)).toHaveLength(1);
+    expect(await listAutomationSources(client.db, grant.workspaceId)).toHaveLength(2);
     expect(await listAutomationTriggers(client.db, grant.workspaceId)).toHaveLength(1);
     expect(await listAutomationRuns(client.db, grant.workspaceId)).toHaveLength(1);
   }, 60_000);

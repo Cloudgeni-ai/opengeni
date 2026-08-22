@@ -10186,6 +10186,8 @@ export const automationSources = pgTable(
     webhookSecretEncrypted: text("webhook_secret_encrypted").notNull(),
     status: text("status").notNull().default("active"),
     version: integer("version").notNull().default(1),
+    packInstallationId: uuid("pack_installation_id"),
+    packConnectorId: text("pack_connector_id"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10207,12 +10209,20 @@ export const automationSources = pgTable(
         and octet_length(${table.name}) between 1 and 512
         and octet_length(${table.adapterId}) between 1 and 128
         and octet_length(${table.createdBySubjectId}) between 1 and 4096
-        and jsonb_typeof(${table.configuration}) = 'object'`,
+        and jsonb_typeof(${table.configuration}) = 'object'
+        and ((${table.packInstallationId} is null and ${table.packConnectorId} is null)
+          or (${table.packInstallationId} is not null
+            and octet_length(${table.packConnectorId}) between 1 and 128))`,
     ),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
       name: "automation_sources_workspace_account_fk",
+    }).onDelete("cascade"),
+    packInstallation: foreignKey({
+      columns: [table.workspaceId, table.packInstallationId],
+      foreignColumns: [packInstallations.workspaceId, packInstallations.id],
+      name: "automation_sources_pack_installation_fk",
     }).onDelete("cascade"),
   }),
 );

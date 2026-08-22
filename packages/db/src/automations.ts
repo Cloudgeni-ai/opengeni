@@ -12,7 +12,7 @@ import {
   type UpdateAutomationSourceRequest,
   type UpdateAutomationTriggerRequest,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withWorkspaceRls } from "./database";
 import * as schema from "./schema";
@@ -84,6 +84,8 @@ export async function createAutomationSource(
     createdBySubjectId: string;
     request: CreateAutomationSourceRequest;
     webhookSecretEncrypted: string;
+    packInstallationId?: string | null;
+    packConnectorId?: string | null;
   },
 ): Promise<AutomationSource> {
   return await withWorkspaceRls(
@@ -100,6 +102,8 @@ export async function createAutomationSource(
             adapterId: input.request.adapterId,
             configuration: input.request.configuration,
             webhookSecretEncrypted: input.webhookSecretEncrypted,
+            packInstallationId: input.packInstallationId ?? null,
+            packConnectorId: input.packConnectorId ?? null,
             createdBySubjectId: input.createdBySubjectId,
           })
           .returning();
@@ -194,6 +198,7 @@ export async function updateAutomationSource(
         and(
           eq(schema.automationSources.workspaceId, input.workspaceId),
           eq(schema.automationSources.id, input.sourceId),
+          isNull(schema.automationSources.packInstallationId),
         ),
       )
       .returning();
@@ -801,6 +806,8 @@ function mapSource(row: SourceRow): AutomationSource {
     configuration: row.configuration,
     status: row.status as AutomationSource["status"],
     version: row.version,
+    packInstallationId: row.packInstallationId,
+    packConnectorId: row.packConnectorId,
     hasWebhookSecret: Boolean(row.webhookSecretEncrypted),
     webhookPath: `/v1/webhooks/automations/${row.endpointId}`,
     createdBySubjectId: row.createdBySubjectId,

@@ -76,6 +76,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       c.req.param("sourceId"),
     );
+    assertGenericSourceMutable(current);
     if (request.configuration) {
       requireAutomationAdapter(current.adapterId).validateSourceConfiguration(
         request.configuration,
@@ -101,7 +102,14 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/automations/sources/:sourceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const current = await requireSource(
+      deps,
+      grant.accountId,
+      workspaceId,
+      c.req.param("sourceId"),
+    );
+    assertGenericSourceMutable(current);
     const source = await updateAutomationSource(deps.db, {
       workspaceId,
       sourceId: c.req.param("sourceId"),
@@ -397,6 +405,14 @@ async function requireSource(
   const source = await getAutomationSourceSecret(deps.db, { accountId, workspaceId, sourceId });
   if (!source) throw new HTTPException(404, { message: "automation source not found" });
   return source;
+}
+
+function assertGenericSourceMutable(source: AutomationSourceSecret): void {
+  if (source.packInstallationId) {
+    throw new HTTPException(409, {
+      message: "Pack-owned automation sources must be managed through their Pack setup API",
+    });
+  }
 }
 
 function requireEncryptionKey(deps: ApiRouteDeps): Uint8Array {

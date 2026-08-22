@@ -4,7 +4,7 @@ OpenGeni automations translate authenticated external events into ordinary agent
 
 ## Model
 
-- A **source** owns an adapter, an opaque public webhook endpoint, non-secret adapter configuration, an encrypted ingress secret, an active/disabled lifecycle, and a monotonic version.
+- A **source** owns an adapter, an opaque public webhook endpoint, non-secret adapter configuration, an encrypted ingress secret, an active/disabled lifecycle, and a monotonic version. A Pack-created source also carries the exact Pack installation and connector owner; the generic API cannot mutate that source behind the Pack's setup authority.
 - A **trigger** points at one source. Its immutable revisions own event matching plus the complete session template. `configuration` is Pack-frozen policy, while bounded `parameters` hold per-installation values such as an exact repository binding. A mutable head selects the current revision and active/paused/disabled status.
 - An **event** is the normalized, bounded result of one authenticated provider delivery. It freezes the accepted source version/configuration and matched trigger revisions, so recovery never resamples newer configuration. `(source, delivery key)` deduplicates transport retries and the raw-byte digest rejects a reused delivery identity with different bytes. One event may match at most 32 triggers.
 - A **run** is one trigger accepting one logical occurrence. `(trigger, occurrence key)` converges distinct provider deliveries for the same work. It freezes the exact accepted execution and later links to one ordinary session.
@@ -39,7 +39,7 @@ Workspace admins manage sources and triggers under `/v1/workspaces/:workspaceId/
 
 ## Packs
 
-A Pack may declare `automationTemplates`. Installing a Pack makes these frozen templates available but does not manufacture a provider connection. After the required connection/app is registered, setup instantiates a trigger tied to both the exact Pack installation and template. Pack-owned configuration and execution fields are immutable; per-installation `parameters`, pause/disable, and display-name edits remain revisioned. Disabling or uninstalling the Pack prevents a pending run from dispatching.
+A Pack may declare `automationTemplates`. Installing a Pack makes these frozen templates available but does not manufacture a provider connection. After the required connection/app is registered, setup may create a source owned by the exact Pack installation and connector, then instantiate a trigger tied to the exact installation and template. Generic source mutation is rejected for a Pack-owned source; the Pack setup API owns credential rotation and lifecycle synchronization. Pack-owned trigger configuration and execution fields are immutable; per-installation `parameters`, pause/disable, and display-name edits remain revisioned. Disabling or uninstalling the Pack prevents a pending run from dispatching.
 
 Canonical implementation:
 

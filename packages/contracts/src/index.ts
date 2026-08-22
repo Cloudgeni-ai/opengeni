@@ -8556,6 +8556,8 @@ export const AutomationSource = z.object({
   configuration: z.record(z.string(), z.unknown()),
   status: AutomationSourceStatus,
   version: z.number().int().positive(),
+  packInstallationId: z.string().uuid().nullable(),
+  packConnectorId: z.string().min(1).max(128).nullable(),
   hasWebhookSecret: z.boolean(),
   webhookPath: z.string().min(1),
   createdBySubjectId: z.string(),
