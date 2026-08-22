@@ -49,6 +49,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       "auth_sessions",
       "auth_users",
       "auth_verifications",
+      "automation_webhook_endpoints",
       "integration_oauth_clients",
       "managed_accounts",
       "nested_agent_depth_configuration",

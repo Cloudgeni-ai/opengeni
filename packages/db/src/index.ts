@@ -65047,3 +65047,4 @@ export * from "./interaction-revisions";
 export * from "./canonical-human-identities";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
+export * from "./automations";

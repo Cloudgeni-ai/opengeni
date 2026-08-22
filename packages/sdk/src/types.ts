@@ -5319,6 +5319,30 @@ export type CapabilityPackScheduledTaskTemplate = {
   prompt?: string | undefined;
 };
 
+export type CapabilityPackAutomationTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  adapterId: string;
+  eventTypes: string[];
+  sessionTemplate: {
+    prompt: string;
+    instructions: string | null;
+    resources: ResourceRef[];
+    skills: CapabilityPackSkill[];
+    tools: ToolRef[];
+    firstPartyMcpTools: string[];
+    firstPartyMcpPermissions: Permission[];
+    model: string | null;
+    reasoningEffort: ReasoningEffort | null;
+    sandboxBackend: SandboxBackend | null;
+    policyRole: string | null;
+    metadata: Record<string, unknown>;
+  };
+  configuration: Record<string, unknown>;
+  connectionRequirement: string | null;
+};
+
 export type CapabilityPackSkillFile = {
   path: string;
   content: string;
@@ -5401,6 +5425,7 @@ export type CapabilityPack = {
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
   scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
+  automationTemplates?: CapabilityPackAutomationTemplate[] | undefined;
   variableSet?: CapabilityPackVariableSetSpec | undefined;
   metadata: Record<string, unknown>;
 };
@@ -5503,6 +5528,31 @@ export type RegisterCapabilityPackRequest = {
         defaultRunMode?: ScheduledTaskRunMode | undefined;
         defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
         prompt?: string | undefined;
+      }[]
+    | undefined;
+  automationTemplates?:
+    | {
+        id: string;
+        name: string;
+        description: string;
+        adapterId: string;
+        eventTypes: string[];
+        sessionTemplate: {
+          prompt: string;
+          instructions?: string | null | undefined;
+          resources?: ResourceRef[] | undefined;
+          skills?: CapabilityPackSkill[] | undefined;
+          tools?: ToolRef[] | undefined;
+          firstPartyMcpTools?: string[] | undefined;
+          firstPartyMcpPermissions?: Permission[] | undefined;
+          model?: string | null | undefined;
+          reasoningEffort?: ReasoningEffort | null | undefined;
+          sandboxBackend?: SandboxBackend | null | undefined;
+          policyRole?: string | null | undefined;
+          metadata?: Record<string, unknown> | undefined;
+        };
+        configuration?: Record<string, unknown> | undefined;
+        connectionRequirement?: string | null | undefined;
       }[]
     | undefined;
   variableSet?:

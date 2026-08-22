@@ -25,6 +25,11 @@ import type {
 } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
+  triggerAutomationRun?: (input: {
+    accountId: string;
+    workspaceId: string;
+    runId: string;
+  }) => Promise<void>;
   signalUserMessage: (input: {
     sessionId: string;
     eventId: string;

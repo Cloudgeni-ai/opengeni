@@ -69,6 +69,7 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  */
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
+  "automation_webhook_endpoints",
   "workspace_memberships",
   "workspaces",
 ] as const;

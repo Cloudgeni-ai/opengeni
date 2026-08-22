@@ -41,7 +41,7 @@ Then open the smallest source files that answer the question:
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog).
+- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
@@ -104,6 +104,7 @@ Keep these concepts straight while working:
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
+- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters and Packs over this substrate.
 - **Knowledge memory**: reviewed workspace memory records stored separately from per-session conversation history. First-party docs MCP can search approved memories and propose new ones; approval/rejection lives in workspace API/UI review paths.
 
 ## Source Discovery Workflow
@@ -134,6 +135,7 @@ Before editing, identify which layer owns the behavior:
 - Sandbox resources: resource validation, manifest building, object storage, sandbox environment.
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
+- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter or Pack layered above it.
 - UI: `apps/web` API helpers/types/components.
 
 For pull-request delivery, preserve immutable candidates across a moving base:

@@ -39,6 +39,7 @@ const marketingSocialPack: CapabilityPack = {
   // (see apps/worker/src/activities/packs.ts), and a test enforces this.
   skills: [],
   components: [],
+  automationTemplates: [],
   tools: [
     { kind: "mcp", id: "opengeni" },
     { kind: "mcp", id: "docs" },
@@ -237,6 +238,7 @@ export function capabilityPackRequiresInstallationPlan(pack: CapabilityPack): bo
   return (
     pack.components.length > 0 ||
     pack.skills.length > 0 ||
+    (pack.automationTemplates?.length ?? 0) > 0 ||
     pack.rig !== undefined ||
     pack.sandboxImage !== undefined ||
     pack.sandboxProviderImages !== undefined
