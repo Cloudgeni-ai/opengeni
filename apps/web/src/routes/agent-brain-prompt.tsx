@@ -1,8 +1,10 @@
 import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useMemo, useState } from "react";
 
 import { useAppContext } from "@/context";
+import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 
 type AgentBrainPromptKind = "company_profile" | "preference" | "workspace_instructions";
 
@@ -61,16 +63,38 @@ export function AgentBrainPrompt({
   const copy = promptCopy(kind);
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
+  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
+  const modelSelection = useMemo(
+    () =>
+      resolveAgentBrainPromptModel(modelCatalog.rows, {
+        model: context.model,
+        reasoningEffort: context.reasoningEffort,
+        latencyMode: context.latencyMode,
+      }),
+    [modelCatalog.rows, context.model, context.reasoningEffort, context.latencyMode],
+  );
+  const noModelAvailable = !modelCatalog.loading && modelSelection === null;
+  const canSubmit =
+    Boolean(request.trim()) &&
+    !starting &&
+    !context.busy &&
+    !modelCatalog.loading &&
+    modelSelection !== null;
 
   const start = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const trimmed = request.trim();
-    if (!trimmed || starting || context.busy) return;
+    if (!trimmed || starting || context.busy || modelCatalog.loading || !modelSelection) return;
     setStarting(true);
     try {
       const created = await context.startSession(
         workspaceId,
-        { text: copy.openingMessage(trimmed) },
+        {
+          text: copy.openingMessage(trimmed),
+          model: modelSelection.model,
+          reasoningEffort: modelSelection.reasoningEffort,
+          latencyMode: modelSelection.latencyMode,
+        },
         { instructions: copy.instructions },
       );
       if (created) {
@@ -104,11 +128,22 @@ export function AgentBrainPrompt({
       <p className="text-xs leading-5 text-fg-subtle">
         OpenGeni will ask questions if needed and show you the result before saving it.
       </p>
+      {noModelAvailable ? (
+        <p className="text-xs leading-5 text-status-error" role="status">
+          No model is available for this workspace. Check the workspace model policy and provider
+          credentials.
+        </p>
+      ) : null}
+      {modelCatalog.error && modelSelection === null ? (
+        <p className="text-xs leading-5 text-fg-subtle">
+          Could not load the workspace model catalog: {modelCatalog.error}
+        </p>
+      ) : null}
       <div>
         <button
           type="submit"
           className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={!request.trim() || starting || context.busy}
+          disabled={!canSubmit}
         >
           {starting ? "Starting…" : copy.button}
         </button>
