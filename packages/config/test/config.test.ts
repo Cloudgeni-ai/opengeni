@@ -440,9 +440,7 @@ describe("OpenGeni Slack interaction settings", () => {
 
   test("defaults and validates the signed Slack slash command", () => {
     expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
-    expect(() =>
-      withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings()),
-    ).toThrow();
+    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
   });
 });
 
