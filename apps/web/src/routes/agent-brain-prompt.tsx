@@ -52,6 +52,7 @@ function promptCopy(kind: AgentBrainPromptKind): {
 }
 
 type CatalogState = {
+  workspaceId: string;
   models: WorkspaceModelCatalogModel[];
   loading: boolean;
   error: string | null;
@@ -68,21 +69,27 @@ function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & {
   refresh: () => Promise<void>;
 } {
   const client = useAppContext().client;
-  const [state, setState] = useState<CatalogState>({ models: [], loading: true, error: null });
+  const [state, setState] = useState<CatalogState>({
+    workspaceId,
+    models: [],
+    loading: true,
+    error: null,
+  });
   const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    setState((previous) => ({ ...previous, loading: true }));
+    setState({ workspaceId, models: [], loading: true, error: null });
     void (async () => {
       try {
         const response = await client.getWorkspaceModelCatalog(workspaceId);
         if (!cancelled) {
-          setState({ models: response.models, loading: false, error: null });
+          setState({ workspaceId, models: response.models, loading: false, error: null });
         }
       } catch (caught) {
         if (!cancelled) {
           setState({
+            workspaceId,
             models: [],
             loading: false,
             error: caught instanceof Error ? caught.message : String(caught),
@@ -99,7 +106,9 @@ function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & {
     setRefreshToken((token) => token + 1);
   }, []);
 
-  return { ...state, refresh };
+  return state.workspaceId === workspaceId
+    ? { ...state, refresh }
+    : { workspaceId, models: [], loading: true, error: null, refresh };
 }
 
 export function AgentBrainPrompt({
@@ -115,13 +124,9 @@ export function AgentBrainPrompt({
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
   const modelCatalog = useAgentBrainPromptCatalog(workspaceId);
-  // When the catalog fetch itself failed there is no policy verdict to act on,
-  // so fall back to the context defaults (the pre-catalog behaviour) rather than
-  // blocking the form; only a loaded catalog with no selectable row fails closed.
-  const catalogFailed = !modelCatalog.loading && modelCatalog.error !== null;
-  const catalogSelection = useMemo(
+  const modelSelection = useMemo(
     () =>
-      modelCatalog.loading || catalogFailed
+      modelCatalog.loading || modelCatalog.error
         ? null
         : resolveAgentBrainPromptModel(modelCatalog.models, {
             model: context.model,
@@ -130,23 +135,15 @@ export function AgentBrainPrompt({
           }),
     [
       modelCatalog.loading,
-      catalogFailed,
+      modelCatalog.error,
       modelCatalog.models,
       context.model,
       context.reasoningEffort,
       context.latencyMode,
     ],
   );
-  const modelSelection =
-    catalogSelection ??
-    (catalogFailed
-      ? {
-          model: context.model,
-          reasoningEffort: context.reasoningEffort,
-          latencyMode: context.latencyMode,
-        }
-      : null);
-  const noModelAvailable = !modelCatalog.loading && !catalogFailed && catalogSelection === null;
+  const noModelAvailable =
+    !modelCatalog.loading && modelCatalog.error === null && modelSelection === null;
   const canSubmit =
     Boolean(request.trim()) &&
     !starting &&
@@ -201,15 +198,25 @@ export function AgentBrainPrompt({
       <p className="text-xs leading-5 text-fg-subtle">
         OpenGeni will ask questions if needed and show you the result before saving it.
       </p>
+      {modelSelection ? (
+        <p className="text-xs leading-5 text-fg-subtle" role="status">
+          Model: <span className="font-medium text-fg">{modelSelection.label}</span>
+          {" · "}
+          {modelSelection.paymentSource}
+        </p>
+      ) : null}
       {noModelAvailable ? (
         <p className="text-xs leading-5 text-status-error" role="status">
           No model is available for this workspace. Check the workspace model policy and provider
           credentials.
         </p>
       ) : null}
-      {catalogFailed ? (
+      {modelCatalog.error ? (
         <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
-          <span>Could not load the workspace model catalog: {modelCatalog.error}</span>
+          <span>
+            Could not resolve an allowed workspace model: {modelCatalog.error}. Retry before
+            creating with OpenGeni.
+          </span>
           <button
             type="button"
             className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-fg hover:bg-surface-muted"
