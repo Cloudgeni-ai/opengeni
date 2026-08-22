@@ -626,6 +626,7 @@ async function fixture(
     externalOwnerTeamId?: string;
     guestOwner?: boolean;
     slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
+    slackCommand?: string;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -669,6 +670,7 @@ async function fixture(
     ...(options.codexSubscriptionEnabled ? { codexSubscriptionEnabled: true } : {}),
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
+    slackCommand: options.slackCommand ?? "/opengeni",
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -4222,9 +4224,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
   test("slash commands and explicit message shortcuts each create one durable session surface", async () => {
     if (!available) return;
-    const value = await fixture();
+    const configuredCommand = "/opengeni-staging";
+    const value = await fixture({ slackCommand: configuredCommand });
     const command = new URLSearchParams({
-      command: "/opengeni",
+      command: configuredCommand,
       team_id: value.teamId,
       user_id: value.ownerSlackUserId,
       channel_id: "C_COMMAND",
@@ -4296,7 +4299,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     const transientTriggerId = `transient-command-${crypto.randomUUID()}`;
     const transientCommand = new URLSearchParams({
-      command: "/opengeni",
+      command: configuredCommand,
       team_id: value.teamId,
       user_id: value.ownerSlackUserId,
       channel_id: transientChannel,
@@ -4336,7 +4339,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       value.slack.channelAccessFailures.set(channelId, failure);
       const triggerId = `permanent-${crypto.randomUUID()}`;
       const permanentCommand = new URLSearchParams({
-        command: "/opengeni",
+        command: configuredCommand,
         team_id: value.teamId,
         user_id: value.ownerSlackUserId,
         channel_id: channelId,

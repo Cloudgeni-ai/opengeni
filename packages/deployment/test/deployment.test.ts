@@ -744,6 +744,7 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_CLIENT_ID: "slack-staging-client",
         OPENGENI_SLACK_CLIENT_SECRET: "slack-staging-secret",
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
+        OPENGENI_SLACK_COMMAND: "/opengeni-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -793,6 +794,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID=github-personal-staging",

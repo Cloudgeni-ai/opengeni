@@ -419,6 +419,7 @@ describe("OpenGeni Slack interaction settings", () => {
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+    OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
   test("allows hosted Slack OAuth without enabling signed Slack interactions", () => {
@@ -426,6 +427,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
+    expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
   test("loads the signing secret without projecting it into any public contract", () => {
@@ -434,6 +436,13 @@ describe("OpenGeni Slack interaction settings", () => {
       () => getSettings(),
     );
     expect(settings.slackSigningSecret).toBe("slack-signing-secret");
+  });
+
+  test("defaults and validates the signed Slack slash command", () => {
+    expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
+    expect(() =>
+      withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings()),
+    ).toThrow();
   });
 });
 
