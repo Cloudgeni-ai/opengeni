@@ -89,11 +89,22 @@ The owner-only repository-authority routes are:
 - `POST /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify`
 
 Generic Connection create/update rejects `github.com` OAuth credentials and
-the reserved personal-GitHub metadata role. This repository-authority phase is
-deliberately inert for agent execution: it does not yet freeze selection
-snapshots into accepted turns, follow-ups, scheduled tasks, or runs; expose the
-token to a sandbox; add Git transport; or register GitHub API tools. Those
-admission, inheritance/recovery, broker, and runtime surfaces are separately
-audited dependent phases. Until they land, selecting a repository grants no
-runtime capability and unsupported agent-created use must fail rather than
-silently dropping authority.
+the reserved personal-GitHub metadata role. A human/API-created session,
+follow-up, or scheduled-task definition that carries a personal GitHub
+repository resource must also carry one explicit `github:personal`
+`connection.use` selection. Admission revalidates the same-organization target
+grant and exact owner/connection/credential binding, verifies every requested
+provider repository ID and read/write level against the current selected set,
+and freezes the connection generation, selection generation, per-row
+generation, canonical URI, ref, and access into the accepted turn or task.
+Credential bindings remain selectors, never grants. Missing, stale, mixed-
+account, or widened authority fails closed.
+
+This phase still exposes no token to a sandbox, adds no Git transport, and
+registers no GitHub API tools. Physical provider use must revalidate the frozen
+snapshot immediately before broker access; that broker/runtime work and
+agent-created inheritance, child/goal propagation, and recovery are separately
+audited dependent phases. Agent-created personal GitHub use therefore fails
+closed in this phase instead of silently dropping authority. Until a broker
+consumer lands, selecting and freezing a repository grants no executable
+runtime capability.

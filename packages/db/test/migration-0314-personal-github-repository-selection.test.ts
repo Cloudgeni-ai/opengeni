@@ -121,6 +121,15 @@ function selected(lastVerifiedAt = new Date().toISOString()) {
 }
 
 describe("migration 0314 personal GitHub repository selection", () => {
+  test("admits the dedicated discriminator only through existing scheduled connection ledgers", async () => {
+    const source = await Bun.file(
+      new URL("../drizzle/0314_personal_github_repository_selection.sql", import.meta.url),
+    ).text();
+    expect(source).toContain("scheduled_task_connection_authority_shape_chk");
+    expect(source).toContain("scheduled_run_connection_authority_shape_chk");
+    expect(source.match(/connection_type IN \('mcp', 'github_personal'\)/gu)).toHaveLength(2);
+  });
+
   test("keeps bigint repository IDs exact and advances only authority-relevant generations", async () => {
     if (!available) return;
     const owner = await fixture();

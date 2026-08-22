@@ -5,6 +5,7 @@ import { ConnectionMetadata } from "./index";
 export const PERSONAL_GITHUB_PROVIDER_DOMAIN = "github.com" as const;
 export const PERSONAL_GITHUB_PROVIDER_FAMILY = "github" as const;
 export const PERSONAL_GITHUB_CREDENTIAL_ROLE = "opengeni_github_personal" as const;
+export const PERSONAL_GITHUB_CONNECTION_SURFACE_ID = "github:personal" as const;
 export const PERSONAL_GITHUB_REQUESTED_SCOPES = ["repo"] as const;
 export const PERSONAL_GITHUB_AUTHORIZATION_URL =
   "https://github.com/login/oauth/authorize" as const;

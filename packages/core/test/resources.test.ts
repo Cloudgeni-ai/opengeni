@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeResources } from "../src/domain/resources";
+import { normalizeResources, personalGitHubRepositoryResources } from "../src/domain/resources";
 
 describe("repository resource normalization", () => {
   test("preserves Azure DevOps clone paths without appending a GitHub-style suffix", () => {
@@ -92,5 +92,29 @@ describe("repository resource normalization", () => {
         mountPath: "repos/dev.azure.com/acme/project/_git/infrastructure.git",
       },
     ]);
+  });
+
+  test("separates personal GitHub bindings from GitHub App aliases", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    expect(personalGitHubRepositoryResources([resource])).toEqual([resource]);
+    expect(() =>
+      personalGitHubRepositoryResources([
+        { ...resource, githubInstallationId: 123, githubRepositoryId: 456 },
+      ]),
+    ).toThrow();
+    expect(() =>
+      personalGitHubRepositoryResources([
+        { ...resource, uri: "https://github.com/octocat/private-repository.git" },
+      ]),
+    ).toThrow();
+    expect(() => personalGitHubRepositoryResources([resource, resource])).toThrow();
   });
 });

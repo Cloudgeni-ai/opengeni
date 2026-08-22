@@ -196,6 +196,7 @@ BEGIN
         AND connection_value.authority_scope = 'user'
         AND connection_value.provider_domain = 'github.com'
         AND connection_value.kind = 'oauth2'
+        AND connection_value.granted_scopes = '["repo"]'::jsonb
         AND connection_value.metadata ->> 'credentialRole' = 'opengeni_github_personal'
         AND connection_value.metadata ->> 'providerFamily' = 'github'
         AND connection_value.metadata ->> 'providerPrincipalId' ~ '^[1-9][0-9]*$'
@@ -372,6 +373,7 @@ BEGIN
         AND connection_value.authority_scope = 'user'
         AND connection_value.provider_domain = 'github.com'
         AND connection_value.kind = 'oauth2'
+        AND connection_value.granted_scopes = '["repo"]'::jsonb
         AND connection_value.authority_generation = p_expected_connection_authority_generation
         AND connection_value.metadata ->> 'credentialRole' = 'opengeni_github_personal'
         AND connection_value.metadata ->> 'providerFamily' = 'github'
@@ -589,3 +591,45 @@ COMMENT ON TABLE personal_github_repository_selection_heads IS
   'Owner-only monotonic authority head for an explicit personal GitHub repository set.';
 COMMENT ON TABLE personal_github_repository_selections IS
   'Only explicitly selected personal GitHub repositories; never a private discovery catalog.';
+
+-- Scheduled tasks already freeze user-owned connection.use authority in a
+-- separate immutable ledger. Admit the dedicated personal-GitHub discriminator
+-- into that existing lane; the exact repository set remains in the task's
+-- accepted personal_connection_delegations snapshot and execution digest.
+ALTER TABLE scheduled_task_connection_authority_snapshots
+  DROP CONSTRAINT scheduled_task_connection_authority_shape_chk,
+  ADD CONSTRAINT scheduled_task_connection_authority_shape_chk CHECK (
+    task_authority_revision > 0
+    AND execution_digest ~ '^[0-9a-f]{64}$'
+    AND octet_length(server_id) BETWEEN 1 AND 256
+    AND connection_generation > 0
+    AND (selected_kind IS NULL OR selected_kind IN ('oauth2','api_key','app_install','delegated'))
+    AND (connection_type IS NULL OR connection_type IN ('mcp', 'github_personal'))
+    AND membership_authorization_revision > 0
+    AND authority_generation > 0
+    AND grant_generation > 0
+    AND grant_mode IN ('once', 'session', 'always')
+    AND grant_context IN ('user_private', 'workspace_shared')
+    AND grant_context = session_visibility
+    AND session_visibility IN ('user_private', 'workspace_shared')
+    AND cardinality(selection_sources) > 0
+  );
+
+ALTER TABLE scheduled_task_run_connection_authority_snapshots
+  DROP CONSTRAINT scheduled_run_connection_authority_shape_chk,
+  ADD CONSTRAINT scheduled_run_connection_authority_shape_chk CHECK (
+    task_authority_revision > 0
+    AND execution_digest ~ '^[0-9a-f]{64}$'
+    AND octet_length(server_id) BETWEEN 1 AND 256
+    AND connection_generation > 0
+    AND (selected_kind IS NULL OR selected_kind IN ('oauth2','api_key','app_install','delegated'))
+    AND (connection_type IS NULL OR connection_type IN ('mcp', 'github_personal'))
+    AND membership_authorization_revision > 0
+    AND authority_generation > 0
+    AND grant_generation > 0
+    AND grant_mode IN ('once', 'session', 'always')
+    AND grant_context IN ('user_private', 'workspace_shared')
+    AND grant_context = session_visibility
+    AND session_visibility IN ('user_private', 'workspace_shared')
+    AND cardinality(selection_sources) > 0
+  );

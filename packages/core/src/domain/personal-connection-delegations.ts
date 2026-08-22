@@ -4,6 +4,7 @@ import type {
   ConnectionMetadata,
   McpConnectionAuthoritySelection,
   McpPersonalConnectionDelegation,
+  ResourceRef,
   SessionTurn,
   SocialConnection,
   ToolRef,
@@ -15,6 +16,12 @@ import {
   googleDriveScopesAllowCapability,
 } from "@opengeni/contracts/google-drive";
 import {
+  isPersonalGitHubConnection,
+  PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+  PersonalGitHubConnectionMetadata,
+} from "@opengeni/contracts/personal-github";
+import {
+  getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
   getConnectionMetadata,
   getSocialConnection,
@@ -26,6 +33,7 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
+import { personalGitHubRepositoryResources } from "./resources";
 
 export type PersonalConnectionDelegationSource =
   | {
@@ -530,6 +538,103 @@ export function personalAtlassianDelegationsFromVisibleConnections(input: {
     }));
 }
 
+async function personalGitHubDelegationFromVisibleConnections(input: {
+  db: Database;
+  accountId: string;
+  subjectId: string;
+  connections: ConnectionMetadata[];
+  resources: ResourceRef[];
+  authoritySelection?: McpConnectionAuthoritySelection;
+}): Promise<McpPersonalConnectionDelegation | null> {
+  const resources = personalGitHubRepositoryResources(input.resources);
+  if (resources.length === 0) {
+    if (input.authoritySelection) {
+      throw new Error("personal GitHub connection authority requires selected repositories");
+    }
+    return null;
+  }
+  const bindingIds = new Set(resources.map((resource) => resource.credentialBindingId));
+  if (bindingIds.size !== 1) {
+    throw new Error("accepted work may use only one personal GitHub account");
+  }
+  const authoritySelection = input.authoritySelection;
+  if (!authoritySelection) {
+    throw new Error("personal GitHub repository resources require explicit connection authority");
+  }
+  const connection = input.connections.find(
+    (candidate) =>
+      candidate.id === authoritySelection.connectionId &&
+      candidate.subjectId === input.subjectId &&
+      candidate.status === "active" &&
+      isPersonalGitHubConnection(candidate),
+  );
+  if (
+    !connection ||
+    !connection.authorityId ||
+    connection.authorityId !== authoritySelection.userDelegation.authorityId ||
+    connection.grantedScopes.length !== 1 ||
+    connection.grantedScopes[0] !== "repo"
+  ) {
+    throw new Error("personal GitHub connection authority selection is unavailable");
+  }
+  const metadata = PersonalGitHubConnectionMetadata.parse(connection.metadata);
+  const credentialBindingId = [...bindingIds][0]!;
+  if (metadata.credentialBindingId !== credentialBindingId) {
+    throw new Error("personal GitHub credential binding does not match the selected connection");
+  }
+  const selection = await getPersonalGitHubRepositorySelectionState(input.db, {
+    accountId: input.accountId,
+    originWorkspaceId: connection.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: connection.id,
+  });
+  if (
+    !selection ||
+    selection.selectionGeneration <= 0 ||
+    selection.credentialBindingId !== credentialBindingId ||
+    selection.providerPrincipalId !== metadata.providerPrincipalId
+  ) {
+    throw new Error("personal GitHub repository selection changed or is unavailable");
+  }
+  const selectedById = new Map(
+    selection.repositories.map((repository) => [repository.repositoryId, repository]),
+  );
+  const repositories = resources.map((resource) => {
+    const selected = selectedById.get(resource.repositoryId);
+    if (
+      !selected ||
+      selected.canonicalUrl !== resource.uri ||
+      (resource.access === "write" && selected.selectedAccess !== "write")
+    ) {
+      throw new Error("personal GitHub repository resource is outside the selected authority");
+    }
+    return {
+      repositoryId: selected.repositoryId,
+      fullName: selected.fullName,
+      canonicalUrl: selected.canonicalUrl,
+      ref: resource.ref,
+      access: resource.access,
+      selectionGeneration: selected.selectionGeneration,
+    };
+  });
+  return {
+    serverId: PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+    connectionId: connection.id,
+    originWorkspaceId: connection.workspaceId,
+    ownerSubjectId: input.subjectId,
+    providerDomain: "github.com",
+    kind: "oauth2",
+    connectionType: "github_personal",
+    userDelegation: authoritySelection.userDelegation,
+    personalGitHubRepositorySelection: {
+      credentialBindingId,
+      connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+      selectionGeneration: selection.selectionGeneration,
+      repositories,
+    },
+  };
+}
+
 export function personalConnectionDelegationsEqual(
   left: McpPersonalConnectionDelegation[],
   right: McpPersonalConnectionDelegation[],
@@ -546,7 +651,9 @@ export function personalConnectionDelegationsEqual(
       other.kind === delegation.kind &&
       other.connectionType === delegation.connectionType &&
       JSON.stringify(other.userDelegation ?? null) ===
-        JSON.stringify(delegation.userDelegation ?? null)
+        JSON.stringify(delegation.userDelegation ?? null) &&
+      JSON.stringify(other.personalGitHubRepositorySelection ?? null) ===
+        JSON.stringify(delegation.personalGitHubRepositorySelection ?? null)
     );
   });
 }
@@ -655,6 +762,7 @@ export async function freezePersonalConnectionDelegations(input: {
   workspaceId: string;
   settings: Pick<Settings, "mcpServers">;
   tools: ToolRef[];
+  resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAuthoritySelection[];
   rejectUnselectedActivatedConnections?: boolean;
@@ -667,13 +775,24 @@ export async function freezePersonalConnectionDelegations(input: {
 }): Promise<McpPersonalConnectionDelegation[]> {
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
   const includeFirstPartyConnections = input.tools.some((tool) => tool.id === "opengeni");
-  if ((servers.length === 0 && !includeFirstPartyConnections) || input.source.kind === "none") {
+  const personalGitHubResources = personalGitHubRepositoryResources(input.resources ?? []);
+  if (
+    (servers.length === 0 &&
+      !includeFirstPartyConnections &&
+      personalGitHubResources.length === 0) ||
+    input.source.kind === "none"
+  ) {
     return [];
   }
   if (input.source.kind === "turn") {
     if ((input.authoritySelections?.length ?? 0) > 0) {
       throw new Error(
         "agent-created work inherits connection authority from its exact parent turn",
+      );
+    }
+    if (personalGitHubResources.length > 0) {
+      throw new Error(
+        "agent-created personal GitHub repository authority is not activated in this delivery phase",
       );
     }
     const inherited = personalConnectionDelegationsFromParent({
@@ -756,6 +875,9 @@ export async function freezePersonalConnectionDelegations(input: {
   if (input.googleDrivePublicationEnabled) {
     supportedSelectionIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
   }
+  if (personalGitHubResources.length > 0) {
+    supportedSelectionIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+  }
   const unsupportedSelections = (input.authoritySelections ?? []).filter(
     (selection) => !supportedSelectionIds.has(selection.serverId),
   );
@@ -777,7 +899,22 @@ export async function freezePersonalConnectionDelegations(input: {
       ? { rejectUnselectedActivatedConnections: input.rejectUnselectedActivatedConnections }
       : {}),
   });
-  if (!includeFirstPartyConnections) return mcp;
+  const personalGitHubAuthoritySelection = (input.authoritySelections ?? []).find(
+    (selection) => selection.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+  );
+  const personalGitHub = await personalGitHubDelegationFromVisibleConnections({
+    db: input.db,
+    accountId: input.source.accountId,
+    subjectId: ownerSubjectId,
+    connections: visibleConnections,
+    resources: input.resources ?? [],
+    ...(personalGitHubAuthoritySelection
+      ? { authoritySelection: personalGitHubAuthoritySelection }
+      : {}),
+  });
+  if (!includeFirstPartyConnections) {
+    return [...mcp, ...(personalGitHub ? [personalGitHub] : [])];
+  }
   const visible = await listSocialConnections(input.db, input.workspaceId, 500, ownerSubjectId);
   const latest = new Map<"x" | "reddit", (typeof visible)[number]>();
   for (const connection of visible) {
@@ -819,6 +956,7 @@ export async function freezePersonalConnectionDelegations(input: {
     : null;
   return [
     ...mcp,
+    ...(personalGitHub ? [personalGitHub] : []),
     ...(googleDrivePublication ? [googleDrivePublication] : []),
     ...[...latest.values()].map((connection) => ({
       serverId: `social:${connection.provider}`,

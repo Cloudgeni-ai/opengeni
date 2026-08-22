@@ -5,6 +5,7 @@ import {
   PersonalGitHubRepository,
   ReplacePersonalGitHubRepositorySelectionsRequest,
 } from "../src/personal-github";
+import { McpPersonalConnectionDelegation } from "../src";
 
 const repository = {
   repositoryId: "1234567890123456",
@@ -89,5 +90,66 @@ describe("personal GitHub repository contracts", () => {
         },
       }).repositories,
     ).toHaveLength(1);
+  });
+
+  test("binds durable personal delegations to one canonical repository snapshot", () => {
+    const delegation = {
+      serverId: "github:personal",
+      connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      originWorkspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ownerSubjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2" as const,
+      connectionType: "github_personal" as const,
+      userDelegation: {
+        organizationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        authorityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        authorityGeneration: 2,
+        workspaceId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        sessionId: null,
+        action: "connection.use" as const,
+        mode: "always" as const,
+        context: "workspace_shared" as const,
+        authorityEpoch: null,
+        grantId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        grantGeneration: 3,
+      },
+      personalGitHubRepositorySelection: {
+        credentialBindingId: "11111111-1111-4111-8111-111111111111",
+        connectionAuthorityGeneration: 2,
+        selectionGeneration: 4,
+        repositories: [
+          {
+            repositoryId: repository.repositoryId,
+            fullName: repository.fullName,
+            canonicalUrl: repository.canonicalUrl,
+            ref: repository.defaultBranch,
+            access: "write" as const,
+            selectionGeneration: 4,
+          },
+        ],
+      },
+    };
+    expect(McpPersonalConnectionDelegation.parse(delegation)).toEqual(delegation);
+    expect(
+      McpPersonalConnectionDelegation.safeParse({
+        ...delegation,
+        personalGitHubRepositorySelection: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      McpPersonalConnectionDelegation.safeParse({
+        ...delegation,
+        personalGitHubRepositorySelection: {
+          ...delegation.personalGitHubRepositorySelection,
+          repositories: [
+            {
+              ...delegation.personalGitHubRepositorySelection.repositories[0]!,
+              canonicalUrl: "https://github.com/octocat/different-repository",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
   });
 });

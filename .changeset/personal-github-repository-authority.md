@@ -6,6 +6,7 @@
 ---
 
 Add bounded owner-only personal GitHub repository discovery, immutable selected-repository
-authority storage, full-replacement and verification APIs, and typed SDK methods. Runtime
-Git and GitHub API execution remain unavailable until their separately audited authority
-admission and broker phases land.
+authority storage, full-replacement and verification APIs, typed SDK methods, and exact
+accepted-turn/scheduled-task authority snapshots for explicitly bound repository resources.
+Runtime Git and GitHub API execution remain unavailable until their separately audited broker
+and provider-consumer phases land.
