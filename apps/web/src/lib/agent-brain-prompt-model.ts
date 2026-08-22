@@ -8,9 +8,36 @@ export type AgentBrainPromptModelPreference = {
 
 export type AgentBrainPromptModelSelection = {
   model: string;
+  label: string;
+  paymentSource: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
 };
+
+function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
+  if (model.source === "codex") {
+    return "Codex subscription";
+  }
+  if (model.source === "supergrok") {
+    return "SuperGrok subscription";
+  }
+  if (model.source === "workspace_gateway") {
+    return "Workspace AI Gateway";
+  }
+  if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
+    return "OpenGeni credits";
+  }
+  if (model.billing?.upstreamPayer === "connected_subscription") {
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "xai"
+      ? "SuperGrok subscription"
+      : "Codex subscription";
+  }
+  if (model.billing?.upstreamPayer === "workspace") {
+    return "Workspace AI Gateway";
+  }
+  return "External provider";
+}
 
 /**
  * Pick a workspace-selectable model for the Company Brain "Create with OpenGeni"
@@ -55,5 +82,11 @@ export function resolveAgentBrainPromptModel(
     )
       ? preferred.latencyMode
       : "standard";
-  return { model: model.id, reasoningEffort, latencyMode };
+  return {
+    model: model.id,
+    label: model.label,
+    paymentSource: paymentSourceFor(model),
+    reasoningEffort,
+    latencyMode,
+  };
 }
