@@ -52,8 +52,12 @@ export type SessionGoalAutoResumedByExternalInput = {
  * Resume a goal that the continuation ceiling paused, because new external
  * input arrived. The ceiling (`max_auto_continuations`) is pacing for
  * consecutive no-input continuations, never user intent: a `user_pause`,
- * `api`, `agent`, `limits`, or `no_progress` pause is deliberately left alone
- * and is never resumed here.
+ * `api`, `agent`, or `limits` pause is deliberately left alone and is never
+ * resumed here. Every producer of external input calls this: child results,
+ * scheduled occurrences, and media results (`addSessionSystemUpdate*`), Agent
+ * messages (`sendAgentMessageInTransaction`), Agent Steer
+ * (`steerAgentSessionInTransaction`), and human/API Send/Steer
+ * (`submitHumanPromptInTransaction`).
  *
  * Lock contract: the caller already holds the canonical event-write prefix
  * and the session row (`FOR NO KEY UPDATE`); this helper then takes the goal

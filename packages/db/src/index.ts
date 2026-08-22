@@ -50015,6 +50015,8 @@ export async function getSessionGoalWithContinuation(
       // is the same notion the materializer applies under lock.
       let currentHoldUntil: Date | null = null;
       if (goal.continuationHoldTurnId && goal.continuationHoldUntil) {
+        // Newest finished truth by finish time (a human turn queued after
+        // internal turns has a low position but finishes later).
         const [latestFinishedTurn] = await tx
           .select({ id: schema.sessionTurns.id })
           .from(schema.sessionTurns)
@@ -50025,7 +50027,11 @@ export async function getSessionGoalWithContinuation(
               sql`${schema.sessionTurns.finishedAt} is not null`,
             ),
           )
-          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+          )
           .limit(1);
         if (
           latestFinishedTurn?.id === goal.continuationHoldTurnId &&
@@ -52153,7 +52159,11 @@ async function latestFinishedTurnHasFailureCodeTx(
         sql`${schema.sessionTurns.finishedAt} is not null`,
       ),
     )
-    .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
     .limit(1);
   return latestFinished
     ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
@@ -52689,7 +52699,15 @@ export async function materializeGoalContinuation(
           return { action: "queue", events: [] } as const;
         }
 
+        // A hold whose deadline has just passed is due now: the evaluation
+        // that retires it skips the idle backoff once, so pacing never extends
+        // the agent's own stated deadline (the streak keeps counting after).
+        let holdDeadlinePassed = false;
         if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
+          // Newest finished truth by finish time, the same notion the
+          // evaluator and the idle backoff use: a human turn queued after
+          // internal turns has a low position yet is the newer truth that
+          // retires the hold.
           const [latestFinishedTurn] = await tx
             .select({ id: schema.sessionTurns.id })
             .from(schema.sessionTurns)
@@ -52700,7 +52718,11 @@ export async function materializeGoalContinuation(
                 sql`${schema.sessionTurns.finishedAt} is not null`,
               ),
             )
-            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+            .orderBy(
+              desc(schema.sessionTurns.finishedAt),
+              desc(schema.sessionTurns.position),
+              desc(schema.sessionTurns.createdAt),
+            )
             .limit(1);
           const holdUntil = goalRead.continuationHoldUntil;
           // Compare against the transaction's database clock: the wake-outbox
@@ -52738,6 +52760,7 @@ export async function materializeGoalContinuation(
           // A newer turn finished after the hold was declared, or the deadline
           // passed: retire the hold in this same transaction and continue
           // exactly as before.
+          holdDeadlinePassed = holdUntil.getTime() <= dbNow.getTime();
           await tx
             .update(schema.sessionGoals)
             .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
@@ -52755,6 +52778,7 @@ export async function materializeGoalContinuation(
         // above), and they pull the delayed outbox wake to now.
         if (
           input.idleBackoff &&
+          !holdDeadlinePassed &&
           goalRead.autoContinuations >= 1 &&
           goalRead.lastContinuationTurnId
         ) {

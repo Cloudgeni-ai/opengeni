@@ -167,7 +167,11 @@ The locked decision applies these rules:
    deadline row; an undelivered earlier wake coalesces with
    `least(next_attempt_at, notBefore)`. A hold that belongs to an older turn or
    whose deadline has passed is cleared in that same transaction and
-   evaluation continues as before. Every goal head mutation clears the hold
+   evaluation continues as before. "Newest finished turn" is ordered by
+   finish time everywhere (materializer, evaluator, backoff, and the API
+   projection): a human prompt queued after internal turns takes a low
+   normalized queue position, yet it is the newer truth that retires a hold.
+   Every goal head mutation clears the hold
    inside its own transaction: human/API `PATCH` (pause, resume, redirect),
    `DELETE`, agent `goal_set`, `goal_complete`, `goal_pause`, and an applied
    `goal_update` revision (a `review_changes` proposal-only outcome records
@@ -198,7 +202,10 @@ The locked decision applies these rules:
    `session_workflow_wake_outbox.next_attempt_at`, never in a Temporal timer or
    a new column. Any new input (pending machine input, a human prompt, Steer)
    commits its own immediate wake, which pulls that row to now, and wins the
-   next evaluation as ordinary input. The API projects the wait as
+   next evaluation as ordinary input. A `goal_wait` hold whose deadline has
+   just passed is due now: the evaluation that retires it skips the backoff
+   once (the streak keeps counting afterwards), so pacing never extends the
+   agent's own stated deadline. The API projects the wait as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
    OpenGeni does not infer progress or blockage from tool/event shape; the
@@ -212,13 +219,15 @@ The locked decision applies these rules:
    scheduled-task configuration only) applies on its own even without the
    deployment setting. The ceiling bounds the same consecutive no-input streak
    as the backoff, so any consumed external input resets it. Reaching it is
-   pacing, not user intent: any later external input (new machine input such
-   as a child result or agent message, a human/API prompt, or Steer) resumes
-   the goal automatically in the same commit as that input, with
-   `goal.resumed` (`actor: "system"`, `reason: "external_input"`, and the
-   causing update or turn), a fresh continuation epoch, and an armed wake. A
-   `user_pause`, `api`, `agent`, `limits`, or `no_progress` pause is never
-   auto-resumed.
+   pacing, not user intent: every external input producer resumes the goal
+   automatically in the same commit as that input: child results
+   (`child_terminal_result`), scheduled occurrences (`scheduled_occurrence`),
+   media results (`media_generation_result`), Agent messages
+   (`agent_message`), Agent Steer (`agent_steer_instruction`), and human/API
+   Send/Steer. Each emits `goal.resumed` (`actor: "system"`,
+   `reason: "external_input"`, and the causing update or turn) at its next
+   session sequence, starts a fresh continuation epoch, and arms the wake. A
+   `user_pause`, `api`, `agent`, or `limits` pause is never auto-resumed.
 7. Otherwise one deterministic goal-continuation internal update is recorded.
    At claim, its exact prompt becomes one canonical user-role model-memory item
    with the frozen goal snapshot; it is not duplicated into the generic

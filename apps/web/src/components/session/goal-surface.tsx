@@ -396,8 +396,8 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
           }
         >
           {record.maxAutoContinuations !== null
-            ? `${record.autoContinuations} of ${record.maxAutoContinuations} auto-continues`
-            : `${record.autoContinuations} auto-continue${record.autoContinuations === 1 ? "" : "s"}`}
+            ? `${record.autoContinuations} of ${record.maxAutoContinuations} consecutive unattended continues`
+            : `${record.autoContinuations} consecutive unattended continue${record.autoContinuations === 1 ? "" : "s"}`}
         </MetaChip>
         <MetaChip dot={record.noProgressStreak >= 2 ? "waiting" : undefined}>
           {record.noProgressStreak} stalled check{record.noProgressStreak === 1 ? "" : "s"}

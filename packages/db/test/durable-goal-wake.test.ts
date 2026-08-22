@@ -27,7 +27,9 @@ import {
   projectSessionGoalPromptField,
   recoverSessionDispatch,
   recordSessionGoalProgressWithEvent,
+  sendAgentMessageInTransaction,
   setSessionGoalStatusWithEvent,
+  steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
   updateSessionGoalWithEvent,
@@ -2700,7 +2702,8 @@ describe("input-aware continuation cap and idle backoff", () => {
 
   test("consecutive no-input continuations back off, re-arm the delayed wake, and yield to new input", async () => {
     const ctx = await runningGoalFixture();
-    const idleBackoff = { scheduleMs: [3_000, 30_000], maxMs: 10_000 };
+    // Wide delays so the assertions never race the wall clock in CI.
+    const idleBackoff = { scheduleMs: [60_000, 120_000], maxMs: 90_000 };
     await settleIdle(ctx);
     // First continuation after external input (the initial human turn) is immediate.
     expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
@@ -2710,11 +2713,11 @@ describe("input-aware continuation cap and idle backoff", () => {
     expect(armed).toMatchObject({ autoContinuations: 1, updates: 1, usage: 1, events: 1 });
     expect(armed.wakeRevision).toBeGreaterThan(armed.observedRevision);
 
-    // Second consecutive no-input continuation: deferred 3 s after the first finished.
+    // Second consecutive no-input continuation: deferred 60 s after the first finished.
     const deferred = await materializeWith(ctx, { idleBackoff });
     expect(deferred.action).toBe("deferred");
     if (deferred.action !== "deferred") return;
-    expect(deferred.notBefore.getTime()).toBe(first.finishedAt.getTime() + 3_000);
+    expect(deferred.notBefore.getTime()).toBe(first.finishedAt.getTime() + 60_000);
     // Nothing consumed: ledger, updates, usage, and events untouched.
     expect(await counts(ctx)).toEqual(armed);
     let wake = await outboxRow(ctx);
@@ -2726,7 +2729,7 @@ describe("input-aware continuation cap and idle backoff", () => {
     wake = await outboxRow(ctx);
     expect(wake!.reason).toBe("goal_idle_backoff");
     expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
-    expect(wake!.next_attempt_at.getTime()).toBe(first.finishedAt.getTime() + 3_000);
+    expect(wake!.next_attempt_at.getTime()).toBe(first.finishedAt.getTime() + 60_000);
     expect(await counts(ctx)).toEqual(armed);
     const projection = await getSessionGoalWithContinuation(
       client.db,
@@ -2738,13 +2741,13 @@ describe("input-aware continuation cap and idle backoff", () => {
       reason: "backoff_pending",
       wakeRevision: armed.wakeRevision,
       observedRevision: armed.observedRevision,
-      nextAttemptAt: new Date(first.finishedAt.getTime() + 3_000).toISOString(),
+      nextAttemptAt: new Date(first.finishedAt.getTime() + 60_000).toISOString(),
     });
 
     // The deadline passes (shift every finished turn into the past together so
     // finish ordering is preserved): the continuation materializes as before.
     await shared.admin`
-      update session_turns set finished_at = finished_at - interval '10 seconds'
+      update session_turns set finished_at = finished_at - interval '70 seconds'
       where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
         and finished_at is not null`;
     expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
@@ -2753,14 +2756,14 @@ describe("input-aware continuation cap and idle backoff", () => {
       auto_continuations: 2,
       last_continuation_turn_id: second.turn.id,
     });
-    // Third consecutive: schedule says 30 s, the ceiling caps it at 10 s.
+    // Third consecutive: schedule says 120 s, the ceiling caps it at 90 s.
     await markOutboxDelivered(ctx);
     const capped = await materializeWith(ctx, { idleBackoff });
     expect(capped.action).toBe("deferred");
     if (capped.action !== "deferred") return;
-    expect(capped.notBefore.getTime()).toBe(second.finishedAt.getTime() + 10_000);
+    expect(capped.notBefore.getTime()).toBe(second.finishedAt.getTime() + 90_000);
     wake = await outboxRow(ctx);
-    expect(wake!.next_attempt_at.getTime()).toBe(second.finishedAt.getTime() + 10_000);
+    expect(wake!.next_attempt_at.getTime()).toBe(second.finishedAt.getTime() + 90_000);
 
     // New input mid-backoff pulls the delayed wake to now and wins the next
     // evaluation as ordinary pending machine input.
@@ -2795,7 +2798,7 @@ describe("input-aware continuation cap and idle backoff", () => {
 
   test("a human turn after a continuation restarts the streak without backoff", async () => {
     const ctx = await runningGoalFixture();
-    const idleBackoff = { scheduleMs: [3_000], maxMs: 3_000 };
+    const idleBackoff = { scheduleMs: [60_000], maxMs: 60_000 };
     await settleIdle(ctx);
     expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
     await claimAndSettle(ctx);
@@ -2822,5 +2825,268 @@ describe("input-aware continuation cap and idle backoff", () => {
     // Latest finished turn is human work: no pacing, the streak restarts.
     expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
     expect(await goalRow(ctx)).toMatchObject({ auto_continuations: 1 });
+  });
+
+  /** A live peer agent attempt in the same workspace (the production caller shape). */
+  async function agentCallerIn(ctx: GoalFixture) {
+    const session = await createSession(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      initialMessage: "caller",
+      resources: [],
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: ctx.grant.subjectId },
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("caller turn was not claimed");
+    return {
+      type: "agent_attempt" as const,
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
+  }
+
+  async function eventsById(ctx: GoalFixture, ids: string[]) {
+    const rows = await shared.admin<
+      Array<{ type: string; payload: Record<string, unknown>; sequence: number | string }>
+    >`
+      select type, payload, sequence from session_events
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and id = any(${ids}::uuid[])
+      order by sequence asc`;
+    return rows.map((row) => ({ ...row, sequence: Number(row.sequence) }));
+  }
+
+  test("an Agent message (production producer) auto-resumes a cap-paused goal and wakes it", async () => {
+    const ctx = await runningGoalFixture();
+    await pauseByCap(ctx);
+    const before = await goalRow(ctx);
+    const caller = await agentCallerIn(ctx);
+    const message = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          targetSessionId: ctx.session.id,
+          actor: caller,
+          operationKey: crypto.randomUUID(),
+          text: "worker finished the batch",
+        }),
+      ),
+    );
+    expect(message.replay).toBe(false);
+    const events = await eventsById(ctx, message.eventIds);
+    expect(events.map((event) => event.type)).toEqual(["system.update.pending", "goal.resumed"]);
+    expect(events[1]!.sequence).toBe(events[0]!.sequence + 1);
+    expect(events[1]!.payload).toMatchObject({
+      actor: "system",
+      reason: "external_input",
+      cause: { kind: "agent_message", updateId: message.updateId },
+      version: before.version + 1,
+    });
+    // The same commit resumed the goal and woke the idle session.
+    expect(message.shouldSignal).toBe(true);
+    expect(message.wakeRevision).not.toBeNull();
+    expect(await goalRow(ctx)).toMatchObject({
+      status: "active",
+      paused_reason: null,
+      auto_continuations: 0,
+      version: before.version + 1,
+      continuation_wake_revision: before.continuation_wake_revision + 1,
+      last_continuation_turn_id: null,
+    });
+    const [session] = await shared.admin<Array<{ last_sequence: number | string }>>`
+      select last_sequence from sessions where id = ${ctx.session.id}`;
+    expect(Number(session!.last_sequence)).toBe(events[1]!.sequence);
+    // The pending message is real model input for the next evaluation.
+    expect((await materializeWith(ctx, { defaultMaxAutoContinuations: 1 })).action).toBe("queue");
+  });
+
+  test("an Agent Steer (production producer) auto-resumes a cap-paused goal before superseding", async () => {
+    const ctx = await runningGoalFixture();
+    await pauseByCap(ctx);
+    const before = await goalRow(ctx);
+    const caller = await agentCallerIn(ctx);
+    const steer = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          targetSessionId: ctx.session.id,
+          actor: caller,
+          operationKey: crypto.randomUUID(),
+          instruction: "Re-check the workers and report",
+        }),
+      ),
+    );
+    expect(steer.replay).toBe(false);
+    const events = await eventsById(ctx, steer.eventIds);
+    const types = events.map((event) => event.type);
+    expect(types).toContain("system.update.pending");
+    expect(types[types.length - 1]).toBe("goal.resumed");
+    expect(events[events.length - 1]!.payload).toMatchObject({
+      actor: "system",
+      reason: "external_input",
+      cause: { kind: "agent_steer_instruction", updateId: steer.updateId },
+      version: before.version + 1,
+    });
+    expect(steer.wakeRevision).toBeGreaterThan(0);
+    expect(await goalRow(ctx)).toMatchObject({
+      status: "active",
+      paused_reason: null,
+      auto_continuations: 0,
+      version: before.version + 1,
+      continuation_wake_revision: before.continuation_wake_revision + 1,
+      last_continuation_turn_id: null,
+    });
+    const [session] = await shared.admin<Array<{ last_sequence: number | string }>>`
+      select last_sequence from sessions where id = ${ctx.session.id}`;
+    expect(Number(session!.last_sequence)).toBe(events[events.length - 1]!.sequence);
+    // The Steer is the authoritative next direction; no continuation is synthesized beside it.
+    expect((await materializeWith(ctx, { defaultMaxAutoContinuations: 1 })).action).toBe("queue");
+  });
+
+  test("a human turn finishing after a goal_wait turn retires the hold everywhere", async () => {
+    const ctx = await runningGoalFixture();
+    await holdSessionGoalContinuationWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      reason: "waiting for the workers",
+      untilSeconds: 3600,
+      command: goalCommand(ctx, {
+        attemptId: ctx.attemptId,
+        executionGeneration: ctx.turn.executionGeneration,
+        operationKey: crypto.randomUUID(),
+      }),
+    });
+    await settleIdle(ctx);
+    expect((await materializeWith(ctx)).action).toBe("held");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation.reason,
+    ).toBe("held_for_input");
+
+    // The human prompt is queued at a LOW normalized position but finishes later.
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "new direction",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const human = await claimAndSettle(ctx);
+    expect(human.turn.source).toBe("user");
+    const [positions] = await shared.admin<
+      Array<{ human_position: number; goal_position: number }>
+    >`
+      select
+        (select position from session_turns where id = ${human.turn.id}) as human_position,
+        (select position from session_turns where id = ${ctx.turn.id}) as goal_position`;
+    expect(Number(positions!.human_position)).toBeLessThanOrEqual(Number(positions!.goal_position));
+
+    // Projection and materializer agree: the newer human turn retired the hold.
+    const projection = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(projection?.continuation.reason).not.toBe("held_for_input");
+    expect((await materializeWith(ctx)).action).toBe("continue");
+    const [hold] = await shared.admin<Array<{ continuation_hold_turn_id: string | null }>>`
+      select continuation_hold_turn_id from session_goals where session_id = ${ctx.session.id}`;
+    expect(hold!.continuation_hold_turn_id).toBeNull();
+  });
+
+  test("an expired goal_wait deadline is due now and skips the idle backoff once", async () => {
+    const ctx = await runningGoalFixture();
+    const idleBackoff = { scheduleMs: [60_000], maxMs: 60_000 };
+    await settleIdle(ctx);
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("goal turn was not claimed");
+    expect(claimed.turn.source).toBe("goal");
+    // The continuation turn itself declares a short hold, then ends.
+    await holdSessionGoalContinuationWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      reason: "workers report within half a minute",
+      untilSeconds: 30,
+      command: {
+        accountId: ctx.grant.accountId,
+        actor: {
+          type: "agent_attempt",
+          sessionId: ctx.session.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+    const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "test" } }],
+    });
+    expect(settled.action).toBe("settled");
+    expect(await goalRow(ctx)).toMatchObject({
+      auto_continuations: 1,
+      last_continuation_turn_id: claimed.turn.id,
+    });
+    // While current, the hold wins over pacing.
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("held");
+    // The agent's stated deadline passes: the next evaluation is due now even
+    // though the 60 s pacing delay since the continuation finished has not
+    // elapsed. The streak keeps counting afterwards.
+    await shared.admin`
+      update session_goals set continuation_hold_until = now() - interval '1 second'
+      where session_id = ${ctx.session.id}`;
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    expect(await goalRow(ctx)).toMatchObject({ auto_continuations: 2 });
+    const [hold] = await shared.admin<Array<{ continuation_hold_turn_id: string | null }>>`
+      select continuation_hold_turn_id from session_goals where session_id = ${ctx.session.id}`;
+    expect(hold!.continuation_hold_turn_id).toBeNull();
   });
 });

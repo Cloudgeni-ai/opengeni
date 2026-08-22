@@ -5503,9 +5503,10 @@ export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuati
 /**
  * Why a paused goal became active again. `api` is the operator PATCH; the
  * system resumes only a `max_auto_continuations` pause, and only because new
- * external input (machine input, a human/API prompt, or Steer) arrived. The
- * cap is pacing, never user intent, so a `user_pause`/`api`/`agent`/`limits`/
- * `no_progress` pause is never auto-resumed.
+ * external input arrived: a child result, scheduled occurrence, media result,
+ * Agent message, Agent Steer, or human/API Send/Steer. The cap is pacing,
+ * never user intent, so a `user_pause`/`api`/`agent`/`limits` pause is never
+ * auto-resumed.
  */
 export const SessionGoalResumedReason = z.enum(["api", "external_input"]);
 export type SessionGoalResumedReason = z.infer<typeof SessionGoalResumedReason>;

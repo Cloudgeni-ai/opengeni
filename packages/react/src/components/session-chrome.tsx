@@ -1037,7 +1037,7 @@ function GoalPanel({
       <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
         <div className="flex flex-wrap gap-1 text-[10px] text-og-fg-muted">
           <span className="rounded bg-og-surface-3/70 px-1 py-px">
-            {record.autoContinuations} auto-continues
+            {record.autoContinuations} consecutive unattended continues
           </span>
           <span className="rounded bg-og-surface-3/70 px-1 py-px">
             {record.noProgressStreak} stalled
