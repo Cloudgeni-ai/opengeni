@@ -15,6 +15,7 @@ import {
   getCapabilityPack,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
+  prReviewPackConnectorId,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
   requirePermission,
@@ -61,7 +62,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
-    await requirePrReviewPackActive(db, workspaceId);
+    const packInstallation = await requirePrReviewPackActive(db, workspaceId);
     assertPrReviewSandboxBackend(deps);
     const payload = CreatePrReviewAppRegistrationRequest.parse(await c.req.json());
     const encryptionKey = requirePrReviewEncryptionKey(deps);
@@ -107,6 +108,8 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         webhookSecretEncrypted: encryptVariableSetValue(encryptionKey, payload.webhookSecret),
         webhookUsername: payload.webhookUsername ?? null,
         createdBySubjectId: grant.subjectId,
+        packInstallationId: packInstallation.id,
+        packConnectorId: prReviewPackConnectorId(payload.provider),
       }),
       "A PR Review registration with this provider and name already exists",
     );

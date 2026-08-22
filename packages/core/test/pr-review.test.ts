@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   prReviewCredentialBindingId,
+  prReviewPackConnectorId,
   prReviewRegistrationIdFromCredentialBinding,
   normalizePrReviewProviderBaseUrl,
   normalizePrReviewPullRequestEvent,
@@ -301,6 +302,12 @@ describe("OpenGeni Review Bot provider boundary", () => {
     expect(prReviewCredentialBindingId(id)).toBe(`pr-review:${id}`);
     expect(prReviewRegistrationIdFromCredentialBinding(`pr-review:${id}`)).toBe(id);
     expect(prReviewRegistrationIdFromCredentialBinding("pr-review:not-a-uuid")).toBeNull();
+  });
+
+  test("maps providers to their exact Pack connector owner", () => {
+    expect(prReviewPackConnectorId("github")).toBe("github");
+    expect(prReviewPackConnectorId("gitlab")).toBe("gitlab");
+    expect(prReviewPackConnectorId("azure_devops")).toBe("azure-devops");
   });
 
   test("requires a dedicated GitHub App key and provider tokens elsewhere", () => {

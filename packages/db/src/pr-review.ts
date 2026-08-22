@@ -39,6 +39,8 @@ export async function createPrReviewAppRegistration(
     webhookSecretEncrypted: string;
     webhookUsername: string | null;
     createdBySubjectId: string;
+    packInstallationId: string;
+    packConnectorId: string;
   },
 ): Promise<PrReviewAppRegistration> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -58,6 +60,8 @@ export async function createPrReviewAppRegistration(
             webhookUsername: input.webhookUsername,
           },
           webhookSecretEncrypted: input.webhookSecretEncrypted,
+          packInstallationId: input.packInstallationId,
+          packConnectorId: input.packConnectorId,
           createdBySubjectId: input.createdBySubjectId,
         })
         .returning();
@@ -622,6 +626,9 @@ export async function resolvePrReviewGitCredential(
         runSessionId: schema.automationRuns.sessionId,
         triggerStatus: schema.automationTriggers.status,
         sourceStatus: schema.automationSources.status,
+        sourcePackInstallationId: schema.automationSources.packInstallationId,
+        sourcePackConnectorId: schema.automationSources.packConnectorId,
+        packInstallationId: schema.packInstallations.id,
         packStatus: schema.packInstallations.status,
         bindingStatus: schema.prReviewRepositoryBindings.status,
         registrationStatus: schema.prReviewAppRegistrations.status,
@@ -681,6 +688,8 @@ export async function resolvePrReviewGitCredential(
       execution.runSessionId !== input.sessionId ||
       execution.triggerStatus !== "active" ||
       execution.sourceStatus !== "active" ||
+      execution.sourcePackInstallationId !== execution.packInstallationId ||
+      execution.sourcePackConnectorId !== prReviewProviderPackConnectorId(input.provider) ||
       execution.packStatus !== "active" ||
       execution.bindingStatus !== "active" ||
       execution.registrationStatus !== "active"
@@ -751,6 +760,10 @@ export async function resolvePrReviewGitCredential(
       expiresAt: registration.accessTokenExpiresAt?.toISOString() ?? null,
     };
   });
+}
+
+function prReviewProviderPackConnectorId(provider: PrReviewProvider): string {
+  return provider === "azure_devops" ? "azure-devops" : provider;
 }
 
 function prReviewMetadataText(metadata: unknown, key: string): string | null {

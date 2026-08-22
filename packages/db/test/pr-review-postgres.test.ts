@@ -136,6 +136,8 @@ describe("PR Review Pack persistence", () => {
       webhookSecretEncrypted: "encrypted-webhook-secret",
       webhookUsername: null,
       createdBySubjectId: grant.subjectId,
+      packInstallationId: installation.id,
+      packConnectorId: "github",
     });
     expect(registration.webhookPath).toMatch(/^\/v1\/webhooks\/automations\/[0-9a-f-]+$/u);
     const binding = await createPrReviewRepositoryBinding(client.db, {
@@ -160,7 +162,12 @@ describe("PR Review Pack persistence", () => {
       sessionTemplate,
     });
     expect(binding.triggerId).not.toBe(registration.sourceId);
-    expect(await listAutomationSources(client.db, grant.workspaceId)).toHaveLength(1);
+    expect(await listAutomationSources(client.db, grant.workspaceId)).toEqual([
+      expect.objectContaining({
+        packInstallationId: installation.id,
+        packConnectorId: "github",
+      }),
+    ]);
     const [trigger] = await listAutomationTriggers(client.db, grant.workspaceId);
     expect(trigger).toMatchObject({
       id: binding.triggerId,

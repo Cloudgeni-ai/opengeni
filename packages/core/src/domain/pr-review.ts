@@ -386,6 +386,10 @@ export function prReviewWebhookAuthKind(
   return "basic";
 }
 
+export function prReviewPackConnectorId(provider: PrReviewProvider): string {
+  return provider === "azure_devops" ? "azure-devops" : provider;
+}
+
 export function prReviewCredentialBindingId(registrationId: string): string {
   return `pr-review:${registrationId}`;
 }

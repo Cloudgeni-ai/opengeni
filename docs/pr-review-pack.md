@@ -94,7 +94,9 @@ second webhook or run lifecycle:
 
 - the provider registration atomically creates one generic automation source;
   that source owns the adapter ID, opaque endpoint, encrypted ingress secret,
-  non-secret provider configuration, status, and version;
+  non-secret provider configuration, status, and version, and is fenced to the
+  exact Pack installation plus provider connector so only the Pack setup API
+  can rotate or change it;
 - a repository binding atomically creates one Pack-owned generic trigger whose
   immutable revision freezes exact repository matching and session parameters;
 - a verified delivery becomes a bounded normalized generic event;
