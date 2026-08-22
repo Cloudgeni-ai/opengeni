@@ -546,6 +546,16 @@ Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
 
+Recoverable attempt transitions close ordinary in-flight receipts with an
+explicit outcome-unknown result but preserve every receipt carrying an
+`interruption_kind`. Those rows are the exact open-suffix authority a
+replacement attempt needs to replay the original approval or human-input
+trigger, including a result already consumed before worker loss. Capacity waits,
+recoverable pause/maintenance, provider failover, graceful shutdown, and worker
+death all follow that rule. Terminal failure/cancellation and superseding Steer
+close the entire turn ledger. Recovery never reconstructs this authority from
+history or `agent_run_states`.
+
 For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
 audit projection is durable. An HTTP-successful result with `isError: true`

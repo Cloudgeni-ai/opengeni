@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/contracts";
 import { canonicalizePersistedHistoryItem, omitOutputOnlyHistoryItemFields } from "@opengeni/codex";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import * as schema from "./schema";
@@ -86,6 +86,7 @@ export type ClosePendingSessionToolCallsInput = {
   sequence: number;
   now: Date;
   turnAssociation?: "current" | null;
+  preserveInterruptionRows?: boolean;
 };
 
 function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
@@ -108,10 +109,13 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
 }
 
 /**
- * Close every unresolved raw tool call for a logical turn while its owning
- * session/turn locks are held. Durable results win; otherwise the model gets an
- * explicit interrupted/outcome-unknown result for protocols that can represent
- * one. Repeated settlement is an exact no-op after ledger deletion.
+ * Close raw tool calls for a logical turn while its owning session/turn locks
+ * are held. Recoverable transitions preserve interruption rows because those
+ * rows are the exact open-suffix resume authority for a replacement attempt;
+ * ordinary in-flight rows still receive durable outcome-unknown settlement.
+ * Terminal and superseding transitions close every row. Durable results win;
+ * repeated settlement is an exact no-op after the selected ledger rows are
+ * deleted.
  */
 export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
@@ -129,18 +133,20 @@ export async function closePendingSessionToolCallsInTransaction(
     )
     .orderBy(asc(schema.sessionPendingToolCalls.createdAt), asc(schema.sessionPendingToolCalls.id))
     .for("update");
-  const pending = pendingRows.map((row) => ({
-    ...row,
-    callItem: fromPostgresLosslessJson(row.callItem, row.callItemCodecVersion),
-    resultItem:
-      row.resultItem === null
-        ? null
-        : fromPostgresLosslessJson(row.resultItem, row.resultItemCodecVersion),
-    eventOutput:
-      row.eventOutput === null
-        ? null
-        : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion),
-  }));
+  const pending = pendingRows
+    .filter((row) => !(input.preserveInterruptionRows && row.interruptionKind !== null))
+    .map((row) => ({
+      ...row,
+      callItem: fromPostgresLosslessJson(row.callItem, row.callItemCodecVersion),
+      resultItem:
+        row.resultItem === null
+          ? null
+          : fromPostgresLosslessJson(row.resultItem, row.resultItemCodecVersion),
+      eventOutput:
+        row.eventOutput === null
+          ? null
+          : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion),
+    }));
   if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
 
   const history = await tx
@@ -342,14 +348,16 @@ export async function closePendingSessionToolCallsInTransaction(
     reason: input.reason,
     now: input.now,
   });
-  await tx
-    .delete(schema.sessionPendingToolCalls)
-    .where(
-      and(
-        eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-        eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-        eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+  await tx.delete(schema.sessionPendingToolCalls).where(
+    and(
+      eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+      eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+      eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+      inArray(
+        schema.sessionPendingToolCalls.id,
+        pending.map((call) => call.id),
       ),
-    );
+    ),
+  );
   return { sequence, events: inserted.map(mapEvent), closed: pending.length };
 }
