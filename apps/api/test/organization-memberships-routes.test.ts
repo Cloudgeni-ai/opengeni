@@ -370,7 +370,7 @@ describe("organization membership routes", () => {
       name: "Other organization owner",
       emailVerified: true,
     });
-    const otherOrganizationId = otherAccess.organizationMemberships[0]?.accountId;
+    const otherOrganizationId = otherAccess.organizationMemberships[0]?.organizationId;
     if (!otherOrganizationId) throw new Error("other organization missing");
     const otherEndpoint = `http://x/v1/organizations/${otherOrganizationId}/private-session-settings`;
     expect(
