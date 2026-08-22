@@ -389,7 +389,7 @@ describe("successful-create selection history", () => {
         channelId: project,
         targetSandboxId: machineA,
         machines: [
-          { sandboxId: machineA, workingDir: "/Users/jorgen/code/opengeni" },
+          { sandboxId: machineA, workingDir: "/workspace/opengeni" },
           { sandboxId: machineB, workingDir: "repos/cloudgeni" },
         ],
       },
@@ -401,7 +401,7 @@ describe("successful-create selection history", () => {
     expect(rememberedProjectCompute(history, project)).toEqual({
       kind: "machine",
       sandboxId: machineA,
-      folder: { kind: "path", path: "/Users/jorgen/code/opengeni" },
+      folder: { kind: "path", path: "/workspace/opengeni" },
     });
     expect(rememberedProjectCompute(history, null)).toEqual({ kind: "sandbox", backend: "" });
   });

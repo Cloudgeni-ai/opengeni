@@ -13,7 +13,7 @@ describe("new-session successful-create hierarchy", () => {
     history = rememberNewSessionSelection(history, {
       channelId: projectA,
       targetSandboxId: machineA,
-      workingDir: "/Users/jorgen/code/opengeni",
+      workingDir: "/workspace/opengeni",
     });
     history = rememberNewSessionSelection(history, {
       channelId: projectA,
@@ -37,7 +37,7 @@ describe("new-session successful-create hierarchy", () => {
         targetSandboxId: machineB,
         machines: [
           { sandboxId: machineB, workingDir: "repos/cloudgeni" },
-          { sandboxId: machineA, workingDir: "/Users/jorgen/code/opengeni" },
+          { sandboxId: machineA, workingDir: "/workspace/opengeni" },
         ],
       },
     ]);

@@ -364,7 +364,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const exact = await fixture();
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
-    const workingDir = "/Users/jorgen/code/opengeni";
+    const workingDir = "/workspace/opengeni";
     await saveDraft(exact, 0, {
       text: "private prompt",
       resources: [
@@ -506,7 +506,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const context = await fixture();
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
-    const workingDir = "/Users/jorgen/code/realtime";
+    const workingDir = "/workspace/realtime";
     await saveDraft(context, 0, { text: "keep for a later text session" });
     const session = await createUninitializedSession(context);
 
