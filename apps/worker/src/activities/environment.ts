@@ -784,9 +784,9 @@ export function gitHubTokenMintSelection(
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
-  // OPE-290 admits and freezes this authority, but OPE-291 owns the broker and
-  // its immediately-before-use revalidation. Until then, never let a generic
-  // host/App credential callback substitute a token for the personal lane.
+  // The repository-authority phase admits and freezes this selection, while the
+  // personal Git broker owns immediately-before-use revalidation. Until that
+  // consumer is active, never let a generic host/App callback substitute a token.
   const personalGitHubResources = new Set<ResourceRef>(
     personalGitHubRepositoryResources(resources),
   );

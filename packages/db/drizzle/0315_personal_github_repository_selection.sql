@@ -618,7 +618,7 @@ ALTER TABLE scheduled_task_connection_authority_snapshots
 ALTER TABLE scheduled_task_connection_authority_snapshots
   VALIDATE CONSTRAINT scheduled_task_connection_authority_shape_chk;
 
--- OPE-294 owns per-occurrence repository-generation revalidation. Keep the
--- existing run-ledger discriminator unchanged so a task definition can retain
--- explicit personal GitHub authority while every occurrence still fails closed
--- before a provider consumer can run.
+-- Per-occurrence repository-generation revalidation belongs to the scheduled
+-- lifecycle phase. Keep the existing run-ledger discriminator unchanged so a
+-- task definition can retain explicit personal GitHub authority while every
+-- occurrence still fails closed before a provider consumer can run.

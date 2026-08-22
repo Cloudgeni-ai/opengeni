@@ -888,9 +888,9 @@ describe("durable active-goal wake", () => {
       },
     };
     const delegations = [...ctx.turn.personalConnectionDelegations, personalGitHubDelegation];
-    // Simulate a snapshot written by the future personal-GitHub phase without
-    // asking today's capture trigger to re-admit authority that OPE-294 has not
-    // activated. The behavior under test is successor projection itself.
+    // Simulate a snapshot written by the future personal-GitHub lifecycle without
+    // asking today's capture trigger to re-admit authority that the machine-input
+    // phase has not activated. The behavior under test is successor projection.
     await shared.admin.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
       await tx`
