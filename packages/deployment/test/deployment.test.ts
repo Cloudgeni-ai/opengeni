@@ -741,6 +741,10 @@ describe("deployment contract", () => {
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
         OPENGENI_INTEGRATIONS_ENABLED: "true",
         OPENGENI_INTEGRATIONS_STATE_SECRET: "integration-state",
+        OPENGENI_SLACK_CLIENT_ID: "slack-staging-client",
+        OPENGENI_SLACK_CLIENT_SECRET: "slack-staging-secret",
+        OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
+        OPENGENI_SLACK_COMMAND: "/opengeni-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -785,6 +789,12 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_ID=slack-staging-client");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_SECRET=slack-staging-secret");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID=github-personal-staging",
