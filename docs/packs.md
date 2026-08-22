@@ -1,5 +1,7 @@
 # Capability Packs
 
+Packs may also declare frozen `automationTemplates`. These describe an adapter, event match, and complete session template, but installation alone does not create or authorize a provider connection. Setup instantiates the template only after its required connection exists and binds the trigger to the exact Pack installation. Runtime dispatch then rechecks that installation before creating the ordinary agent session. See [`automations.md`](automations.md).
+
 Capability Packs are role-oriented bundles that compose existing OpenGeni primitives rather than creating a second runtime. A Pack may describe:
 
 - exact Plugin, Skill, Integration-instance, and Integration-Facet components;

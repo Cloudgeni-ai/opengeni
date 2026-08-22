@@ -21,6 +21,8 @@ export type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
+  DispatchAutomationRunInput,
+  DispatchAutomationRunResult,
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   IndexDocumentInput,
@@ -104,6 +106,7 @@ export const expireSessionInteractionIntervention =
   defaultControlActivities.expireSessionInteractionIntervention;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;
 export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;

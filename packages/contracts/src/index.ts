@@ -8346,6 +8346,335 @@ export const TriggerScheduledTaskRequest = z.object({
 });
 export type TriggerScheduledTaskRequest = z.infer<typeof TriggerScheduledTaskRequest>;
 
+// ============ Event-triggered automations ============
+
+export const AUTOMATION_WEBHOOK_MAX_BYTES = 2 * 1024 * 1024;
+export const AUTOMATION_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024;
+export const AUTOMATION_SESSION_TEMPLATE_MAX_BYTES = 512 * 1024;
+export const AUTOMATION_MAX_MATCHED_TRIGGERS = 32;
+
+const AutomationBoundedJson = z.record(z.string(), z.unknown()).superRefine((value, context) => {
+  let bytes = Number.POSITIVE_INFINITY;
+  try {
+    bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    // The shared JSON/protocol boundary reports the exact runtime path later;
+    // this public ingress still fails closed on an unserializable value.
+  }
+  if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
+    context.addIssue({
+      code: "custom",
+      message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
+    });
+  }
+});
+
+export const AutomationAdapterId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type AutomationAdapterId = z.infer<typeof AutomationAdapterId>;
+
+export const AutomationSourceStatus = z.enum(["active", "disabled"]);
+export type AutomationSourceStatus = z.infer<typeof AutomationSourceStatus>;
+
+export const AutomationTriggerStatus = z.enum(["active", "paused", "disabled"]);
+export type AutomationTriggerStatus = z.infer<typeof AutomationTriggerStatus>;
+
+export const AutomationRunStatus = z.enum([
+  "queued",
+  "dispatching",
+  "dispatched",
+  "skipped",
+  "failed",
+]);
+export type AutomationRunStatus = z.infer<typeof AutomationRunStatus>;
+
+export const AutomationEventStatus = z.enum(["accepted", "ignored", "failed"]);
+export type AutomationEventStatus = z.infer<typeof AutomationEventStatus>;
+
+export const SignedJsonAutomationEnvelope = z
+  .object({
+    id: z.string().trim().min(1).max(1024).optional(),
+    type: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024).optional(),
+    occurredAt: z.string().datetime({ offset: true }).nullable().optional(),
+    subject: z.string().trim().min(1).max(512).nullable().optional(),
+    resource: z.string().trim().min(1).max(1024).nullable().optional(),
+    data: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
+
+const AutomationSessionSkill = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    description: z.string().min(1).max(2048).optional(),
+    files: z
+      .array(
+        z.object({
+          path: z
+            .string()
+            .min(1)
+            .max(512)
+            .refine(
+              (path) =>
+                !path.startsWith("/") &&
+                !path.includes("\\") &&
+                path
+                  .split("/")
+                  .every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
+              "automation skill file path must be a safe relative POSIX path",
+            ),
+          content: z.string().max(256 * 1024),
+        }),
+      )
+      .min(1)
+      .max(64),
+  })
+  .superRefine((skill, context) => {
+    if (!skill.files.some((file) => file.path === "SKILL.md")) {
+      context.addIssue({
+        code: "custom",
+        path: ["files"],
+        message: "automation skill must include a top-level SKILL.md file",
+      });
+    }
+  });
+
+export const AutomationSessionTemplate = z
+  .object({
+    prompt: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64 * 1024),
+    instructions: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64 * 1024)
+      .nullable()
+      .default(null),
+    resources: z.array(ResourceRef).max(100).default([]),
+    skills: z.array(AutomationSessionSkill).max(32).default([]),
+    tools: z.array(ToolRef).max(128).default([]),
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(128).default([]),
+    firstPartyMcpPermissions: z.array(Permission).max(128).default([]),
+    model: z.string().trim().min(1).max(512).nullable().default(null),
+    reasoningEffort: ReasoningEffort.nullable().default(null),
+    sandboxBackend: SandboxBackend.nullable().default(null),
+    policyRole: z.string().trim().min(1).max(128).nullable().default(null),
+    metadata: AutomationBoundedJson.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    let bytes = Number.POSITIVE_INFINITY;
+    try {
+      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      // Fail through the size issue below.
+    }
+    if (bytes > AUTOMATION_SESSION_TEMPLATE_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `automation session template exceeds ${AUTOMATION_SESSION_TEMPLATE_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
+
+export const AutomationNormalizedEvent = z
+  .object({
+    adapterId: AutomationAdapterId,
+    eventType: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024),
+    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+    subject: z.string().trim().min(1).max(512).nullable().default(null),
+    resource: z.string().trim().min(1).max(1024).nullable().default(null),
+    payload: AutomationBoundedJson,
+  })
+  .strict();
+export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
+
+export const AutomationAcceptedExecution = z
+  .object({
+    version: z.literal(1),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    sourceVersion: z.number().int().positive(),
+    triggerId: z.string().uuid(),
+    triggerRevision: z.number().int().positive(),
+    eventId: z.string().uuid(),
+    adapterId: AutomationAdapterId,
+    occurrenceKey: z.string().min(1).max(1024),
+    initialMessage: z
+      .string()
+      .min(1)
+      .max(256 * 1024),
+    sessionTemplate: AutomationSessionTemplate,
+    serviceSubjectId: z.string().min(1).max(512),
+    serviceLabel: z.string().min(1).max(200),
+    provenance: AutomationBoundedJson,
+  })
+  .strict();
+export type AutomationAcceptedExecution = z.infer<typeof AutomationAcceptedExecution>;
+
+export const CreateAutomationSourceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    adapterId: AutomationAdapterId.default("signed-json.v1"),
+    webhookSecret: z.string().min(16).max(65_536),
+    configuration: AutomationBoundedJson.default({}),
+  })
+  .strict();
+export type CreateAutomationSourceRequest = z.infer<typeof CreateAutomationSourceRequest>;
+
+export const UpdateAutomationSourceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    webhookSecret: z.string().min(16).max(65_536).optional(),
+    configuration: AutomationBoundedJson.optional(),
+    status: AutomationSourceStatus.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, "automation source update is empty");
+export type UpdateAutomationSourceRequest = z.infer<typeof UpdateAutomationSourceRequest>;
+
+export const AutomationSource = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  adapterId: AutomationAdapterId,
+  configuration: z.record(z.string(), z.unknown()),
+  status: AutomationSourceStatus,
+  version: z.number().int().positive(),
+  hasWebhookSecret: z.boolean(),
+  webhookPath: z.string().min(1),
+  createdBySubjectId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationSource = z.infer<typeof AutomationSource>;
+
+export const CreateAutomationTriggerRequest = z
+  .object({
+    sourceId: z.string().uuid(),
+    name: z.string().trim().min(1).max(200),
+    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
+    configuration: AutomationBoundedJson.default({}),
+    sessionTemplate: AutomationSessionTemplate,
+    status: AutomationTriggerStatus.default("active"),
+    packInstallationId: z.string().uuid().nullable().default(null),
+    packTemplateId: z.string().trim().min(1).max(128).nullable().default(null),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["packTemplateId"],
+        message: "packInstallationId and packTemplateId must be supplied together",
+      });
+    }
+  });
+export type CreateAutomationTriggerRequest = z.infer<typeof CreateAutomationTriggerRequest>;
+
+export const UpdateAutomationTriggerRequest = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    name: z.string().trim().min(1).max(200).optional(),
+    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
+    configuration: AutomationBoundedJson.optional(),
+    sessionTemplate: AutomationSessionTemplate.optional(),
+    status: AutomationTriggerStatus.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).some((key) => key !== "expectedRevision"), {
+    message: "automation trigger update is empty",
+  });
+export type UpdateAutomationTriggerRequest = z.infer<typeof UpdateAutomationTriggerRequest>;
+
+export const AutomationTrigger = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sourceId: z.string().uuid(),
+  name: z.string(),
+  adapterId: AutomationAdapterId,
+  eventTypes: z.array(z.string()),
+  configuration: z.record(z.string(), z.unknown()),
+  sessionTemplate: AutomationSessionTemplate,
+  status: AutomationTriggerStatus,
+  revision: z.number().int().positive(),
+  packInstallationId: z.string().uuid().nullable(),
+  packTemplateId: z.string().nullable(),
+  createdBySubjectId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationTrigger = z.infer<typeof AutomationTrigger>;
+
+export const AutomationRun = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sourceId: z.string().uuid(),
+  triggerId: z.string().uuid(),
+  triggerRevision: z.number().int().positive(),
+  eventId: z.string().uuid(),
+  occurrenceKey: z.string(),
+  status: AutomationRunStatus,
+  sessionId: z.string().uuid().nullable(),
+  errorCode: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationRun = z.infer<typeof AutomationRun>;
+
+export const AutomationWebhookResult = z.object({
+  accepted: z.boolean(),
+  duplicate: z.boolean(),
+  ignoredReason: z.string().nullable(),
+  eventId: z.string().uuid().nullable(),
+  runIds: z.array(z.string().uuid()),
+});
+export type AutomationWebhookResult = z.infer<typeof AutomationWebhookResult>;
+
+export const TriggerAutomationManuallyRequest = z
+  .object({
+    deliveryId: z.string().trim().min(1).max(512).optional(),
+    eventType: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024),
+    payload: AutomationBoundedJson.default({}),
+    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+    subject: z.string().trim().min(1).max(512).nullable().default(null),
+    resource: z.string().trim().min(1).max(1024).nullable().default(null),
+  })
+  .strict();
+export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
+
+export const CapabilityPackAutomationTemplate = z
+  .object({
+    id: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(4096),
+    adapterId: AutomationAdapterId,
+    eventTypes: z.array(z.string().min(1).max(256)).min(1).max(64),
+    sessionTemplate: AutomationSessionTemplate,
+    configuration: AutomationBoundedJson.default({}),
+    connectionRequirement: z.string().min(1).max(128).nullable().default(null),
+  })
+  .strict();
+export type CapabilityPackAutomationTemplate = z.infer<typeof CapabilityPackAutomationTemplate>;
+
 export const CapabilityPackConnectorAuthModel = z.enum([
   "oauth2_authorization_code_pkce",
   "oauth2_authorization_code",
@@ -8651,6 +8980,7 @@ export const CapabilityPack = z.preprocess(
       connectors: z.array(CapabilityPackConnector).default([]),
       knowledge: z.array(CapabilityPackKnowledge).default([]),
       scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+      automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
       variableSet: CapabilityPackVariableSet.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
     })
@@ -8676,6 +9006,17 @@ export const CapabilityPack = z.preprocess(
           });
         }
         componentKeys.add(key);
+      });
+      const automationTemplateIds = new Set<string>();
+      pack.automationTemplates?.forEach((template, index) => {
+        if (automationTemplateIds.has(template.id)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate Pack automation template id: ${template.id}`,
+            path: ["automationTemplates", index, "id"],
+          });
+        }
+        automationTemplateIds.add(template.id);
       });
       if (!pack.sandboxProviderImages?.modal) {
         return;

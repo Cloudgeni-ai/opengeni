@@ -1,4 +1,6 @@
 import type {
+  AutomationAcceptedExecution,
+  AutomationSessionTemplate,
   AttemptToolCatalog,
   AttemptToolResult,
   DraftTimelineAnnotation,
@@ -10117,6 +10119,10 @@ export const packInstallations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceIdentity: uniqueIndex("pack_installations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
     workspacePack: uniqueIndex("pack_installations_workspace_pack_idx").on(
       table.workspaceId,
       table.packId,
@@ -10160,6 +10166,364 @@ export const packInstallationComponents = pgTable(
       table.kind,
       table.capabilityId,
     ),
+  }),
+);
+
+export const automationSources = pgTable(
+  "automation_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    endpointId: uuid("endpoint_id").notNull().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    adapterId: text("adapter_id").notNull(),
+    configuration: jsonb("configuration").$type<Record<string, unknown>>().notNull().default({}),
+    webhookSecretEncrypted: text("webhook_secret_encrypted").notNull(),
+    status: text("status").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    endpoint: uniqueIndex("automation_sources_endpoint_uq").on(table.endpointId),
+    workspaceIdentity: uniqueIndex("automation_sources_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceStatus: index("automation_sources_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    shape: check(
+      "automation_sources_shape_chk",
+      sql`${table.status} in ('active', 'disabled')
+        and ${table.version} > 0
+        and octet_length(${table.name}) between 1 and 512
+        and octet_length(${table.adapterId}) between 1 and 128
+        and octet_length(${table.createdBySubjectId}) between 1 and 4096
+        and jsonb_typeof(${table.configuration}) = 'object'`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_sources_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Credential-free global webhook routing. Possession of the opaque endpoint
+ * UUID locates the tenant; authentication still requires the encrypted secret
+ * on the FORCE-RLS source row before any payload is parsed or accepted. */
+export const automationWebhookEndpoints = pgTable(
+  "automation_webhook_endpoints",
+  {
+    endpointId: uuid("endpoint_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => automationSources.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    source: uniqueIndex("automation_webhook_endpoints_source_uq").on(table.sourceId),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_webhook_endpoints_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const automationTriggers = pgTable(
+  "automation_triggers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id").notNull(),
+    name: text("name").notNull(),
+    status: text("status").notNull().default("active"),
+    currentRevision: integer("current_revision").notNull().default(1),
+    packInstallationId: uuid("pack_installation_id"),
+    packTemplateId: text("pack_template_id"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdentity: uniqueIndex("automation_triggers_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceSourceIdentity: uniqueIndex("automation_triggers_workspace_source_id_uq").on(
+      table.workspaceId,
+      table.id,
+      table.sourceId,
+    ),
+    workspaceStatus: index("automation_triggers_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+    source: foreignKey({
+      columns: [table.workspaceId, table.sourceId],
+      foreignColumns: [automationSources.workspaceId, automationSources.id],
+      name: "automation_triggers_source_fk",
+    }).onDelete("cascade"),
+    packInstallation: foreignKey({
+      columns: [table.workspaceId, table.packInstallationId],
+      foreignColumns: [packInstallations.workspaceId, packInstallations.id],
+      name: "automation_triggers_pack_installation_fk",
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_triggers_workspace_account_fk",
+    }).onDelete("cascade"),
+    shape: check(
+      "automation_triggers_shape_chk",
+      sql`${table.status} in ('active', 'paused', 'disabled')
+        and ${table.currentRevision} > 0
+        and octet_length(${table.name}) between 1 and 512
+        and octet_length(${table.createdBySubjectId}) between 1 and 4096
+        and ((${table.packInstallationId} is null and ${table.packTemplateId} is null)
+          or (${table.packInstallationId} is not null and octet_length(${table.packTemplateId}) between 1 and 128))`,
+    ),
+  }),
+);
+
+export const automationTriggerRevisions = pgTable(
+  "automation_trigger_revisions",
+  {
+    triggerId: uuid("trigger_id").notNull(),
+    revision: integer("revision").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    adapterId: text("adapter_id").notNull(),
+    eventTypes: jsonb("event_types").$type<string[]>().notNull(),
+    configuration: jsonb("configuration").$type<Record<string, unknown>>().notNull().default({}),
+    sessionTemplate: jsonb("session_template").$type<AutomationSessionTemplate>().notNull(),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.triggerId, table.revision] }),
+    trigger: foreignKey({
+      columns: [table.workspaceId, table.triggerId],
+      foreignColumns: [automationTriggers.workspaceId, automationTriggers.id],
+      name: "automation_trigger_revisions_trigger_fk",
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_trigger_revisions_workspace_account_fk",
+    }).onDelete("cascade"),
+    shape: check(
+      "automation_trigger_revisions_shape_chk",
+      sql`${table.revision} > 0
+        and octet_length(${table.adapterId}) between 1 and 128
+        and jsonb_typeof(${table.eventTypes}) = 'array'
+        and jsonb_array_length(${table.eventTypes}) between 1 and 64
+        and jsonb_typeof(${table.configuration}) = 'object'
+        and jsonb_typeof(${table.sessionTemplate}) = 'object'`,
+    ),
+  }),
+);
+
+export const automationTriggerEvents = pgTable(
+  "automation_trigger_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    sourceVersion: integer("source_version").notNull(),
+    sourceConfiguration: jsonb("source_configuration").$type<Record<string, unknown>>().notNull(),
+    matchedTriggerRevisions: jsonb("matched_trigger_revisions")
+      .$type<Array<{ triggerId: string; revision: number }>>()
+      .notNull(),
+    deliveryKey: text("delivery_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    adapterId: text("adapter_id").notNull(),
+    eventType: text("event_type").notNull(),
+    occurrenceKey: text("occurrence_key").notNull(),
+    normalizedEvent: jsonb("normalized_event").$type<Record<string, unknown>>().notNull(),
+    status: text("status").notNull().default("accepted"),
+    ignoredReason: text("ignored_reason"),
+    errorCode: text("error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    sourceDelivery: uniqueIndex("automation_trigger_events_source_delivery_uq").on(
+      table.sourceId,
+      table.deliveryKey,
+    ),
+    workspaceCreated: index("automation_trigger_events_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+    workspaceSourceIdentity: uniqueIndex("automation_trigger_events_workspace_source_id_uq").on(
+      table.workspaceId,
+      table.sourceId,
+      table.id,
+    ),
+    source: foreignKey({
+      columns: [table.workspaceId, table.sourceId],
+      foreignColumns: [automationSources.workspaceId, automationSources.id],
+      name: "automation_trigger_events_source_fk",
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_trigger_events_workspace_account_fk",
+    }).onDelete("cascade"),
+    shape: check(
+      "automation_trigger_events_shape_chk",
+      sql`${table.status} in ('accepted', 'ignored', 'failed')
+        and ${table.sourceVersion} > 0
+        and jsonb_typeof(${table.sourceConfiguration}) = 'object'
+        and jsonb_typeof(${table.matchedTriggerRevisions}) = 'array'
+        and jsonb_array_length(${table.matchedTriggerRevisions}) <= 32
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and octet_length(${table.deliveryKey}) between 1 and 1024
+        and octet_length(${table.eventType}) between 1 and 256
+        and octet_length(${table.occurrenceKey}) between 1 and 1024
+        and jsonb_typeof(${table.normalizedEvent}) = 'object'`,
+    ),
+  }),
+);
+
+export const automationRuns = pgTable(
+  "automation_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    triggerId: uuid("trigger_id").notNull(),
+    triggerRevision: integer("trigger_revision").notNull(),
+    eventId: uuid("event_id").notNull(),
+    occurrenceKey: text("occurrence_key").notNull(),
+    acceptedExecution: jsonb("accepted_execution").$type<AutomationAcceptedExecution>().notNull(),
+    status: text("status").notNull().default("queued"),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    errorCode: text("error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    triggerOccurrence: uniqueIndex("automation_runs_trigger_occurrence_uq").on(
+      table.triggerId,
+      table.occurrenceKey,
+    ),
+    workspaceStatus: index("automation_runs_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.createdAt,
+    ),
+    workspaceTriggerIdentity: uniqueIndex("automation_runs_workspace_trigger_id_uq").on(
+      table.workspaceId,
+      table.triggerId,
+      table.id,
+    ),
+    source: foreignKey({
+      columns: [table.workspaceId, table.sourceId],
+      foreignColumns: [automationSources.workspaceId, automationSources.id],
+      name: "automation_runs_source_fk",
+    }).onDelete("restrict"),
+    triggerSource: foreignKey({
+      columns: [table.workspaceId, table.triggerId, table.sourceId],
+      foreignColumns: [
+        automationTriggers.workspaceId,
+        automationTriggers.id,
+        automationTriggers.sourceId,
+      ],
+      name: "automation_runs_trigger_source_fk",
+    }).onDelete("restrict"),
+    triggerRevisionFk: foreignKey({
+      columns: [table.triggerId, table.triggerRevision],
+      foreignColumns: [automationTriggerRevisions.triggerId, automationTriggerRevisions.revision],
+      name: "automation_runs_trigger_revision_fk",
+    }).onDelete("restrict"),
+    event: foreignKey({
+      columns: [table.workspaceId, table.sourceId, table.eventId],
+      foreignColumns: [
+        automationTriggerEvents.workspaceId,
+        automationTriggerEvents.sourceId,
+        automationTriggerEvents.id,
+      ],
+      name: "automation_runs_event_fk",
+    }).onDelete("restrict"),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_runs_workspace_account_fk",
+    }).onDelete("cascade"),
+    shape: check(
+      "automation_runs_shape_chk",
+      sql`${table.triggerRevision} > 0
+        and ${table.status} in ('queued', 'dispatching', 'dispatched', 'skipped', 'failed')
+        and octet_length(${table.occurrenceKey}) between 1 and 1024
+        and jsonb_typeof(${table.acceptedExecution}) = 'object'`,
+    ),
+  }),
+);
+
+export const automationRunEventLinks = pgTable(
+  "automation_run_event_links",
+  {
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => automationRuns.id, { onDelete: "cascade" }),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => automationTriggerEvents.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    triggerId: uuid("trigger_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.runId, table.eventId] }),
+    eventTrigger: uniqueIndex("automation_run_event_links_event_trigger_uq").on(
+      table.eventId,
+      table.triggerId,
+    ),
+    run: foreignKey({
+      columns: [table.workspaceId, table.triggerId, table.runId],
+      foreignColumns: [automationRuns.workspaceId, automationRuns.triggerId, automationRuns.id],
+      name: "automation_run_event_links_run_fk",
+    }).onDelete("cascade"),
+    event: foreignKey({
+      columns: [table.workspaceId, table.sourceId, table.eventId],
+      foreignColumns: [
+        automationTriggerEvents.workspaceId,
+        automationTriggerEvents.sourceId,
+        automationTriggerEvents.id,
+      ],
+      name: "automation_run_event_links_event_fk",
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "automation_run_event_links_workspace_account_fk",
+    }).onDelete("cascade"),
   }),
 );
 

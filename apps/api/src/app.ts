@@ -100,6 +100,7 @@ import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPackRoutes } from "./routes/packs";
+import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
@@ -702,6 +703,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerAutomationRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);

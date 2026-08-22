@@ -56,6 +56,18 @@ export const scheduledTaskActivity = proxyActivities<
   },
 });
 
+export const automationActivity = proxyActivities<Pick<typeof activities, "dispatchAutomationRun">>(
+  {
+    startToCloseTimeout: "2 minutes",
+    retry: {
+      initialInterval: "1 second",
+      backoffCoefficient: 2,
+      maximumInterval: "30 seconds",
+      maximumAttempts: 5,
+    },
+  },
+);
+
 /** Goal continuation evaluates a durable Postgres obligation at an idle
  * boundary. A transient failure gets a short retry window, then records an
  * explicit delayed outbox wake instead of relying on an unrelated mutation or
