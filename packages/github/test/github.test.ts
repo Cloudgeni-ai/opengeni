@@ -11,6 +11,9 @@ import {
   githubAppBotIdentity,
   githubOAuthAuthorizeUrl,
   normalizeGitHubAppPrivateKey,
+  openPersonalGitHubGitBrokerClaims,
+  personalGitHubGitBrokerRouteId,
+  sealPersonalGitHubGitBrokerClaims,
   verifySignedState,
 } from "../src";
 
@@ -394,6 +397,81 @@ describe("GitHub app manifest helpers", () => {
         }),
       ).rejects.toThrow("explicit, unique repository allowlist");
     }
+  });
+});
+
+describe("personal GitHub Git broker bearer", () => {
+  const baseClaims = () => {
+    const authority = {
+      version: 1 as const,
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "root-1",
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      executionGeneration: 2,
+      originWorkspaceId: "origin-workspace-1",
+      connectionId: "connection-1",
+      connectionAuthorityGeneration: 3,
+      ownerSubjectId: "subject-1",
+      credentialBindingId: "binding-1",
+      selectionGeneration: 4,
+    };
+    const repository = {
+      repositoryId: "1234",
+      fullName: "open-geni/private-repo",
+      canonicalUrl: "https://github.com/open-geni/private-repo",
+      ref: "main",
+      access: "write" as const,
+      selectionGeneration: 4,
+    };
+    const claims = {
+      ...authority,
+      nonce: "renewal-nonce-a",
+      issuedAt: 1_000,
+      expiresAt: 1_300,
+    };
+    return {
+      claims,
+      routeId: personalGitHubGitBrokerRouteId("broker-secret", {
+        ...authority,
+        repository,
+      }),
+    };
+  };
+
+  test("encrypts exact authority and rejects tampering, wrong secrets, and expiry", () => {
+    const { claims } = baseClaims();
+    const token = sealPersonalGitHubGitBrokerClaims("broker-secret", claims);
+    expect(token).not.toContain(claims.connectionId);
+    expect(token.length).toBeLessThan(2_048);
+    expect(openPersonalGitHubGitBrokerClaims("broker-secret", token, 1_001)).toEqual(claims);
+    expect(openPersonalGitHubGitBrokerClaims("wrong-secret", token, 1_001)).toBeNull();
+    expect(openPersonalGitHubGitBrokerClaims("broker-secret", `${token}x`, 1_001)).toBeNull();
+    expect(openPersonalGitHubGitBrokerClaims("broker-secret", token, 1_300)).toBeNull();
+  });
+
+  test("keeps broker routes stable across bearer renewal and fences authority changes", () => {
+    const first = baseClaims();
+    const renewed = {
+      claims: { ...first.claims, nonce: "renewal-nonce-b", issuedAt: 1_100, expiresAt: 1_400 },
+      routeId: first.routeId,
+    };
+    expect(renewed.routeId).toBe(first.routeId);
+    const changedAttemptRoute = personalGitHubGitBrokerRouteId("broker-secret", {
+      ...first.claims,
+      attemptId: "attempt-2",
+      repository: {
+        repositoryId: "1234",
+        fullName: "open-geni/private-repo",
+        canonicalUrl: "https://github.com/open-geni/private-repo",
+        ref: "main",
+        access: "write",
+        selectionGeneration: 4,
+      },
+    });
+    expect(changedAttemptRoute).not.toBe(first.routeId);
   });
 });
 

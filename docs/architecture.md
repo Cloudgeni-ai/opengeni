@@ -995,8 +995,21 @@ task definitions. Personal resources carry the dedicated, non-colliding
 of a host-opaque `credentialBindingId` never reclassifies an existing generic
 host or GitHub App resource. The opaque credential binding is never authority,
 and agent-created inheritance remains fail-closed until its dependent lifecycle
-phase. No token, Git transport, or GitHub API tool is exposed yet, so accepted
-authority does not by itself grant repository execution. See
+phase. Managed sandboxes consume an accepted human/API turn through the
+default-off personal GitHub smart-HTTP broker in
+`apps/worker/src/personal-github-git-credentials.ts` and
+`apps/api/src/routes/personal-github-git-broker.ts`. A short encrypted bearer contains
+only opaque exact-attempt and generation fences; stable credential-free routes
+are HMAC-bound to each frozen repository and renewed bearers cannot change them.
+The bearer reaches the managed sandbox through private editor/file ingress;
+token-free lifecycle commands atomically install it without placing it in argv.
+Every physical GitHub request rechecks accepted connection authority, current
+repository selection, live provider identity/permissions, and read/write intent
+before a fixed-host, no-redirect streaming smart-Git call. The broad OAuth token
+is decrypted only at the API broker, never enters a sandbox, manifest, remote,
+argv, model context, event, log, or audit text, and ambiguous pushes are never
+replayed. The existing GitHub App and Connected Machine lanes are unchanged.
+No personal GitHub API tool is exposed yet. See
 [`personal-github.md`](personal-github.md).
 
 Browser/Computer controller and viewer reachability are separate. Docker sandboxes
