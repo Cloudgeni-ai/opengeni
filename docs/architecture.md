@@ -173,6 +173,11 @@ unpaired calls never enter model-facing history; resume promotes reasoning +
 call + bounded result as one pair. Side-effecting approvals invoke through the
 existing MCP execute-once fence immediately and, if sibling interruptions
 remain, stay `requires_action` without a model call.
+Recoverable attempt settlement preserves every interruption-stamped receipt as
+the exact replacement-attempt resume authority while closing ordinary in-flight
+receipts outcome-unknown. Destructive terminal failure/cancellation and
+superseding settlement clear the whole turn ledger; neither history nor
+`agent_run_states` is a fallback authority.
 
 Generated image bytes are permanent workspace artifacts, not another memory
 store. Native provider base64 is replaced before durable history/event/RunState
