@@ -2,8 +2,9 @@
 "@opengeni/db": patch
 ---
 
-Fix human-confirmed `remember_confirm` activation after the human-input resume:
-the live attempt of the same logical turn is now accepted at the asked
-generation or later (migration 0315) for both governed-learning activation and
-knowledge-claim confirmation, while the human answer stays bound to the exact
-generation in which the question was asked.
+Fix human-confirmed `remember_confirm` activation after the human-input resume
+(migration 0315): the human answer is bound to the same logical turn and exact
+proposal rather than one execution generation, so the answered request row and
+the live attempt may both carry a later generation of that turn than the
+decision receipt, for both governed-learning activation and knowledge-claim
+confirmation.

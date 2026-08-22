@@ -17,13 +17,18 @@ SET statement_timeout = '10min';
 -- confirmation failed with 42501 ("governed-learning activation attempt is
 -- unavailable").
 --
--- The real invariant: the human answer stays bound to the exact generation in
--- which the question was asked (the human-input row's `turn_generation` must
--- still equal the decision receipt's `execution_generation`); the live attempt
--- must be the active attempt of the same logical turn (same session active
--- turn, same turn id) at that generation or later, still claimed/running with
--- no pending interruption. Nothing widens to another turn or an earlier
--- generation.
+-- The real invariant: the human answer is bound to the same logical turn and
+-- to exactly this proposal (same session and turn id, the reconstructed
+-- `remember:<proposalId>` question, the `save` answer, the initiating human as
+-- responder, one activation per decision receipt), not to one execution
+-- generation. Generations only move forward on that turn: the human-input row
+-- is created at the generation in which the question was asked, which is the
+-- minting generation or later (a worker death between `remember` and the pause
+-- re-claims at the next generation, and a different interruption answered
+-- first re-freezes a still-pending row under the next generation); the live
+-- attempt must be the active attempt of the same logical turn at the minting
+-- generation or later, still claimed/running with no pending interruption.
+-- Nothing widens to another turn or an earlier generation.
 --
 -- `confirm_remember_knowledge_claim` (0274/0284) had the same defect in a
 -- different shape: its caller passes the live attempt's generation, which the
@@ -32,8 +37,8 @@ SET statement_timeout = '10min';
 -- stay exact; the human-input row now binds to the asked generation, which is
 -- the live generation or earlier on the same logical turn.
 
--- Body is byte-identical to migration 0293 except the two live-generation
--- comparisons (`>=` instead of `=`) and their explanatory comment.
+-- Body is byte-identical to migration 0293 except the three generation
+-- comparisons (`>=` instead of `=`) and their explanatory comments.
 CREATE OR REPLACE FUNCTION activate_human_confirmed_learning_decision(
   p_account_id uuid,
   p_workspace_id uuid,
@@ -173,9 +178,7 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'governed-learning activation session is unavailable' USING ERRCODE = '42501';
   END IF;
-  -- The decision receipt was minted before the human-input pause. The human
-  -- answer is bound to the exact execution generation in which the question
-  -- was asked (checked below against the human-input row), but resuming a
+  -- The decision receipt was minted before the human-input pause. Resuming a
   -- requires_action turn always increments the logical turn's execution
   -- generation and claims a new attempt, so the live attempt of the same
   -- logical turn is a later generation. Require that live attempt on the same
@@ -395,7 +398,10 @@ BEGIN
   END IF;
 
   -- The exact human must have answered the bound question for this proposal
-  -- on the same session/turn, in the same execution generation, with `save`.
+  -- on the same session/turn with `save`. The row carries the generation in
+  -- which the question was asked: the minting generation, or a later one of
+  -- the same turn when a recovery re-claimed before the pause or another
+  -- interruption answered first re-froze the pending row.
   -- The question the human saw is reconstructed here from the proposal itself
   -- (canonical prompt, exact proposal content as help text, fixed options), so
   -- an agent cannot obtain confirmation through a misleading prompt.
@@ -418,7 +424,7 @@ BEGIN
     AND request.account_id = p_account_id AND request.workspace_id = p_workspace_id
     AND request.session_id = decision_row.session_id
     AND request.turn_id = decision_row.turn_id
-    AND request.turn_generation = decision_row.execution_generation
+    AND request.turn_generation >= decision_row.execution_generation
     AND request.status = 'answered'
     AND request.responded_by = caller_subject_id
     AND request.response->>'outcome' = 'answered'

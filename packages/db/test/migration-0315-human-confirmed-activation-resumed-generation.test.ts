@@ -26,7 +26,7 @@ function functionBody(sql: string, name: string): string {
 }
 
 describe("migration 0315 human-confirmed activation across the resume generation", () => {
-  test("accepts the resumed live attempt while keeping the human answer bound to the asked generation", async () => {
+  test("accepts later generations of the same logical turn for the live attempt and the answered row", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
 
@@ -54,11 +54,19 @@ describe("migration 0315 human-confirmed activation across the resume generation
     expect(activation).toContain(
       "AND interruption.state IN ('pending', 'delivered', 'acknowledged')",
     );
-    // The human-input binding stays exact.
+    // The human-input binding stays on the same turn and exact proposal; the
+    // answered row may carry a later generation of that turn.
     expect(activation).toContain(
       "human_question_id := 'remember:' || decision_row.proposal_id::text;",
     );
-    expect(activation).toContain("AND request.turn_generation = decision_row.execution_generation");
+    expect(activation).toContain(
+      "AND request.turn_generation >= decision_row.execution_generation",
+    );
+    expect(activation).not.toContain(
+      "AND request.turn_generation = decision_row.execution_generation",
+    );
+    expect(activation).toContain("AND request.session_id = decision_row.session_id");
+    expect(activation).toContain("AND request.turn_id = decision_row.turn_id");
     expect(activation).toContain("AND request.status = 'answered'");
     expect(activation).toContain("AND request.responded_by = caller_subject_id");
     expect(activation).toContain("AND answer.value->'values' = to_jsonb(ARRAY['save'])");

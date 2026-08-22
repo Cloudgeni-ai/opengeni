@@ -1145,9 +1145,6 @@ describe("governed-learning activation PostgreSQL authority", () => {
       questionId: `remember:${crypto.randomUUID()}`,
     });
     const pending = await answeredRememberInput(f, proposalId, d.noteText, { status: "pending" });
-    const staleGeneration = await answeredRememberInput(f, proposalId, d.noteText, {
-      turnGeneration: 2,
-    });
     // The human must have seen the canonical prompt, the exact content, and
     // the fixed options; a misleading agent-authored question cannot confirm.
     const misleadingPrompt = await answeredRememberInput(f, proposalId, d.noteText, {
@@ -1170,7 +1167,6 @@ describe("governed-learning activation PostgreSQL authority", () => {
       skipped,
       otherProposal,
       pending,
-      staleGeneration,
       misleadingPrompt,
       hiddenContent,
       relabeledOptions,
@@ -1270,8 +1266,10 @@ describe("governed-learning activation PostgreSQL authority", () => {
       destination: "preference",
       outcome: "activated",
     });
-    // The answer stays bound to the generation in which it was asked: a row
-    // stamped with the resumed generation does not confirm the gen-1 decision.
+    // The answered row itself may carry a later generation of the same turn:
+    // a recovery re-claim between `remember` and the pause, or a different
+    // interruption answered first, re-freezes the pending row under the next
+    // generation. It still confirms the gen-1 decision on this turn.
     const f2 = await fixture("suggest");
     const d2 = await decision(f2, "preference");
     const resumedAnswer = await answeredRememberInput(
@@ -1284,16 +1282,20 @@ describe("governed-learning activation PostgreSQL authority", () => {
       closedAttemptId: f2.writerAttempt.attemptId,
       nextGeneration: 2,
     });
-    await expect(
-      activateHumanConfirmedLearningDecision(client.db, {
-        caller: f2.caller,
-        request: {
-          operationId: crypto.randomUUID(),
-          decisionReceiptId: d2.receipt.id,
-          humanInputRequestId: resumedAnswer,
-        },
-      }),
-    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+    const laterRowActivation = await activateHumanConfirmedLearningDecision(client.db, {
+      caller: f2.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        decisionReceiptId: d2.receipt.id,
+        humanInputRequestId: resumedAnswer,
+      },
+    });
+    expect(laterRowActivation).toMatchObject({
+      authorityKind: "human_confirmed",
+      humanInputRequestId: resumedAnswer,
+      destination: "preference",
+      outcome: "activated",
+    });
   });
 
   test("human confirmation never widens to a different logical turn", async () => {
