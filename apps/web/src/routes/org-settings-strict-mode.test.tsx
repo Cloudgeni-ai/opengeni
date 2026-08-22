@@ -28,32 +28,19 @@ const getBillingEntitlements = mock(async () => ({
   mode: "managed" as const,
   entitlements: { seats: 10 },
 }));
-const getBillingInvoices = mock(async () => ({
-  invoices: [
-    {
-      id: "in_123",
-      number: "OG-0042",
-      status: "paid" as const,
-      createdAt: timestamp,
-      totalMicros: 25_000_000,
-      amountPaidMicros: 25_000_000,
-      currency: "usd",
-      hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
-    },
-  ],
-  hasMore: false,
-  nextCursor: null,
-}));
 const createBillingCheckout = mock(async () => {
   throw new Error("bounded checkout failure");
+});
+const createBillingPortalSession = mock(async () => {
+  throw new Error("bounded portal failure");
 });
 
 const context = {
   client: {
     getBilling,
-    getBillingInvoices,
     getBillingEntitlements,
     createBillingCheckout,
+    createBillingPortalSession,
   } as unknown as OpenGeniCoreClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -154,7 +141,7 @@ afterAll(() => {
 });
 
 describe("organization billing StrictMode ownership", () => {
-  test("keeps initial reads and a checkout mutation owned after setup cleanup setup", async () => {
+  test("keeps initial reads and billing mutations owned after setup cleanup setup", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -170,12 +157,12 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(getBillingInvoices.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
-    expect(container.textContent).toContain("OG-0042");
-    expect(container.textContent).toContain("View in Stripe");
-    expect(container.querySelector('a[href="https://invoice.stripe.com/i/test"]')).not.toBe(null);
+    expect(container.textContent).toContain(
+      "View invoices and manage payment information in Stripe.",
+    );
+    expect(container.textContent).not.toContain("OG-0042");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
@@ -184,6 +171,18 @@ describe("organization billing StrictMode ownership", () => {
       description: "bounded checkout failure",
     });
     expect(button(container, "Add credits").disabled).toBe(false);
+
+    await act(async () => button(container, "Open Stripe billing").click());
+    await flush();
+    expect(createBillingPortalSession).toHaveBeenCalledTimes(1);
+    expect(createBillingPortalSession).toHaveBeenCalledWith({
+      accountId,
+      returnUrl: window.location.href,
+    });
+    expect(toastError).toHaveBeenCalledWith("Couldn't open Stripe billing", {
+      description: "bounded portal failure",
+    });
+    expect(button(container, "Open Stripe billing").disabled).toBe(false);
 
     await act(async () => root.unmount());
     container.remove();

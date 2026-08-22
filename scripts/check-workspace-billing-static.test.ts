@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { checkForbiddenProviderImports, type Finding } from "./check-workspace-billing-static";
+import {
+  checkBillingPortalSurface,
+  checkForbiddenProviderImports,
+  type Finding,
+} from "./check-workspace-billing-static";
 
 async function findingsFor(file: string, source: string): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -8,6 +12,30 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
 }
 
 describe("workspace provider import guard", () => {
+  test("confines the Stripe billing portal path to its API and SDK surfaces", () => {
+    const portalPath = ["/v1/billing", "portal"].join("/");
+    const allowed: Finding[] = [];
+    checkBillingPortalSurface(
+      "apps/api/src/routes/billing.ts",
+      `app.post("${portalPath}")`,
+      allowed,
+    );
+    expect(allowed).toEqual([]);
+
+    const denied: Finding[] = [];
+    checkBillingPortalSurface(
+      "apps/api/src/routes/example.ts",
+      `app.post("${portalPath}")`,
+      denied,
+    );
+    expect(denied).toEqual([
+      {
+        file: "apps/api/src/routes/example.ts",
+        message: "contains Stripe billing portal route outside its canonical API/SDK surface",
+      },
+    ]);
+  });
+
   test("ignores dependency names that are bundler configuration data", async () => {
     const findings = await findingsFor(
       "scripts/build-runtime-processes.ts",

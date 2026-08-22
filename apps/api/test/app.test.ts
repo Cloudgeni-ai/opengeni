@@ -27,8 +27,7 @@ import {
   temporalScheduleSpec,
 } from "../src/index";
 import {
-  billingInvoiceFromStripe,
-  parseStripeInvoicePagination,
+  stripeBillingPortalSessionCreateParams,
   stripeCheckoutSessionCreateParams,
   stripeCustomerProvider,
 } from "../src/routes/billing";
@@ -989,44 +988,24 @@ describe("API helpers", () => {
     ).toBe("stripe:test");
   });
 
-  test("projects Stripe invoices into the public hosted-invoice shape", () => {
+  test("returns Stripe billing portal sessions to the canonical billing page", () => {
     expect(
-      billingInvoiceFromStripe({
-        id: "in_123",
-        number: "OG-0042",
-        status: "paid",
-        created: 1_767_225_600,
-        total: 2550,
-        amount_paid: 2550,
-        currency: "usd",
-        hosted_invoice_url: "https://invoice.stripe.com/i/acct_test",
-      } as never),
-    ).toEqual({
-      id: "in_123",
-      number: "OG-0042",
-      status: "paid",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      totalMicros: 25_500_000,
-      amountPaidMicros: 25_500_000,
-      currency: "usd",
-      hostedInvoiceUrl: "https://invoice.stripe.com/i/acct_test",
-    });
-  });
-
-  test("bounds Stripe invoice pagination parameters", () => {
-    expect(parseStripeInvoicePagination({})).toEqual({ limit: 24 });
-    expect(
-      parseStripeInvoicePagination({
-        limit: "100",
-        startingAfter: "in_123ABC",
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "https://app.opengeni.ai",
+        returnUrl: "https://app.opengeni.ai/organizations/test/billing?tab=credits",
       }),
-    ).toEqual({ limit: 100, startingAfter: "in_123ABC" });
-    expect(() => parseStripeInvoicePagination({ limit: "0" })).toThrow(
-      "limit must be an integer between 1 and 100",
-    );
-    expect(() => parseStripeInvoicePagination({ startingAfter: "cus_wrong" })).toThrow(
-      "startingAfter must be a Stripe invoice id",
-    );
+    ).toEqual({
+      customer: "cus_test",
+      return_url: "https://app.opengeni.ai/organizations/test/billing?tab=credits",
+    });
+    expect(() =>
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "https://app.opengeni.ai",
+        returnUrl: "https://evil.example/billing",
+      }),
+    ).toThrow("returnUrl must use the OpenGeni public origin");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {

@@ -1,5 +1,6 @@
 import {
-  BillingInvoicesResponse,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   type AccessContext,
@@ -56,43 +57,6 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
-  app.get("/v1/billing/invoices", async (c) => {
-    if (deps.settings.billingMode !== "stripe") {
-      throw new HTTPException(404, { message: "stripe billing is not enabled" });
-    }
-    const context = await requireAccessContext(c, deps);
-    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    const pagination = parseStripeInvoicePagination({
-      limit: c.req.query("limit"),
-      startingAfter: c.req.query("startingAfter"),
-    });
-    const customer = await getBillingCustomer(deps.db, accountId, stripeCustomerProvider(deps));
-    if (!customer) {
-      return c.json(
-        BillingInvoicesResponse.parse({ invoices: [], hasMore: false, nextCursor: null }),
-      );
-    }
-
-    let page: Stripe.ApiList<Stripe.Invoice>;
-    try {
-      page = await stripeClient(deps).invoices.list({
-        customer: customer.providerCustomerId,
-        limit: pagination.limit,
-        ...(pagination.startingAfter ? { starting_after: pagination.startingAfter } : {}),
-      });
-    } catch {
-      throw new HTTPException(502, { message: "Unable to load invoices from Stripe" });
-    }
-    const invoices = page.data.map(billingInvoiceFromStripe);
-    return c.json(
-      BillingInvoicesResponse.parse({
-        invoices,
-        hasMore: page.has_more,
-        nextCursor: page.has_more ? (invoices.at(-1)?.id ?? null) : null,
-      }),
-    );
-  });
-
   app.get("/v1/billing/entitlements", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
@@ -141,6 +105,38 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       CreateCheckoutResponse.parse({
         checkoutSessionId: session.id,
+        url: session.url,
+      }),
+    );
+  });
+
+  app.post("/v1/billing/portal", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
+      });
+    }
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    const session = await stripe.billingPortal.sessions.create(
+      stripeBillingPortalSessionCreateParams({
+        customerId,
+        publicBaseUrl: deps.settings.publicBaseUrl,
+        returnUrl: parsed.data.returnUrl,
+      }),
+    );
+    if (!session.url) {
+      throw new HTTPException(502, { message: "Stripe did not return a billing portal URL" });
+    }
+    return c.json(
+      CreateBillingPortalResponse.parse({
+        portalSessionId: session.id,
         url: session.url,
       }),
     );
@@ -272,69 +268,15 @@ export function stripeCheckoutSessionCreateParams(input: {
   };
 }
 
-export function billingInvoiceFromStripe(
-  invoice: Stripe.Invoice,
-): BillingInvoicesResponse["invoices"][number] {
+export function stripeBillingPortalSessionCreateParams(input: {
+  customerId: string;
+  publicBaseUrl?: string | undefined;
+  returnUrl?: string | undefined;
+}): Stripe.BillingPortal.SessionCreateParams {
   return {
-    id: invoice.id,
-    number: invoice.number,
-    status: stripeInvoiceStatus(invoice.status),
-    createdAt: new Date(invoice.created * 1_000).toISOString(),
-    totalMicros: centsToMicros(invoice.total),
-    amountPaidMicros: centsToMicros(invoice.amount_paid),
-    currency: invoice.currency,
-    hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
+    customer: input.customerId,
+    return_url: checkoutReturnUrl(input.publicBaseUrl, input.returnUrl, "/billing", "returnUrl"),
   };
-}
-
-export function parseStripeInvoicePagination(input: {
-  limit?: string | undefined;
-  startingAfter?: string | undefined;
-}): { limit: number; startingAfter?: string | undefined } {
-  const startingAfter = parseInvoiceCursor(input.startingAfter);
-  return {
-    limit: parseInvoiceLimit(input.limit),
-    ...(startingAfter ? { startingAfter } : {}),
-  };
-}
-
-function stripeInvoiceStatus(
-  status: Stripe.Invoice.Status | null,
-): BillingInvoicesResponse["invoices"][number]["status"] {
-  switch (status) {
-    case "draft":
-      return "draft";
-    case "open":
-      return "open";
-    case "paid":
-      return "paid";
-    case "uncollectible":
-      return "uncollectible";
-    case "void":
-      return "void";
-    default:
-      return null;
-  }
-}
-
-function parseInvoiceLimit(value: string | undefined): number {
-  if (value === undefined) return 24;
-  if (!/^\d+$/.test(value)) {
-    throw new HTTPException(400, { message: "limit must be an integer between 1 and 100" });
-  }
-  const limit = Number(value);
-  if (limit < 1 || limit > 100) {
-    throw new HTTPException(400, { message: "limit must be an integer between 1 and 100" });
-  }
-  return limit;
-}
-
-function parseInvoiceCursor(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  if (!/^in_[A-Za-z0-9]+$/.test(value)) {
-    throw new HTTPException(400, { message: "startingAfter must be a Stripe invoice id" });
-  }
-  return value;
 }
 
 function checkoutReturnUrl(
@@ -345,7 +287,7 @@ function checkoutReturnUrl(
 ): string {
   if (!publicBaseUrl) {
     throw new HTTPException(500, {
-      message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe checkout",
+      message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe redirects",
     });
   }
   const base = new URL(publicBaseUrl);

@@ -652,7 +652,7 @@ Every public endpoint group has typed methods:
 | Remote Skills | `previewSkillImport`, `installSkill`, `previewSkillUninstall`, `uninstallSkill` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
 | API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
-| Billing | `getBilling`, `getBillingUsage`, `getBillingInvoices`, `getBillingEntitlements`, `createBillingCheckout` |
+| Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout`, `createBillingPortalSession` |
 
 `listIntegrationDefinitions` returns safe Integration Definition metadata without any
 deployment OAuth client credentials. API Integrations are multi-instance:

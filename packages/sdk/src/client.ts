@@ -107,7 +107,6 @@ import type {
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
-  BillingInvoicesResponse,
   CodexAccount,
   CodexAccountsResponse,
   CodexAppsUpdate,
@@ -181,6 +180,8 @@ import type {
   InstallLibrarySkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
@@ -6208,21 +6209,6 @@ export class OpenGeniClient {
     });
   }
 
-  async getBillingInvoices(
-    options: { accountId?: string; limit?: number; startingAfter?: string } = {},
-  ): Promise<BillingInvoicesResponse> {
-    const query: Record<string, string> = {};
-    for (const [key, value] of Object.entries(options)) {
-      if (value !== undefined) query[key] = String(value);
-    }
-    return await this.requestJson<BillingInvoicesResponse>(
-      "GET",
-      "/v1/billing/invoices",
-      undefined,
-      query,
-    );
-  }
-
   async getWorkspaceInsights(
     workspaceId: string,
     options: {
@@ -6259,6 +6245,17 @@ export class OpenGeniClient {
   /** Start a Stripe checkout for prepaid credits. */
   async createBillingCheckout(request: CreateCheckoutRequest): Promise<CreateCheckoutResponse> {
     return await this.requestJson<CreateCheckoutResponse>("POST", "/v1/billing/checkout", request);
+  }
+
+  /** Open Stripe's hosted portal for invoices and payment information. */
+  async createBillingPortalSession(
+    request: CreateBillingPortalRequest = {},
+  ): Promise<CreateBillingPortalResponse> {
+    return await this.requestJson<CreateBillingPortalResponse>(
+      "POST",
+      "/v1/billing/portal",
+      request,
+    );
   }
 
   // --- Internals -------------------------------------------------------------

@@ -39,7 +39,7 @@ export async function auditWorkspaceBillingStatic(
     }
     checkUnscopedOperationalRoutes(file, text, findings);
     await checkForbiddenProviderImports(file, text, findings);
-    checkDeletedBillingPortal(file, text, findings);
+    checkBillingPortalSurface(file, text, findings);
     checkGithubWebhookAdvertising(file, text, findings);
     checkMcpDefaults(file, text, findings);
   }
@@ -193,11 +193,21 @@ function runtimeLoader(file: string): RuntimeLoader | null {
   return null;
 }
 
-function checkDeletedBillingPortal(file: string, text: string, out: Finding[]): void {
-  if (isSourceLike(file) && text.includes("/v1/billing/portal")) {
+const billingPortalSurfaceFiles = new Set([
+  "apps/api/src/routes/billing.ts",
+  "packages/sdk/src/client.ts",
+  "packages/sdk/test/client-coverage.test.ts",
+]);
+
+export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {
+  if (
+    isSourceLike(file) &&
+    text.includes("/v1/billing/portal") &&
+    !billingPortalSurfaceFiles.has(file)
+  ) {
     out.push({
       file,
-      message: "contains first-release-excluded /v1/billing/portal route or client call",
+      message: "contains Stripe billing portal route outside its canonical API/SDK surface",
     });
   }
 }

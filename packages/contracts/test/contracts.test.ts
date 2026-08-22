@@ -3,7 +3,8 @@ import {
   AddDocumentRequest,
   assertUniqueResourceMountPaths,
   approvalIdentifier,
-  BillingInvoicesResponse,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -99,43 +100,17 @@ import {
 } from "../src";
 
 describe("contracts", () => {
-  test("validates paginated Stripe-hosted invoice metadata", () => {
+  test("validates Stripe billing portal sessions", () => {
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    expect(CreateBillingPortalRequest.parse({ accountId })).toEqual({
+      accountId,
+    });
     expect(
-      BillingInvoicesResponse.parse({
-        invoices: [
-          {
-            id: "in_123",
-            number: "OG-0042",
-            status: "paid",
-            createdAt: "2026-01-01T00:00:00.000Z",
-            totalMicros: 25_000_000,
-            amountPaidMicros: 25_000_000,
-            currency: "usd",
-            hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
-          },
-        ],
-        hasMore: true,
-        nextCursor: "in_123",
-      }).nextCursor,
-    ).toBe("in_123");
-    expect(
-      BillingInvoicesResponse.safeParse({
-        invoices: [
-          {
-            id: "in_123",
-            number: null,
-            status: "refunded",
-            createdAt: "2026-01-01T00:00:00.000Z",
-            totalMicros: 0,
-            amountPaidMicros: 0,
-            currency: "usd",
-            hostedInvoiceUrl: null,
-          },
-        ],
-        hasMore: false,
-        nextCursor: null,
-      }).success,
-    ).toBe(false);
+      CreateBillingPortalResponse.parse({
+        portalSessionId: "bps_123",
+        url: "https://billing.stripe.com/p/session/test",
+      }).url,
+    ).toBe("https://billing.stripe.com/p/session/test");
   });
   test("keeps model context contribution summaries content-free and uniquely keyed", () => {
     const valid = {
