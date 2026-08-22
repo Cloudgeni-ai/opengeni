@@ -29602,6 +29602,76 @@ async function readWorkspaceSessionActivityRevision(
   return normalizeSessionActivityRevision(revision, "snapshot revision");
 }
 
+/** A durable user.message that accepted an ordinary human/API turn. */
+function humanPromptTriggerEventFilter(): SQL {
+  return sql`exists (
+    select 1
+    from ${schema.sessionTurns} human_prompt_turn
+    where human_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+      and human_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+      and human_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+      and human_prompt_turn.source in ('user', 'api')
+  )`;
+}
+
+/**
+ * Discovery is not cursoring individual events, so it may show the original
+ * human/API user.message only after the turn has an immutable turn.started
+ * boundary. Pre-start terminal queue transitions remain private forever.
+ */
+function discoveryClaimedConversationEventFilter(): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} <> 'user.message'
+    or not ${humanPromptTriggerEventFilter()}
+    or exists (
+      select 1
+      from ${schema.sessionTurns} started_prompt_turn
+      join ${schema.sessionEvents} prompt_start
+        on prompt_start.workspace_id = started_prompt_turn.workspace_id
+       and prompt_start.session_id = started_prompt_turn.session_id
+       and prompt_start.turn_id = started_prompt_turn.id
+       and prompt_start.type = 'turn.started'
+      where started_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+        and started_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+        and started_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+        and started_prompt_turn.source in ('user', 'api')
+    )
+  )`;
+}
+
+/**
+ * Event monitoring permanently excludes the pre-start trigger sequence. Once
+ * turn.started exists, sessionEventProjectionSelect surfaces the exact prompt
+ * at that newer immutable sequence instead, so keyset eligibility never moves
+ * behind an already-issued cursor. Forensic reads deliberately omit this.
+ */
+function monitoringClaimedConversationEventFilter(): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} <> 'user.message'
+    or not ${humanPromptTriggerEventFilter()}
+  )`;
+}
+
+/** A turn.started row that canonically exposes one human/API prompt. */
+function claimedHumanPromptStartEventFilter(): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} = 'turn.started'
+    and exists (
+      select 1
+      from ${schema.sessionTurns} claimed_prompt_turn
+      join ${schema.sessionEvents} claimed_prompt_trigger
+        on claimed_prompt_trigger.workspace_id = claimed_prompt_turn.workspace_id
+       and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
+       and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
+       and claimed_prompt_trigger.type = 'user.message'
+      where claimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+        and claimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+        and claimed_prompt_turn.id = ${schema.sessionEvents.turnId}
+        and claimed_prompt_turn.source in ('user', 'api')
+    )
+  )`;
+}
+
 /**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
@@ -29875,6 +29945,7 @@ export async function listSessionDiscoverySummaries(
                 eq(schema.sessionEvents.workspaceId, workspaceId),
                 inArray(schema.sessionEvents.sessionId, ids),
                 inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+                discoveryClaimedConversationEventFilter(),
               ),
             )
             .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
@@ -30311,6 +30382,13 @@ export type ListSessionEventsOptions = {
   includeClasses?: readonly SessionEventSemanticClass[];
   excludeClasses?: readonly SessionEventSemanticClass[];
   defaultExcludeTypes?: readonly SessionEventType[];
+  /**
+   * Monitoring-only conversation boundary. Human/API trigger rows remain
+   * permanently hidden at their pre-start sequence and are projected from the
+   * immutable turn.started sequence instead. Forensic readers intentionally
+   * leave this false so the retained event log remains exact.
+   */
+  claimedConversationOnly?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -30360,6 +30438,9 @@ type SessionEventProjectionRow = {
   turnAssociation: string | null;
   duplicateOfEventId: string | null;
   duplicateReason: string | null;
+  claimedPromptEventId: string | null;
+  claimedPromptPayload: unknown | null;
+  claimedPromptPayloadCodecVersion: number | null;
 };
 
 /**
@@ -30388,6 +30469,14 @@ export async function listSessionEventPage(
     excludeClasses: options.excludeClasses,
     defaultExcludeTypes: options.defaultExcludeTypes,
   });
+  const mapClaimedPromptStartsAsUserMessages =
+    options.claimedConversationOnly === true &&
+    typeFilters.includeTypes.includes("user.message") &&
+    !typeFilters.includeTypes.includes("turn.started") &&
+    !typeFilters.excludeTypes.includes("user.message");
+  const includeClaimedPromptPayload =
+    options.claimedConversationOnly === true &&
+    !typeFilters.excludeTypes.includes("user.message");
   const maxBytes = Math.max(
     SESSION_EVENT_ENVELOPE_MAX_BYTES + 2,
     normalizeEventLimit(options.maxBytes, SESSION_EVENT_DB_PAGE_MAX_BYTES),
@@ -30412,6 +30501,9 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
+      if (options.claimedConversationOnly) {
+        filters.push(monitoringClaimedConversationEventFilter());
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows
@@ -30427,7 +30519,14 @@ export async function listSessionEventPage(
         );
       }
       if (typeFilters.includeTypes.length > 0) {
-        filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
+        filters.push(
+          mapClaimedPromptStartsAsUserMessages
+            ? or(
+                inArray(schema.sessionEvents.type, typeFilters.includeTypes),
+                claimedHumanPromptStartEventFilter(),
+              )!
+            : inArray(schema.sessionEvents.type, typeFilters.includeTypes),
+        );
       }
       if (typeFilters.excludeTypes.length > 0) {
         filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
@@ -30444,7 +30543,12 @@ export async function listSessionEventPage(
       }
 
       const rows = await scopedDb
-        .select(sessionEventProjectionSelect(payloadMode))
+        .select(
+          sessionEventProjectionSelect(payloadMode, {
+            includeClaimedPromptPayload,
+            mapClaimedPromptStartsAsUserMessages,
+          }),
+        )
         .from(schema.sessionEvents)
         .where(and(...filters))
         .orderBy(
@@ -30500,7 +30604,19 @@ export async function listSessionEventPage(
   });
 }
 
-function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "full") {
+function sessionEventProjectionSelect(
+  payloadMode: SessionEventPayloadMode = "full",
+  options: {
+    includeClaimedPromptPayload?: boolean;
+    mapClaimedPromptStartsAsUserMessages?: boolean;
+  } = {},
+) {
+  // Drizzle de-qualifies outer columns when they are interpolated inside a
+  // nested scalar subquery. These are intentional correlated references to the
+  // one unaliased outer session_events table used by every caller here.
+  const outerEventWorkspaceId = sql.raw('"session_events"."workspace_id"');
+  const outerEventSessionId = sql.raw('"session_events"."session_id"');
+  const outerEventTurnId = sql.raw('"session_events"."turn_id"');
   const typeInvalid = sql`(
     octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
     or position(E'\\n' in ${schema.sessionEvents.type}) > 0
@@ -30580,7 +30696,7 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
     else opengeni_private.project_session_event_payload(${schema.sessionEvents.payload})
   end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
-  const selectedPayload =
+  const ordinarySelectedPayload =
     payloadMode === "full"
       ? schema.sessionEvents.payload
       : payloadMode === "none"
@@ -30604,15 +30720,122 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
           )
         end`;
 
+  const claimedPromptEventId = sql<string | null>`case
+    when ${claimedHumanPromptStartEventFilter()} then (
+      select claimed_prompt_trigger.id
+      from ${schema.sessionTurns} claimed_prompt_turn
+      join ${schema.sessionEvents} claimed_prompt_trigger
+        on claimed_prompt_trigger.workspace_id = claimed_prompt_turn.workspace_id
+       and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
+       and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
+       and claimed_prompt_trigger.type = 'user.message'
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
+        and claimed_prompt_turn.source in ('user', 'api')
+      limit 1
+    )
+    else null
+  end`;
+  const claimedPromptPayload = sql<unknown | null>`case
+    when ${claimedHumanPromptStartEventFilter()} then (
+      select claimed_prompt_trigger.payload
+      from ${schema.sessionTurns} claimed_prompt_turn
+      join ${schema.sessionEvents} claimed_prompt_trigger
+        on claimed_prompt_trigger.workspace_id = claimed_prompt_turn.workspace_id
+       and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
+       and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
+       and claimed_prompt_trigger.type = 'user.message'
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
+        and claimed_prompt_turn.source in ('user', 'api')
+      limit 1
+    )
+    else null
+  end`;
+  const claimedPromptPayloadCodecVersion = sql<number | null>`case
+    when ${claimedHumanPromptStartEventFilter()} then (
+      select claimed_prompt_trigger.payload_codec_version
+      from ${schema.sessionTurns} claimed_prompt_turn
+      join ${schema.sessionEvents} claimed_prompt_trigger
+        on claimed_prompt_trigger.workspace_id = claimed_prompt_turn.workspace_id
+       and claimed_prompt_trigger.session_id = claimed_prompt_turn.session_id
+       and claimed_prompt_trigger.id = claimed_prompt_turn.trigger_event_id
+       and claimed_prompt_trigger.type = 'user.message'
+      where claimed_prompt_turn.workspace_id = ${outerEventWorkspaceId}
+        and claimed_prompt_turn.session_id = ${outerEventSessionId}
+        and claimed_prompt_turn.id = ${outerEventTurnId}
+        and claimed_prompt_turn.source in ('user', 'api')
+      limit 1
+    )
+    else null
+  end`;
+  const projectedClaimedPromptPayload = sql<unknown>`opengeni_private.project_session_event_payload(
+    ${claimedPromptPayload}
+  )`;
+  const projectedClaimedPromptPayloadBytes = sql<number>`octet_length(
+    (${projectedClaimedPromptPayload})::text
+  )`;
+  const selectedClaimedPromptPayload =
+    payloadMode === "full"
+      ? claimedPromptPayload
+      : payloadMode === "none"
+        ? sql<unknown>`jsonb_build_object(
+          '_monitoring', jsonb_build_object(
+            'payloadMode', 'none',
+            'payloadOmitted', true,
+            'projectedPayloadBytes', ${projectedClaimedPromptPayloadBytes}
+          )
+        )`
+        : sql<unknown>`case
+          when ${projectedClaimedPromptPayloadBytes} <= 4096 then ${projectedClaimedPromptPayload}
+          else jsonb_build_object(
+            '_monitoring', jsonb_build_object(
+              'payloadMode', 'summary',
+              'payloadTruncated', true,
+              'projectedPayloadBytes', ${projectedClaimedPromptPayloadBytes},
+              'fullForensicPayload', 'request payloadMode=full explicitly'
+            ),
+            'preview', left((${projectedClaimedPromptPayload})::text, 2048)
+          )
+        end`;
+  const mapClaimedPrompt = options.mapClaimedPromptStartsAsUserMessages === true;
+  const selectedType = mapClaimedPrompt
+    ? sql<string>`case
+        when ${claimedHumanPromptStartEventFilter()} then 'user.message'
+        ${payloadMode === "full" ? sql`else ${schema.sessionEvents.type}` : sql`else ${projectedType}`}
+      end`
+    : payloadMode === "full"
+      ? schema.sessionEvents.type
+      : projectedType;
+  const selectedPayload = mapClaimedPrompt
+    ? sql<unknown>`case
+        when ${claimedHumanPromptStartEventFilter()} then ${selectedClaimedPromptPayload}
+        else ${ordinarySelectedPayload}
+      end`
+    : ordinarySelectedPayload;
+  const selectedPayloadCodecVersion = mapClaimedPrompt
+    ? sql<number | null>`case
+        when ${claimedHumanPromptStartEventFilter()} then ${
+          payloadMode === "full" ? claimedPromptPayloadCodecVersion : sql`null`
+        }
+        else ${
+          payloadMode === "full" ? schema.sessionEvents.payloadCodecVersion : sql`null`
+        }
+      end`
+    : payloadMode === "full"
+      ? schema.sessionEvents.payloadCodecVersion
+      : sql<number | null>`null`;
+
   return {
     id: schema.sessionEvents.id,
     workspaceId: schema.sessionEvents.workspaceId,
     sessionId: schema.sessionEvents.sessionId,
     sequence: schema.sessionEvents.sequence,
-    type: payloadMode === "full" ? schema.sessionEvents.type : projectedType,
+    type: selectedType,
     payload: selectedPayload,
-    payloadCodecVersion:
-      payloadMode === "full" ? schema.sessionEvents.payloadCodecVersion : sql<number | null>`null`,
+    payloadCodecVersion: selectedPayloadCodecVersion,
     occurredAt: schema.sessionEvents.occurredAt,
     clientEventId:
       payloadMode === "full" ? schema.sessionEvents.clientEventId : projectedClientEventId,
@@ -30624,6 +30847,18 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
     duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
     duplicateReason:
       payloadMode === "full" ? schema.sessionEvents.duplicateReason : projectedDuplicateReason,
+    claimedPromptEventId:
+      options.includeClaimedPromptPayload && !mapClaimedPrompt
+        ? claimedPromptEventId
+        : sql<null>`null`,
+    claimedPromptPayload:
+      options.includeClaimedPromptPayload && !mapClaimedPrompt
+        ? selectedClaimedPromptPayload
+        : sql<null>`null`,
+    claimedPromptPayloadCodecVersion:
+      options.includeClaimedPromptPayload && !mapClaimedPrompt && payloadMode === "full"
+        ? claimedPromptPayloadCodecVersion
+        : sql<number | null>`null`,
   };
 }
 
@@ -63241,13 +63476,30 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
 }
 
 function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
+  const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
+  const claimedPrompt = row.claimedPromptEventId
+    ? {
+        eventId: row.claimedPromptEventId,
+        payload: fromPostgresLosslessJson(
+          row.claimedPromptPayload,
+          row.claimedPromptPayloadCodecVersion,
+        ),
+      }
+    : null;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
     sessionId: row.sessionId,
     sequence: row.sequence,
     type: row.type as SessionEventType,
-    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+    payload: claimedPrompt
+      ? {
+          ...(payload && typeof payload === "object" && !Array.isArray(payload)
+            ? payload
+            : { eventPayload: payload }),
+          claimedUserMessage: claimedPrompt,
+        }
+      : payload,
     occurredAt:
       row.occurredAt instanceof Date
         ? row.occurredAt.toISOString()

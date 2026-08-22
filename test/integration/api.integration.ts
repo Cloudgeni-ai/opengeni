@@ -5027,10 +5027,25 @@ describe("API component integration", () => {
     const initialEvents = (await listed.json()) as SessionEvent[];
     expect(initialEvents.map((event) => event.type)).toEqual([
       "session.created",
-      "user.message",
       "session.status.changed",
       "turn.queued",
     ]);
+    expect(JSON.stringify(initialEvents)).not.toContain("stream");
+    const forensicInitial = await app.request(
+      workspacePath(
+        workspaceId,
+        `/sessions/${session.id}/events?mode=forensic&payloadMode=full&limit=10`,
+      ),
+    );
+    expect(forensicInitial.status).toBe(200);
+    expect((await forensicInitial.json()) as SessionEvent[]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "user.message",
+          payload: expect.objectContaining({ text: "stream" }),
+        }),
+      ]),
+    );
 
     const bulkEventCount = 2005;
     await appendSessionEvents(
@@ -5042,7 +5057,7 @@ describe("API component integration", () => {
         payload: { text: `bulk-${index}` },
       })),
     );
-    const latestSequence = initialEvents.length + bulkEventCount;
+    const latestSequence = initialEvents.at(-1)!.sequence + bulkEventCount;
     const newest = await app.request(
       workspacePath(
         workspaceId,
@@ -8258,10 +8273,10 @@ describe("API component integration", () => {
     expect(timeline.events.map((event) => event.type)).toEqual([
       "session.created",
       "goal.set",
-      "user.message",
       "session.status.changed",
       "turn.queued",
     ]);
+    expect(JSON.stringify(timeline.events)).not.toContain("take the staging deploy zero-to-one");
     expect(timeline.direction).toBe("before");
     expect(timeline.nextBefore).toBe(timeline.events[0]!.sequence);
     expect(timeline.nextAfter).toBeNull();

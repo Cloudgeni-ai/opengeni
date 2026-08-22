@@ -269,6 +269,17 @@ forensics and density profiling therefore run only in a bounded non-serving
 execution class and never in API or turn-worker serving pods. See
 [`deployment.md`](deployment.md) for the reproducible density harness.
 
+Compact session discovery keeps that queue boundary intact. `queuedPromptCount`
+reports waiting human/API work, but `includeLastMessage` excludes the matching
+`user.message` content until its logical turn durably emits `turn.started` after
+admission. A delete, Queue Edit, cancellation, or other pre-start terminal
+transition therefore never exposes that prompt through monitoring. Event pages
+permanently omit the earlier trigger sequence and project the claimed message at
+the immutable `turn.started` sequence (`claimedUserMessage` on ordinary tails;
+filtered `user.message` reads map that boundary to the message projection), so a
+claim cannot move newly eligible content behind an issued keyset cursor. Forensic
+full-event reads intentionally retain the exact original queue evidence.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
