@@ -4,6 +4,10 @@
 
 opengeni:
   sourceRevision: ""
+  opensandbox:
+    enabled: false
+    namespace: opensandbox-system
+    metricsService: opensandbox-controller-metrics
   dashboards:
     enabled: true
     labelKey: grafana_dashboard
@@ -66,6 +70,9 @@ kube-prometheus-stack:
           sourceLabels: [__name__]
           regex: '^(?:container_(?:cpu_(?:usage_seconds_total|cfs_periods_total|cfs_throttled_periods_total)|fs_(?:reads|writes)(?:_bytes)?_total|memory_(?:cache|rss|working_set_bytes|swap)|network_(?:receive|transmit)_(?:bytes_total|packets_total|packets_dropped_total))|machine_(?:cpu_cores|memory_bytes))$'
         - action: drop
+          sourceLabels: [namespace]
+          regex: '^opensandbox$'
+        - action: drop
           sourceLabels: [__name__, interface]
           regex: 'container_network_.*;(cali|cilium|cni|lxc|nodelocaldns|tunl).*'
         - action: drop
@@ -75,6 +82,9 @@ kube-prometheus-stack:
         - action: keep
           sourceLabels: [__name__]
           regex: '^(?:prober_probe_total)$'
+        - action: drop
+          sourceLabels: [namespace]
+          regex: '^opensandbox$'
       metricRelabelings:
         - action: drop
           sourceLabels: [__name__, le]
@@ -206,6 +216,56 @@ kube-prometheus-stack:
     # Exact inputs consumed by the pinned Kubernetes mixin plus OpenGeni's own
     # rules. This rejects secret/configmap metadata and unused pod-state fanout
     # at the exporter boundary instead of paying for it in Prometheus.
+    rbac:
+      extraRules:
+        - apiGroups: ["sandbox.opensandbox.io"]
+          resources: ["pools"]
+          verbs: ["list", "watch"]
+    customResourceState:
+      enabled: false
+      config:
+        kind: CustomResourceStateMetrics
+        spec:
+          resources:
+            - groupVersionKind:
+                group: sandbox.opensandbox.io
+                version: v1alpha1
+                kind: Pool
+              metricNamePrefix: opensandbox_pool
+              labelsFromPath:
+                namespace: [metadata, namespace]
+                pool: [metadata, name]
+              metrics:
+                - name: spec_pool_max
+                  help: OpenSandbox Pool maximum capacity.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [spec, capacitySpec, poolMax]
+                - name: spec_buffer_min
+                  help: OpenSandbox Pool minimum warm buffer.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [spec, capacitySpec, bufferMin]
+                - name: status_total
+                  help: OpenSandbox Pool observed total Pods.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, total]
+                - name: status_allocated
+                  help: OpenSandbox Pool allocated Pods.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, allocated]
+                - name: status_available
+                  help: OpenSandbox Pool available Pods.
+                  each:
+                    type: Gauge
+                    gauge:
+                      path: [status, available]
     metricAllowlist:
       - kube_daemonset_status_current_number_scheduled
       - kube_daemonset_status_desired_number_scheduled
@@ -242,6 +302,7 @@ kube-prometheus-stack:
       - kube_persistentvolumeclaim_labels
       - kube_pod_container_resource_limits
       - kube_pod_container_resource_requests
+      - kube_pod_container_status_restarts_total
       - kube_pod_container_status_waiting_reason
       - kube_pod_info
       - kube_pod_labels
@@ -249,6 +310,7 @@ kube-prometheus-stack:
       - kube_pod_status_phase
       - kube_pod_status_ready
       - kube_pod_status_reason
+      - kube_pod_status_unschedulable
       - kube_poddisruptionbudget_status_current_healthy
       - kube_poddisruptionbudget_status_desired_healthy
       - kube_replicaset_owner
@@ -264,6 +326,11 @@ kube-prometheus-stack:
       - kube_statefulset_status_replicas_ready
       - kube_statefulset_status_replicas_updated
       - kube_statefulset_status_update_revision
+      - opensandbox_pool_spec_buffer_min
+      - opensandbox_pool_spec_pool_max
+      - opensandbox_pool_status_allocated
+      - opensandbox_pool_status_available
+      - opensandbox_pool_status_total
     metricLabelsAllowlist:
       - "horizontalpodautoscalers=[app.kubernetes.io/instance,app.kubernetes.io/component]"
       - "pods=[app.kubernetes.io/instance,app.kubernetes.io/component]"
@@ -275,6 +342,9 @@ kube-prometheus-stack:
         # for every pod. The pinned mixin consumes only SchedulingGated; retain
         # that exact exception and allow future reasons through for review.
         metricRelabelings:
+          - action: drop
+            sourceLabels: [namespace, __name__]
+            regex: 'opensandbox;kube_pod_.*'
           - action: drop
             sourceLabels: [__name__, reason]
             regex: 'kube_pod_status_reason;(?:Evicted|NodeAffinity|NodeLost|PreemptionByScheduler|Shutdown|TerminationByKubelet|UnexpectedAdmissionError)'

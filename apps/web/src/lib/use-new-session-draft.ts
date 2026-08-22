@@ -2,6 +2,7 @@ import { stableJson } from "@opengeni/contracts";
 import type {
   FileAsset,
   NewSessionDraft,
+  NewSessionSelectionHistory,
   OpenGeniClient,
   ResourceRef,
   SaveNewSessionDraftRequest,
@@ -17,7 +18,10 @@ export type UseNewSessionDraftOptions = {
   /** The complete browser-visible value. It must contain ready file refs only. */
   value: NewSessionDraftEditable;
   /** Apply a remote value to the controlled text/model/tool/options state. */
-  onApplyRemote: (value: NewSessionDraftEditable) => void;
+  onApplyRemote: (
+    value: NewSessionDraftEditable,
+    selectionHistory: NewSessionSelectionHistory,
+  ) => void;
   /** Replace finalized attachments with freshly revalidated server assets. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
   /** Revalidate non-file resource identities against the current UI catalog. */
@@ -131,7 +135,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           text: remote.text,
           resources: [
             ...hydratedResources.filter((resource) => resource.kind === "repository"),
-            ...files.map((file): ResourceRef => ({ kind: "file", fileId: file.id })),
+            ...files.map(
+              (file): ResourceRef => ({
+                kind: "file",
+                fileId: file.id,
+              }),
+            ),
           ],
           tools: remote.tools,
           toolsProvided: remote.toolsProvided,
@@ -167,7 +176,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       setCurrentConflict(null);
       setError(null);
       restoreReadyFilesRef.current(remote.files);
-      onApplyRemoteRef.current(remote.editable);
+      onApplyRemoteRef.current(remote.editable, remote.draft.selectionHistory);
     },
     [setCurrentConflict],
   );
@@ -500,6 +509,7 @@ function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraf
     ...remote,
     toolsProvided: Object.hasOwn(remote, "toolsProvided") ? remote.toolsProvided : true,
     latencyMode: remote.latencyMode ?? "standard",
+    selectionHistory: remote.selectionHistory ?? { projects: [] },
   };
 }
 

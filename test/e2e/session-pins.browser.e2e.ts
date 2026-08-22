@@ -1276,7 +1276,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
         const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
-        const inspector = page.getByRole("button", { name: /session panel$/ });
+        const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
         for (const control of [pin, inspector, hamburger]) {
           const box = await control.boundingBox();

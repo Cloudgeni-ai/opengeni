@@ -34,6 +34,14 @@ export function isRunningStatus(status: SessionStatus): boolean {
   return RUNNING_STATUSES.has(status);
 }
 
+function hasActiveEffectiveControl(session: Session): boolean {
+  return (session.effectiveControl?.state ?? "active") === "active";
+}
+
+function isEffectivelyRunning(session: Session): boolean {
+  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+}
+
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
 export function sessionActivityTime(session: Session): number {
   const updated = Date.parse(session.updatedAt);
@@ -112,11 +120,9 @@ export type GroupedSessions = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
-  const running = sessions
-    .filter((session) => isRunningStatus(session.status))
-    .sort(compareSessionActivity);
+  const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
   const rest = sessions
-    .filter((session) => !isRunningStatus(session.status))
+    .filter((session) => !isEffectivelyRunning(session))
     .sort(compareSessionActivity);
 
   const buckets = new Map<SessionRecencyGroup, Session[]>();
@@ -197,10 +203,11 @@ function ownRailStatusCounts(
     attention: session.status === "requires_action" ? 1 : 0,
     failed: session.status === "failed" ? 1 : 0,
     active:
-      session.status === "running" ||
-      session.status === "queued" ||
-      session.status === "recovering" ||
-      session.status === "waiting_capacity"
+      hasActiveEffectiveControl(session) &&
+      (session.status === "running" ||
+        session.status === "queued" ||
+        session.status === "recovering" ||
+        session.status === "waiting_capacity")
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -474,10 +481,10 @@ export function groupSessionsForBrowse(
 ): SessionForest {
   const now = options.now ?? new Date();
   const running = sessions
-    .filter((session) => isRunningStatus(session.status))
+    .filter(isEffectivelyRunning)
     .sort(compareSessionActivity)
     .map((session) => ({ session, children: [], hasActiveDescendant: false }));
-  const rest = sessions.filter((session) => !isRunningStatus(session.status));
+  const rest = sessions.filter((session) => !isEffectivelyRunning(session));
   if (groupBy === "created") {
     const buckets = new Map<SessionRecencyGroup, Session[]>();
     for (const session of rest) {
@@ -557,7 +564,7 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
   const summarizedActive = Boolean(
     stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
   );
-  return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
+  return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
 
 /** Bucket already-built roots using the rail's activity and recency rules. */
@@ -740,12 +747,13 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
 
 function subtreeCounts(node: SessionTreeNode): RemovedCounts {
   const status = node.session.status;
+  const active = hasActiveEffectiveControl(node.session);
   const counts: RemovedCounts = {
     total: 1,
-    running: status === "running" || status === "recovering" ? 1 : 0,
-    queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
+    running: active && (status === "running" || status === "recovering") ? 1 : 0,
+    queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
-    paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
+    paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
   };
   const stats = node.session.treeStats;

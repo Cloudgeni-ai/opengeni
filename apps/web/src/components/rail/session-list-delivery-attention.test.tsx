@@ -8,7 +8,7 @@ import { registerDom, renderComponent } from "../../../../../packages/react/test
 registerDom();
 
 describe("production session rail delivery attention", () => {
-  test("uses the existing status slot without changing the metadata geometry", async () => {
+  test("uses the existing compact status position without changing metadata geometry", async () => {
     const failed: RailAggregateStatus = {
       kind: "failed",
       count: 1,
@@ -24,9 +24,7 @@ describe("production session rail delivery attention", () => {
     );
 
     const existingOuterClass = rendered.container.firstElementChild?.className;
-    const existingGridClass = rendered.container.firstElementChild?.firstElementChild?.className;
-    const existingSlotClass =
-      rendered.container.firstElementChild?.firstElementChild?.children.item(1)?.className;
+    const existingStatusClass = rendered.container.querySelector('[title="1 failed"]')?.className;
 
     const sendFailed: RailAggregateStatus = {
       kind: "send_failed",
@@ -43,13 +41,11 @@ describe("production session rail delivery attention", () => {
     );
 
     const outer = rendered.container.firstElementChild;
-    const geometry = outer?.firstElementChild;
-    const statusSlot = geometry?.children.item(1);
+    const statusSlot = rendered.container.querySelector('[title="1 message not sent"]');
     const icon = statusSlot?.querySelector("svg");
 
     expect(outer?.className).toBe(existingOuterClass);
-    expect(geometry?.className).toBe(existingGridClass);
-    expect(statusSlot?.className).toBe(existingSlotClass);
+    expect(statusSlot?.className).toBe(existingStatusClass);
     expect(statusSlot?.getAttribute("title")).toBe("1 message not sent");
     expect(icon?.classList.contains("text-status-failed")).toBe(true);
     expect(rendered.container.textContent).toBe("2m");

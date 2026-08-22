@@ -598,6 +598,12 @@ describe("routed-operation sandbox disappearance discriminator", () => {
         new Error("Modal sandbox sb-123 is no longer running."),
       ),
     ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("opensandbox", {
+        statusCode: 404,
+        error: { code: "SANDBOX_NOT_FOUND", message: "sandbox is gone" },
+      }),
+    ).toBe(true);
   });
 
   test("transient transport evidence dominates nested sandbox disappearance", () => {

@@ -803,9 +803,7 @@ describe("worker activities integration", () => {
     expect(request).not.toContain("data:image/png");
     expect(request).toContain("look at this");
     expect(request).toContain("Attached files are available in the sandbox");
-    expect(request).toContain(
-      `diagram.png (image/png, 4 bytes): /workspace/files/${fileId}/diagram.png`,
-    );
+    expect(request).toContain(`diagram.png (image/png, 4 bytes): files/${fileId}/diagram.png`);
   });
 
   test("does not require object storage reads for attached file path context", async () => {
@@ -864,7 +862,7 @@ describe("worker activities integration", () => {
     const request = JSON.stringify(model.requests[0]?.input ?? {});
     expect(request).not.toContain("input_image");
     expect(request).not.toContain("direct model vision context");
-    expect(request).toContain(`/workspace/files/${fileId}/large.png`);
+    expect(request).toContain(`files/${fileId}/large.png`);
   });
 
   test("fails the turn plainly when two enabled packs declare sandbox images", async () => {

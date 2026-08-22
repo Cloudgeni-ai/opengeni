@@ -25,6 +25,8 @@ import {
   DESKTOP_STREAM_PORT,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
+  parseWorkspaceArchiveObjectRef,
   type SandboxBackend,
   type SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
@@ -35,7 +37,7 @@ import type {
   SandboxSessionState,
 } from "@openai/agents/sandbox";
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
-import { PROVIDER_REGISTRY } from "./providers";
+import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
@@ -100,14 +102,17 @@ export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
   buildImmutableProviderImage,
+  isProviderApiThrottleError,
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
+  renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
   type ProviderImmutableImageBuildInput,
   type ProviderImmutableImageBuildResult,
+  type ProviderExpirationRenewalInput,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
@@ -128,6 +133,7 @@ export {
   describeLegacyNativeSnapshotArchive,
   describeNativeSnapshotArchive,
   fingerprintSandboxWorkspace,
+  inlineWorkspaceArchiveForRestore,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
@@ -161,6 +167,15 @@ export {
   type ModalSandboxAttribution,
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
+export {
+  OpenSandboxClient,
+  OpenSandboxSession,
+  setOpenSandboxApplyDiff,
+  type OpenSandboxApplyDiff,
+  type OpenSandboxClientOptions,
+  type OpenSandboxEditor,
+  type OpenSandboxSessionState,
+} from "./providers/opensandbox-adapter";
 export {
   selectBackend,
   sdkBackendIdForSandboxBackend,
@@ -324,11 +339,19 @@ export {
 export {
   exposeStreamPort,
   buildStreamUrl,
+  exposedPortAllowsHostFetch,
   exposedPortEndpointFromUrl,
+  isOpenSandboxLifecycleProxyPath,
+  joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
+  redactOpenSandboxSignedUriPath,
+  signedEndpointExpiresAtMs,
+  signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
   type ExposeStreamPortInput,
   type ExposeStreamPortResult,
+  type OpenSandboxSignedUriPath,
 } from "./stream-port";
 
 // P4.3 recording loop — plain functions over a live session handle (no agent
@@ -571,6 +594,7 @@ export function createSandboxClientForBackend(
   backend: SandboxBackend,
   settings: Settings,
   environment = collectSandboxEnvironment(settings),
+  metrics?: RuntimeMetricsHooks,
 ): unknown {
   const registration = PROVIDER_REGISTRY[backend];
   if (!registration) {
@@ -619,7 +643,12 @@ export function createSandboxClientForBackend(
 
   const raw = withProviderExactResumeContract(
     registration,
-    registration.build({ settings, environment, exposedPorts }),
+    registration.build({
+      settings,
+      environment,
+      exposedPorts,
+      ...(metrics ? { metrics } : {}),
+    }),
   );
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
@@ -1158,9 +1187,9 @@ export class SandboxExecReadinessError extends Error {
   }
 }
 
-/** Modal may return a sandbox handle before its command router accepts exec.
- * Allow cold filesystem-snapshot restores to absorb provider tail latency
- * without publishing the lease warm before command execution is possible. */
+/** A remote provider may return a sandbox handle before its command router
+ * accepts exec. Allow cold restores to absorb provider tail latency without
+ * publishing the lease warm before command execution is possible. */
 export const MODAL_EXEC_READINESS_TIMEOUT_MS = 60_000;
 
 function sandboxExecProbeSessionId(result: unknown): number | null {
@@ -1173,14 +1202,14 @@ function sandboxExecProbeSessionId(result: unknown): number | null {
   return null;
 }
 
-/** A provider handle is not workspace readiness. Modal can return a handle
- * before its command router accepts exec, so every create path must pass this
- * bounded probe before atomically publishing the lease warm/ready. */
+/** A provider handle is not workspace readiness. Providers with asynchronous
+ * startup must pass this bounded command probe before a caller publishes the
+ * lease warm/ready. */
 export async function verifySandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
 ): Promise<void> {
-  if (established.backendId !== "modal") return;
+  if (established.backendId !== "modal" && established.backendId !== "opensandbox") return;
   const session = established.session as {
     exec?: (args: {
       cmd: string;
@@ -1701,10 +1730,10 @@ export async function establishSandboxSessionFromEnvelope(
   if (backend === "modal" && opts.recovery === "create-or-restore" && !opts.clientFactory) {
     await ensureModalRegistryImage(settings);
   }
-  const client = (opts.clientFactory ?? createSandboxClientForBackend)(
-    backend,
-    settings,
-    environment,
+  const client = (
+    opts.clientFactory
+      ? opts.clientFactory(backend, settings, environment)
+      : createSandboxClientForBackend(backend, settings, environment, opts.metrics)
   ) as ResumeCapableClient | undefined;
   if (!client) {
     throw new SandboxConfigError(
@@ -1779,11 +1808,14 @@ export async function establishSandboxSessionFromEnvelope(
     const restoreClient =
       restoreSettings === settings
         ? client
-        : ((opts.clientFactory ?? createSandboxClientForBackend)(
-            backend,
-            restoreSettings,
-            environment,
-          ) as ResumeCapableClient | undefined);
+        : ((opts.clientFactory
+            ? opts.clientFactory(backend, restoreSettings, environment)
+            : createSandboxClientForBackend(
+                backend,
+                restoreSettings,
+                environment,
+                opts.metrics,
+              )) as ResumeCapableClient | undefined);
     if (!restoreClient?.create) {
       throw new SandboxConfigError(
         backend,
@@ -1810,6 +1842,12 @@ export async function establishSandboxSessionFromEnvelope(
         "failed",
         createStarted,
       );
+      recordSandboxProviderApiThrottleMetric(
+        opts.metrics,
+        restoreClient.backendId,
+        "create",
+        error,
+      );
       if (
         createImageSource !== "provider_immutable" ||
         backend !== "modal" ||
@@ -1832,10 +1870,10 @@ export async function establishSandboxSessionFromEnvelope(
         workspaceArchive,
       );
       await ensureModalRegistryImage(fallbackSettings);
-      const fallbackClient = (opts.clientFactory ?? createSandboxClientForBackend)(
-        backend,
-        fallbackSettings,
-        environment,
+      const fallbackClient = (
+        opts.clientFactory
+          ? opts.clientFactory(backend, fallbackSettings, environment)
+          : createSandboxClientForBackend(backend, fallbackSettings, environment, opts.metrics)
       ) as ResumeCapableClient | undefined;
       if (!fallbackClient?.create) {
         throw new SandboxConfigError(
@@ -1861,6 +1899,12 @@ export async function establishSandboxSessionFromEnvelope(
           "logical",
           "failed",
           fallbackStarted,
+        );
+        recordSandboxProviderApiThrottleMetric(
+          opts.metrics,
+          fallbackClient.backendId,
+          "create",
+          fallbackError,
         );
         throw fallbackError;
       }
@@ -2148,6 +2192,20 @@ function recordSandboxCreateMetric(
   }
 }
 
+function recordSandboxProviderApiThrottleMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  operation: "create" | "renew",
+  error: unknown,
+): void {
+  if (!isProviderApiThrottleError(error)) return;
+  try {
+    metrics?.onSandboxProviderApiThrottle?.({ backend, operation });
+  } catch {
+    // Metrics emission must not affect sandbox lifecycle.
+  }
+}
+
 // A client that can SERIALIZE a live session state back to the persistable
 // envelope form (the inverse of deserializeSessionState). Narrowed so the leaf
 // stays agent-loop-free.
@@ -2272,8 +2330,10 @@ export function requirePersistableReplacementSandboxEnvelope(
 const DURABLE_WORKSPACE_ARCHIVE_FIELDS = [
   "workspaceArchive",
   "workspaceArchiveMeta",
+  "workspaceArchiveRef",
   "workspaceArchivePrev",
   "workspaceArchivePrevMeta",
+  "workspaceArchivePrevRef",
   "workspaceArchiveAt",
 ] as const;
 
@@ -2284,11 +2344,15 @@ function durableWorkspaceArchiveFields(
     envelope?.sessionState && typeof envelope.sessionState === "object"
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
-  if (
-    !sessionState ||
-    typeof sessionState.workspaceArchive !== "string" ||
-    sessionState.workspaceArchive.length === 0
-  ) {
+  if (!sessionState) return null;
+  const archiveRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef);
+  const hasInline =
+    typeof sessionState.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const hasPreviousInline =
+    typeof sessionState.workspaceArchivePrev === "string" &&
+    sessionState.workspaceArchivePrev.length > 0;
+  if (!hasInline && !archiveRef && !hasPreviousInline && !previousRef) {
     return null;
   }
   const fields: Record<string, unknown> = {};
@@ -2297,7 +2361,7 @@ function durableWorkspaceArchiveFields(
       fields[key] = sessionState[key];
     }
   }
-  return fields;
+  return omitInlineWorkspaceArchiveWhenObjectRefPresent(fields);
 }
 
 /**
@@ -2322,15 +2386,24 @@ export async function serializeReplacementSandboxEnvelope(
     serialized?.sessionState && typeof serialized.sessionState === "object"
       ? (serialized.sessionState as Record<string, unknown>)
       : {};
+  const sessionState: Record<string, unknown> = {
+    ...serializedSessionState,
+    ...(archiveFields ?? {}),
+  };
+  // Spread cannot delete keys. Restore inlines that leaked into serialized
+  // replacement state must not survive a durable object-storage ref.
+  if (parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {
+    delete sessionState.workspaceArchive;
+  }
+  if (parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef)) {
+    delete sessionState.workspaceArchivePrev;
+  }
   return {
     ...(serialized ?? {}),
     // Never inherit a historical backend marker when the replacement could not
     // serialize. The separately-persisted resume_backend_id and this envelope
     // must both describe the replacement.
     backendId: established.backendId,
-    sessionState: {
-      ...serializedSessionState,
-      ...(archiveFields ?? {}),
-    },
+    sessionState,
   };
 }

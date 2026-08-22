@@ -506,7 +506,7 @@ describe("turnInput attachment projection", () => {
         kind: "message",
         internalContext:
           "Attached files are available in the sandbox:\n" +
-          `- diagram.png (image/png, 5 bytes): /workspace/.opengeni/files/${image.id}/diagram.png`,
+          `- diagram.png (image/png, 5 bytes): .opengeni/files/${image.id}/diagram.png`,
         historyItems: [
           {
             type: "message",
@@ -517,7 +517,7 @@ describe("turnInput attachment projection", () => {
                 type: "input_text",
                 text:
                   `[Attachment: diagram.png; fileId=${image.id}; type=image/png; bytes=5; ` +
-                  `path=/workspace/.opengeni/files/${image.id}/diagram.png. If the local path is absent, ` +
+                  `path=.opengeni/files/${image.id}/diagram.png. If the local path is absent, ` +
                   "call files__files_get_download_url with this fileId and download it with the shell.]",
               },
               { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
@@ -604,7 +604,7 @@ describe("turnInput attachment projection", () => {
               type: "input_text",
               text:
                 `[Earlier attachment: fileId=${image.id}; ` +
-                `mountDirectory=/workspace/.opengeni/files/${image.id}. Use the existing file there, or ` +
+                `mountDirectory=.opengeni/files/${image.id}. Use the existing file there, or ` +
                 "call files__files_get_download_url with this fileId and download it with the shell.]",
             },
           ],

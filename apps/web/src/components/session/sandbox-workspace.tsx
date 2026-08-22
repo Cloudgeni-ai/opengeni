@@ -130,6 +130,7 @@ export function SessionWorkspace(props: {
       collapsed={effectiveCollapsed}
       onCollapsedChange={props.onCollapsedChange}
       {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
+      showCollapseControl
       {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
       autoSaveId={layoutStorageId}
       browserExtensionSetupUrl="/browser-extension-setup.html"

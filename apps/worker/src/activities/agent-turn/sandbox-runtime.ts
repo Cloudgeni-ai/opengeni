@@ -48,6 +48,7 @@ export type SandboxTurnRuntimeDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -65,6 +66,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     input,
     settings,
     db,
+    objectStorage,
     observability,
     cancellationSignal,
     activityContext,
@@ -487,7 +489,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
             const snapshotTurnId = attempt.turnId;
             if (snapshotSession && snapshotTurnId) {
               await maybePersistWarmWorkspaceSnapshot(
-                { db, settings },
+                { db, settings, objectStorage },
                 {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
@@ -560,7 +562,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         })
       ) {
         sandboxState.snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
-          { db, settings },
+          { db, settings, objectStorage },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

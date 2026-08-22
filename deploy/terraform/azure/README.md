@@ -7,6 +7,7 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - Resource group, when `create_resource_group = true`.
 - Azure Container Registry.
 - AKS cluster with OIDC issuer and workload identity enabled.
+- Optional dedicated autoscaling AKS user pool for OpenSandbox workload Pods.
 - Azure Key Vault with RBAC authorization enabled.
 - Azure Database for PostgreSQL Flexible Server when `postgres.mode = "managed"`.
 - `pgcrypto`, `pgvector`, and `btree_gin` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema.
@@ -197,6 +198,42 @@ requires an operator-reviewed read-only plan, RWO drain/reattach and rollback
 evidence, and a fresh quota/SKU/preflight check. These settings are operational
 guardrails, not a cost-savings claim; actual savings require authoritative
 billing evidence.
+
+### Optional OpenSandbox user pool
+
+`sandbox_node_pool.enabled` is false by default, so existing Modal deployments
+and system-pool plans remain unchanged. When enabled, Terraform creates a
+separate Linux `User` pool with Cluster Autoscaler, including scale-to-zero when
+`min_count = 0`. The pool has the fixed scheduling contract used by the pinned
+OpenSandbox BatchSandbox template:
+
+- label: `opengeni.ai/sandbox-pool=opensandbox`
+- taint: `opengeni.ai/sandbox=true:NoSchedule`
+
+OpenGeni/control components do not tolerate that taint. OpenSandbox workload
+Pods require both the label and toleration, preventing sandbox load from
+competing with the AKS system pool by default. This is capacity/autoscaling
+isolation, not a tenant-security boundary.
+
+```hcl
+sandbox_node_pool = {
+  enabled         = true
+  name            = "sandbox"
+  vm_size         = "Standard_D4ds_v5"
+  min_count       = 0
+  max_count       = 20
+  max_pods        = 110
+  zones           = ["1", "2", "3"]
+  os_disk_size_gb = 128
+  os_disk_type    = "Ephemeral"
+}
+```
+
+Treat 5, 50, and 500 sandbox tests as separate capacity profiles. Compute
+`max_count` from sandbox CPU/memory requests, daemon overhead, pod/IP density,
+target utilization, disruption margin, regional vCPU quota, and the test's hard
+cost ceiling. A lightweight 500-sandbox result is not evidence for 500
+desktop-class rigs.
 
 ## Managed PostgreSQL Capacity
 

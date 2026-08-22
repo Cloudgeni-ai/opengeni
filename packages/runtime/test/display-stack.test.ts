@@ -152,6 +152,14 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(cmd).toContain("-le 2000");
     expect(cmd).toContain("exit 14");
     expect(cmd).toContain("OPENGENI_DESKTOP_NOT_PAINTING");
+    // Empty /workspace HOME has no xfce4-desktop xfconf; seed the canonical
+    // wallpaper and start xfdesktop before scrot or the size floor never trips.
+    expect(cmd).toContain("xfconf-query -c xfce4-desktop");
+    expect(cmd).toContain("xfce-blue.jpg");
+    expect(cmd).toContain("xfdesktop --disable-wm-check");
+    const seedIdx = cmd.indexOf("paint_backdrop_seed");
+    expect(seedIdx).toBeGreaterThan(upIdx);
+    expect(seedIdx).toBeLessThan(scrotIdx);
     // chained so a failed bring-up never reaches the paint probe.
     expect(cmd).toContain("&& {");
   });
@@ -863,5 +871,6 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     ).text();
     expect(launcher).toContain('exec flock --close "$RUN/up.lock"');
     expect(launcher).not.toContain('exec 9>"$RUN/up.lock"');
+    expect(launcher).toContain("xfce-blue.jpg");
   });
 });

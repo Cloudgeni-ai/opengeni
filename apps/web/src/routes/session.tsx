@@ -22,6 +22,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BugIcon,
   CheckIcon,
   Loader2Icon,
   MenuIcon,
@@ -825,12 +826,8 @@ function SessionDock(props: {
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
-      label: (
-        <span className="inline-flex items-center gap-1.5">
-          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
-          <span>Artifacts</span>
-        </span>
-      ),
+      label: "Artifacts",
+      icon: <PanelsTopLeftIcon />,
       ...(artifactSummaries.length > 0
         ? {
             badge: (
@@ -859,6 +856,7 @@ function SessionDock(props: {
     trailingTabs.push({
       id: "debug",
       label: "Debug",
+      icon: <BugIcon />,
       content: (
         <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -1567,11 +1565,6 @@ function SessionChatPane(props: {
               workspaceId={props.session.workspaceId}
             />
           ) : null}
-          {props.session.tenancy ? (
-            <Suspense fallback={null}>
-              <LazySessionRouteAuxiliary session={props.session} events={props.events} />
-            </Suspense>
-          ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
               className="h-full"
@@ -1596,6 +1589,21 @@ function SessionChatPane(props: {
               loadingOldest={props.loadingOldest}
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
+              trailingState={
+                props.humanInput.requests.length > 0 &&
+                props.session.status === "requires_action" ? (
+                  <div className="pb-1" data-human-input-timeline-surface="">
+                    <HumanInputSurface
+                      requests={props.humanInput.requests}
+                      respondingRequestId={props.humanInput.respondingRequestId}
+                      error={props.humanInput.mutationError?.message}
+                      onSubmit={(requestId, response) =>
+                        props.humanInput.respond(requestId, response).then(() => undefined)
+                      }
+                    />
+                  </div>
+                ) : undefined
+              }
               emptyState={
                 props.queue.stoppingPreviousAttempt ? (
                   <EmptyState
@@ -1688,23 +1696,6 @@ function SessionChatPane(props: {
               );
             })}
           </div>
-        </div>
-      ) : null}
-
-      {/* Structured questions are tool output, not approvals: answer/skip
-          resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger.
-          Parallel requests step one-at-a-time inside HumanInputSurface. */}
-      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
-          <HumanInputSurface
-            requests={props.humanInput.requests}
-            respondingRequestId={props.humanInput.respondingRequestId}
-            error={props.humanInput.mutationError?.message}
-            onSubmit={(requestId, response) =>
-              props.humanInput.respond(requestId, response).then(() => undefined)
-            }
-          />
         </div>
       ) : null}
 

@@ -10,6 +10,7 @@ import {
   toolDisplayName,
   type AgentMessageItem,
   type FleetDecisionItem,
+  type HumanInputItem,
   type MemoryItem,
   type SandboxItem,
   type StartupPhaseItem,
@@ -845,6 +846,94 @@ describe("buildTimeline", () => {
     const message = items[0] as UserMessageItem;
     expect(message.resources).toEqual([]);
     expect(message.tools).toEqual([]);
+  });
+
+  test("projects answered structured input as a persistent question-and-answer item", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.humanInput.requested", {
+        request: {
+          id: "request-1",
+          questions: [
+            {
+              id: "repository",
+              kind: "text",
+              label: "Repository",
+              prompt: "Which repository?",
+              options: [],
+            },
+            {
+              id: "github_access",
+              kind: "single_select",
+              label: "GitHub access",
+              prompt: "How should access be provided?",
+              options: [{ id: "connect_workspace", label: "Connect the workspace integration" }],
+            },
+            {
+              id: "regions",
+              kind: "multi_select",
+              label: "Regions",
+              prompt: "Where should this run?",
+              options: [{ id: "eu_north", label: "EU North" }],
+              allowOther: true,
+            },
+          ],
+        },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-1",
+        response: {
+          outcome: "answered",
+          answers: [
+            { questionId: "repository", values: ["https://github.com/acme/widget"] },
+            { questionId: "github_access", values: ["connect_workspace"] },
+            { questionId: "regions", values: ["eu_north"], other: "On-premises" },
+          ],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "human-input",
+      requestId: "request-1",
+      answers: [
+        {
+          questionId: "repository",
+          label: "Repository",
+          values: ["https://github.com/acme/widget"],
+        },
+        {
+          questionId: "github_access",
+          label: "GitHub access",
+          values: ["Connect the workspace integration"],
+        },
+        { questionId: "regions", label: "Regions", values: ["EU North", "On-premises"] },
+      ],
+    });
+    expect((items[0] as HumanInputItem).answers.flatMap((answer) => answer.values)).not.toContain(
+      "connect_workspace",
+    );
+  });
+
+  test("keeps structured answers visible when the request event is outside the loaded page", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.humanInputResponse", {
+        requestId: "request-before-window",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "release_channel", values: ["canary"] }],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "human-input",
+      requestId: "request-before-window",
+      answers: [{ questionId: "release_channel", label: "Release Channel", values: ["canary"] }],
+    });
   });
 
   test("projects realtime voice text while retaining expandable execution context", () => {

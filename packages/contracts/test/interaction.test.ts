@@ -366,6 +366,45 @@ describe("interaction contracts", () => {
     ).toBe(false);
   });
 
+  test("accepts native three-protocol and frame-proxy two-protocol computer RFB attachments", () => {
+    const shared = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+    };
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...shared,
+        stream: {
+          kind: "direct_rfb",
+          url: "wss://computer.example.test/v1/rfb",
+          protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.secret"],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...shared,
+        stream: {
+          kind: "direct_rfb",
+          url: "wss://api.example.test/v1/interaction/frame-proxy",
+          protocols: ["binary", "opengeni-frame-proxy.grant"],
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...shared,
+        stream: {
+          kind: "direct_rfb",
+          url: "wss://computer.example.test/v1/rfb",
+          protocols: ["binary"],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("binds controller computer commands and receipts to durable causal authority", () => {
     expect(
       ComputerActionCommand.parse({

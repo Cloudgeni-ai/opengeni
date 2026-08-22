@@ -1,6 +1,7 @@
 import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
   ToolResultSpilledReceipt,
+  sandboxShellPath,
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
 } from "@opengeni/contracts";
@@ -29,7 +30,13 @@ export function modelToolResultOverflowError(): AttemptToolResultValue {
 export function spilledModelToolResult(
   receipt: ToolResultSpilledReceiptValue,
 ): AttemptToolResultValue {
-  const structuredContent = ToolResultSpilledReceipt.parse(receipt);
+  // Rematerialization keeps the virtual `/workspace/tool-results/...` path.
+  // The model-visible receipt is cwd-relative so exec_command can open the copy
+  // on a Connected Machine (no `/workspace` directory exists there).
+  const structuredContent = ToolResultSpilledReceipt.parse({
+    ...receipt,
+    sandboxPath: receipt.sandboxPath === null ? null : sandboxShellPath(receipt.sandboxPath),
+  });
   return {
     isError: false,
     content: [{ type: "text", text: JSON.stringify(structuredContent) }],

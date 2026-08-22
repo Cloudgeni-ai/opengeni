@@ -6,6 +6,7 @@
 
 import type { Settings } from "@opengeni/config";
 import type { CapabilityDescriptor, SandboxBackend } from "@opengeni/contracts";
+import type { RuntimeMetricsHooks } from "../../metrics";
 
 export interface ProviderConstructionContext {
   settings: Settings;
@@ -18,6 +19,7 @@ export interface ProviderConstructionContext {
    * createSandboxClient before build()).
    */
   exposedPorts: number[];
+  metrics?: RuntimeMetricsHooks;
 }
 
 export type ProviderImmutableImageBuildResult = {
@@ -36,6 +38,11 @@ export type ProviderImmutableImageBuildInput = {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+};
+
+export type ProviderExpirationRenewalInput = {
+  settings: Settings;
+  instanceId: string;
 };
 
 /**
@@ -143,6 +150,9 @@ export interface ProviderRegistration {
   buildImmutableImage?(
     input: ProviderImmutableImageBuildInput,
   ): Promise<ProviderImmutableImageBuildResult>;
+  /** Refresh a renewable provider expiration for one exact live instance.
+   * Omission means the provider has no renewable TTL contract. */
+  renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;
   descriptor: CapabilityDescriptor;
   /**
    * Validate that the settings carry the credentials/config this provider

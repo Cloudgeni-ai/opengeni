@@ -59,6 +59,20 @@ output "aks_egress_public_ip" {
   value       = azurerm_public_ip.aks_egress.ip_address
 }
 
+output "sandbox_node_pool" {
+  description = "Dedicated OpenSandbox AKS user-pool scheduling and capacity contract, or null when disabled."
+  value = var.sandbox_node_pool.enabled ? {
+    id         = azurerm_kubernetes_cluster_node_pool.sandbox[0].id
+    name       = azurerm_kubernetes_cluster_node_pool.sandbox[0].name
+    vm_size    = azurerm_kubernetes_cluster_node_pool.sandbox[0].vm_size
+    min_count  = azurerm_kubernetes_cluster_node_pool.sandbox[0].min_count
+    max_count  = azurerm_kubernetes_cluster_node_pool.sandbox[0].max_count
+    max_pods   = azurerm_kubernetes_cluster_node_pool.sandbox[0].max_pods
+    node_label = "opengeni.ai/sandbox-pool=opensandbox"
+    node_taint = "opengeni.ai/sandbox=true:NoSchedule"
+  } : null
+}
+
 output "key_vault_name" {
   description = "Key Vault name for runtime secret storage."
   value       = azurerm_key_vault.this.name

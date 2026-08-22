@@ -12,7 +12,6 @@ import {
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
-  CalendarClockIcon,
   ChevronRightIcon,
   CircleDashedIcon,
   Clock3Icon,
@@ -21,7 +20,6 @@ import {
   FolderPlusIcon,
   FolderOpenIcon,
   ListFilterIcon,
-  Loader2Icon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
@@ -30,7 +28,6 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
-  TriangleAlertIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -46,6 +43,8 @@ import {
 } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
+import { RailTrailingMetadata, SessionRowContent } from "@/components/rail/session-row-content";
+export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -2307,30 +2306,12 @@ function SessionRow(props: {
             }}
             className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
-            <span className="sr-only">{stateLabel}. </span>
-            {/* Let long titles run toward the metadata and dissolve under a
-                short edge mask. This preserves more of the useful title than
-                a hard ellipsis while keeping the icon columns untouched. */}
-            <span className="flex min-w-0 flex-1 flex-col leading-tight">
-              <span
-                className="block overflow-hidden whitespace-nowrap"
-                style={{
-                  maskImage: "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
-                  WebkitMaskImage:
-                    "linear-gradient(to right, black calc(100% - 0.75rem), transparent)",
-                }}
-              >
-                {title}
-              </span>
-              {rail.isMobile ? (
-                <span className="mt-0.5 truncate text-2xs font-normal text-fg-muted">
-                  {[stateLabel, depthLabel, descendantLabel, relativeTime]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              ) : null}
-            </span>
-            <RailTrailingMetadata
+            <SessionRowContent
+              title={title}
+              stateLabel={stateLabel}
+              depthLabel={depthLabel}
+              descendantLabel={descendantLabel}
+              mobile={rail.isMobile}
               summary={props.aggregateStatus}
               scheduled={Boolean(scheduledTaskIdOf(props.session))}
               relativeTime={rail.isMobile ? undefined : relativeTime}
@@ -2607,81 +2588,6 @@ function RowActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-/** The one descendant-aware status marker shared by rows and section headers. */
-function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
-  if (summary.kind === "neutral") return null;
-  if (summary.kind === "active") {
-    return (
-      <Loader2Icon
-        aria-hidden="true"
-        className="size-3 shrink-0 animate-spin text-fg-subtle motion-reduce:animate-none"
-      />
-    );
-  }
-  if (summary.kind === "active_work") {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-flex size-2.5 shrink-0 rounded-full border border-brand"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(-12deg, var(--og-color-accent) 0 2px, transparent 2px 3.5px)",
-        }}
-      />
-    );
-  }
-  if (summary.kind === "send_failed") {
-    return (
-      <TriangleAlertIcon aria-hidden="true" className="size-3.5 shrink-0 text-status-failed" />
-    );
-  }
-  const tone =
-    summary.kind === "needs_attention"
-      ? "bg-status-waiting"
-      : summary.kind === "failed"
-        ? "bg-status-failed"
-        : "bg-brand";
-  return (
-    <span
-      aria-hidden="true"
-      className={cn("relative inline-flex size-2 shrink-0 rounded-full", tone)}
-    />
-  );
-}
-
-export function RailTrailingMetadata({
-  summary,
-  scheduled = false,
-  relativeTime,
-}: {
-  summary: RailAggregateStatus;
-  scheduled?: boolean;
-  relativeTime?: string | undefined;
-}) {
-  const hasStatusMarker = summary.kind !== "neutral";
-  return (
-    <span className="flex w-[3.625rem] shrink-0 items-center">
-      <span className="grid w-[3.625rem] shrink-0 grid-cols-[0.875rem_0.75rem_1.5rem] items-center gap-1">
-        <span className="flex size-3.5 items-center justify-center">
-          {scheduled && hasStatusMarker ? (
-            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
-          ) : null}
-        </span>
-        <span className="flex size-3 items-center justify-center" title={summary.label}>
-          {hasStatusMarker ? (
-            <RailAggregateDot summary={summary} />
-          ) : scheduled ? (
-            <CalendarClockIcon aria-label="Scheduled task" className="size-3.5 text-fg-subtle" />
-          ) : null}
-        </span>
-        <span className="w-6 text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
-          {relativeTime}
-        </span>
-      </span>
-    </span>
   );
 }
 

@@ -134,18 +134,94 @@ describe("turn-capacity Prometheus alerts", () => {
         "          targetLabel: opengeni_workload_component",
     );
   });
+
+  test("fences the complete OpenSandbox failure catalog to the selected backend", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    expect(template).toContain("{{- if $opensandboxEnabled }}");
+
+    const expected = new Map([
+      [
+        "OpenGeniOpenSandboxApiThrottled",
+        [
+          "opengeni_sandbox_provider_api_throttles_total",
+          'rest_client_requests_total{namespace="opensandbox-system",code="429"}',
+        ],
+      ],
+      [
+        "OpenGeniOpenSandboxTtlRenewalFailed",
+        ["opengeni_sandbox_ttl_renewals_total", 'outcome="failed"'],
+      ],
+      [
+        "OpenGeniOpenSandboxPoolDepleted",
+        [
+          "opensandbox_pool_status_available",
+          "opensandbox_pool_spec_buffer_min",
+          "opensandbox_pool_spec_pool_max",
+        ],
+      ],
+      [
+        "OpenGeniOpenSandboxInventoryStale",
+        ['opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"}'],
+      ],
+      [
+        "OpenGeniOpenSandboxPodPending",
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="pending"}'],
+      ],
+      [
+        "OpenGeniOpenSandboxImagePullFailed",
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"}'],
+      ],
+      [
+        "OpenGeniOpenSandboxControllerError",
+        [
+          "controller_runtime_reconcile_errors_total",
+          "opensandbox-controller-manager",
+          "kube_pod_container_status_restarts_total",
+        ],
+      ],
+      [
+        "OpenGeniOpenSandboxCapacityExhausted",
+        ['opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"}'],
+      ],
+      ["OpenGeniOpenSandboxCleanupStuck", ["opengeni:opensandbox_cleanup_stuck:fresh_max"]],
+      [
+        "OpenGeniOpenSandboxExpirationOverdue",
+        ["opengeni:opensandbox_expiration_overdue:fresh_max"],
+      ],
+    ]);
+
+    for (const [alert, signals] of expected) {
+      const expression = alertExpression(template, alert);
+      for (const signal of signals)
+        expect(expression, `${alert} missing ${signal}`).toContain(signal);
+      expect(expression).not.toMatch(/workspace_id|session_id|sandbox_id|attempt_id/);
+    }
+    expect(template).toContain(
+      "The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.",
+    );
+    expect(template).not.toMatch(/opensandbox_batchsandbox_(?:status|deletion|finalizer|spec)/);
+  });
 });
 
 function alertExpression(template: string, alertName: string): string {
   const marker = `- alert: ${alertName}\n`;
   const start = template.indexOf(marker);
   if (start < 0) throw new Error(`Missing alert ${alertName}`);
-  const expressionStart = template.indexOf("          expr: |\n", start);
-  const expressionEnd = template.indexOf("          for:", expressionStart);
-  if (expressionStart < 0 || expressionEnd < 0) {
+  const expressionStart = template.indexOf("          expr:", start);
+  if (expressionStart < 0) {
     throw new Error(`Missing expression boundaries for ${alertName}`);
   }
-  return template.slice(expressionStart + "          expr: |\n".length, expressionEnd);
+  const expressionLineEnd = template.indexOf("\n", expressionStart);
+  const expressionLine = template.slice(expressionStart, expressionLineEnd);
+  if (expressionLine === "          expr: |") {
+    const expressionEnd = template.indexOf("          for:", expressionLineEnd);
+    if (expressionEnd < 0) throw new Error(`Missing multiline expression end for ${alertName}`);
+    return template.slice(expressionLineEnd + 1, expressionEnd);
+  }
+  return expressionLine.slice("          expr:".length).trim();
 }
 
 function metricSelectors(expression: string): string[] {

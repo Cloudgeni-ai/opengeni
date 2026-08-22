@@ -25,12 +25,17 @@ describe("observability deployment plan", () => {
     const plan = observabilityStackPlanFor({
       profile: "production",
       environment: "prod-us",
+      opensandbox: true,
     });
 
     expect(plan.chartPath).toBe("deploy/observability");
-    expect(plan.chartVersion).toBe("0.1.4");
+    expect(plan.chartVersion).toBe("0.1.6");
     expect(plan.kubePrometheusStackVersion).toBe("87.16.1");
-    expect(plan.valuesFiles).toEqual(["deploy/observability/values.production.example.yaml"]);
+    expect(plan.opensandbox).toBe(true);
+    expect(plan.valuesFiles).toEqual([
+      "deploy/observability/values.production.example.yaml",
+      "deploy/observability/values.opensandbox.yaml",
+    ]);
     expect(plan.installCommands.slice(0, 2)).toEqual([
       "helm repo add prometheus-community https://prometheus-community.github.io/helm-charts",
       "helm dependency build deploy/observability",
@@ -57,10 +62,32 @@ describe("observability deployment plan", () => {
       false,
     );
     expect(plan.verifyCommands[0]).toContain("deployment:observability-verify");
+    expect(plan.verifyCommands[0]).toContain("--opensandbox");
     expect(plan.destroyCommands).toEqual([
       "helm uninstall opengeni-observability --namespace observability --ignore-not-found",
     ]);
     expect(plan.notes.some((note) => note.includes("never runs application hooks"))).toBe(true);
+    expect(plan.notes.some((note) => note.includes("OpenSandbox monitoring is enabled"))).toBe(
+      true,
+    );
+  });
+
+  test("keeps OpenSandbox custom-resource monitoring opt-in", () => {
+    const values = Bun.YAML.parse(readFileSync("deploy/observability/values.yaml", "utf8"));
+    const overlay = Bun.YAML.parse(
+      readFileSync("deploy/observability/values.opensandbox.yaml", "utf8"),
+    );
+
+    expect(values.opengeni.opensandbox.enabled).toBe(false);
+    expect(values["kube-prometheus-stack"]["kube-state-metrics"].customResourceState.enabled).toBe(
+      false,
+    );
+    expect(overlay.opengeni.opensandbox.enabled).toBe(true);
+    expect(overlay["kube-prometheus-stack"]["kube-state-metrics"].customResourceState.enabled).toBe(
+      true,
+    );
+    expect(observabilityStackPlanFor().valuesFiles).toEqual([]);
+    expect(observabilityStackPlanFor().verifyCommands[0]).not.toContain("--opensandbox");
   });
 
   test("rejects unsupported profiles and shell-unsafe identifiers", () => {

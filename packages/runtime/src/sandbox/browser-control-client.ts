@@ -70,7 +70,14 @@ import {
   type EnsureBrowserControlServerResult,
 } from "./browser-control-server";
 import { parseExecResponseBanner } from "./exec-banner";
-import { buildStreamUrl, type ExposedPortEndpoint } from "./stream-port";
+import {
+  buildStreamUrl,
+  exposedPortAllowsHostFetch,
+  joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
+  StreamPortUnavailableError,
+  type ExposedPortEndpoint,
+} from "./stream-port";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
 // Controller I/O uses absolute paths under /tmp. Never inherit the session
@@ -132,6 +139,14 @@ export type BrowserControlPlacementSession = {
     maxOutputTokens?: number;
   }) => Promise<string>;
   resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+  /** Signed OpenSandbox Channel B must host-fetch. Never fall through to in-box curl. */
+  requireHostFetchController?: boolean;
+  runtimeMetrics?: {
+    onOpenSandboxSignedEndpoint?: (input: {
+      outcome: "minted" | "mint_failed" | "host_fetch_unauthorized";
+      port: number;
+    }) => void;
+  };
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
   ) => Promise<BrowserControlEnsureResponse>;
@@ -714,13 +729,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    const providerPath = endpoint.path ?? "/";
-    if (providerPath !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "browser placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/browser-sessions/${binding.browserSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "target id"))}/frames`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/browser-sessions/${binding.browserSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "target id"))}/frames`,
+    );
     return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
@@ -742,12 +754,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    if ((endpoint.path ?? "/") !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "computer placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/frames`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/frames`,
+    );
     return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
@@ -762,12 +772,10 @@ export class BrowserControlClient {
       );
     }
     const endpoint = await this.session.resolveExposedPort(this.port);
-    if ((endpoint.path ?? "/") !== "/") {
-      throw new BrowserControlUnsupportedError(
-        "computer placement requires a native HTTP/WebSocket relay",
-      );
-    }
-    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`;
+    const path = joinControllerPath(
+      endpoint.path,
+      `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`,
+    );
     return buildStreamUrl({ ...endpoint, path });
   }
 
@@ -897,30 +905,70 @@ export class BrowserControlClient {
     // that actual data plane for control too: one authenticated HTTP request,
     // instead of materializing files and starting curl through the sandbox exec
     // API for every click or key. Connected machines keep their agent transport.
+    const requireHostFetch = this.session.requireHostFetchController === true;
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
         const endpoint = await this.session.resolveExposedPort(this.port);
-        if ((endpoint.path ?? "/") === "/") {
-          return await requestExposedController(endpoint, input, this.timeoutMs);
+        // Lifecycle proxies rewrite Authorization, so a host-side Bearer cannot
+        // be both the proxy key and the browserd admin token. Native `/` tunnels
+        // and OSEP-0011 signed URIs host-fetch. Unsigned OpenSandbox still uses
+        // in-box loopback curl on the lifecycle prefix. Signed Channel B never
+        // takes that path. A cached controller-only session has no exec, so
+        // host-fetching a lifecycle prefix would 401; throw a retryable
+        // transport error so the caller invalidates and provisions.
+        const hostFetchAllowed = exposedPortAllowsHostFetch(endpoint);
+        const canExec = Boolean(this.session.exec || this.session.execCommand);
+        if (!hostFetchAllowed && (requireHostFetch || !canExec)) {
+          throw new BrowserControlTransportError(
+            requireHostFetch
+              ? "signed Channel B cannot use the lifecycle proxy"
+              : "cached browser controller endpoint cannot host-fetch a prefixed proxy",
+          );
+        }
+        if (hostFetchAllowed) {
+          try {
+            return await requestExposedController(
+              endpoint,
+              input,
+              this.timeoutMs,
+              this.session.runtimeMetrics,
+            );
+          } catch (error) {
+            if (
+              retryNativeEndpoint &&
+              !requireHostFetch &&
+              error instanceof BrowserControlTransportError
+            ) {
+              return await this.requestJson(input, false);
+            }
+            throw error;
+          }
         }
       } catch (error) {
         if (
           error instanceof BrowserControlRequestError ||
           error instanceof BrowserControlProtocolError ||
+          error instanceof BrowserControlTransportError ||
           error instanceof RangeError
         ) {
           throw error;
         }
-        if (!this.session.exec && !this.session.execCommand) {
+        if (requireHostFetch || (!this.session.exec && !this.session.execCommand)) {
           throw new BrowserControlTransportError(
-            "cached browser controller endpoint is temporarily unavailable",
+            requireHostFetch
+              ? "signed Channel B host-fetch failed"
+              : "cached browser controller endpoint is temporarily unavailable",
             { cause: error },
           );
         }
-        // Port discovery or its transport can fail transiently. The existing
-        // idempotent operation journal makes the private exec fallback safe even
-        // if a mutation reached browserd before its response connection failed.
+        // Unsigned lifecycle placements may fall back to in-box curl when port
+        // discovery fails. Signed Channel B must not; that would restore the
+        // Authorization-rewriting proxy path the signed edge exists to avoid.
       }
+    } else if (requireHostFetch) {
+      throw new BrowserControlTransportError(
+        "signed Channel B requires a host-fetch controller endpoint",
+      );
     }
 
     const controllerPort = await this.controllerPort();
@@ -1464,6 +1512,29 @@ function curlConfig(input: {
   ].join("\n");
 }
 
+function joinControllerPath(endpointPath: string | undefined, requestPath: string): string {
+  try {
+    return joinExposedPortPath(endpointPath, requestPath);
+  } catch (error) {
+    if (error instanceof StreamPortUnavailableError) {
+      throw new BrowserControlProtocolError(error.message);
+    }
+    throw error;
+  }
+}
+
+function exposedPortHeaders(endpoint: ExposedPortEndpoint): Record<string, string> {
+  const raw = endpoint.headers;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== "string" || typeof value !== "string") continue;
+    if (key.toLowerCase() === "authorization") continue;
+    headers[key] = value;
+  }
+  return headers;
+}
+
 async function requestExposedController(
   endpoint: ExposedPortEndpoint,
   input: {
@@ -1474,10 +1545,18 @@ async function requestExposedController(
     timeoutMs?: number;
   },
   defaultTimeoutMs: number,
+  metrics?: {
+    onOpenSandboxSignedEndpoint?: (input: {
+      outcome: "minted" | "mint_failed" | "host_fetch_unauthorized";
+      port: number;
+    }) => void;
+  },
 ): Promise<unknown> {
   const token = requireToken(input.token, "browser controller token");
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
-  const streamUrl = new URL(buildStreamUrl({ ...endpoint, path: input.path }));
+  const streamUrl = new URL(
+    buildStreamUrl({ ...endpoint, path: joinControllerPath(endpoint.path, input.path) }),
+  );
   streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
   const body = input.body === undefined ? undefined : JSON.stringify(input.body);
   if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
@@ -1486,6 +1565,7 @@ async function requestExposedController(
   const response = await fetch(streamUrl, {
     method: input.method,
     headers: {
+      ...exposedPortHeaders(endpoint),
       authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
@@ -1497,7 +1577,33 @@ async function requestExposedController(
   if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
     throw new BrowserControlProtocolError("browser controller response is too large");
   }
+  if (
+    (response.status === 401 || response.status === 403) &&
+    !looksLikeBrowserControlEnvelope(responseText)
+  ) {
+    const signed = parseOpenSandboxSignedUriPath(endpoint.path ?? "");
+    if (signed) {
+      try {
+        metrics?.onOpenSandboxSignedEndpoint?.({
+          outcome: "host_fetch_unauthorized",
+          port: signed.port,
+        });
+      } catch {
+        /* metrics must not affect Channel B */
+      }
+    }
+    throw new BrowserControlTransportError(`browser controller returned HTTP ${response.status}`);
+  }
   return parseEnvelope(responseText, response.status);
+}
+
+function looksLikeBrowserControlEnvelope(body: string): boolean {
+  try {
+    const value: unknown = JSON.parse(body);
+    return isRecord(value) && value.protocolVersion === BROWSER_CONTROL_PROTOCOL_VERSION;
+  } catch {
+    return false;
+  }
 }
 
 function parseEnvelope(body: string, status: number): unknown {
@@ -1953,6 +2059,13 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
   }
 }
 
+function isWorkspaceConfinedWrite(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /must stay within|confines|workspace mount|within \/workspace/iu.test(error.message)
+  );
+}
+
 async function writePrivateFile(
   session: BrowserControlPlacementSession,
   input: {
@@ -1967,8 +2080,18 @@ async function writePrivateFile(
     return;
   }
   if (session.writeFile) {
-    await session.writeFile(input);
-    return;
+    try {
+      await session.writeFile(input);
+      return;
+    } catch (error) {
+      if (
+        !isWorkspaceConfinedWrite(error) ||
+        (!session.exec && !session.execCommand) ||
+        !session.writeStdin
+      ) {
+        throw error;
+      }
+    }
   }
   if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new BrowserControlUnsupportedError("browser placement has no private file transport");

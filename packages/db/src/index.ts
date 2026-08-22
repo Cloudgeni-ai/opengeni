@@ -173,6 +173,10 @@ import {
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
+  workspaceArchivePayloadPresent,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
+  type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
@@ -278,6 +282,7 @@ import {
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
   seedNewSessionDraftInTransaction,
+  rememberNewSessionSelectionInTransaction,
   type NewSessionDraftSnapshot,
 } from "./new-session-drafts";
 import {
@@ -1947,7 +1952,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       }
     }
     const organizationAccounts = await tx
-      .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+      .select({
+        id: schema.managedAccounts.id,
+        name: schema.managedAccounts.name,
+      })
       .from(schema.managedAccounts)
       .where(
         inArray(
@@ -14137,7 +14145,10 @@ export async function getScheduledTaskIncludingDeleted(
       )
       .limit(1);
     return row
-      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      ? {
+          ...mapScheduledTask(row),
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        }
       : null;
   });
 }
@@ -14161,7 +14172,10 @@ export async function getScheduledTaskIncludingDeletedForUpdate(
       .for("update")
       .limit(1);
     return row
-      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      ? {
+          ...mapScheduledTask(row),
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        }
       : null;
   });
 }
@@ -14893,7 +14907,12 @@ export async function materializeScheduledTaskReusableSessionFromRun(
 
 export async function bindScheduledTaskRunSessionInTransaction(
   tx: Database,
-  input: { accountId: string; workspaceId: string; runId: string; sessionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    runId: string;
+    sessionId: string;
+  },
 ): Promise<void> {
   await withRlsContext(
     tx,
@@ -14942,7 +14961,9 @@ async function scheduledTaskRunCausalHumanInTransaction(
     throw new Error("scheduled authority classes have different causal humans");
   }
   const [acceptedRow] = await tx
-    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .select({
+      acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+    })
     .from(schema.scheduledTaskRuns)
     .where(
       and(
@@ -15073,7 +15094,12 @@ export async function markScheduledTaskRunFailedIfQueued(
 
 export async function markScheduledTaskRunSkippedIfQueued(
   db: Database,
-  input: { workspaceId: string; runId: string; sessionId: string; error: string },
+  input: {
+    workspaceId: string;
+    runId: string;
+    sessionId: string;
+    error: string;
+  },
 ): Promise<void> {
   await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     await scopedDb.execute(sql`select transition_scheduled_agent_run(
@@ -15091,7 +15117,12 @@ export async function markScheduledTaskRunSkippedIfQueued(
 /** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
 export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   tx: Database,
-  input: { workspaceId: string; sessionId: string; runId: string; error?: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    error?: string;
+  },
 ): Promise<void> {
   await tx.execute(sql`select transition_scheduled_agent_run(
     current_setting('opengeni.account_id')::uuid,
@@ -15123,7 +15154,9 @@ async function validateScheduledTargetExecutionAtClaim(
   );
   if (liveAuthority?.denial) return liveAuthority.denial;
   const [run] = await tx
-    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .select({
+      acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+    })
     .from(schema.scheduledTaskRuns)
     .where(
       and(
@@ -15163,7 +15196,9 @@ async function validateScheduledTargetExecutionAtClaim(
   const [rigVersion] =
     target.rigId && target.rigVersionId
       ? await tx
-          .select({ defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds })
+          .select({
+            defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds,
+          })
           .from(schema.rigVersions)
           .where(
             and(
@@ -27063,7 +27098,10 @@ export async function deleteSessionTreeIfQuiescent(
             )
             .returning({ id: schema.sessions.id });
           if (deleted.length !== 1) return { status: "not_found" as const };
-          return { status: "deleted" as const, deletedSessionCount: sessionIds.length };
+          return {
+            status: "deleted" as const,
+            deletedSessionCount: sessionIds.length,
+          };
         }),
     );
   } catch (error) {
@@ -27809,9 +27847,39 @@ export async function sessionTreeStatsForSessions(
         stats."activelyWorkingDescendants",
         stats.truncated
       from ${schema.sessions} root
+      join ${schema.workspaceInferenceControls} workspace_control
+        on workspace_control.workspace_id = root.workspace_id
       cross join lateral (
-        with recursive descendants(id, status, last_sequence, depth, path) as (
-          select root.id, root.status, root.last_sequence, 0, array[root.id]::uuid[]
+        with recursive descendants(
+          id,
+          status,
+          last_sequence,
+          effective_pause_revision,
+          depth,
+          path
+        ) as (
+          select
+            root.id,
+            root.status,
+            root.last_sequence,
+            greatest(
+              case
+                when workspace_control.workspace_state = 'paused'
+                  and workspace_control.workspace_pause_revision is not null
+                  and (
+                    root.subtree_run_override_revision is null
+                    or root.subtree_run_override_revision <= workspace_control.workspace_pause_revision
+                  )
+                  then workspace_control.workspace_pause_revision
+                else null
+              end,
+              case
+                when root.direct_control_state = 'paused' then root.direct_pause_revision
+                else null
+              end
+            ),
+            0,
+            array[root.id]::uuid[]
 
           union all
 
@@ -27819,6 +27887,24 @@ export async function sessionTreeStatsForSessions(
             child.id,
             child.status,
             child.last_sequence,
+            greatest(
+              case
+                -- A subtree resume defeats every inherited pause older than it.
+                -- Preserve only the strongest still-undefeated blocker, then
+                -- apply the child's own pause (which its own override cannot defeat).
+                when descendants.effective_pause_revision is not null
+                  and (
+                    child.subtree_run_override_revision is null
+                    or child.subtree_run_override_revision <= descendants.effective_pause_revision
+                  )
+                  then descendants.effective_pause_revision
+                else null
+              end,
+              case
+                when child.direct_control_state = 'paused' then child.direct_pause_revision
+                else null
+              end
+            ),
             descendants.depth + 1,
             descendants.path || child.id
           from descendants
@@ -27832,11 +27918,18 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, last_sequence, depth, path
+          select id, status, last_sequence, effective_pause_revision, depth, path
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
-          select id, status, last_sequence, depth, path, row_number() over () as ordinal
+          select
+            id,
+            status,
+            last_sequence,
+            effective_pause_revision,
+            depth,
+            path,
+            row_number() over () as ordinal
           from bounded
         )
         select
@@ -27848,11 +27941,15 @@ export async function sessionTreeStatsForSessions(
           )::int as "totalDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status in ('running', 'recovering')
+              and depth > 0
+              and effective_pause_revision is null
+              and status in ('running', 'recovering')
           )::int as "runningDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status in ('queued', 'waiting_capacity')
+              and depth > 0
+              and effective_pause_revision is null
+              and status in ('queued', 'waiting_capacity')
           )::int as "queuedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
@@ -27860,7 +27957,7 @@ export async function sessionTreeStatsForSessions(
           )::int as "attentionDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
-              and depth > 0 and status = 'paused'
+              and depth > 0 and effective_pause_revision is not null
           )::int as "pausedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
@@ -31001,12 +31098,6 @@ function validateAnsweredHumanInput(
       // string cap on HumanInputAnswer.values. Ignore legacy minLength/maxLength
       // still present on older persisted question JSON.
       continue;
-    }
-    if (other && !question.allowOther) {
-      throw new HumanInputResponseValidationError(
-        "INVALID_RESPONSE",
-        `Question ${question.id} does not allow Other`,
-      );
     }
     const optionIds = new Set(question.options.map((option) => option.id));
     if (values.some((value) => !optionIds.has(value))) {
@@ -34606,11 +34697,11 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
     resume?.sessionState && typeof resume.sessionState === "object"
       ? (resume.sessionState as Record<string, unknown>)
       : undefined;
-  const currentArchivePresent =
-    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const currentArchivePresent = workspaceArchivePayloadPresent(sessionState);
   const previousArchivePresent =
-    typeof sessionState?.workspaceArchivePrev === "string" &&
-    sessionState.workspaceArchivePrev.length > 0;
+    (typeof sessionState?.workspaceArchivePrev === "string" &&
+      sessionState.workspaceArchivePrev.length > 0) ||
+    parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef) !== null;
   const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
   const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
   const archiveStatus: SandboxArchiveAvailability = currentArchivePresent
@@ -34763,8 +34854,10 @@ function resumeStateWithRecovery(
 const WORKSPACE_ARCHIVE_SESSION_KEYS = [
   "workspaceArchive",
   "workspaceArchiveMeta",
+  "workspaceArchiveRef",
   "workspaceArchivePrev",
   "workspaceArchivePrevMeta",
+  "workspaceArchivePrevRef",
   "workspaceArchiveAt",
 ] as const;
 
@@ -34793,7 +34886,10 @@ function resumeStateWithPreservedArchives(
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
-    sessionState: { ...targetSession, ...archiveFields },
+    sessionState: omitInlineWorkspaceArchiveWhenObjectRefPresent({
+      ...targetSession,
+      ...archiveFields,
+    }),
   };
 }
 
@@ -34813,12 +34909,16 @@ function archiveOnlyResumeState(
       sessionState[key] = currentSession[key];
     }
   }
+  const durableSession =
+    Object.keys(sessionState).length > 0
+      ? omitInlineWorkspaceArchiveWhenObjectRefPresent(sessionState)
+      : sessionState;
   return {
     backendId:
       typeof current?.backendId === "string"
         ? current.backendId
         : (row.resume_backend_id ?? row.backend),
-    ...(Object.keys(sessionState).length > 0 ? { sessionState } : {}),
+    ...(Object.keys(durableSession).length > 0 ? { sessionState: durableSession } : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -34919,11 +35019,11 @@ function archiveProjectionFromResumeState(
     resumeState?.sessionState && typeof resumeState.sessionState === "object"
       ? (resumeState.sessionState as Record<string, unknown>)
       : undefined;
-  const currentPresent =
-    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0;
+  const currentPresent = workspaceArchivePayloadPresent(sessionState);
   const previousPresent =
-    typeof sessionState?.workspaceArchivePrev === "string" &&
-    sessionState.workspaceArchivePrev.length > 0;
+    (typeof sessionState?.workspaceArchivePrev === "string" &&
+      sessionState.workspaceArchivePrev.length > 0) ||
+    parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef) !== null;
   const current = parseArchiveRevision(sessionState?.workspaceArchiveMeta);
   const previous = parseArchiveRevision(sessionState?.workspaceArchivePrevMeta);
   return {
@@ -34982,7 +35082,10 @@ async function upsertLeaseHolder(
   kind: LeaseHolderKind,
   holderId: string,
   subjectId: string | null,
-  viewerAuthority: { subjectId: string | null; authorityEpoch: number | null } = {
+  viewerAuthority: {
+    subjectId: string | null;
+    authorityEpoch: number | null;
+  } = {
     subjectId: null,
     authorityEpoch: null,
   },
@@ -37241,11 +37344,19 @@ function evaluateColdLostSnapshot(
   const treeDescriptor = descriptor?.version === 1 ? descriptor : null;
   const sessionState = archiveSessionState(row);
   const base64 = sessionState?.workspaceArchive;
-  const bytes = decodeCanonicalBase64(base64);
-  const referenceBytes = bytes?.length ?? null;
-  const referenceSha256 = bytes ? sha256String(bytes) : null;
+  const objectRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchiveRef);
+  const inlineBytes = decodeCanonicalBase64(base64);
+  const inlineObjectMismatch = Boolean(
+    inlineBytes &&
+    objectRef &&
+    (sha256String(inlineBytes) !== objectRef.sha256 || inlineBytes.length !== objectRef.bytes),
+  );
+  const bytes = inlineBytes;
+  const referenceBytes = inlineBytes?.length ?? objectRef?.bytes ?? null;
+  const referenceSha256 = inlineBytes ? sha256String(inlineBytes) : (objectRef?.sha256 ?? null);
   const referenceVerified =
     descriptor !== null &&
+    !inlineObjectMismatch &&
     referenceBytes === descriptor.archiveBytes &&
     referenceSha256 === descriptor.archiveSha256;
   const archiveObject = modalProviderObject(bytes);
@@ -37268,7 +37379,7 @@ function evaluateColdLostSnapshot(
         archiveGeneration !== Number(row.workspace_generation) ||
         !archiveComplete),
   );
-  add("archive_base64_invalid", row !== null && bytes === null);
+  add("archive_base64_invalid", row !== null && bytes === null && objectRef === null);
   add("archive_bytes_mismatch", descriptor !== null && !referenceVerified);
   add(
     "archive_descriptor_version_mismatch",
@@ -40147,7 +40258,10 @@ async function lockWorkspaceMutationSessionTx(
 async function resolveWorkspaceMutationGrantIdentityTx(
   tx: Database,
   input: { accountId: string; humanSubjectId: string | null },
-): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
+): Promise<{
+  membershipId: string | null;
+  authorizationRevision: number | null;
+}> {
   if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
   // `organization_memberships` has no runtime SELECT (0263). Migration 0277
   // installs one narrow tenant-fenced SECURITY DEFINER seam that returns only
@@ -42732,18 +42846,24 @@ export async function claimWorkspaceArchiveCapture(
               )
               .limit(1)
           : [];
+        if (!turnAttempt) return { status: "attempt_fenced" as const };
+        const attemptIsCurrent = turnAttempt.activeAttemptId === input.warmAttempt.attemptId;
+        const attemptLive =
+          (turnAttempt.state === "claimed" || turnAttempt.state === "running") &&
+          turnAttempt.outcome === null &&
+          attemptIsCurrent;
+        const attemptSettledForTurnEnd =
+          turnAttempt.state === "closed" &&
+          (turnAttempt.outcome === "completed" ||
+            turnAttempt.outcome === "failed" ||
+            turnAttempt.outcome === "requires_action") &&
+          (turnAttempt.activeAttemptId === null || attemptIsCurrent);
         const attemptMayCapture =
           turnAttempt !== undefined &&
           turnAttempt.accountId === input.accountId &&
           turnAttempt.sandboxGroupId === input.sandboxGroupId &&
-          turnAttempt.activeAttemptId === input.warmAttempt.attemptId &&
           !interruption &&
-          (turnAttempt.state === "claimed" || turnAttempt.state === "running"
-            ? turnAttempt.outcome === null
-            : turnAttempt.state === "closed" &&
-              (turnAttempt.outcome === "completed" ||
-                turnAttempt.outcome === "failed" ||
-                turnAttempt.outcome === "requires_action"));
+          (attemptLive || attemptSettledForTurnEnd);
         if (!attemptMayCapture) return { status: "attempt_fenced" as const };
       }
 
@@ -43806,6 +43926,34 @@ export async function adoptLegacyModalCheckpointArtifact(
   );
 }
 
+function publishedWorkspaceArchiveFields(input: {
+  workspaceArchive?: string | null;
+  workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
+}): {
+  workspaceArchive?: string;
+  workspaceArchiveRef?: WorkspaceArchiveObjectRef;
+} {
+  const ref = parseWorkspaceArchiveObjectRef(input.workspaceArchiveRef) ?? undefined;
+  const inline =
+    typeof input.workspaceArchive === "string" && input.workspaceArchive.length > 0
+      ? input.workspaceArchive
+      : undefined;
+  if (!ref && !inline) {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
+  if (inline && ref) {
+    const bytes = decodeCanonicalBase64(inline);
+    if (!bytes || sha256String(bytes) !== ref.sha256 || bytes.length !== ref.bytes) {
+      throw new Error("inline workspace archive and object-storage ref disagree");
+    }
+  }
+  if (ref) return { workspaceArchiveRef: ref };
+  if (!inline) {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
+  return { workspaceArchive: inline };
+}
+
 export async function persistDrainSnapshot(
   db: Database,
   input: {
@@ -43828,10 +43976,13 @@ export async function persistDrainSnapshot(
         checkpointArtifactId?: never;
       }
     | {
-        /** Base64 provider receipt or tar archive from the verified runtime capture. */
-        workspaceArchive: string;
+        /** Base64 provider receipt or tar archive from the verified runtime capture.
+         *  Omit when `workspaceArchiveRef` locates object-storage bytes. */
+        workspaceArchive?: string;
         /** Exact descriptor is mandatory for every new publication. */
         workspaceArchiveMeta: SandboxArchiveRevision;
+        /** Object-storage locator for tar bytes. When set, inline bytes are omitted. */
+        workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
         /** Required for Modal-native descriptors; absent for actual tar archives. */
         checkpointArtifactId?: string | null;
       }
@@ -43953,6 +44104,11 @@ export async function persistDrainSnapshot(
       }
       const priorArchive = row.prior_archive ?? null;
       const priorArchivePrev = row.prior_archive_prev ?? null;
+      const priorSessionState =
+        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+          ? (row.resume_state.sessionState as Record<string, unknown>)
+          : null;
+      const priorRef = parseWorkspaceArchiveObjectRef(priorSessionState?.workspaceArchiveRef);
       // null workspaceArchive = pure CAS-check. Keep the drain's exact capture
       // claim intact: it is also the durable teardown claim and must fence new
       // holders until provider termination commits cold or recovery replaces it.
@@ -43962,16 +44118,13 @@ export async function persistDrainSnapshot(
           archiveRevision: null,
         };
       }
-      const priorMeta = parseArchiveRevision(
-        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
-          ? (row.resume_state.sessionState as Record<string, unknown>).workspaceArchiveMeta
-          : null,
-      );
+      const published = publishedWorkspaceArchiveFields(input);
+      const priorMeta = parseArchiveRevision(priorSessionState?.workspaceArchiveMeta);
       if (activePublication && row.archive_capture_published_at !== null) {
         // A predecessor and its successor may receive the same provider result.
         // Publication is already durable; treat this as an idempotent ownership
         // gate and hand any distinct unused Modal candidate to GC.
-        if (priorArchive === null || priorMeta === null) {
+        if ((priorArchive === null && priorRef === null) || priorMeta === null) {
           throw new Error("Published workspace capture has no durable verified archive");
         }
         if (
@@ -43998,12 +44151,13 @@ export async function persistDrainSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
-      const previousCheckpointArtifactId =
-        rotation.previousArchive === priorArchive
-          ? row.current_checkpoint_artifact_id
-          : rotation.previousArchive === priorArchivePrev
-            ? row.previous_checkpoint_artifact_id
-            : null;
+      const previousCheckpointArtifactId = previousCheckpointArtifactIdForRotation({
+        previousArchive: rotation.previousArchive,
+        priorArchive,
+        priorArchivePrev,
+        currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
+        previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
+      });
       const resumeState = coldLatePublication
         ? archiveOnlyResumeState(row, {
             provider: recovery.provider,
@@ -44032,12 +44186,16 @@ export async function persistDrainSnapshot(
         ...(coldLatePublication && input.providerRequestId !== undefined
           ? { providerRequestId: input.providerRequestId }
           : {}),
-        workspaceArchive: input.workspaceArchive,
+        ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
+        ...(published.workspaceArchiveRef
+          ? { workspaceArchiveRef: published.workspaceArchiveRef }
+          : {}),
         resumeState,
         livenessGuard: coldLatePublication ? "cold_late" : "draining",
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
+        previousArchiveRef: rotation.previousArchiveRef,
         checkpointArtifactId: input.checkpointArtifactId ?? null,
         previousCheckpointArtifactId,
         priorCurrentCheckpointArtifactId: row.current_checkpoint_artifact_id,
@@ -44082,12 +44240,15 @@ export function rotateWorkspaceArchives(input: {
 }): {
   previousArchive: string | null;
   previousArchiveMeta: SandboxArchiveRevision | null;
+  previousArchiveRef: WorkspaceArchiveObjectRef | null;
 } {
   const sessionState =
     input.resumeState?.sessionState && typeof input.resumeState.sessionState === "object"
       ? (input.resumeState.sessionState as Record<string, unknown>)
       : {};
   const previousMeta = parseArchiveRevision(sessionState.workspaceArchivePrevMeta);
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchivePrevRef);
+  const currentRef = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
   const recovery =
     input.resumeState?.opengeniRecovery && typeof input.resumeState.opengeniRecovery === "object"
       ? (input.resumeState.opengeniRecovery as Record<string, unknown>)
@@ -44099,19 +44260,38 @@ export function rotateWorkspaceArchives(input: {
   const verifiedRevision =
     typeof workspace.verifiedRevision === "string" ? workspace.verifiedRevision : null;
   const preserveVerifiedPrevious =
-    input.priorPreviousArchive !== null &&
+    (input.priorPreviousArchive !== null || previousRef !== null) &&
     previousMeta !== null &&
     previousMeta.revision === verifiedRevision;
 
   return preserveVerifiedPrevious
     ? {
-        previousArchive: input.priorPreviousArchive,
+        previousArchive: previousRef ? null : input.priorPreviousArchive,
         previousArchiveMeta: previousMeta,
+        previousArchiveRef: previousRef,
       }
     : {
-        previousArchive: input.priorCurrentArchive,
+        previousArchive: currentRef ? null : input.priorCurrentArchive,
         previousArchiveMeta: parseArchiveRevision(sessionState.workspaceArchiveMeta),
+        previousArchiveRef: currentRef,
       };
+}
+
+function previousCheckpointArtifactIdForRotation(input: {
+  previousArchive: string | null;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+  currentCheckpointArtifactId: string | null;
+  previousCheckpointArtifactId: string | null;
+}): string | null {
+  // Object-storage rotation nulls inline bytes when a ref exists. `null === null`
+  // must not promote the current Modal checkpoint into the previous slot.
+  if (input.previousArchive === null) return null;
+  if (input.previousArchive === input.priorArchive) return input.currentCheckpointArtifactId;
+  if (input.previousArchive === input.priorArchivePrev) {
+    return input.previousCheckpointArtifactId;
+  }
+  return null;
 }
 
 async function foldWorkspaceArchiveOntoLease(
@@ -44124,12 +44304,14 @@ async function foldWorkspaceArchiveOntoLease(
     expectedWorkspaceGeneration: number;
     captureId: string | null;
     providerRequestId?: string | null;
-    workspaceArchive: string;
+    workspaceArchive?: string;
     workspaceArchiveMeta: SandboxArchiveRevision | null;
+    workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
     resumeState: Record<string, unknown> | null;
     livenessGuard: "draining" | "warm" | "cold_late";
     previousArchive: string | null;
     previousArchiveMeta: SandboxArchiveRevision | null;
+    previousArchiveRef?: WorkspaceArchiveObjectRef | null;
     checkpointArtifactId: string | null;
     previousCheckpointArtifactId: string | null;
     priorCurrentCheckpointArtifactId: string | null;
@@ -44175,9 +44357,17 @@ async function foldWorkspaceArchiveOntoLease(
       : {};
   const sessionState: Record<string, unknown> = {
     ...currentSession,
-    workspaceArchive: input.workspaceArchive,
     workspaceArchiveAt: archiveAtIso,
   };
+  if (input.workspaceArchiveRef) {
+    sessionState.workspaceArchiveRef = input.workspaceArchiveRef;
+    delete sessionState.workspaceArchive;
+  } else if (typeof input.workspaceArchive === "string" && input.workspaceArchive.length > 0) {
+    sessionState.workspaceArchive = input.workspaceArchive;
+    delete sessionState.workspaceArchiveRef;
+  } else {
+    throw new Error("workspace archive publication requires inline bytes or an object ref");
+  }
   if (input.workspaceArchiveMeta) {
     sessionState.workspaceArchiveMeta = input.workspaceArchiveMeta;
   } else {
@@ -44193,6 +44383,11 @@ async function foldWorkspaceArchiveOntoLease(
   } else {
     delete sessionState.workspaceArchivePrevMeta;
   }
+  if (input.previousArchiveRef) {
+    sessionState.workspaceArchivePrevRef = input.previousArchiveRef;
+  } else {
+    delete sessionState.workspaceArchivePrevRef;
+  }
   const folded: Record<string, unknown> = { ...base, sessionState };
   const explicitRecovery =
     folded.opengeniRecovery && typeof folded.opengeniRecovery === "object"
@@ -44203,6 +44398,7 @@ async function foldWorkspaceArchiveOntoLease(
     archive: archiveProjectionFromResumeState(folded),
   };
   const foldedJson = JSON.stringify(folded);
+  const inlineWorkspaceArchive = input.workspaceArchive ?? null;
   // Publication and GC must serialize on the provider-object receipt itself.
   // Merely checking its state in a lease UPDATE subquery permits a write-skew:
   // a concurrent failed callback can mark the object delete_pending after the
@@ -44231,7 +44427,7 @@ async function foldWorkspaceArchiveOntoLease(
         and artifact.source_workspace_generation = lease.workspace_generation
         and artifact.provenance = 'native_capture'
         and artifact.provider_backend = lease.backend
-        and artifact.archive_base64 = ${input.workspaceArchive}
+        and artifact.archive_base64 = ${inlineWorkspaceArchive}
         and artifact.descriptor_revision =
           coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
         and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
@@ -44285,7 +44481,7 @@ async function foldWorkspaceArchiveOntoLease(
             and artifact.source_instance_id = ${input.expectedInstanceId}
             and artifact.source_workspace_generation = lease.workspace_generation
             and artifact.provenance = 'native_capture'
-            and artifact.archive_base64 = ${input.workspaceArchive}
+            and artifact.archive_base64 = ${inlineWorkspaceArchive}
             and artifact.descriptor_revision =
               coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
             and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
@@ -44384,10 +44580,13 @@ export async function persistWarmSnapshot(
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
     captureId: string;
-    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
-    workspaceArchive: string;
+    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
+     *  Omit when `workspaceArchiveRef` locates object-storage bytes. */
+    workspaceArchive?: string;
     /** Exact verified archive/tree descriptor produced by the runtime capture. */
     workspaceArchiveMeta: SandboxArchiveRevision;
+    /** Object-storage locator for tar bytes. When set, inline bytes are omitted. */
+    workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
     checkpointArtifactId?: string | null;
     /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
     minIntervalMs: number;
@@ -44409,6 +44608,7 @@ export async function persistWarmSnapshot(
   if (!workspaceArchiveMeta) {
     throw new Error("Invalid verified workspace archive descriptor");
   }
+  const published = publishedWorkspaceArchiveFields(input);
   if (
     workspaceArchiveMeta?.version === 2 &&
     (workspaceArchiveMeta.provider === "modal_snapshot_filesystem" ||
@@ -44493,6 +44693,7 @@ export async function persistWarmSnapshot(
         previous_checkpoint_artifact_id: string | null;
         archive_generation: number | string | null;
         resume_state: Record<string, unknown> | null;
+        liveness: "warm" | "draining" | "cold" | "warming";
       }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
@@ -44501,11 +44702,12 @@ export async function persistWarmSnapshot(
           current_checkpoint_artifact_id,
           previous_checkpoint_artifact_id,
           archive_generation,
-          resume_state
+          resume_state,
+          liveness
         from sandbox_leases as lease
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
-          and lease.liveness = 'warm'
+          and lease.liveness in ('warm', 'draining')
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
@@ -44577,12 +44779,23 @@ export async function persistWarmSnapshot(
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
-      const previousCheckpointArtifactId =
-        rotation.previousArchive === priorArchive
-          ? guard[0]!.current_checkpoint_artifact_id
-          : rotation.previousArchive === priorArchivePrev
-            ? guard[0]!.previous_checkpoint_artifact_id
-            : null;
+      const previousCheckpointArtifactId = previousCheckpointArtifactIdForRotation({
+        previousArchive: rotation.previousArchive,
+        priorArchive,
+        priorArchivePrev,
+        currentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
+        previousCheckpointArtifactId: guard[0]!.previous_checkpoint_artifact_id,
+      });
+      const rowLiveness = guard[0]!.liveness;
+      if (rowLiveness !== "warm" && rowLiveness !== "draining") {
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: false,
+          archiveRevision: null,
+        };
+      }
+      const livenessGuard: "warm" | "draining" = rowLiveness;
       const folded = await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
@@ -44590,12 +44803,16 @@ export async function persistWarmSnapshot(
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
         captureId: input.captureId,
-        workspaceArchive: input.workspaceArchive,
+        ...(published.workspaceArchive ? { workspaceArchive: published.workspaceArchive } : {}),
         workspaceArchiveMeta,
+        ...(published.workspaceArchiveRef
+          ? { workspaceArchiveRef: published.workspaceArchiveRef }
+          : {}),
         resumeState: guard[0]!.resume_state,
-        livenessGuard: "warm",
+        livenessGuard,
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
+        previousArchiveRef: rotation.previousArchiveRef,
         checkpointArtifactId: input.checkpointArtifactId ?? null,
         previousCheckpointArtifactId,
         priorCurrentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
@@ -48035,7 +48252,9 @@ export async function setActiveSandbox(
                 return { swapped: false, pointer: null };
               }
             } else {
-              const [session] = await scopedDb.execute<{ active_turn_id: string | null }>(sql`
+              const [session] = await scopedDb.execute<{
+                active_turn_id: string | null;
+              }>(sql`
                 select active_turn_id from sessions
                 where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
                 for no key update
@@ -50210,7 +50429,11 @@ export async function rejectSessionGoalRevisionWithEvent(
           )
           .limit(1);
         if (existingDecision?.disposition === "rejected") {
-          return { revision: mapSessionGoalRevision(existingDecision), events: [], replay: true };
+          return {
+            revision: mapSessionGoalRevision(existingDecision),
+            events: [],
+            replay: true,
+          };
         }
         if (existingDecision) {
           throw new SessionControlConflictError("goal rewrite proposal was already applied");
@@ -52011,6 +52234,20 @@ export type InitializeSessionStartInput = {
     subjectId: string;
     expectedRevision: number;
     expectedSnapshot?: NewSessionDraftSnapshot;
+    acceptedSelection?: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
+  } | null;
+  /** Successful create that preserves, rather than consumes, the draft. */
+  rememberNewSessionSelection?: {
+    subjectId: string;
+    acceptedSelection: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
@@ -52212,8 +52449,25 @@ export async function initializeSessionStartAtomically(
               subjectId: input.consumeNewSessionDraft.subjectId,
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
               ...(input.consumeNewSessionDraft.expectedSnapshot
-                ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+                ? {
+                    expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
+                  }
                 : {}),
+              ...(input.consumeNewSessionDraft.acceptedSelection
+                ? {
+                    acceptedSelection: input.consumeNewSessionDraft.acceptedSelection,
+                  }
+                : {}),
+            });
+          } else if (initializedNow && input.rememberNewSessionSelection) {
+            await setSubjectRlsContext(
+              tx as unknown as Database,
+              input.rememberNewSessionSelection.subjectId,
+            );
+            await rememberNewSessionSelectionInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              subjectId: input.rememberNewSessionSelection.subjectId,
+              acceptedSelection: input.rememberNewSessionSelection.acceptedSelection,
             });
           }
           return {
@@ -52495,7 +52749,10 @@ export async function initializeSessionStartAtomically(
                     turnId: turn.id,
                     sequence: ++sequence,
                     type: "session.personal_resources.attached",
-                    payload: { turnId: turn.id, ...acceptedPersonalResources.summary },
+                    payload: {
+                      turnId: turn.id,
+                      ...acceptedPersonalResources.summary,
+                    },
                   },
                   "payload",
                   "payloadCodecVersion",
@@ -52596,8 +52853,25 @@ export async function initializeSessionStartAtomically(
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
             ...(input.consumeNewSessionDraft.expectedSnapshot
-              ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+              ? {
+                  expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
+                }
               : {}),
+            ...(input.consumeNewSessionDraft.acceptedSelection
+              ? {
+                  acceptedSelection: input.consumeNewSessionDraft.acceptedSelection,
+                }
+              : {}),
+          });
+        } else if (initializedNow && input.rememberNewSessionSelection) {
+          await setSubjectRlsContext(
+            tx as unknown as Database,
+            input.rememberNewSessionSelection.subjectId,
+          );
+          await rememberNewSessionSelectionInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            subjectId: input.rememberNewSessionSelection.subjectId,
+            acceptedSelection: input.rememberNewSessionSelection.acceptedSelection,
           });
         }
         const changed =
@@ -57908,17 +58182,22 @@ export async function applySessionTurnSettlement(
         };
       }
 
-      const humanInputRequests = input.runState?.humanInputRequests ?? [];
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
+        ...request,
+        questions: request.questions.map((question) => {
+          const parsed = HumanInputQuestionContract.parse(question);
+          return parsed.kind === "text" || parsed.allowOther
+            ? parsed
+            : { ...parsed, allowOther: true };
+        }),
+      }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
         }
         for (const request of humanInputRequests) {
-          const parsedQuestions = request.questions.map((question) =>
-            HumanInputQuestionContract.parse(question),
-          );
-          if (Buffer.byteLength(JSON.stringify(parsedQuestions)) > 49_152) {
+          if (Buffer.byteLength(JSON.stringify(request.questions)) > 49_152) {
             throw new Error("Human-input request questions exceed the durable payload limit");
           }
           if (

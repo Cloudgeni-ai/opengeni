@@ -226,7 +226,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
 export type SandboxBackend =
@@ -240,7 +240,8 @@ export type SandboxBackend =
   | "blaxel"
   | "cloudflare"
   | "vercel"
-  | "selfhosted";
+  | "selfhosted"
+  | "opensandbox";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -4069,6 +4070,17 @@ export type NewSessionDraftOptions = {
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
 };
 
+export type NewSessionSelectionHistory = {
+  /** Most-recently used project first. Null channelId is the Default project. */
+  projects: Array<{
+    channelId: string | null;
+    /** Null means the managed sandbox was used most recently in this project. */
+    targetSandboxId: string | null;
+    /** Most-recently used machine in this project first. */
+    machines: Array<{ sandboxId: string; workingDir: string | null }>;
+  }>;
+};
+
 export type NewSessionDraft = {
   revision: number;
   text: string;
@@ -4080,6 +4092,7 @@ export type NewSessionDraft = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   options: NewSessionDraftOptions;
+  selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
 };
 
@@ -4247,7 +4260,10 @@ export type SubmitComposerDraftResponse = {
   replay: boolean;
 };
 
-export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+export type SaveNewSessionDraftRequest = Omit<
+  NewSessionDraft,
+  "revision" | "selectionHistory" | "updatedAt"
+> & {
   expectedRevision: number;
 };
 
@@ -6653,7 +6669,7 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted";
+export type MachineKind = "modal" | "selfhosted" | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";

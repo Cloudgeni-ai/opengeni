@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildStreamUrl,
+  exposedPortAllowsHostFetch,
   exposedPortEndpointFromUrl,
   exposeStreamPort,
+  joinExposedPortPath,
+  parseOpenSandboxSignedUriPath,
+  redactOpenSandboxSignedUriPath,
+  signedEndpointNeedsRefresh,
   StreamPortUnavailableError,
   verifyStreamToken,
   type ExposedPortEndpoint,
@@ -84,10 +89,61 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
     expect(url).toBe("wss://relay.opengeni.ai/stream?ws=w1&agent=a1&port=7681&channel=ch-1");
   });
 
+  test("joins an OpenSandbox lifecycle proxy prefix with a controller request path", () => {
+    const prefix = "/v1/sandboxes/sbx-1/proxy/7682";
+    expect(joinExposedPortPath(prefix, "/v1/origins")).toBe(`${prefix}/v1/origins`);
+    expect(joinExposedPortPath("/", "/v1/origins")).toBe("/v1/origins");
+    expect(joinExposedPortPath(undefined, "/v1/computer-sessions")).toBe("/v1/computer-sessions");
+    expect(joinExposedPortPath(`${prefix}/`, "/v1/origins")).toBe(`${prefix}/v1/origins`);
+    expect(() => joinExposedPortPath(prefix, "origins")).toThrow(StreamPortUnavailableError);
+  });
+
   test("a non-leading-slash path is normalized", () => {
     expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe(
       "wss://h:6080/stream",
     );
+  });
+});
+
+describe("exposedPortAllowsHostFetch", () => {
+  test("allows native tunnels and OSEP-0011 signed URIs, not lifecycle proxies", () => {
+    expect(exposedPortAllowsHostFetch({ host: "h", port: 443, tls: true, path: "/" })).toBe(true);
+    expect(
+      exposedPortAllowsHostFetch(
+        "ws://127.0.0.1:28888/sbx-1/7682/s6ph0/sigsigsig/v1/browser-sessions/x",
+      ),
+    ).toBe(true);
+    expect(exposedPortAllowsHostFetch("ws://127.0.0.1:18090/v1/sandboxes/sbx-1/proxy/7682")).toBe(
+      false,
+    );
+    expect(
+      exposedPortAllowsHostFetch({
+        host: "127.0.0.1",
+        port: 18090,
+        tls: false,
+        path: "/sandboxes/sbx-1/6080/vnc.html",
+      }),
+    ).toBe(false);
+    const signed = parseOpenSandboxSignedUriPath("/sbx-1/7682/s6ph0/sigsigsig/v1/origins");
+    expect(signed).toMatchObject({ sandboxId: "sbx-1", port: 7682, signature: "sigsigsig" });
+    expect(redactOpenSandboxSignedUriPath("/sbx-1/7682/s6ph0/sigsigsig/v1/origins")).toBe(
+      "/sbx-1/7682/s6ph0/[redacted]/v1/origins",
+    );
+    expect(redactOpenSandboxSignedUriPath("/v1/sandboxes/sbx-1/proxy/7682")).toBe(
+      "/v1/sandboxes/sbx-1/proxy/7682",
+    );
+    expect(
+      signedEndpointNeedsRefresh(
+        "/sbx-1/7682/s6ph0/sigsigsig",
+        signed!.expiresAtSeconds * 1000 - 60_000,
+      ),
+    ).toBe(false);
+    expect(
+      signedEndpointNeedsRefresh(
+        "/sbx-1/7682/s6ph0/sigsigsig",
+        signed!.expiresAtSeconds * 1000 - 1_000,
+      ),
+    ).toBe(true);
   });
 });
 
