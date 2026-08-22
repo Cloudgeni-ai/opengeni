@@ -115,7 +115,12 @@ const budgets = {
   // macOS/arm64 production graph measures 2,115,776 raw / 589,075 gzip bytes.
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2067 * kib,
+  // Generic event automations add the shared SDK contracts that let ordinary
+  // session surfaces carry Pack-owned trigger metadata. The exact Bun 1.3.14
+  // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
+  // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
+  // per-file, lazy-chunk, and CSS caps remain unchanged.
+  directSessionRaw: 2073 * kib,
   directSessionGzip: 576 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
