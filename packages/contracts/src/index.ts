@@ -870,6 +870,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "preference_propose",
   "remember",
   "remember_confirm",
+  "company_profile_propose",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",

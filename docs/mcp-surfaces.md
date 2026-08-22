@@ -18,6 +18,7 @@ First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
 - `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
+- `company_profile_propose` — records one inactive organization company-profile proposal (`durable_learning` provenance, `agent-attempt:<attemptId>` source) for an exact agent attempt; it never activates, and an organization account admin activates it from Company Brain → Company profile & goals (see [`company-profile.md`](company-profile.md)). Unlike the memory tools it is independent of `settings.memoryEnabled`.
 
 These tools are session-scoped: they register only when the delegated bearer carries
 a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`

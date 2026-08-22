@@ -2657,6 +2657,7 @@ export type FirstPartyMcpToolName =
   | "preference_propose"
   | "remember"
   | "remember_confirm"
+  | "company_profile_propose"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
