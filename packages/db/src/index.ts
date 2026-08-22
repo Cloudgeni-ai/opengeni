@@ -281,6 +281,7 @@ import {
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
   seedNewSessionDraftInTransaction,
+  rememberNewSessionSelectionInTransaction,
   type NewSessionDraftSnapshot,
 } from "./new-session-drafts";
 import {
@@ -1504,10 +1505,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       workspaceId: null,
     });
     await setSubjectRlsContext(tx as unknown as Database, subjectId);
-    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
-      tx,
-      sql`select list_self_organization_memberships(${subjectId}) as result`,
-    );
+    const [existingOrganizationMembershipResult] = await rawRows<{
+      result: unknown;
+    }>(tx, sql`select list_self_organization_memberships(${subjectId}) as result`);
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
@@ -1585,7 +1585,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       }
       const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
       const organizationAccounts = await tx
-        .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+        .select({
+          id: schema.managedAccounts.id,
+          name: schema.managedAccounts.name,
+        })
         .from(schema.managedAccounts)
         .where(
           inArray(
@@ -1844,7 +1847,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       }
     }
     const organizationAccounts = await tx
-      .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+      .select({
+        id: schema.managedAccounts.id,
+        name: schema.managedAccounts.name,
+      })
       .from(schema.managedAccounts)
       .where(
         inArray(
@@ -14034,7 +14040,10 @@ export async function getScheduledTaskIncludingDeleted(
       )
       .limit(1);
     return row
-      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      ? {
+          ...mapScheduledTask(row),
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        }
       : null;
   });
 }
@@ -14058,7 +14067,10 @@ export async function getScheduledTaskIncludingDeletedForUpdate(
       .for("update")
       .limit(1);
     return row
-      ? { ...mapScheduledTask(row), deletedAt: row.deletedAt?.toISOString() ?? null }
+      ? {
+          ...mapScheduledTask(row),
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        }
       : null;
   });
 }
@@ -14790,7 +14802,12 @@ export async function materializeScheduledTaskReusableSessionFromRun(
 
 export async function bindScheduledTaskRunSessionInTransaction(
   tx: Database,
-  input: { accountId: string; workspaceId: string; runId: string; sessionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    runId: string;
+    sessionId: string;
+  },
 ): Promise<void> {
   await withRlsContext(
     tx,
@@ -14839,7 +14856,9 @@ async function scheduledTaskRunCausalHumanInTransaction(
     throw new Error("scheduled authority classes have different causal humans");
   }
   const [acceptedRow] = await tx
-    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .select({
+      acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+    })
     .from(schema.scheduledTaskRuns)
     .where(
       and(
@@ -14970,7 +14989,12 @@ export async function markScheduledTaskRunFailedIfQueued(
 
 export async function markScheduledTaskRunSkippedIfQueued(
   db: Database,
-  input: { workspaceId: string; runId: string; sessionId: string; error: string },
+  input: {
+    workspaceId: string;
+    runId: string;
+    sessionId: string;
+    error: string;
+  },
 ): Promise<void> {
   await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     await scopedDb.execute(sql`select transition_scheduled_agent_run(
@@ -14988,7 +15012,12 @@ export async function markScheduledTaskRunSkippedIfQueued(
 /** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
 export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   tx: Database,
-  input: { workspaceId: string; sessionId: string; runId: string; error?: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+    error?: string;
+  },
 ): Promise<void> {
   await tx.execute(sql`select transition_scheduled_agent_run(
     current_setting('opengeni.account_id')::uuid,
@@ -15020,7 +15049,9 @@ async function validateScheduledTargetExecutionAtClaim(
   );
   if (liveAuthority?.denial) return liveAuthority.denial;
   const [run] = await tx
-    .select({ acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot })
+    .select({
+      acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+    })
     .from(schema.scheduledTaskRuns)
     .where(
       and(
@@ -15060,7 +15091,9 @@ async function validateScheduledTargetExecutionAtClaim(
   const [rigVersion] =
     target.rigId && target.rigVersionId
       ? await tx
-          .select({ defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds })
+          .select({
+            defaultVariableSetIds: schema.rigVersions.defaultVariableSetIds,
+          })
           .from(schema.rigVersions)
           .where(
             and(
@@ -26960,7 +26993,10 @@ export async function deleteSessionTreeIfQuiescent(
             )
             .returning({ id: schema.sessions.id });
           if (deleted.length !== 1) return { status: "not_found" as const };
-          return { status: "deleted" as const, deletedSessionCount: sessionIds.length };
+          return {
+            status: "deleted" as const,
+            deletedSessionCount: sessionIds.length,
+          };
         }),
     );
   } catch (error) {
@@ -34941,7 +34977,10 @@ async function upsertLeaseHolder(
   kind: LeaseHolderKind,
   holderId: string,
   subjectId: string | null,
-  viewerAuthority: { subjectId: string | null; authorityEpoch: number | null } = {
+  viewerAuthority: {
+    subjectId: string | null;
+    authorityEpoch: number | null;
+  } = {
     subjectId: null,
     authorityEpoch: null,
   },
@@ -40114,7 +40153,10 @@ async function lockWorkspaceMutationSessionTx(
 async function resolveWorkspaceMutationGrantIdentityTx(
   tx: Database,
   input: { accountId: string; humanSubjectId: string | null },
-): Promise<{ membershipId: string | null; authorizationRevision: number | null }> {
+): Promise<{
+  membershipId: string | null;
+  authorizationRevision: number | null;
+}> {
   if (!input.humanSubjectId) return { membershipId: null, authorizationRevision: null };
   // `organization_memberships` has no runtime SELECT (0263). Migration 0277
   // installs one narrow tenant-fenced SECURITY DEFINER seam that returns only
@@ -48105,7 +48147,9 @@ export async function setActiveSandbox(
                 return { swapped: false, pointer: null };
               }
             } else {
-              const [session] = await scopedDb.execute<{ active_turn_id: string | null }>(sql`
+              const [session] = await scopedDb.execute<{
+                active_turn_id: string | null;
+              }>(sql`
                 select active_turn_id from sessions
                 where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
                 for no key update
@@ -50280,7 +50324,11 @@ export async function rejectSessionGoalRevisionWithEvent(
           )
           .limit(1);
         if (existingDecision?.disposition === "rejected") {
-          return { revision: mapSessionGoalRevision(existingDecision), events: [], replay: true };
+          return {
+            revision: mapSessionGoalRevision(existingDecision),
+            events: [],
+            replay: true,
+          };
         }
         if (existingDecision) {
           throw new SessionControlConflictError("goal rewrite proposal was already applied");
@@ -52081,6 +52129,20 @@ export type InitializeSessionStartInput = {
     subjectId: string;
     expectedRevision: number;
     expectedSnapshot?: NewSessionDraftSnapshot;
+    acceptedSelection?: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
+  } | null;
+  /** Successful create that preserves, rather than consumes, the draft. */
+  rememberNewSessionSelection?: {
+    subjectId: string;
+    acceptedSelection: {
+      channelId: string | null;
+      targetSandboxId: string | null;
+      workingDir: string | null;
+    };
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
@@ -52282,8 +52344,25 @@ export async function initializeSessionStartAtomically(
               subjectId: input.consumeNewSessionDraft.subjectId,
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
               ...(input.consumeNewSessionDraft.expectedSnapshot
-                ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+                ? {
+                    expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
+                  }
                 : {}),
+              ...(input.consumeNewSessionDraft.acceptedSelection
+                ? {
+                    acceptedSelection: input.consumeNewSessionDraft.acceptedSelection,
+                  }
+                : {}),
+            });
+          } else if (initializedNow && input.rememberNewSessionSelection) {
+            await setSubjectRlsContext(
+              tx as unknown as Database,
+              input.rememberNewSessionSelection.subjectId,
+            );
+            await rememberNewSessionSelectionInTransaction(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              subjectId: input.rememberNewSessionSelection.subjectId,
+              acceptedSelection: input.rememberNewSessionSelection.acceptedSelection,
             });
           }
           return {
@@ -52565,7 +52644,10 @@ export async function initializeSessionStartAtomically(
                     turnId: turn.id,
                     sequence: ++sequence,
                     type: "session.personal_resources.attached",
-                    payload: { turnId: turn.id, ...acceptedPersonalResources.summary },
+                    payload: {
+                      turnId: turn.id,
+                      ...acceptedPersonalResources.summary,
+                    },
                   },
                   "payload",
                   "payloadCodecVersion",
@@ -52666,8 +52748,25 @@ export async function initializeSessionStartAtomically(
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,
             ...(input.consumeNewSessionDraft.expectedSnapshot
-              ? { expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot }
+              ? {
+                  expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
+                }
               : {}),
+            ...(input.consumeNewSessionDraft.acceptedSelection
+              ? {
+                  acceptedSelection: input.consumeNewSessionDraft.acceptedSelection,
+                }
+              : {}),
+          });
+        } else if (initializedNow && input.rememberNewSessionSelection) {
+          await setSubjectRlsContext(
+            tx as unknown as Database,
+            input.rememberNewSessionSelection.subjectId,
+          );
+          await rememberNewSessionSelectionInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            subjectId: input.rememberNewSessionSelection.subjectId,
+            acceptedSelection: input.rememberNewSessionSelection.acceptedSelection,
           });
         }
         const changed =

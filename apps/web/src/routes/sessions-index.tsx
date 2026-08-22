@@ -29,7 +29,11 @@ import {
   RealtimeVoiceModelPanel,
   useRealtimeModelSelection,
 } from "@opengeni/react/realtime";
-import { OpenGeniApiError, type SessionRealtimeModel } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type NewSessionSelectionHistory,
+  type SessionRealtimeModel,
+} from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -93,6 +97,8 @@ import {
   emptySessionDraft,
   isSessionDraftComputeReady,
   newSessionDraftOptionsFromSessionDraft,
+  rememberedMachineFolder,
+  rememberedProjectCompute,
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
@@ -153,6 +159,9 @@ function SessionsIndexRouteContent({
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
     launch.channelId ?? null,
   );
+  const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
+    projects: [],
+  });
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
@@ -171,7 +180,11 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
     if (personalWorkspace) {
-      setTenancyCapabilities({ activated: true, canCreatePrivate: true, reason: "available" });
+      setTenancyCapabilities({
+        activated: true,
+        canCreatePrivate: true,
+        reason: "available",
+      });
       return;
     }
     setTenancyCapabilities(null);
@@ -240,8 +253,12 @@ function SessionsIndexRouteContent({
       !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
     ) {
       setSelectedChannelId(null);
+      const rememberedCompute = rememberedProjectCompute(selectionHistory, null);
+      if (rememberedCompute) {
+        setDraft((current) => ({ ...current, compute: rememberedCompute }));
+      }
     }
-  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId]);
+  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectionHistory]);
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
@@ -318,11 +335,17 @@ function SessionsIndexRouteContent({
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
-    (remote: NewSessionDraftEditable) => {
+    (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
       setMessage(remote.text);
-      setDraft(
-        sessionDraftFromNewSessionDraftOptions(remote.options, firstPartyMcpToolPolicy.default),
+      const restored = sessionDraftFromNewSessionDraftOptions(
+        remote.options,
+        firstPartyMcpToolPolicy.default,
       );
+      const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
+      const rememberedCompute = rememberedProjectCompute(history, channelId);
+      setSelectionHistory(history);
+      setSelectedChannelId(channelId);
+      setDraft(rememberedCompute ? { ...restored, compute: rememberedCompute } : restored);
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
@@ -348,8 +371,19 @@ function SessionsIndexRouteContent({
       setSelectedRepoRefs,
       githubRepos,
       firstPartyMcpToolPolicy.default,
+      launch.channelId,
       workspaceDefaultToolIdsForHydration,
     ],
+  );
+  const selectProject = useCallback(
+    (channelId: string | null) => {
+      setSelectedChannelId(channelId);
+      const rememberedCompute = rememberedProjectCompute(selectionHistory, channelId);
+      if (rememberedCompute) {
+        setDraft((current) => ({ ...current, compute: rememberedCompute }));
+      }
+    },
+    [selectionHistory],
   );
   const newSessionDraft = useNewSessionDraft({
     workspaceId,
@@ -466,6 +500,7 @@ function SessionsIndexRouteContent({
                   channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
+                  expectedNewSessionDraftRevision: flushed.revision,
                   visibility: personalWorkspace ? "workspace" : submission.options.visibility,
                 },
               );
@@ -796,7 +831,7 @@ function SessionsIndexRouteContent({
                 showRepos={draft.compute.kind === "sandbox"}
                 channels={channelsQuery.channels}
                 selectedChannelId={selectedChannelId}
-                onChannelChange={setSelectedChannelId}
+                onChannelChange={selectProject}
                 onCreateProject={() => setProjectDialogOpen(true)}
                 selection={{
                   mcpServerIds: context.selectedCapabilityToolIds,
@@ -829,6 +864,8 @@ function SessionsIndexRouteContent({
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
             personalAttachment={personalAttachment}
+            selectedChannelId={selectedChannelId}
+            selectionHistory={selectionHistory}
           />
           {draft.compute.kind === "sandbox" ? (
             <PersonalResourceAttachmentControl
@@ -861,7 +898,10 @@ function SessionsIndexRouteContent({
 // the rail's session list + the workspace model catalog so labels/marks match
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
-  const { sessions, pinned } = useWorkspaceSessions({ limit: 12, pollIntervalMs: 30_000 });
+  const { sessions, pinned } = useWorkspaceSessions({
+    limit: 12,
+    pollIntervalMs: 30_000,
+  });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const recent = useMemo(() => {
     const ordinary = sessions.filter((session) => !session.pinned);
@@ -1214,6 +1254,8 @@ function ComputeTargetControl(props: {
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalAttachment: PersonalResourceAttachmentController;
+  selectedChannelId: string | null;
+  selectionHistory: NewSessionSelectionHistory;
 }) {
   const { draft, onChange } = props;
   // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
@@ -1235,9 +1277,14 @@ function ComputeTargetControl(props: {
   // local opt-in lets a user reveal the option before/while enrolling.
   // No teaser for absent hardware: the segmented control exists only when the
   // fleet has machines. Discovery lives on the Machines page, not the composer.
-  const showComputeTarget = !fleetEmpty;
+  const showComputeTarget = fleet.loading || !fleetEmpty;
+  const machineAvailabilityKey = machines
+    .map((machine) => `${machine.sandboxId}:${machine.state}`)
+    .join("\u0000");
 
   const sandboxBackendOverride = draft.compute.kind === "sandbox" ? draft.compute.backend : "";
+  const selectedMachineSandboxId =
+    draft.compute.kind === "machine" ? draft.compute.sandboxId : null;
 
   // Defensive: if the segmented control is hidden (clean flow) while a stale draft
   // still points at a machine (e.g. the last machine just left the fleet), fall
@@ -1249,11 +1296,43 @@ function ComputeTargetControl(props: {
       onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
       return;
     }
+    if (
+      !fleet.loading &&
+      draft.compute.kind === "machine" &&
+      selectedMachineSandboxId !== null &&
+      !machines.some((machine) => machine.sandboxId === selectedMachineSandboxId)
+    ) {
+      const fallback = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      onChange({
+        ...draft,
+        compute: fallback
+          ? {
+              kind: "machine",
+              sandboxId: fallback.sandboxId,
+              folder: rememberedMachineFolder(
+                props.selectionHistory,
+                props.selectedChannelId,
+                fallback.sandboxId,
+              ),
+            }
+          : { kind: "sandbox", backend: "" },
+      });
+      return;
+    }
     if (draft.compute.kind === "sandbox" && sandboxBackendOverride) {
       onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showComputeTarget, draft.compute.kind, sandboxBackendOverride]);
+  }, [
+    showComputeTarget,
+    fleet.loading,
+    machineAvailabilityKey,
+    draft.compute.kind,
+    selectedMachineSandboxId,
+    sandboxBackendOverride,
+    props.selectedChannelId,
+    props.selectionHistory,
+  ]);
 
   const selectKind = (kind: ComputeKind) => {
     if (kind === draft.compute.kind) {
@@ -1267,14 +1346,33 @@ function ComputeTargetControl(props: {
     }
     // Auto-pick the first selectable machine so the common single-machine case is
     // submit-ready immediately; otherwise leave it unpicked (submit stays blocked).
+    const project = props.selectionHistory.projects.find(
+      (candidate) => candidate.channelId === props.selectedChannelId,
+    );
+    const rememberedMachine = project?.machines.find((remembered) =>
+      machines.some(
+        (machine) =>
+          machine.sandboxId === remembered.sandboxId && isMachineComputeSelectable(machine.state),
+      ),
+    );
     const firstSelectable =
-      machines.find((machine) => isMachineComputeSelectable(machine.state)) ?? null;
+      (rememberedMachine
+        ? machines.find((machine) => machine.sandboxId === rememberedMachine.sandboxId)
+        : null) ??
+      machines.find((machine) => isMachineComputeSelectable(machine.state)) ??
+      null;
     onChange({
       ...draft,
       compute: {
         kind: "machine",
         sandboxId: firstSelectable?.sandboxId ?? null,
-        folder: { kind: "root" },
+        folder: firstSelectable
+          ? rememberedMachineFolder(
+              props.selectionHistory,
+              props.selectedChannelId,
+              firstSelectable.sandboxId,
+            )
+          : { kind: "root" },
       },
     });
   };
@@ -1355,6 +1453,8 @@ function ComputeTargetControl(props: {
           machines={machines}
           onChange={onChange}
           disabled={props.disabled}
+          selectedChannelId={props.selectedChannelId}
+          selectionHistory={props.selectionHistory}
         />
       )}
     </section>
@@ -1543,6 +1643,8 @@ function ConnectedMachineFields(props: {
   machines: MachineView[];
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
+  selectedChannelId: string | null;
+  selectionHistory: NewSessionSelectionHistory;
 }) {
   const { draft, compute, onChange, machines } = props;
   const setCompute = (next: ConnectedMachineTarget) => onChange({ ...draft, compute: next });
@@ -1562,7 +1664,20 @@ function ConnectedMachineFields(props: {
         <Select
           value={compute.sandboxId ?? ""}
           disabled={props.disabled}
-          onChange={(event) => setCompute({ ...compute, sandboxId: event.target.value || null })}
+          onChange={(event) => {
+            const sandboxId = event.target.value || null;
+            setCompute({
+              ...compute,
+              sandboxId,
+              folder: sandboxId
+                ? rememberedMachineFolder(
+                    props.selectionHistory,
+                    props.selectedChannelId,
+                    sandboxId,
+                  )
+                : { kind: "root" },
+            });
+          }}
         >
           <option value="" disabled>
             Choose a machine…
@@ -1621,7 +1736,12 @@ function ConnectedMachineFields(props: {
           <FolderRadio
             checked={compute.folder.kind === "path"}
             disabled={props.disabled}
-            onSelect={() => setCompute({ ...compute, folder: { kind: "path", path: customPath } })}
+            onSelect={() =>
+              setCompute({
+                ...compute,
+                folder: { kind: "path", path: customPath },
+              })
+            }
             label="Custom path"
             hint="absolute, or relative to the launch root"
           />
@@ -1630,7 +1750,10 @@ function ConnectedMachineFields(props: {
               value={customPath}
               disabled={props.disabled}
               onChange={(event) =>
-                setCompute({ ...compute, folder: { kind: "path", path: event.target.value } })
+                setCompute({
+                  ...compute,
+                  folder: { kind: "path", path: event.target.value },
+                })
               }
               placeholder="e.g. ~/repos/myproject or packages/runtime"
               aria-label="Custom working directory"

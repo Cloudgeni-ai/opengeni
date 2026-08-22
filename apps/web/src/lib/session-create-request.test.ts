@@ -7,6 +7,8 @@ import {
   emptySessionDraft,
   newSessionDraftOptionsFromSessionDraft,
   prepareCreateSessionAttempt,
+  rememberedMachineFolder,
+  rememberedProjectCompute,
   retainCreateSessionAttemptAfterFailure,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
@@ -176,10 +178,12 @@ describe("buildCreateSessionRequest", () => {
     const request = build([], [], {
       submission: { text: "", resources: [] },
       startMode: "realtime",
+      expectedNewSessionDraftRevision: 7,
     });
 
     expect(request.startMode).toBe("realtime");
     expect(request).not.toHaveProperty("initialMessage");
+    expect(request.expectedNewSessionDraftRevision).toBe(7);
   });
 
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
@@ -372,6 +376,42 @@ describe("buildCreateSessionRequest", () => {
       freshIdempotencyKey: "fresh-reconfirmed",
     });
     expect(reconfirmed.request.idempotencyKey).toBe("fresh-reconfirmed");
+  });
+});
+
+describe("successful-create selection history", () => {
+  const project = "00000000-0000-4000-8000-000000000031";
+  const machineA = "00000000-0000-4000-8000-000000000041";
+  const machineB = "00000000-0000-4000-8000-000000000042";
+  const history = {
+    projects: [
+      {
+        channelId: project,
+        targetSandboxId: machineA,
+        machines: [
+          { sandboxId: machineA, workingDir: "/workspace/opengeni" },
+          { sandboxId: machineB, workingDir: "repos/cloudgeni" },
+        ],
+      },
+      { channelId: null, targetSandboxId: null, machines: [] },
+    ],
+  };
+
+  test("restores the last compute target for each project", () => {
+    expect(rememberedProjectCompute(history, project)).toEqual({
+      kind: "machine",
+      sandboxId: machineA,
+      folder: { kind: "path", path: "/workspace/opengeni" },
+    });
+    expect(rememberedProjectCompute(history, null)).toEqual({ kind: "sandbox", backend: "" });
+  });
+
+  test("restores paths only within the exact project and machine pair", () => {
+    expect(rememberedMachineFolder(history, project, machineB)).toEqual({
+      kind: "path",
+      path: "repos/cloudgeni",
+    });
+    expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
   });
 });
 

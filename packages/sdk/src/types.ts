@@ -4066,6 +4066,17 @@ export type NewSessionDraftOptions = {
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
 };
 
+export type NewSessionSelectionHistory = {
+  /** Most-recently used project first. Null channelId is the Default project. */
+  projects: Array<{
+    channelId: string | null;
+    /** Null means the managed sandbox was used most recently in this project. */
+    targetSandboxId: string | null;
+    /** Most-recently used machine in this project first. */
+    machines: Array<{ sandboxId: string; workingDir: string | null }>;
+  }>;
+};
+
 export type NewSessionDraft = {
   revision: number;
   text: string;
@@ -4077,6 +4088,7 @@ export type NewSessionDraft = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   options: NewSessionDraftOptions;
+  selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
 };
 
@@ -4244,7 +4256,10 @@ export type SubmitComposerDraftResponse = {
   replay: boolean;
 };
 
-export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+export type SaveNewSessionDraftRequest = Omit<
+  NewSessionDraft,
+  "revision" | "selectionHistory" | "updatedAt"
+> & {
   expectedRevision: number;
 };
 
