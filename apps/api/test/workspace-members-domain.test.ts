@@ -8,6 +8,7 @@ import {
   memberCanAdminister,
   resolveMemberSubjectId,
 } from "@opengeni/core";
+import { workspaceMembersResponse } from "../src/routes/workspaces";
 
 function member(
   overrides: Partial<WorkspaceMember> & Pick<WorkspaceMember, "subjectId">,
@@ -54,6 +55,41 @@ describe("workspace member helpers", () => {
   test("resolveMemberSubjectId returns subjectId for a known user and 404s for an unknown email", () => {
     expect(resolveMemberSubjectId("u1")).toBe("user:u1");
     expect(statusOf(() => resolveMemberSubjectId(null))).toBe(404);
+  });
+
+  test("member responses omit retired stored permissions without dropping current permissions", () => {
+    const legacyMember = {
+      ...member({ subjectId: "user:legacy" }),
+      permissions: [
+        "workspace:read",
+        "capabilities:read",
+        "sessions:create",
+        "capabilities:write",
+        42,
+      ],
+    };
+
+    expect(workspaceMembersResponse([legacyMember])).toEqual({
+      members: [
+        {
+          ...member({ subjectId: "user:legacy" }),
+          permissions: ["workspace:read", "sessions:create"],
+        },
+      ],
+    });
+  });
+
+  test("member responses fail closed when stored permissions are not an array", () => {
+    expect(
+      workspaceMembersResponse([
+        {
+          ...member({ subjectId: "user:malformed" }),
+          permissions: { unexpected: true },
+        },
+      ]),
+    ).toEqual({
+      members: [{ ...member({ subjectId: "user:malformed" }), permissions: [] }],
+    });
   });
 });
 

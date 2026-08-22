@@ -2,6 +2,7 @@ import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
   ListWorkspaceMembersResponse,
+  Permission as PermissionSchema,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelPolicyRequest,
@@ -16,6 +17,7 @@ import {
   workspaceControlUtf8Bytes,
   type AccessContext,
   type Permission,
+  type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
@@ -74,6 +76,29 @@ export function canonicalWorkspacePolicyModelIds(
     return null;
   }
   return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
+
+type WorkspaceMemberProjectionInput = Omit<WorkspaceMemberValue, "permissions"> & {
+  permissions: unknown;
+};
+
+/**
+ * Keep the roster readable across stored-permission contract changes. Unknown
+ * values are never re-authorized: they are omitted from the public projection,
+ * while every currently recognized permission is preserved in stored order.
+ */
+export function workspaceMembersResponse(members: readonly WorkspaceMemberProjectionInput[]) {
+  return ListWorkspaceMembersResponse.parse({
+    members: members.map((member) => ({
+      ...member,
+      permissions: Array.isArray(member.permissions)
+        ? member.permissions.flatMap((candidate) => {
+            const parsed = PermissionSchema.safeParse(candidate);
+            return parsed.success ? [parsed.data] : [];
+          })
+        : [],
+    })),
+  });
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -409,7 +434,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const members = await listWorkspaceMembers(deps.db, workspaceId);
-    return c.json(ListWorkspaceMembersResponse.parse({ members }));
+    return c.json(workspaceMembersResponse(members));
   });
 
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {
