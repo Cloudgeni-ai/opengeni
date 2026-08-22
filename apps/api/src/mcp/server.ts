@@ -239,8 +239,8 @@ import {
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
+import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { registerRememberTools } from "./remember";
-import { registerCompanyProfileTools } from "./company-profile";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
@@ -429,9 +429,14 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["documents:search", "sessions:control", "workspace:read"],
   },
-  // Agent-directed company-profile proposals record an inactive organization
-  // revision; activation stays with the organization account admin.
-  company_profile_propose: { sessionRequired: true, allOf: ["workspace:read", "sessions:control"] },
+  company_profile_propose: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "workspace:read"],
+  },
+  company_profile_confirm: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -784,6 +789,20 @@ export function buildOpenGeniMcpServer(
       },
       json,
     });
+    registerCompanyProfileAgentAdminTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+        agentSubjectId: grant.subjectId,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
     registerRememberTools({
       server,
       db: deps.db,
@@ -792,20 +811,6 @@ export function buildOpenGeniMcpServer(
         workspaceId: grant.workspaceId,
         ...attempt,
       },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
-    registerCompanyProfileTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
-      },
-      actorSubjectId: grant.subjectId,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },

@@ -925,6 +925,27 @@ export async function getCompanyProfileRevision(
   });
 }
 
+export async function getCompanyProfileActivationEvent(
+  db: Database,
+  input: { accountId: string; workspaceId: string; eventId: string },
+): Promise<CompanyProfileActivationEvent> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [event] = await scopedDb
+      .select()
+      .from(schema.companyProfileActivationEvents)
+      .where(
+        and(
+          eq(schema.companyProfileActivationEvents.accountId, input.accountId),
+          eq(schema.companyProfileActivationEvents.id, input.eventId),
+        ),
+      )
+      .limit(1);
+    if (!event)
+      throw new CompanyProfileNotFoundError("Company-profile activation event was not found");
+    return eventFromRow(event);
+  });
+}
+
 function unifiedJsonDiff(from: CompanyProfileRevision, to: CompanyProfileRevision): string {
   const before = JSON.stringify(from.profile, null, 2).split("\n");
   const after = JSON.stringify(to.profile, null, 2).split("\n");

@@ -367,6 +367,11 @@ describe("embedded worker lifecycle contract", () => {
       [],
       [
         ...[
+          "company_profile_activation_events",
+          "company_profile_agent_confirmation_receipts",
+          "company_profile_agent_proposal_receipts",
+          "company_profile_heads",
+          "company_profile_revisions",
           "connections",
           "files",
           "google_drive_object_acl_evidence",
@@ -377,6 +382,7 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_index_obligations",
           "knowledge_source_sync_states",
           "knowledge_sources",
+          "managed_accounts",
           "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",
@@ -390,6 +396,11 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
+          "session_human_input_requests",
+          "session_turn_attempts",
+          "session_turns",
+          "sessions",
+          "workspaces",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",

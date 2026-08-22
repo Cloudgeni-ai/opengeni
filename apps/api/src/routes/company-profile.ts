@@ -42,10 +42,11 @@ async function parseBody<S extends z.ZodType>(context: Context, schema: S): Prom
   return parsed.data;
 }
 
-function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
+export function authorizeCompanyProfileMutation(access: AccessGrantAuthorization): void {
   const { grant } = access;
   if (
     !access.contextIntegrity ||
+    !access.canonicalManagedHumanSession ||
     access.authenticatedSubjectId !== grant.subjectId ||
     grant.principalKind !== "human_session" ||
     grant.serviceInitiator ||
@@ -56,8 +57,11 @@ function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
       message: "Company-profile administration requires a direct human-authorized request",
     });
   }
-  if (!access.accountGrant?.permissions.includes("account:admin")) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  const organizationRole = access.accountGrant?.role;
+  if (organizationRole !== "owner" && organizationRole !== "admin") {
+    throw new HTTPException(403, {
+      message: "Company-profile administration requires organization owner or admin authority",
+    });
   }
 }
 
@@ -127,7 +131,7 @@ export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): voi
       workspaceId,
       "workspace:read",
     );
-    requireDirectAccountAdmin(access);
+    authorizeCompanyProfileMutation(access);
     const request = await parseBody(context, UpdateCompanyProfileRequest);
     try {
       return context.json(
@@ -181,7 +185,7 @@ export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): voi
       workspaceId,
       "workspace:read",
     );
-    requireDirectAccountAdmin(access);
+    authorizeCompanyProfileMutation(access);
     const request = await parseBody(context, RollbackCompanyProfileRequest);
     try {
       return context.json(
@@ -230,7 +234,7 @@ export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): voi
       workspaceId,
       "workspace:read",
     );
-    requireDirectAccountAdmin(access);
+    authorizeCompanyProfileMutation(access);
     const request = await parseBody(context, ActivateCompanyProfileRevisionRequest);
     try {
       return context.json(
