@@ -64,6 +64,7 @@ export * from "./domain/automations";
 export * from "./domain/pr-review";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
+export * from "./domain/github-repository-bindings";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";

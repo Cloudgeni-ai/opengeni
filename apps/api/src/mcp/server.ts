@@ -5257,7 +5257,14 @@ function requireVariableSetsUseForMcpAttachment(
   }
 }
 
-function repositoryWithScheduledTaskResource(
+/**
+ * Project one allowlisted GitHub App repository into the resource an agent or
+ * scheduled task attaches. Every listed repository is in the workspace
+ * allowlist, public or private, so every resource carries the stable ids
+ * that mint the scoped installation token; a bare URI would clone anonymously
+ * and could never push.
+ */
+export function repositoryWithScheduledTaskResource(
   repository: GitHubRepository,
 ): GitHubRepository & { resource: ResourceRef } {
   const uri = normalizedRepositoryUri(repository.cloneUrl);
@@ -5269,12 +5276,8 @@ function repositoryWithScheduledTaskResource(
       ref: repository.defaultBranch,
       provider: "github",
       mountPath: defaultRepositoryMountPath(uri, "github"),
-      ...(repository.private
-        ? {
-            githubInstallationId: repository.installationId,
-            githubRepositoryId: repository.id,
-          }
-        : {}),
+      githubInstallationId: repository.installationId,
+      githubRepositoryId: repository.id,
     },
   };
 }

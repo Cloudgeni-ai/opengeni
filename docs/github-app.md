@@ -121,6 +121,39 @@ operators can unlink them, but they cannot enumerate repositories, authorize a
 session resource, or mint an installation token. The legacy PR #518 chooser
 endpoint remains `410 Gone`; it is not an alternate binding path.
 
+### Bound repositories receive a scoped token, public or private
+
+Repository visibility is not the credential decision; the workspace allowlist
+is. Every repository in a bound installation's allowlist receives a short-lived
+installation token scoped to exactly that repository, whether the repository is
+public or private, so the sandbox can push and use `gh` against it. A
+repository that is not in any of the workspace's allowlists (for example a
+public upstream project) is cloned anonymously and is read-only: no token is
+minted for it.
+
+The web composer and the first-party `github_repositories_list` MCP tool stamp
+`githubInstallationId`/`githubRepositoryId` on every allowlisted selection. For
+a bare `https://github.com/<owner>/<repo>` resource that reached a session
+without those ids (an API caller, a session created before bound public
+repositories carried ids, or an agent-spawned child inheriting its parent's
+resources), the turn worker resolves the binding before minting: the owner
+login selects the workspace's auditable installation(s) from Postgres, one
+server-side metadata-read (a `permissions: { metadata: read }` installation
+token that never reaches the sandbox, bounded to 10 seconds) supplies GitHub's
+repository id, and the resource is stamped for that turn only when exactly one
+allowlist holds that id. The allowlist, `github_installation_repositories`,
+stores repository ids rather than names, so this resolution cannot be completed
+from Postgres alone and is therefore performed where OpenGeni already talks to
+GitHub rather than at session create. Results (positive and negative) are
+memoized per worker process for ten minutes keyed by workspace, installation,
+and `owner/name`, so recovered attempts and sibling children do not re-read
+GitHub; failures are not memoized. A bound owner whose allowlist does not hold
+the repository, an ambiguous match across two bindings, or a suspended/deleted
+installation leaves the resource bare and posts a visible
+`credential.auth_needed` warning for `github.com` once per session and URI
+within that window; resolution never fails the turn or the session, and a
+GitHub outage proceeds bare after the bound timeout.
+
 Connected Machines do not receive OpenGeni GitHub App credentials and continue
 to use their machine's ambient Git authentication.
 

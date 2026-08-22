@@ -74,6 +74,7 @@ import {
 import { selectXaiTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
+import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
@@ -841,8 +842,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceRefs,
       });
       const {
-        turnResources,
-        runtimeResources,
+        turnResources: claimedTurnResources,
+        runtimeResources: claimedRuntimeResources,
         mcpAvailabilityNote,
         turnTools,
         connectionScope,
@@ -868,6 +869,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxCreationBackend,
         effectiveRunCredentialBackend,
       } = sandboxRoute;
+
+      // A bare github.com repository URI (API caller, older session, or an
+      // agent-spawned child inheriting its parent's resources) resolves to
+      // the workspace's GitHub App binding here, before credential minting
+      // and the runtime clone plan derive binding ids from the same resource
+      // set. A Connected Machine receives no platform Git credential, so its
+      // resources stay exactly as stored. Resolution never fails the turn;
+      // an unusable bound repository stays bare and is reported visibly.
+      const { turnResources, runtimeResources } = await waitForTurnOperation(
+        applyTurnGitHubRepositoryBindings({
+          db,
+          settings: runSettings,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          activeSandboxBackend,
+          claimedTurnResources,
+          claimedRuntimeResources,
+          publish: async (events) => {
+            await eventing.publish!(events, true);
+          },
+          warn: (message, fields) => observability.warn(message, fields),
+        }),
+        cancellationSignal,
+        undefined,
+      );
 
       const runCredentials = await prepareRunCredentials({
         input,
