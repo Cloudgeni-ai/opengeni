@@ -120,10 +120,10 @@ function selected(lastVerifiedAt = new Date().toISOString()) {
   };
 }
 
-describe("migration 0314 personal GitHub repository selection", () => {
+describe("migration 0315 personal GitHub repository selection", () => {
   test("admits the dedicated discriminator only through existing scheduled connection ledgers", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0314_personal_github_repository_selection.sql", import.meta.url),
+      new URL("../drizzle/0315_personal_github_repository_selection.sql", import.meta.url),
     ).text();
     expect(source).toContain("scheduled_task_connection_authority_shape_chk");
     expect(source).toContain("scheduled_run_connection_authority_shape_chk");
