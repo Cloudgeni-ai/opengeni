@@ -2197,7 +2197,8 @@ function goalToolPreview(name: string, args: unknown): string | null {
     leaf !== "goal_set" &&
     leaf !== "goal_update" &&
     leaf !== "goal_complete" &&
-    leaf !== "goal_pause"
+    leaf !== "goal_pause" &&
+    leaf !== "goal_wait"
   ) {
     return null;
   }
@@ -2212,9 +2213,11 @@ function goalToolPreview(name: string, args: unknown): string | null {
         ? record.evidence
         : typeof record.rationale === "string"
           ? record.rationale
-          : typeof record.progressNote === "string"
-            ? record.progressNote
-            : null;
+          : typeof record.reason === "string"
+            ? record.reason
+            : typeof record.progressNote === "string"
+              ? record.progressNote
+              : null;
   return text ? truncatePreview(text, 90) : null;
 }
 

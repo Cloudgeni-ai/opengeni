@@ -49989,7 +49989,7 @@ export async function getSessionGoalWithContinuation(
           .limit(1);
         if (
           latestFinishedTurn?.id === goal.continuationHoldTurnId &&
-          goal.continuationHoldUntil.getTime() > Date.now()
+          goal.continuationHoldUntil.getTime() > (await transactionNow(tx)).getTime()
         ) {
           currentHoldUntil = goal.continuationHoldUntil;
         }
@@ -51432,6 +51432,19 @@ export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
 export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
 
 /**
+ * The database clock of the current transaction. Hold deadlines are compared
+ * against this rather than the worker's `Date.now()` because the wake-outbox
+ * dispatcher claims rows on Postgres `now()`; one authority avoids clock-skew
+ * re-wake loops right at the deadline.
+ */
+async function transactionNow(tx: Database): Promise<Date> {
+  const rows = await rawRows<{ now: string | Date }>(tx, sql`select now() as now`);
+  const value = rows[0]?.now;
+  if (value === undefined) throw new Error("Failed to read the transaction clock");
+  return value instanceof Date ? value : new Date(value);
+}
+
+/**
  * Agent `goal_wait`: record that the active goal's next continuation should
  * wait for child results, a message, a human prompt, or the deadline instead of
  * materializing immediately after the declaring turn ends.
@@ -52608,9 +52621,13 @@ export async function materializeGoalContinuation(
             .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
             .limit(1);
           const holdUntil = goalRead.continuationHoldUntil;
+          // Compare against the transaction's database clock: the wake-outbox
+          // dispatcher fires on DB `now()`, so a worker clock ahead of or
+          // behind Postgres cannot re-hold past the deadline or re-wake early.
+          const dbNow = await transactionNow(tx);
           if (
             latestFinishedTurn?.id === goalRead.continuationHoldTurnId &&
-            holdUntil.getTime() > Date.now()
+            holdUntil.getTime() > dbNow.getTime()
           ) {
             // The declaring turn is still the newest finished truth and its
             // deadline has not passed: leave the obligation armed (the wake

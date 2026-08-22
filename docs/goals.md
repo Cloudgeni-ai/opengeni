@@ -164,12 +164,18 @@ The locked decision applies these rules:
    deadline row; an undelivered earlier wake coalesces with
    `least(next_attempt_at, notBefore)`. A hold that belongs to an older turn or
    whose deadline has passed is cleared in that same transaction and
-   evaluation continues as before. Human/API goal `PATCH` (pause, resume,
-   redirect), `DELETE`, and agent `goal_set`/`goal_update`/`goal_complete`/
-   `goal_pause` clear the hold inside their own transactions, so a human
-   redirect never sits behind an agent-declared wait. The API projects a
-   current hold as `blocked` / `held_for_input` with `nextAttemptAt` at the
-   deadline.
+   evaluation continues as before. Every goal head mutation clears the hold
+   inside its own transaction: human/API `PATCH` (pause, resume, redirect),
+   `DELETE`, agent `goal_set`, `goal_complete`, `goal_pause`, and an applied
+   `goal_update` revision (a `review_changes` proposal-only outcome records
+   evidence but does not touch the head, so it leaves the hold in place). So a
+   human redirect never sits behind an agent-declared wait. The scheduled-run
+   re-arm (`upsertScheduledSessionGoalForRun`) replaces the goal through the
+   same `upsertSessionGoal` path and therefore clears it as well. The API
+   projects a current hold as `blocked` / `held_for_input` with
+   `nextAttemptAt` at the deadline, and the deadline comparison uses the
+   transaction's database clock, the same clock the wake-outbox dispatcher
+   fires on.
 4. Budget/admission policy can pause the goal visibly with reason `limits`.
    OpenGeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation

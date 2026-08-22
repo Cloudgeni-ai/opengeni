@@ -322,7 +322,15 @@ export type SessionStatusItem = {
 export type GoalItem = {
   kind: "goal";
   id: string;
-  action: "set" | "updated" | "completed" | "paused" | "resumed" | "cleared" | "continuation";
+  action:
+    | "set"
+    | "updated"
+    | "completed"
+    | "paused"
+    | "resumed"
+    | "cleared"
+    | "held"
+    | "continuation";
   text: string | null;
   occurredAt: string;
 };
