@@ -99,7 +99,7 @@ import {
 } from "../src";
 
 describe("contracts", () => {
-  test("validates paginated billing invoice download metadata", () => {
+  test("validates paginated Stripe-hosted invoice metadata", () => {
     expect(
       BillingInvoicesResponse.parse({
         invoices: [
@@ -111,7 +111,6 @@ describe("contracts", () => {
             totalMicros: 25_000_000,
             amountPaidMicros: 25_000_000,
             currency: "usd",
-            invoicePdfUrl: "https://pay.stripe.com/invoice/test/pdf",
             hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
           },
         ],
@@ -130,7 +129,6 @@ describe("contracts", () => {
             totalMicros: 0,
             amountPaidMicros: 0,
             currency: "usd",
-            invoicePdfUrl: null,
             hostedInvoiceUrl: null,
           },
         ],

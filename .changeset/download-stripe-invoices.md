@@ -4,4 +4,4 @@
 "@opengeni/sdk": patch
 ---
 
-Create Stripe invoices for prepaid-credit Checkout payments and expose an authorized, paginated billing-invoice API and SDK method with finalized PDF download metadata.
+Create Stripe invoices for prepaid-credit Checkout payments and expose an authorized, paginated billing-invoice API and SDK method with Stripe-hosted invoice links.

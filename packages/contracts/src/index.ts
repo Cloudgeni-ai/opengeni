@@ -4053,7 +4053,6 @@ export const BillingInvoice = z.object({
   totalMicros: z.number().int(),
   amountPaidMicros: z.number().int(),
   currency: z.string(),
-  invoicePdfUrl: z.string().url().nullable(),
   hostedInvoiceUrl: z.string().url().nullable(),
 });
 export type BillingInvoice = z.infer<typeof BillingInvoice>;

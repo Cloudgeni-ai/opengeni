@@ -989,7 +989,7 @@ describe("API helpers", () => {
     ).toBe("stripe:test");
   });
 
-  test("projects Stripe invoices into the public download shape", () => {
+  test("projects Stripe invoices into the public hosted-invoice shape", () => {
     expect(
       billingInvoiceFromStripe({
         id: "in_123",
@@ -999,7 +999,6 @@ describe("API helpers", () => {
         total: 2550,
         amount_paid: 2550,
         currency: "usd",
-        invoice_pdf: "https://pay.stripe.com/invoice/acct_test/pdf",
         hosted_invoice_url: "https://invoice.stripe.com/i/acct_test",
       } as never),
     ).toEqual({
@@ -1010,7 +1009,6 @@ describe("API helpers", () => {
       totalMicros: 25_500_000,
       amountPaidMicros: 25_500_000,
       currency: "usd",
-      invoicePdfUrl: "https://pay.stripe.com/invoice/acct_test/pdf",
       hostedInvoiceUrl: "https://invoice.stripe.com/i/acct_test",
     });
   });

@@ -38,7 +38,6 @@ const getBillingInvoices = mock(async () => ({
       totalMicros: 25_000_000,
       amountPaidMicros: 25_000_000,
       currency: "usd",
-      invoicePdfUrl: "https://pay.stripe.com/invoice/test/pdf",
       hostedInvoiceUrl: "https://invoice.stripe.com/i/test",
     },
   ],
@@ -175,10 +174,8 @@ describe("organization billing StrictMode ownership", () => {
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
     expect(container.textContent).toContain("OG-0042");
-    expect(container.textContent).toContain("Download PDF");
-    expect(container.querySelector('a[href="https://pay.stripe.com/invoice/test/pdf"]')).not.toBe(
-      null,
-    );
+    expect(container.textContent).toContain("View in Stripe");
+    expect(container.querySelector('a[href="https://invoice.stripe.com/i/test"]')).not.toBe(null);
 
     await act(async () => button(container, "Add credits").click());
     await flush();

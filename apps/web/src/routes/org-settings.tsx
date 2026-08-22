@@ -7,7 +7,6 @@ import { Link } from "@tanstack/react-router";
 import {
   ActivityIcon,
   BuildingIcon,
-  DownloadIcon,
   FileTextIcon,
   GaugeIcon,
   Loader2Icon,
@@ -524,9 +523,7 @@ export function InvoicesSection(props: {
             <FileTextIcon className="size-3.5 text-brand" />
             Invoices
           </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Receipts and tax invoices for Stripe credit purchases.
-          </p>
+          <p className="mt-1 text-xs text-fg-muted">Stripe credit purchase invoices.</p>
         </div>
         <Button
           type="button"
@@ -571,23 +568,13 @@ export function InvoicesSection(props: {
                     {invoice.status ? ` · ${invoice.status}` : ""}
                   </p>
                 </div>
-                <div className="flex items-center gap-1">
-                  {invoice.invoicePdfUrl ? (
-                    <Button asChild type="button" variant="secondary" size="sm">
-                      <a href={invoice.invoicePdfUrl} target="_blank" rel="noreferrer" download>
-                        <DownloadIcon className="size-3.5" />
-                        Download PDF
-                      </a>
-                    </Button>
-                  ) : null}
-                  {invoice.hostedInvoiceUrl ? (
-                    <Button asChild type="button" variant="ghost" size="sm">
-                      <a href={invoice.hostedInvoiceUrl} target="_blank" rel="noreferrer">
-                        View invoice
-                      </a>
-                    </Button>
-                  ) : null}
-                </div>
+                {invoice.hostedInvoiceUrl ? (
+                  <Button asChild type="button" variant="secondary" size="sm">
+                    <a href={invoice.hostedInvoiceUrl} target="_blank" rel="noreferrer">
+                      View in Stripe
+                    </a>
+                  </Button>
+                ) : null}
               </div>
             ))}
           </div>

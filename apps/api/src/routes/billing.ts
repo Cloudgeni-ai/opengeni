@@ -283,7 +283,6 @@ export function billingInvoiceFromStripe(
     totalMicros: centsToMicros(invoice.total),
     amountPaidMicros: centsToMicros(invoice.amount_paid),
     currency: invoice.currency,
-    invoicePdfUrl: invoice.invoice_pdf ?? null,
     hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
   };
 }

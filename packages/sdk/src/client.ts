@@ -6211,15 +6211,15 @@ export class OpenGeniClient {
   async getBillingInvoices(
     options: { accountId?: string; limit?: number; startingAfter?: string } = {},
   ): Promise<BillingInvoicesResponse> {
+    const query: Record<string, string> = {};
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) query[key] = String(value);
+    }
     return await this.requestJson<BillingInvoicesResponse>(
       "GET",
       "/v1/billing/invoices",
       undefined,
-      {
-        ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.startingAfter !== undefined ? { startingAfter: options.startingAfter } : {}),
-      },
+      query,
     );
   }
 

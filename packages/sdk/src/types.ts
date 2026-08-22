@@ -6314,7 +6314,6 @@ export type BillingInvoice = {
   totalMicros: number;
   amountPaidMicros: number;
   currency: string;
-  invoicePdfUrl: string | null;
   hostedInvoiceUrl: string | null;
 };
 
