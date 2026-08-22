@@ -132,6 +132,21 @@ describe("Company Brain first-party MCP policy", () => {
     expect(registeredToolNames(denied)).toEqual([]);
   });
 
+  test("company_profile_propose requires exact agent-attempt authority plus its own permissions", () => {
+    const selected: FirstPartyMcpToolName[] = ["company_profile_propose"];
+    expect(
+      registeredToolNames(buildOpenGeniMcpServer(deps(), grant(["workspace:read"], selected))),
+    ).toEqual([]);
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), grant(["workspace:read", "sessions:control"], selected)),
+      ),
+    ).toEqual(["company_profile_propose"]);
+    const humanGrant = grant(["workspace:read", "sessions:control"], selected);
+    humanGrant.principalKind = "human";
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
+  });
+
   test("governed write tools are production-registered and permission filtered", () => {
     const selected: FirstPartyMcpToolName[] = [
       "knowledge_propose",
