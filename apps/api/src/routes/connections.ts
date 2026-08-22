@@ -1150,10 +1150,11 @@ function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settings"]): 
 } {
   const clientId = settings.slackClientId?.trim();
   const clientSecret = settings.slackClientSecret?.trim();
-  if (!clientId || !clientSecret) {
+  const signingSecret = settings.slackSigningSecret?.trim();
+  if (!clientId || !clientSecret || !signingSecret) {
     throw new HTTPException(503, {
       message:
-        "OpenGeni Slack installation requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+        "OpenGeni Slack bot installation requires OPENGENI_SLACK_CLIENT_ID, OPENGENI_SLACK_CLIENT_SECRET, and OPENGENI_SLACK_SIGNING_SECRET",
     });
   }
   return { clientId, clientSecret };

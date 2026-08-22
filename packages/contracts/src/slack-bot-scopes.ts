@@ -87,6 +87,35 @@ export const OPENGENI_SLACK_MCP_USER_SCOPES = [
 
 export const OPENGENI_MANAGED_PUBLIC_BASE_URL = "https://app.opengeni.ai" as const;
 
+export type OpenGeniSlackBotManifestOptions = Readonly<{
+  appName?: string;
+  slashCommand?: string;
+  shortcutName?: string;
+}>;
+
+function normalizedSlackManifestText(
+  value: string | undefined,
+  fallback: string,
+  label: string,
+  maxLength: number,
+): string {
+  const normalized = value?.trim() || fallback;
+  if (normalized.length > maxLength || /[\r\n\0]/u.test(normalized)) {
+    throw new Error(`Slack bot manifest ${label} must be at most ${maxLength} plain characters`);
+  }
+  return normalized;
+}
+
+function normalizedSlackCommand(value: string | undefined): string {
+  const command = value?.trim() || "/opengeni";
+  if (!/^\/[a-z0-9_-]{1,31}$/u.test(command)) {
+    throw new Error(
+      "Slack bot manifest slash command must start with / and contain at most 31 lowercase letters, digits, hyphens, or underscores",
+    );
+  }
+  return command;
+}
+
 function normalizedSlackManifestBaseUrl(publicBaseUrl: string): string {
   const parsed = new URL(publicBaseUrl);
   if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
@@ -99,10 +128,21 @@ function normalizedSlackManifestBaseUrl(publicBaseUrl: string): string {
 }
 
 /** Canonical managed/self-hosted Slack app manifest. Slack accepts JSON manifests. */
-export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
+export function buildOpenGeniSlackBotManifest(
+  publicBaseUrl: string,
+  options: OpenGeniSlackBotManifestOptions = {},
+) {
   const baseUrl = normalizedSlackManifestBaseUrl(publicBaseUrl);
+  const appName = normalizedSlackManifestText(options.appName, "OpenGeni", "app name", 35);
+  const slashCommand = normalizedSlackCommand(options.slashCommand);
+  const shortcutName = normalizedSlackManifestText(
+    options.shortcutName,
+    "Open in OpenGeni",
+    "shortcut name",
+    35,
+  );
   return {
-    display_information: { name: "OpenGeni" },
+    display_information: { name: appName },
     features: {
       app_home: {
         home_tab_enabled: true,
@@ -112,7 +152,7 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
       bot_user: { display_name: "OpenGeni", always_online: false },
       slash_commands: [
         {
-          command: "/opengeni",
+          command: slashCommand,
           description: "Start an OpenGeni task in this channel",
           should_escape: false,
           url: `${baseUrl}/v1/integrations/slack/commands`,
@@ -122,7 +162,7 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
         {
           callback_id: "opengeni_message",
           description: "Start an OpenGeni task from this Slack message",
-          name: "Open in OpenGeni",
+          name: shortcutName,
           type: "message",
         },
       ],

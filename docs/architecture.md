@@ -1060,6 +1060,17 @@ worker credentials, or expose private configuration in its fixed blocker result.
 Ordinary tasks and malformed/non-alert legacy metadata retain their existing
 path.
 
+Slack provider identity is deployment-local. Staging, production, preview, and
+self-hosted deployments use distinct Slack app client IDs, client secrets, and
+signing secrets because redirect, command, event, and interaction URLs are
+app-level provider settings. The canonical manifest derives every URL from the
+deployment's public base URL, supports environment-qualified app/command labels,
+and keeps the verified bot-user display name fixed at `OpenGeni`. Workspace-bot
+installation refuses to start without the signing secret required for inbound
+Slack verification. Canonical: `packages/contracts/src/slack-bot-scopes.ts`,
+`scripts/generate-slack-bot-manifest.ts`,
+`packages/deployment/src/index.ts`, and [`slack-bot.md`](slack-bot.md).
+
 The official Gmail MCP stays on the generic capability/connection path, but it
 is personal-only: each workspace member authorizes their own mailbox, and both
 OAuth start and capability enablement reject workspace-owned Gmail bindings.

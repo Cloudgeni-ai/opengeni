@@ -2182,6 +2182,9 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
+    valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
+    valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
+    valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||
     (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")
