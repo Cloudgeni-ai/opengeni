@@ -1735,6 +1735,14 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/repositories\/verify$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/repositories$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
     label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
   },

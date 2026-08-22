@@ -14,6 +14,7 @@ import {
   ResourceRefConflictError,
   ResourceMountPathError,
   stableJson,
+  type RepositoryResourceRef,
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -169,6 +170,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         mountPath,
         ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
         ...(resource.provider ? { provider: resource.provider } : {}),
+        ...(resource.connectionType ? { connectionType: resource.connectionType } : {}),
         ...(resource.credentialBindingId
           ? { credentialBindingId: resource.credentialBindingId }
           : {}),
@@ -236,6 +238,97 @@ export function validateGitHubRepositorySelectionShapes(resources: ResourceRef[]
   return [...new Set(selected.map((item) => item.installationId))];
 }
 
+export type PersonalGitHubRepositoryResource = RepositoryResourceRef & {
+  provider: "github";
+  connectionType: "github_personal";
+  credentialBindingId: string;
+  access: "read" | "write";
+  repositoryId: string;
+};
+
+const PERSONAL_GITHUB_BINDING_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function isPersonalGitHubRepositoryCandidate(
+  resource: ResourceRef,
+): resource is RepositoryResourceRef & { provider: "github"; credentialBindingId: string } {
+  if (resource.kind !== "repository" || resource.connectionType !== "github_personal") {
+    return false;
+  }
+  return resource.provider === "github" && resource.credentialBindingId !== undefined;
+}
+
+/**
+ * Validate and return the dedicated personal-GitHub repository resource lane.
+ * A host-opaque binding is only a selector for the server-side authority
+ * snapshot; it never authorizes a repository on its own.
+ */
+export function personalGitHubRepositoryResources(
+  resources: ResourceRef[],
+): PersonalGitHubRepositoryResource[] {
+  const selected: PersonalGitHubRepositoryResource[] = [];
+  for (const resource of resources) {
+    if (!isPersonalGitHubRepositoryCandidate(resource)) {
+      if (resource.kind === "repository" && resource.connectionType === "github_personal") {
+        throw new HTTPException(422, {
+          message: "personal GitHub repository resources require the dedicated GitHub provider",
+        });
+      }
+      continue;
+    }
+    if (
+      !PERSONAL_GITHUB_BINDING_ID_PATTERN.test(resource.credentialBindingId) ||
+      typeof resource.repositoryId !== "string" ||
+      !/^[1-9]\d*$/u.test(resource.repositoryId) ||
+      (resource.access !== "read" && resource.access !== "write") ||
+      resource.installationId !== undefined ||
+      resource.githubInstallationId !== undefined ||
+      resource.githubRepositoryId !== undefined ||
+      resource.connectionId !== undefined ||
+      resource.projectId !== undefined
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "personal GitHub repository resources require one opaque binding, provider repository id, and explicit read or write access",
+      });
+    }
+    let uri: URL;
+    try {
+      uri = new URL(resource.uri);
+    } catch {
+      throw new HTTPException(422, { message: "personal GitHub repository URI is invalid" });
+    }
+    if (
+      uri.protocol !== "https:" ||
+      uri.hostname !== "github.com" ||
+      uri.port !== "" ||
+      uri.username !== "" ||
+      uri.password !== "" ||
+      uri.search !== "" ||
+      uri.hash !== "" ||
+      uri.pathname.endsWith(".git") ||
+      uri.pathname.split("/").filter(Boolean).length !== 2 ||
+      resource.uri !== `${uri.origin}${uri.pathname.replace(/\/$/u, "")}`
+    ) {
+      throw new HTTPException(422, {
+        message: "personal GitHub repository resources require a canonical GitHub HTTPS URI",
+      });
+    }
+    selected.push(resource as PersonalGitHubRepositoryResource);
+  }
+  const identities = new Set<string>();
+  for (const resource of selected) {
+    const key = `${resource.credentialBindingId}\0${resource.repositoryId}`;
+    if (identities.has(key)) {
+      throw new HTTPException(422, {
+        message: "personal GitHub repository resources must not contain duplicates",
+      });
+    }
+    identities.add(key);
+  }
+  return selected;
+}
+
 /** @deprecated Use validateGitHubRepositorySelectionShapes for multi-installation sessions. */
 export function validateGitHubRepositorySelectionShape(resources: ResourceRef[]): number | null {
   const installationIds = validateGitHubRepositorySelectionShapes(resources);
@@ -252,6 +345,9 @@ function gitHubRepositorySelections(
 ): Array<{ installationId: number; repositoryId: number }> {
   return resources.flatMap((resource) => {
     if (resource.kind !== "repository") {
+      return [];
+    }
+    if (isPersonalGitHubRepositoryCandidate(resource)) {
       return [];
     }
     const installationRaw =
@@ -283,6 +379,7 @@ export async function validateGitHubRepositorySelection(
   workspaceId: string,
   resources: ResourceRef[],
 ): Promise<void> {
+  personalGitHubRepositoryResources(resources);
   const installationIds = validateGitHubRepositorySelectionShapes(resources);
   if (installationIds.length === 0) {
     return;

@@ -88,6 +88,7 @@
         "@temporalio/client": "^1.17.0",
         "better-auth": "^1.6.14",
         "hono": "^4.12.18",
+        "json-bigint": "^1.0.0",
         "pg": "^8.21.0",
         "resend": "^6.12.4",
         "sharp": "^0.34.5",
@@ -97,6 +98,7 @@
       },
       "devDependencies": {
         "@opengeni/testing": "workspace:*",
+        "@types/json-bigint": "^1.0.4",
         "@types/pg": "^8.20.0",
         "@types/ws": "^8.18.1",
         "postgres": "^3.4.7",
@@ -1974,6 +1976,8 @@
     "@types/istanbul-reports": ["@types/istanbul-reports@3.0.4", "", { "dependencies": { "@types/istanbul-lib-report": "*" } }, "sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ=="],
 
     "@types/js-yaml": ["@types/js-yaml@4.0.9", "", {}, "sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg=="],
+
+    "@types/json-bigint": ["@types/json-bigint@1.0.4", "", {}, "sha512-ydHooXLbOmxBbubnA7Eh+RpBzuaIiQjh8WGJYQB50JFGFrdxW7JzVlyEV7fAXw0T2sqJ1ysTneJbiyNLqZRAag=="],
 
     "@types/json-schema": ["@types/json-schema@7.0.15", "", {}, "sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA=="],
 

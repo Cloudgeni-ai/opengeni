@@ -28,6 +28,35 @@ const authority = {
 const provisionedSettings = () => testSettings({ sandboxBackend: "docker" });
 
 describe("sandbox git credentials", () => {
+  test("does not invoke a generic credential broker for personal GitHub authority", async () => {
+    let brokerCalled = false;
+    const minted = await mintRunGitCredentials(
+      provisionedSettings(),
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/octocat/private-repository",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          repositoryId: "9007199254740993123",
+          access: "read",
+        },
+      ],
+      {
+        scope,
+        authority,
+        gitCredentials: async (input) => {
+          brokerCalled = true;
+          return { token: "must-not-be-minted", workspaceId: input.workspaceId };
+        },
+      },
+    );
+    expect(minted).toBeUndefined();
+    expect(brokerCalled).toBe(false);
+  });
+
   test("derives child-session and root-session lineage from the admitted turn", () => {
     const derived = gitCredentialAuthorityForTurn({
       sessionId: authority.sessionId,

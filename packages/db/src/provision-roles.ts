@@ -1409,6 +1409,30 @@ BEGIN
       END IF;
     END IF;
     IF to_regprocedure(
+      format('%I.get_self_personal_github_repository_selection(uuid,uuid,text,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_self_personal_github_repository_selection(uuid,uuid,text,uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_self_personal_github_repository_selection(uuid,uuid,text,uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.mutate_self_personal_github_repository_selection(uuid,uuid,text,uuid,bigint,bigint,text,jsonb,boolean) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.mutate_self_personal_github_repository_selection(uuid,uuid,text,uuid,bigint,bigint,text,jsonb,boolean) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %I.personal_github_repository_selection_heads, %I.personal_github_repository_selections, %I.personal_github_repository_selection_operations FROM %I',
+        ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.create_personal_document_authority(uuid,uuid,uuid)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.create_personal_document_authority(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});

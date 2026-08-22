@@ -37,11 +37,29 @@ subject-owned `Connection`. A reconnect is CAS-fenced to the same Connection and
 GitHub user. A different GitHub account never overwrites the existing row.
 
 `repo` is broad GitHub-account authority: it includes public and private
-repositories available to the user and permits repository writes. The product
-repository picker introduced by the dependent repository-authority phase is an
-additional OpenGeni allowlist; it does not narrow the OAuth grant held by
-GitHub. Runtime execution must therefore remain behind exact selected-repository
-authority and the normal Ask/Allow/Block action policy.
+repositories available to the user and permits repository writes. OpenGeni's
+repository picker is an additional allowlist; it does not narrow the OAuth
+grant held by GitHub. Runtime execution must therefore remain behind exact
+selected-repository authority and the normal Ask/Allow/Block action policy.
+
+Repository discovery is live and owner-only. The API uses only fixed
+`api.github.com` endpoints, follows no redirects, bounds response bytes and
+repository counts, derives canonical GitHub URLs from validated full names,
+and persists only selected repository projections. It never persists the
+private repository catalog. Repository IDs cross JSON as positive digit
+strings and persist as Postgres `bigint`, so IDs larger than JavaScript's safe
+integer range remain exact.
+
+Each connection has a monotonic selection head and immutable per-row selection
+generation. Full replacement and verification are fenced by both the current
+connection authority generation and selection generation. Reconnect or
+disconnect invalidates stale callers; a selection generation advances only
+when repository identity or selected read/write authority changes. Verification
+may refresh bounded repository facts without broadening selected access or
+advancing that generation. Owner/account/workspace checks, FORCE RLS, lifecycle
+functions, and idempotency receipts protect writes; the application role has no
+direct table DML. The credential binding UUID is evidence only and never grants
+repository authority.
 
 ## Token custody and lifecycle
 
@@ -64,7 +82,30 @@ The lifecycle routes are:
 - `DELETE /v1/workspaces/:workspaceId/connections/:connectionId`
 - `GET /v1/integrations/github-personal/oauth/callback`
 
+The owner-only repository-authority routes are:
+
+- `GET /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories`
+- `PUT /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories`
+- `POST /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify`
+
 Generic Connection create/update rejects `github.com` OAuth credentials and
-the reserved personal-GitHub metadata role. The current phase does not enumerate
-or select repositories, expose the token to a sandbox, add Git transport, or
-register GitHub API tools; those are dependent authority/broker phases.
+the reserved personal-GitHub metadata role. A human/API-created session,
+follow-up, or scheduled-task definition that carries a personal GitHub
+repository resource uses the explicit, non-colliding
+`connectionType: "github_personal"` discriminator and must also carry one
+explicit `github:personal` `connection.use` selection. Admission revalidates the same-organization target
+grant and exact owner/connection/credential binding, verifies every requested
+provider repository ID and read/write level against the current selected set,
+and freezes the connection generation, selection generation, per-row
+generation, canonical URI, ref, and access into the accepted turn or task.
+Credential bindings remain selectors, never grants. Missing, stale, mixed-
+account, or widened authority fails closed.
+
+This phase still exposes no token to a sandbox, adds no Git transport, and
+registers no GitHub API tools. Physical provider use must revalidate the frozen
+snapshot immediately before broker access; that broker/runtime work and
+agent-created inheritance, child/goal propagation, and recovery are separately
+audited dependent phases. Agent-created personal GitHub use therefore fails
+closed in this phase instead of silently dropping authority. Until a broker
+consumer lands, selecting and freezing a repository grants no executable
+runtime capability.

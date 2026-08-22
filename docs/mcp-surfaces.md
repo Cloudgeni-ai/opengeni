@@ -24,6 +24,10 @@ a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
 setting is true. The REST/UI memory audit and seed surfaces remain available when
 the setting is off.
 
+First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
+
+- `company_profile_propose` - records one inactive organization company-profile proposal (`durable_learning` provenance, `agent-attempt:<attemptId>` source) for an exact agent attempt; it never activates, and an organization account admin activates it from Company Brain → Company profile & goals (see [`company-profile.md`](company-profile.md)).
+
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
 which excludes connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools; those require

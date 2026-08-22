@@ -870,6 +870,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "preference_propose",
   "remember",
   "remember_confirm",
+  "company_profile_propose",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -3764,13 +3765,42 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
+    connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
     /**
      * Explicit common-authority grant selected by the owning human. Omission is
      * retained only for legacy_user connections that cannot yet participate in
      * the organization-user authority lifecycle.
      */
     userDelegation: UserResourceDelegation.optional(),
+    /**
+     * Personal GitHub only: the exact repository authority frozen when this
+     * accepted work was admitted. The credential binding is evidence, not an
+     * authorization; physical provider use must revalidate every mutable
+     * connection/grant/selection fence against this snapshot.
+     */
+    personalGitHubRepositorySelection: z
+      .object({
+        credentialBindingId: z.string().uuid(),
+        connectionAuthorityGeneration: z.number().int().positive(),
+        selectionGeneration: z.number().int().positive(),
+        repositories: z
+          .array(
+            z
+              .object({
+                repositoryId: z.string().regex(/^[1-9]\d*$/u),
+                fullName: z.string().min(3).max(140),
+                canonicalUrl: z.string().url().max(512),
+                ref: z.string().min(1).max(255),
+                access: GitRepositoryAccess,
+                selectionGeneration: z.number().int().positive(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(100),
+      })
+      .strict()
+      .optional(),
     /**
      * Google Drive publication only: the exact output destination frozen when
      * this delegation was accepted, so a later connection-settings change can
@@ -3790,7 +3820,62 @@ export const McpPersonalConnectionDelegation = z
       .strict()
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((delegation, context) => {
+    const personalGitHub = delegation.connectionType === "github_personal";
+    if (personalGitHub !== (delegation.personalGitHubRepositorySelection !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["personalGitHubRepositorySelection"],
+        message: "personal GitHub delegation requires one repository authority snapshot",
+      });
+    }
+    if (!personalGitHub) return;
+    if (
+      delegation.serverId !== "github:personal" ||
+      delegation.providerDomain !== "github.com" ||
+      delegation.kind !== "oauth2" ||
+      !delegation.originWorkspaceId ||
+      !delegation.userDelegation
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "personal GitHub delegation requires exact user-owned connection authority",
+      });
+    }
+    const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+    const repositoryIds = new Set<string>();
+    const canonicalUrls = new Set<string>();
+    repositories.forEach((repository, index) => {
+      const canonicalUrl = repository.canonicalUrl.toLowerCase();
+      if (
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(repository.fullName) ||
+        repository.canonicalUrl !== `https://github.com/${repository.fullName}`
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+          message: "personal GitHub repository identity must be canonical",
+        });
+      }
+      if (repositoryIds.has(repository.repositoryId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "repositoryId"],
+          message: "personal GitHub repositories must be unique by provider id",
+        });
+      }
+      if (canonicalUrls.has(canonicalUrl)) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+          message: "personal GitHub repositories must be unique by canonical URL",
+        });
+      }
+      repositoryIds.add(repository.repositoryId);
+      canonicalUrls.add(canonicalUrl);
+    });
+  });
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
 
 /**
@@ -3815,10 +3900,12 @@ export const McpPersonalConnectionDelegations = z
     }
   });
 
-export const McpPersonalConnectionSummary = McpPersonalConnectionDelegation.pick({
-  serverId: true,
-  providerDomain: true,
-});
+export const McpPersonalConnectionSummary = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    providerDomain: z.string().min(1).max(2048),
+  })
+  .strict();
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
 /**
@@ -4090,6 +4177,7 @@ export const RepositoryResourceRef = z.object({
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  connectionType: z.literal("github_personal").optional(),
   credentialBindingId: GitCredentialBindingId.optional(),
   access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),
