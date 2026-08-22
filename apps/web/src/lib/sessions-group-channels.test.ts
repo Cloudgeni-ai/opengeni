@@ -109,6 +109,18 @@ describe("channelRailSections", () => {
     expect(defaultSection?.sessions.map((node) => node.session.id)).toEqual(["s-orphan"]);
   });
 
+  test("renders a newly-created session under its project without a transient Default section", () => {
+    const project = { id: "channel-new", name: "New project" };
+    const sections = channelRailSections(
+      buildRailForest([session({ id: "new-session", channelId: project.id })]),
+      [project],
+    );
+
+    expect(sections.map((section) => section.key)).toEqual([project.id]);
+    expect(sections[0]?.sessions.map((node) => node.session.id)).toEqual(["new-session"]);
+    expect(sections.some((section) => section.channelId === null)).toBe(false);
+  });
+
   test("children stay nested under their root's channel section", () => {
     const forest = buildRailForest([
       session({ id: "root", channelId: "channel-security" }),
