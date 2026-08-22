@@ -1,6 +1,11 @@
 import {
+  ListPersonalGitHubRepositoriesQuery,
+  ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubOAuthStartRequest,
+  PersonalGitHubRepositorySelectionState,
+  ReplacePersonalGitHubRepositorySelectionsRequest,
+  VerifyPersonalGitHubRepositorySelectionsRequest,
 } from "@opengeni/contracts/personal-github";
 import {
   requireAccessGrant,
@@ -8,6 +13,16 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Hono } from "hono";
+import {
+  getPersonalGitHubRepositorySelectionState,
+  PersonalGitHubRepositorySelectionChangedError,
+  PersonalGitHubRepositorySelectionIdempotencyError,
+  PersonalGitHubRepositorySelectionUnavailableError,
+  replacePersonalGitHubRepositorySelections,
+  verifyPersonalGitHubRepositorySelections,
+  type PersonalGitHubRepositorySelectionState as DbPersonalGitHubRepositorySelectionState,
+} from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
 import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import {
   completePersonalGitHubOAuthCallback,
@@ -15,6 +30,13 @@ import {
   personalGitHubReviewUrl,
   startPersonalGitHubOAuth,
 } from "../integrations/personal-github";
+import {
+  listLivePersonalGitHubRepositories,
+  personalGitHubRepositoryProviderHttpError,
+  PersonalGitHubRepositoryProviderError,
+  requirePersonalGitHubRepositoryConnection,
+  verifyLivePersonalGitHubRepositories,
+} from "../integrations/personal-github-repositories";
 
 export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/github", async (c) => {
@@ -65,6 +87,158 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     );
   });
 
+  app.get(
+    "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:read",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
+      const connection = await requirePersonalGitHubRepositoryConnection(deps, {
+        accountId: access.grant.accountId,
+        workspaceId,
+        subjectId: access.grant.subjectId,
+        connectionId,
+      });
+      const query = ListPersonalGitHubRepositoriesQuery.parse(c.req.query());
+      try {
+        const selection = await loadRepositorySelectionState(deps, access.grant, connection);
+        const page = await listLivePersonalGitHubRepositories(deps, {
+          accountId: access.grant.accountId,
+          workspaceId,
+          subjectId: access.grant.subjectId,
+          connectionId,
+          expectedConnectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+          page: query.cursor,
+          limit: query.limit,
+        });
+        const selectedAccessById = new Map(
+          selection.repositories.map((repository) => [
+            repository.repositoryId,
+            repository.selectedAccess,
+          ]),
+        );
+        return c.json(
+          ListPersonalGitHubRepositoriesResponse.parse({
+            repositories: page.repositories.map((repository) => ({
+              ...repository,
+              selectedAccess: selectedAccessById.get(repository.repositoryId) ?? null,
+            })),
+            nextCursor: page.nextPage,
+            selection,
+          }),
+        );
+      } catch (error) {
+        throw personalGitHubRepositoryRouteError(error);
+      }
+    },
+  );
+
+  app.put(
+    "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:write",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
+      const connection = await requirePersonalGitHubRepositoryConnection(deps, {
+        accountId: access.grant.accountId,
+        workspaceId,
+        subjectId: access.grant.subjectId,
+        connectionId,
+      });
+      const request = ReplacePersonalGitHubRepositorySelectionsRequest.parse(await c.req.json());
+      try {
+        const current = await loadRepositorySelectionState(deps, access.grant, connection);
+        assertRepositoryConnectionAuthorityFence(current, request);
+        const verified = await verifyLivePersonalGitHubRepositories(deps, {
+          accountId: access.grant.accountId,
+          workspaceId,
+          subjectId: access.grant.subjectId,
+          connectionId,
+          expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
+          repositories: request.repositories,
+        });
+        const lastVerifiedAt = new Date().toISOString();
+        const selection = await replacePersonalGitHubRepositorySelections(deps.db, {
+          accountId: access.grant.accountId,
+          originWorkspaceId: connection.workspaceId,
+          subjectId: access.grant.subjectId,
+          connectionId,
+          expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
+          expectedSelectionGeneration: request.expectedSelectionGeneration,
+          idempotencyKey: request.idempotencyKey,
+          repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
+        });
+        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+      } catch (error) {
+        throw personalGitHubRepositoryRouteError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:write",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
+      const connection = await requirePersonalGitHubRepositoryConnection(deps, {
+        accountId: access.grant.accountId,
+        workspaceId,
+        subjectId: access.grant.subjectId,
+        connectionId,
+      });
+      const request = VerifyPersonalGitHubRepositorySelectionsRequest.parse(await c.req.json());
+      try {
+        const current = await loadRepositorySelectionState(deps, access.grant, connection);
+        assertRepositoryConnectionAuthorityFence(current, request);
+        const verified = await verifyLivePersonalGitHubRepositories(deps, {
+          accountId: access.grant.accountId,
+          workspaceId,
+          subjectId: access.grant.subjectId,
+          connectionId,
+          expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
+          repositories: current.repositories.map((repository) => ({
+            repositoryId: repository.repositoryId,
+            fullName: repository.fullName,
+            access: repository.selectedAccess,
+          })),
+        });
+        const lastVerifiedAt = new Date().toISOString();
+        const selection = await verifyPersonalGitHubRepositorySelections(deps.db, {
+          accountId: access.grant.accountId,
+          originWorkspaceId: connection.workspaceId,
+          subjectId: access.grant.subjectId,
+          connectionId,
+          expectedConnectionAuthorityGeneration: request.expectedConnectionAuthorityGeneration,
+          expectedSelectionGeneration: request.expectedSelectionGeneration,
+          idempotencyKey: request.idempotencyKey,
+          repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
+        });
+        return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+      } catch (error) {
+        throw personalGitHubRepositoryRouteError(error);
+      }
+    },
+  );
+
   app.get("/v1/integrations/github-personal/oauth/callback", async (c) => {
     const code = c.req.query("code");
     const state = c.req.query("state");
@@ -77,6 +251,52 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     });
     return c.redirect(result.redirectTo, 302);
   });
+}
+
+async function loadRepositorySelectionState(
+  deps: ApiRouteDeps,
+  grant: { accountId: string; subjectId: string },
+  connection: { id: string; workspaceId: string },
+): Promise<DbPersonalGitHubRepositorySelectionState> {
+  const state = await getPersonalGitHubRepositorySelectionState(deps.db, {
+    accountId: grant.accountId,
+    originWorkspaceId: connection.workspaceId,
+    subjectId: grant.subjectId,
+    connectionId: connection.id,
+  });
+  if (!state) throw new PersonalGitHubRepositorySelectionUnavailableError();
+  return state;
+}
+
+function assertRepositoryConnectionAuthorityFence(
+  current: DbPersonalGitHubRepositorySelectionState,
+  expected: {
+    expectedConnectionAuthorityGeneration: number;
+  },
+): void {
+  if (current.connectionAuthorityGeneration !== expected.expectedConnectionAuthorityGeneration) {
+    throw new PersonalGitHubRepositorySelectionChangedError();
+  }
+}
+
+function personalGitHubRepositoryRouteError(error: unknown): Error {
+  if (error instanceof PersonalGitHubRepositoryProviderError) {
+    return personalGitHubRepositoryProviderHttpError(error);
+  }
+  if (error instanceof PersonalGitHubRepositorySelectionChangedError) {
+    return new HTTPException(409, {
+      message: "personal GitHub repository selection changed; refresh and try again",
+    });
+  }
+  if (error instanceof PersonalGitHubRepositorySelectionIdempotencyError) {
+    return new HTTPException(409, {
+      message: "personal GitHub repository idempotency key was already used",
+    });
+  }
+  if (error instanceof PersonalGitHubRepositorySelectionUnavailableError) {
+    return new HTTPException(404, { message: "personal GitHub connection not found" });
+  }
+  return error instanceof Error ? error : new Error("personal GitHub repository request failed");
 }
 
 function canonicalPersonalGitHubConnection<

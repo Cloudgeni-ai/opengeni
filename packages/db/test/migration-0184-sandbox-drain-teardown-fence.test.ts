@@ -16,6 +16,7 @@ const withheldMigrationNames = [
   "0185_temporal_schedule_cleanup_outbox.sql",
   "0186_sandbox_capture_provider_contract.sql",
   "0275_scheduled_connection_authority.sql",
+  "0315_personal_github_repository_selection.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

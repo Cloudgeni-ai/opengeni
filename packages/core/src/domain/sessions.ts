@@ -1942,6 +1942,7 @@ export async function createSessionForRequestWithOutcome(
     workspaceId,
     settings: runtimeSettings,
     tools,
+    resources,
     source: connectionDelegationSource,
     authoritySelections: payload.connectionAuthorities,
     googleDrivePublicationEnabled,
@@ -2518,6 +2519,7 @@ export async function acceptSessionUserMessageWithOutcome(
     workspaceId,
     settings: runtimeSettings,
     tools: existingSession.tools,
+    resources: [...existingSession.resources, ...requestedResources],
     source: connectionDelegationSource,
     targetSessionId: sessionId,
     googleDrivePublicationEnabled:

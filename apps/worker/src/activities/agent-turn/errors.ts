@@ -9,6 +9,7 @@ import {
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
@@ -716,6 +717,14 @@ export function agentRunFailurePayload(
       code: "mcp_transport_unavailable",
       retryable: true,
       detail: message,
+    };
+  }
+  if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
+    return {
+      error:
+        "The model provider ended its response ambiguously. Partial output was not accepted as complete; the same turn will retry from durable history.",
+      code: UNKNOWN_MODEL_FINISH_REASON_CODE,
+      retryable: true,
     };
   }
   if (
