@@ -1,4 +1,6 @@
 import {
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   type AccessContext,
@@ -103,6 +105,38 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       CreateCheckoutResponse.parse({
         checkoutSessionId: session.id,
+        url: session.url,
+      }),
+    );
+  });
+
+  app.post("/v1/billing/portal", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
+      });
+    }
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    const session = await stripe.billingPortal.sessions.create(
+      stripeBillingPortalSessionCreateParams({
+        customerId,
+        publicBaseUrl: deps.settings.publicBaseUrl,
+        returnUrl: parsed.data.returnUrl,
+      }),
+    );
+    if (!session.url) {
+      throw new HTTPException(502, { message: "Stripe did not return a billing portal URL" });
+    }
+    return c.json(
+      CreateBillingPortalResponse.parse({
+        portalSessionId: session.id,
         url: session.url,
       }),
     );
@@ -220,6 +254,28 @@ export function stripeCheckoutSessionCreateParams(input: {
         opengeni_credit_idempotency_key: input.idempotencyKey,
       },
     },
+    invoice_creation: {
+      enabled: true,
+      invoice_data: {
+        metadata: {
+          opengeni_account_id: input.accountId,
+          opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
+          opengeni_credit_micros: String(input.amountMicros),
+          opengeni_credit_idempotency_key: input.idempotencyKey,
+        },
+      },
+    },
+  };
+}
+
+export function stripeBillingPortalSessionCreateParams(input: {
+  customerId: string;
+  publicBaseUrl?: string | undefined;
+  returnUrl?: string | undefined;
+}): Stripe.BillingPortal.SessionCreateParams {
+  return {
+    customer: input.customerId,
+    return_url: checkoutReturnUrl(input.publicBaseUrl, input.returnUrl, "/billing", "returnUrl"),
   };
 }
 
@@ -231,7 +287,7 @@ function checkoutReturnUrl(
 ): string {
   if (!publicBaseUrl) {
     throw new HTTPException(500, {
-      message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe checkout",
+      message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe redirects",
     });
   }
   const base = new URL(publicBaseUrl);

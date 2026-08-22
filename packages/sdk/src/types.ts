@@ -6668,6 +6668,16 @@ export type CreateCheckoutResponse = {
   url: string;
 };
 
+export type CreateBillingPortalRequest = {
+  accountId?: string | undefined;
+  returnUrl?: string | undefined;
+};
+
+export type CreateBillingPortalResponse = {
+  portalSessionId: string;
+  url: string;
+};
+
 export type UserMessageEventInput = {
   type: "user.message";
   clientEventId?: string | undefined;
