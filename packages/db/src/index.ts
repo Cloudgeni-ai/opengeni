@@ -20916,6 +20916,7 @@ export async function armCodexCapacityWait(
           reason: "codex_capacity_wait",
           sequence,
           now,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -22170,6 +22171,7 @@ export async function armXaiCapacityWait(
           reason: "xai_capacity_wait",
           sequence,
           now,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -56875,6 +56877,7 @@ export async function settleSessionAttemptInterruptions(
           reason,
           sequence,
           now,
+          preserveInterruptionRows: outcome === "interrupted_recoverable",
         },
       );
       sequence = closedTools.sequence;
@@ -59769,6 +59772,7 @@ export async function settleCodexCredentialLeaseLoss(
             reason: "codex_credential_lease_loss",
             sequence,
             now,
+            preserveInterruptionRows: input.checkpointDurable,
           },
         );
         sequence = closedTools.sequence;
@@ -60053,6 +60057,7 @@ export async function settleCodexCredentialFailover(
             reason: "codex_credential_failover",
             sequence,
             now,
+            preserveInterruptionRows: true,
           },
         );
         sequence = closedTools.sequence;
@@ -60355,6 +60360,7 @@ export async function requestSessionTurnRecovery(
           reason: input.reason,
           sequence,
           now,
+          preserveInterruptionRows: true,
         },
       );
       sequence = closedTools.sequence;
@@ -60604,6 +60610,7 @@ export async function recoverSessionDispatch(
           reason: "worker_death",
           sequence,
           now,
+          preserveInterruptionRows: redispatches <= input.maxRedispatches,
         },
       );
       sequence = closedTools.sequence;

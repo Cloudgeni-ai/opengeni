@@ -42,8 +42,11 @@ import {
   listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
+  listTurnOpenSuffixToolCalls,
+  recordPendingSessionToolCallResult,
   recordUsageEvent,
   registerPendingSessionToolCall,
+  requestSessionTurnRecovery,
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
@@ -1746,7 +1749,7 @@ describe("worker activities integration", () => {
     expect(eventTypes).not.toContain("turn.failed");
   });
 
-  test("marks approval reruns running before resuming the agent", async () => {
+  test("resumes an already-consumed approval after recoverable worker loss", async () => {
     const workflowId = "workflow-approval-rerun";
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -1829,6 +1832,48 @@ describe("worker activities integration", () => {
         payload: { approvalId: "approval-1", decision: "approve" },
       },
     ]);
+    const consumedAttemptId = crypto.randomUUID();
+    const consumedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: consumedAttemptId,
+      dispatchId: `approval-consumed-${crypto.randomUUID()}`,
+      trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+    });
+    if (consumedClaim.action !== "claimed") {
+      throw new Error(`consumed approval fixture was not claimed: ${consumedClaim.reason}`);
+    }
+    expect(
+      await recordPendingSessionToolCallResult(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: consumedClaim.turn.executionGeneration,
+        attemptId: consumedAttemptId,
+        callId: "approval-1",
+        resultItem: {
+          type: "function_call_result",
+          name: "needs_approval",
+          callId: "approval-1",
+          status: "completed",
+          output: { type: "text", text: "approved before shutdown" },
+        },
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await requestSessionTurnRecovery(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: approvalTrigger!.id,
+        attemptId: consumedAttemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    expect(
+      await listTurnOpenSuffixToolCalls(dbClient.db, grant.workspaceId, session.id, turn.id),
+    ).toHaveLength(1);
     let observedDuringRun: {
       status?: string;
       activeTurnId?: string | null;
@@ -1878,7 +1923,7 @@ describe("worker activities integration", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+        trigger: { kind: "next" },
         workflowId,
         workflowRunId: crypto.randomUUID(),
       }),
