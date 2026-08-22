@@ -1,10 +1,10 @@
 import { useNavigate } from "@tanstack/react-router";
+import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { SparklesIcon } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAppContext } from "@/context";
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 
 type AgentBrainPromptKind = "company_profile" | "preference" | "workspace_instructions";
 
@@ -51,6 +51,57 @@ function promptCopy(kind: AgentBrainPromptKind): {
   };
 }
 
+type CatalogState = {
+  models: WorkspaceModelCatalogModel[];
+  loading: boolean;
+  error: string | null;
+};
+
+/**
+ * Workspace model catalog for the prompt. This deliberately calls the SDK
+ * client directly instead of reusing the shared `useWorkspaceModelCatalog`
+ * hook: that hook imports the model-policy picker helpers, and a new edge to
+ * them from this lazy route re-buckets rolldown's entry-aware session chunks
+ * and drags the composer stack into the startup graph.
+ */
+function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & {
+  refresh: () => Promise<void>;
+} {
+  const client = useAppContext().client;
+  const [state, setState] = useState<CatalogState>({ models: [], loading: true, error: null });
+  const [refreshToken, setRefreshToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState((previous) => ({ ...previous, loading: true }));
+    void (async () => {
+      try {
+        const response = await client.getWorkspaceModelCatalog(workspaceId);
+        if (!cancelled) {
+          setState({ models: response.models, loading: false, error: null });
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setState({
+            models: [],
+            loading: false,
+            error: caught instanceof Error ? caught.message : String(caught),
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId, refreshToken]);
+
+  const refresh = useCallback(async () => {
+    setRefreshToken((token) => token + 1);
+  }, []);
+
+  return { ...state, refresh };
+}
+
 export function AgentBrainPrompt({
   kind,
   workspaceId,
@@ -63,20 +114,29 @@ export function AgentBrainPrompt({
   const copy = promptCopy(kind);
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
-  const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const catalogSelection = useMemo(
-    () =>
-      resolveAgentBrainPromptModel(modelCatalog.rows, {
-        model: context.model,
-        reasoningEffort: context.reasoningEffort,
-        latencyMode: context.latencyMode,
-      }),
-    [modelCatalog.rows, context.model, context.reasoningEffort, context.latencyMode],
-  );
+  const modelCatalog = useAgentBrainPromptCatalog(workspaceId);
   // When the catalog fetch itself failed there is no policy verdict to act on,
   // so fall back to the context defaults (the pre-catalog behaviour) rather than
   // blocking the form; only a loaded catalog with no selectable row fails closed.
   const catalogFailed = !modelCatalog.loading && modelCatalog.error !== null;
+  const catalogSelection = useMemo(
+    () =>
+      modelCatalog.loading || catalogFailed
+        ? null
+        : resolveAgentBrainPromptModel(modelCatalog.models, {
+            model: context.model,
+            reasoningEffort: context.reasoningEffort,
+            latencyMode: context.latencyMode,
+          }),
+    [
+      modelCatalog.loading,
+      catalogFailed,
+      modelCatalog.models,
+      context.model,
+      context.reasoningEffort,
+      context.latencyMode,
+    ],
+  );
   const modelSelection =
     catalogSelection ??
     (catalogFailed

@@ -1,11 +1,4 @@
-import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
-
-import {
-  coerceReasoningEffortForModel,
-  findPickerRow,
-  type PickerModelRow,
-  runnableLatencyModesForModel,
-} from "@/lib/model-policy";
+import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type AgentBrainPromptModelPreference = {
   model: string;
@@ -21,28 +14,46 @@ export type AgentBrainPromptModelSelection = {
 
 /**
  * Pick a workspace-selectable model for the Company Brain "Create with OpenGeni"
- * prompt. The preferred (app-context) model wins when the workspace catalog
- * marks it selectable; otherwise the first selectable row of the already-sorted
- * catalog is used. Returns `null` when the catalog has no selectable row, so the
- * caller can keep the form disabled instead of submitting a model the workspace
- * policy would reject.
+ * prompt from the raw workspace model catalog. The preferred (app-context)
+ * model wins when the catalog marks it selectable; otherwise the first
+ * selectable catalog model (catalog order) is used. Returns `null` when the
+ * catalog has no selectable model, so the caller can keep the form disabled
+ * instead of submitting a model the workspace policy would reject.
+ *
+ * `availability.selectable` is the API's combined verdict (runnable definition,
+ * ready credential, workspace policy, provider health), so no further
+ * readiness check is needed here. The reasoning-effort and latency coercion
+ * mirror the shared picker helpers in `@opengeni/react/model-policy`; this
+ * module deliberately does not import them: the Company Brain route is the
+ * only lazy route outside the session/composer surfaces that would reach them,
+ * and that extra edge re-buckets rolldown's entry-aware session chunks and
+ * pushes the composer stack into the startup graph.
  */
 export function resolveAgentBrainPromptModel(
-  rows: PickerModelRow[],
+  models: WorkspaceModelCatalogModel[],
   preferred: AgentBrainPromptModelPreference,
 ): AgentBrainPromptModelSelection | null {
-  const preferredRow = findPickerRow(rows, preferred.model);
-  const row = preferredRow?.selectable
-    ? preferredRow
-    : rows.find((candidate) => candidate.selectable);
-  if (!row) {
+  const preferredModel = models.find((model) => model.id === preferred.model);
+  const model = preferredModel?.availability.selectable
+    ? preferredModel
+    : models.find((candidate) => candidate.availability.selectable);
+  if (!model) {
     return null;
   }
-  const reasoningEffort = coerceReasoningEffortForModel(row.catalog, preferred.reasoningEffort);
+  const efforts = model.capabilities?.reasoning.efforts;
+  const effortOptions: ReasoningEffort[] = efforts && efforts.length > 0 ? efforts : ["low"];
+  const configuredDefault = model.capabilities?.reasoning.defaultEffort;
+  const reasoningEffort: ReasoningEffort = effortOptions.includes(preferred.reasoningEffort)
+    ? preferred.reasoningEffort
+    : configuredDefault && effortOptions.includes(configuredDefault)
+      ? configuredDefault
+      : (effortOptions[0] ?? "low");
   const latencyMode: LatencyMode =
     preferred.latencyMode !== "standard" &&
-    runnableLatencyModesForModel(row.catalog).includes(preferred.latencyMode)
+    (model.capabilities?.latencyModes ?? []).some(
+      (mode) => mode.id === preferred.latencyMode && mode.runnable,
+    )
       ? preferred.latencyMode
       : "standard";
-  return { model: row.id, reasoningEffort, latencyMode };
+  return { model: model.id, reasoningEffort, latencyMode };
 }

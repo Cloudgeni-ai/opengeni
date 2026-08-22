@@ -5,7 +5,6 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
-import { projectPickerRows, sortPickerRows } from "@/lib/model-policy";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const supported = { upstream: "supported", runnable: true } as const;
@@ -73,15 +72,11 @@ function catalogModel(
   };
 }
 
-function rowsFor(models: WorkspaceModelCatalogModel[]) {
-  return sortPickerRows(projectPickerRows(models));
-}
-
 describe("resolveAgentBrainPromptModel", () => {
   test("keeps the preferred model when the workspace catalog marks it selectable", () => {
-    const rows = rowsFor([catalogModel("gpt-5.6-sol"), catalogModel("codex/gpt-5.6-luna")]);
+    const models = [catalogModel("gpt-5.6-sol"), catalogModel("codex/gpt-5.6-luna")];
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "gpt-5.6-sol",
         reasoningEffort: "low",
         latencyMode: "standard",
@@ -89,25 +84,24 @@ describe("resolveAgentBrainPromptModel", () => {
     ).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "low", latencyMode: "standard" });
   });
 
-  test("falls back to the first selectable row when the preferred model is blocked", () => {
-    const rows = rowsFor([
+  test("falls back to the first selectable catalog model when the preferred model is blocked", () => {
+    const models = [
       catalogModel("gpt-5.6-sol", { selectable: false }),
       catalogModel("codex/gpt-5.6-luna"),
       catalogModel("supergrok/grok-4"),
-    ]);
-    const selection = resolveAgentBrainPromptModel(rows, {
+    ];
+    const selection = resolveAgentBrainPromptModel(models, {
       model: "gpt-5.6-sol",
       reasoningEffort: "low",
       latencyMode: "standard",
     });
-    expect(selection?.model).toBe(rows.find((row) => row.selectable)?.id);
-    expect(selection?.model).not.toBe("gpt-5.6-sol");
+    expect(selection?.model).toBe("codex/gpt-5.6-luna");
   });
 
   test("falls back when the preferred model is absent from the catalog", () => {
-    const rows = rowsFor([catalogModel("codex/gpt-5.6-luna")]);
+    const models = [catalogModel("codex/gpt-5.6-luna")];
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "legacy-model",
         reasoningEffort: "low",
         latencyMode: "standard",
@@ -116,12 +110,12 @@ describe("resolveAgentBrainPromptModel", () => {
   });
 
   test("returns null when no row is selectable", () => {
-    const rows = rowsFor([
+    const models = [
       catalogModel("gpt-5.6-sol", { selectable: false }),
       catalogModel("codex/gpt-5.6-luna", { selectable: false }),
-    ]);
+    ];
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "gpt-5.6-sol",
         reasoningEffort: "low",
         latencyMode: "standard",
@@ -137,7 +131,7 @@ describe("resolveAgentBrainPromptModel", () => {
   });
 
   test("coerces reasoning effort and latency mode to what the chosen model supports", () => {
-    const rows = rowsFor([
+    const models = [
       catalogModel("codex/gpt-5.6-luna", {
         efforts: ["medium", "high"],
         defaultEffort: "high",
@@ -146,16 +140,16 @@ describe("resolveAgentBrainPromptModel", () => {
           { id: "fast", runnable: false },
         ],
       }),
-    ]);
+    ];
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "gpt-5.6-sol",
         reasoningEffort: "low",
         latencyMode: "fast",
       }),
     ).toEqual({ model: "codex/gpt-5.6-luna", reasoningEffort: "high", latencyMode: "standard" });
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "codex/gpt-5.6-luna",
         reasoningEffort: "medium",
         latencyMode: "standard",
@@ -164,7 +158,7 @@ describe("resolveAgentBrainPromptModel", () => {
   });
 
   test("keeps a non-standard latency mode only when the chosen model can run it", () => {
-    const rows = rowsFor([
+    const models = [
       catalogModel("codex/gpt-5.6-luna", {
         efforts: ["low"],
         latencyModes: [
@@ -172,9 +166,9 @@ describe("resolveAgentBrainPromptModel", () => {
           { id: "priority", runnable: true },
         ],
       }),
-    ]);
+    ];
     expect(
-      resolveAgentBrainPromptModel(rows, {
+      resolveAgentBrainPromptModel(models, {
         model: "codex/gpt-5.6-luna",
         reasoningEffort: "low",
         latencyMode: "priority",
