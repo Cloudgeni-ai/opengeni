@@ -760,7 +760,7 @@ export function withFrozenPersonalConnectionDelegations(input: {
 export async function freezePersonalConnectionDelegations(input: {
   db: Database;
   workspaceId: string;
-  settings: Pick<Settings, "mcpServers">;
+  settings: Pick<Settings, "mcpServers"> & Partial<Pick<Settings, "githubPersonalOauthEnabled">>;
   tools: ToolRef[];
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
@@ -776,6 +776,9 @@ export async function freezePersonalConnectionDelegations(input: {
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
   const includeFirstPartyConnections = input.tools.some((tool) => tool.id === "opengeni");
   const personalGitHubResources = personalGitHubRepositoryResources(input.resources ?? []);
+  if (personalGitHubResources.length > 0 && input.settings.githubPersonalOauthEnabled !== true) {
+    throw new Error("personal GitHub repository authority is not enabled");
+  }
   if (
     (servers.length === 0 &&
       !includeFirstPartyConnections &&

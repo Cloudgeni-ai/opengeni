@@ -497,7 +497,7 @@ describe("personal MCP connection delegation", () => {
         freezePersonalConnectionDelegations({
           db: client.db,
           workspaceId: target!.id,
-          settings: { mcpServers: [] },
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
           tools: [],
           resources: [resource],
           source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
@@ -664,7 +664,7 @@ describe("personal MCP connection delegation", () => {
       freezePersonalConnectionDelegations({
         db: null as never,
         workspaceId: crypto.randomUUID(),
-        settings: { mcpServers: [] },
+        settings: { mcpServers: [], githubPersonalOauthEnabled: true },
         tools: [],
         resources: [
           {
@@ -686,6 +686,33 @@ describe("personal MCP connection delegation", () => {
     ).rejects.toThrow(
       "agent-created personal GitHub repository authority is not activated in this delivery phase",
     );
+  });
+
+  test("keeps personal GitHub repository admission default-off", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: null as never,
+        workspaceId: crypto.randomUUID(),
+        settings: { mcpServers: [] },
+        tools: [],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        source: {
+          kind: "subject",
+          subjectId: "user:owner",
+          accountId: crypto.randomUUID(),
+        },
+      }),
+    ).rejects.toThrow("personal GitHub repository authority is not enabled");
   });
 
   test("freezes only an active exact subject connection", () => {
