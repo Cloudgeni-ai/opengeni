@@ -472,8 +472,8 @@ describe("rail session grouping", () => {
       { preserve: [routeProjection] },
     );
     expect(reconciled.get("manager")?.sessions.map((entry) => entry.id)).toEqual([
-      "worker",
       "sibling",
+      "worker",
     ]);
   });
 
