@@ -29406,6 +29406,27 @@ async function readWorkspaceSessionActivityRevision(
 }
 
 /**
+ * A human/API prompt is appended to the durable event log before its logical
+ * turn is claimed. Monitoring projections must not expose that future prompt
+ * while the canonical queue still owns it; exact forensic event reads remain
+ * available through callers that deliberately omit this filter.
+ */
+function claimedConversationEventFilter(): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} <> 'user.message'
+    or not exists (
+      select 1
+      from ${schema.sessionTurns} queued_prompt_turn
+      where queued_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+        and queued_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+        and queued_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+        and queued_prompt_turn.status = 'queued'
+        and queued_prompt_turn.source in ('user', 'api')
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -29678,6 +29699,7 @@ export async function listSessionDiscoverySummaries(
                 eq(schema.sessionEvents.workspaceId, workspaceId),
                 inArray(schema.sessionEvents.sessionId, ids),
                 inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+                claimedConversationEventFilter(),
               ),
             )
             .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
@@ -30114,6 +30136,11 @@ export type ListSessionEventsOptions = {
   includeClasses?: readonly SessionEventSemanticClass[];
   excludeClasses?: readonly SessionEventSemanticClass[];
   defaultExcludeTypes?: readonly SessionEventType[];
+  /**
+   * Monitoring-only queue boundary. Forensic readers intentionally leave this
+   * false so the retained event log remains exact.
+   */
+  excludeQueuedHumanPrompts?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -30215,6 +30242,9 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
+      if (options.excludeQueuedHumanPrompts) {
+        filters.push(claimedConversationEventFilter());
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows

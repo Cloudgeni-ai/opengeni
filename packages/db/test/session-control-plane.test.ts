@@ -41,6 +41,7 @@ import {
   getSessionGoal,
   getSessionSystemUpdateOutboxByDedupeKey,
   getSessionTurn,
+  listSessionEventPage,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionDiscoverySummaries,
@@ -796,6 +797,115 @@ describe("clean session control plane", () => {
       { kind: "scoped", rootSessionIds: [], sessionIds: [third.id] },
     );
     expect(exactOnlyPaths.get(third.id)).toBeUndefined();
+  });
+
+  test("session discovery withholds queued prompt text until canonical claim", async () => {
+    const { grant, session } = await fixture();
+    const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+    const first = await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "already-running orchestrator prompt",
+    );
+    const firstAttemptId = crypto.randomUUID();
+    const runningTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId: firstAttemptId },
+    );
+    expect(runningTurn?.id).toBe(first.turn.id);
+    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+    ]);
+    const accepted = await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "delegate this newly queued issue",
+    );
+
+    const waiting = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(waiting.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 1,
+      latestMessage: {
+        type: "agent.message.completed",
+        preview: "previous claimed response",
+      },
+    });
+
+    const monitoringUserMessages = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "before",
+        limit: 1,
+        includeTypes: ["user.message"],
+        payloadMode: "summary",
+        excludeQueuedHumanPrompts: true,
+      },
+    );
+    expect(monitoringUserMessages.events[0]?.payload).toMatchObject({
+      text: "already-running orchestrator prompt",
+    });
+
+    const forensicUserMessages = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "before",
+        limit: 1,
+        includeTypes: ["user.message"],
+        payloadMode: "full",
+      },
+    );
+    expect(forensicUserMessages.events[0]?.payload).toMatchObject({
+      text: "delegate this newly queued issue",
+    });
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: runningTurn!.id,
+      triggerEventId: runningTurn!.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "delegated current issue" } }],
+    });
+
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(claimed?.id).toBe(accepted.turn.id);
+
+    const running = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(running.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 0,
+      latestMessage: {
+        type: "user.message",
+        preview: "delegate this newly queued issue",
+      },
+    });
   });
 
   test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {

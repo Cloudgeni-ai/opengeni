@@ -2319,6 +2319,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+      ...(mode === "monitoring" ? { excludeQueuedHumanPrompts: true } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });
     const events = dbPage.events;
