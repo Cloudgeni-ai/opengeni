@@ -2,7 +2,6 @@ import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
   ListWorkspaceMembersResponse,
-  Permission as PermissionSchema,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelPolicyRequest,
@@ -27,6 +26,7 @@ import {
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
+  normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
   listWorkspacesForSubject,
   removeWorkspaceMember,
@@ -91,12 +91,7 @@ export function workspaceMembersResponse(members: readonly WorkspaceMemberProjec
   return ListWorkspaceMembersResponse.parse({
     members: members.map((member) => ({
       ...member,
-      permissions: Array.isArray(member.permissions)
-        ? member.permissions.flatMap((candidate) => {
-            const parsed = PermissionSchema.safeParse(candidate);
-            return parsed.success ? [parsed.data] : [];
-          })
-        : [],
+      permissions: normalizeWorkspaceMembershipPermissions(member.permissions),
     })),
   });
 }

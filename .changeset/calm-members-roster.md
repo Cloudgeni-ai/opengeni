@@ -1,5 +1,7 @@
 ---
 "@opengeni/api-router": patch
+"@opengeni/core": patch
+"@opengeni/db": patch
 ---
 
-Keep workspace member lists readable when legacy rows contain retired or malformed permission values, without restoring any obsolete authority.
+Normalize legacy or malformed workspace-membership permissions before member listing and authorization, without restoring any obsolete authority.
