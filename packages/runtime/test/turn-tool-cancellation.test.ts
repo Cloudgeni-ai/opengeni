@@ -1506,3 +1506,76 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     expect(existsSync(zombiePath)).toBe(false);
   });
 });
+
+describe("retained-process stdin faults stay model-visible", () => {
+  test("a fenced retained-process stdin write is rendered as the tool's error string, never thrown", async () => {
+    const controller = createTurnToolCancellationController();
+    const exec = functionTool("exec_command", async () => running(44));
+    let rawWrites = 0;
+    const write = functionTool("write_stdin", async () => {
+      rawWrites += 1;
+      return exited(0);
+    });
+    // The shape @opengeni/db throws from workspace-mutation admission while a
+    // provider-deadline rotation fences the lease at the same epoch/instance.
+    const fence = Object.assign(
+      new Error("Workspace mutation is waiting for the sandbox rotation to complete"),
+      { name: "SandboxWorkspaceMutationFencedError", code: "rotation_in_progress" },
+    );
+    let mutations = 0;
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 44,
+      writeStdinForProcessMutation: async () => {
+        mutations += 1;
+        throw fence;
+      },
+      writeStdinForProcessControl: async () => exited(0),
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
+
+    const result = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 44, chars: "status\n", yield_time_ms: 100 }),
+    );
+    // Same contract as exec_command on the same fenced lease: the SDK-built
+    // tool's default errorFunction wording, returned as the tool result.
+    expect(typeof result).toBe("string");
+    expect(result).toBe(
+      "An error occurred while running the tool. Please try again. Error: SandboxWorkspaceMutationFencedError: Workspace mutation is waiting for the sandbox rotation to complete",
+    );
+    expect(mutations).toBe(1);
+    expect(rawWrites).toBe(0);
+    // The retained PTY registration is untouched so finalization still drains it.
+    await controller.waitForQuiescence().catch(() => undefined);
+  });
+
+  test("an outcome-unknown retained-process stdin write is rendered, not thrown", async () => {
+    const controller = createTurnToolCancellationController();
+    const exec = functionTool("exec_command", async () => running(45));
+    const write = functionTool("write_stdin", async () => exited(0));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 45,
+      writeStdinForProcessMutation: async () => {
+        throw new RoutingMutationOutcomeUnknownError(
+          "writeStdin",
+          'Platform workspace mutation "writeStdin" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed',
+        );
+      },
+      writeStdinForProcessControl: async () => exited(0),
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
+    const result = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 45, chars: "q", yield_time_ms: 0 }),
+    );
+    expect(typeof result).toBe("string");
+    expect(result).toContain("RoutingMutationOutcomeUnknownError");
+    expect(result).toContain("outcome is unknown");
+  });
+});

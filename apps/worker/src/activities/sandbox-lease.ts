@@ -1874,6 +1874,24 @@ async function probeDrainableProviderReadiness(
   }
 }
 
+export type SandboxDrainReason =
+  | "idle"
+  | "provider_deadline"
+  | "operator"
+  | "teardown_claim"
+  | "rotation_requested";
+
+/** The bounded drain reason carried on `sandbox.box.terminated`: the lease's
+ * rotation reason when a rotation was requested, otherwise the ordinary idle
+ * drain. A requested rotation without a recorded reason (legacy rows) is
+ * reported as `rotation_requested` rather than guessed. */
+export function sandboxDrainReason(
+  lease: Pick<LeaseSnapshot, "rotationRequestedAt" | "rotationReason">,
+): SandboxDrainReason {
+  if (lease.rotationRequestedAt === null) return "idle";
+  return lease.rotationReason ?? "rotation_requested";
+}
+
 /**
  * Terminate one drainable box by id, then CAS its lease draining->cold under the
  * epoch fence. Returns true when the lease went cold (the box is ours to stop
@@ -2324,6 +2342,11 @@ async function terminateDrainableBox(
           archiveRevision,
           instanceId: lease.instanceId,
           providerMissingBeforeCapture: providerMissing,
+          // Why the box drained: the lease's bounded rotation reason when one
+          // was requested (provider deadline, operator/image conflict, teardown
+          // claim), otherwise the ordinary idle drain. Additive diagnostic
+          // fact; no identifiers beyond the ones already carried above.
+          drainReason: sandboxDrainReason(lease),
         },
       });
     } catch (eventError) {

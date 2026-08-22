@@ -1520,4 +1520,126 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       await dropSession(keeper.established);
     }
   }, 60_000);
+
+  // The holder-liveness loop (private to resumeBoxForTurn) keeps the durable
+  // holder alive from registration until release. Its only license to release
+  // is holder death; a rotation-fenced lease heartbeat must NOT make it drop a
+  // live holder (the staging ~61-minute box-age failure: release -> draining ->
+  // reaper terminates the box under the running turn).
+  async function holderHeartbeatAt(
+    workspaceId: string,
+    groupId: string,
+    holderId: string,
+  ): Promise<number | null> {
+    const [r] = await admin<{ t: Date }[]>`
+      select h.last_heartbeat_at as t from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId}
+        and h.holder_id = ${holderId}`;
+    return r ? new Date(r.t).getTime() : null;
+  }
+
+  async function expectLoopKeepsRotationFencedHolder(
+    handles: Array<{ release: () => Promise<void>; established: unknown }>,
+    ids: { workspaceId: string; groupId: string },
+    holderId: string,
+  ): Promise<void> {
+    const { workspaceId, groupId } = ids;
+    // Rotation requested on the warm lease: every lease heartbeat now reports
+    // holderAlive=true / leaseExtended=false. Age the holder to prove the loop
+    // keeps touching it.
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    await admin`
+      update sandbox_lease_holders h set last_heartbeat_at = now() - interval '1 hour'
+      from sandbox_leases l
+      where l.id = h.lease_id and l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId} and h.holder_id = ${holderId}`;
+    const aged = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    expect(aged).not.toBeNull();
+    // Several loop ticks (50 ms cadence) under the rotation fence.
+    await Bun.sleep(400);
+    expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+    const touched = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    expect(touched).toBeGreaterThan(aged!);
+    const row = await readRow(workspaceId, groupId);
+    expect(row?.liveness).toBe("warm");
+    expect(row?.turn_holders).toBeGreaterThanOrEqual(1);
+
+    // Holder death is still honored: once the holder row is gone the loop
+    // releases (idempotently), recomputes the counts, and flips the lease.
+    for (const other of handles.slice(1)) await other.release();
+    await admin`
+      delete from sandbox_lease_holders h using sandbox_leases l
+      where l.id = h.lease_id and l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId} and h.holder_id = ${holderId}`;
+    let drained: string | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      drained = (await readRow(workspaceId, groupId))?.liveness;
+      if (drained === "draining") break;
+      await Bun.sleep(20);
+    }
+    expect(drained).toBe("draining");
+  }
+
+  test("(2e) attached turn: a rotation-fenced heartbeat keeps the live holder; only holder death releases", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId: groupId,
+      backend: "local" as const,
+    };
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      ids,
+      "turn",
+      sandboxLeaseHolderIdForAttempt("rotation-spawner"),
+    );
+    const attachedHolderId = sandboxLeaseHolderIdForAttempt("rotation-attached");
+    const attached = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      ids,
+      "turn",
+      attachedHolderId,
+    );
+    try {
+      expect(attached.leaseEpoch).toBe(spawner.leaseEpoch);
+      await expectLoopKeepsRotationFencedHolder(
+        [attached, spawner],
+        { workspaceId, groupId },
+        attachedHolderId,
+      );
+    } finally {
+      await attached.release();
+      await spawner.release();
+      await dropSession(spawner.established);
+      await dropSession(attached.established);
+    }
+  }, 60_000);
+
+  test("(2f) spawner after warm commit: a rotation-fenced heartbeat keeps the live holder; only holder death releases", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("rotation-solo-spawner");
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+      "turn",
+      holderId,
+    );
+    try {
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("warm");
+      await expectLoopKeepsRotationFencedHolder([spawner], { workspaceId, groupId }, holderId);
+    } finally {
+      await spawner.release();
+      await dropSession(spawner.established);
+    }
+  }, 60_000);
 });

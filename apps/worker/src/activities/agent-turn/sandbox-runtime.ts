@@ -5,6 +5,7 @@ import {
   readLease,
   accrueWarmSeconds,
   abandonRecordingForTurnAttempt,
+  SandboxWorkspaceMutationFencedError,
 } from "@opengeni/db";
 import {
   RoutingMutationOutcomeUnknownError,
@@ -20,6 +21,7 @@ import { createRuntimeBatcher, currentActivityContext } from "../streaming";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
   maybePersistWarmWorkspaceSnapshot,
+  persistSandboxDeadlineRotationCheckpoint,
   waitForWarmSnapshot,
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
@@ -239,6 +241,24 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     try {
       admission = await advanceWorkspaceGeneration(db, identity);
       admissionOutcome = "completed";
+    } catch (admissionError) {
+      if (
+        admissionError instanceof SandboxWorkspaceMutationFencedError &&
+        admissionError.code === "rotation_in_progress" &&
+        sandboxState.sandboxGroupId
+      ) {
+        // The lease still matches this turn's exact epoch/instance but a
+        // rotation was requested. Start the same orderly checkpoint the
+        // heartbeat would start on its next tick, so the model is not fed
+        // retry errors until then. Best-effort and single-flight; the
+        // admission failure itself is still surfaced to the caller.
+        void beginRotationCheckpoint(
+          sandbox,
+          sandbox.leaseEpoch,
+          sandboxState.sandboxGroupId,
+        ).catch(() => undefined);
+      }
+      throw admissionError;
     } finally {
       observeMutationPhase(
         "admission",
@@ -412,6 +432,91 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         console.error("sandbox box lost event publish failed", safeErrorDiagnostic(publishError));
       });
   };
+  /**
+   * Start (single-flight) the orderly provider-deadline rotation checkpoint for
+   * the established box. Entered from the lease heartbeat once the lease is
+   * rotation-fenced, and from a workspace-mutation admission that observed
+   * `rotation_in_progress` at the same epoch/instance, so the model is not fed
+   * retry errors for a whole heartbeat interval before the checkpoint runs.
+   * `not_rotating` means the exact epoch/instance no longer carries a requested
+   * rotation (holder reaped, attempt closed, epoch superseded, or draining).
+   */
+  const beginRotationCheckpoint = async (
+    sandbox: ResumedTurnSandbox,
+    rotationEpoch: number,
+    rotationGroupId: string,
+  ): Promise<"started" | "busy" | "not_rotating"> => {
+    if (sandboxState.rotationInFlight || sandboxRotationController.signal.aborted) return "busy";
+    const rotatingLease = await readLease(db, input.workspaceId, rotationGroupId).catch(() => null);
+    if (
+      !rotatingLease ||
+      rotatingLease.leaseEpoch !== rotationEpoch ||
+      rotatingLease.instanceId !== sandbox.established.instanceId ||
+      rotatingLease.rotationRequestedAt === null
+    ) {
+      return "not_rotating";
+    }
+    if (sandboxState.rotationInFlight || sandboxRotationController.signal.aborted) return "busy";
+    sandboxState.rotationInFlight = (async () => {
+      // Rotation admission already fenced all new workspace mutations.
+      // Wait for an earlier periodic capture, then produce the exact
+      // generation-complete checkpoint that licenses aborting this run.
+      if (sandboxState.snapshotInFlight) {
+        await waitForWarmSnapshot(
+          sandboxState.snapshotInFlight,
+          settings.sandboxSnapshotTimeoutMs,
+          cancellationSignal,
+        );
+      }
+      const snapshotSession = sandboxState.setupBoxSession;
+      const snapshotTurnId = attempt.turnId;
+      if (!snapshotSession || !snapshotTurnId) return;
+      // The checkpoint helper first reinstates this turn's exact holder
+      // when it was lost at the same epoch/instance (defense in depth:
+      // the warm capture requires it), then forces the capture and
+      // reports whether the established epoch now carries a complete
+      // archive under its requested rotation.
+      const checkpoint = await persistSandboxDeadlineRotationCheckpoint(
+        { db, settings, objectStorage, observability },
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: snapshotTurnId,
+          attemptId: input.attemptId,
+          sandboxGroupId: rotationGroupId,
+        },
+        snapshotSession,
+        { leaseEpoch: rotationEpoch, instanceId: sandbox.established.instanceId },
+        cancellationSignal,
+      );
+      if (checkpoint.checkpointed) {
+        sandboxRotationController.abort(
+          new SandboxDeadlineRotationError(rotationGroupId, rotationEpoch),
+        );
+        return;
+      }
+      if (checkpoint.holder === "attempt_fenced" || checkpoint.holder === "lease_fenced") {
+        // This attempt is no longer the active writer, or the exact
+        // epoch/instance is gone. Nothing left to checkpoint here.
+        stopLeaseHeartbeat();
+      }
+    })()
+      .catch((error) => {
+        observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sandboxGroupId: rotationGroupId,
+          leaseEpoch: rotationEpoch,
+          ...safeErrorDiagnostic(error),
+        });
+      })
+      .finally(() => {
+        sandboxState.rotationInFlight = null;
+      });
+    await sandboxState.rotationInFlight;
+    return "started";
+  };
   const startLeaseHeartbeat = (
     sandbox: ResumedTurnSandbox,
     warmBackend: Settings["sandboxBackend"] | undefined,
@@ -457,78 +562,14 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         expectedEpoch: heartbeatEpoch,
       })
         .then(async (alive) => {
-          if (alive || sandboxState.rotationInFlight || sandboxRotationController.signal.aborted)
-            return;
-          const rotatingLease = await readLease(db, input.workspaceId, heartbeatGroupId).catch(
-            () => null,
-          );
-          if (
-            !rotatingLease ||
-            rotatingLease.leaseEpoch !== heartbeatEpoch ||
-            rotatingLease.instanceId !== sandbox.established.instanceId ||
-            rotatingLease.rotationRequestedAt === null
-          ) {
+          if (alive) return;
+          const rotation = await beginRotationCheckpoint(sandbox, heartbeatEpoch, heartbeatGroupId);
+          if (rotation === "not_rotating") {
             // The holder was reaped, the exact attempt closed, the epoch was
             // superseded, or the lease began draining. Do not leave a dead
             // interval issuing DB writes and snapshot probes forever.
             stopLeaseHeartbeat();
-            return;
           }
-          sandboxState.rotationInFlight = (async () => {
-            // Rotation admission already fenced all new workspace mutations.
-            // Wait for an earlier periodic capture, then produce the exact
-            // generation-complete checkpoint that licenses aborting this run.
-            if (sandboxState.snapshotInFlight) {
-              await waitForWarmSnapshot(
-                sandboxState.snapshotInFlight,
-                settings.sandboxSnapshotTimeoutMs,
-                cancellationSignal,
-              );
-            }
-            const snapshotSession = sandboxState.setupBoxSession;
-            const snapshotTurnId = attempt.turnId;
-            if (snapshotSession && snapshotTurnId) {
-              await maybePersistWarmWorkspaceSnapshot(
-                { db, settings, objectStorage },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: snapshotTurnId,
-                  attemptId: input.attemptId,
-                  sandboxGroupId: heartbeatGroupId,
-                },
-                snapshotSession,
-                heartbeatEpoch,
-                cancellationSignal,
-                true,
-              );
-            }
-            const checkpointed = await readLease(db, input.workspaceId, heartbeatGroupId);
-            if (
-              checkpointed?.leaseEpoch === heartbeatEpoch &&
-              checkpointed.rotationRequestedAt !== null &&
-              checkpointed.archiveComplete &&
-              !cancellationSignal?.aborted
-            ) {
-              sandboxRotationController.abort(
-                new SandboxDeadlineRotationError(heartbeatGroupId, heartbeatEpoch),
-              );
-            }
-          })()
-            .catch((error) => {
-              observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                sandboxGroupId: heartbeatGroupId,
-                leaseEpoch: heartbeatEpoch,
-                ...safeErrorDiagnostic(error),
-              });
-            })
-            .finally(() => {
-              sandboxState.rotationInFlight = null;
-            });
-          await sandboxState.rotationInFlight;
         })
         .catch(() => undefined);
       void accrueWarmSeconds(db, {
