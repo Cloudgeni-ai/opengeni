@@ -3,7 +3,6 @@
 "@opengeni/config": patch
 "@opengeni/contracts": patch
 "@opengeni/db": patch
-"@opengeni/deployment": patch
 "@opengeni/sdk": patch
 ---
 
