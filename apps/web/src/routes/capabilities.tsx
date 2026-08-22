@@ -80,9 +80,9 @@ import {
   useSlackIntegration,
 } from "@/components/capabilities/use-slack-integration";
 import { PageHeader } from "@/components/common";
+import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   apiKeyConnectionRef,
@@ -126,10 +126,6 @@ const CustomApiSetupDialog = lazy(async () => {
 });
 
 import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
-const PrReviewSetupCard = lazy(async () => {
-  const module = await import("@/components/capabilities/pr-review-setup-card");
-  return { default: module.PrReviewSetupCard };
-});
 
 import type {
   AccessContext,
@@ -1858,16 +1854,14 @@ export function CapabilitiesRoute({
           />
           {packs.installationFor("pr-review")?.status === "active" ? (
             <div className="mt-6">
-              <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
-                <PrReviewSetupCard
-                  client={client}
-                  workspaceId={workspaceId}
-                  canManage={
-                    canManageApiIntegrationInstances &&
-                    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
-                  }
-                />
-              </Suspense>
+              <PrReviewSetupCard
+                client={client}
+                workspaceId={workspaceId}
+                canManage={
+                  canManageApiIntegrationInstances &&
+                  hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                }
+              />
             </div>
           ) : null}
         </div>
