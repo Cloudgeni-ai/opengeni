@@ -642,6 +642,12 @@ export async function persistSandboxDeadlineRotationCheckpoint(
   signal?: AbortSignal,
 ): Promise<SandboxDeadlineRotationCheckpointResult> {
   const { db, settings } = services;
+  // A cancelled attempt must never briefly regain its holder: its eager
+  // cancellation listener may already have released it, and reinstating here
+  // would pin the lease behind an attempt that is being torn down.
+  if (signal?.aborted) {
+    return { checkpointed: false, holder: "attempt_fenced", lease: null };
+  }
   const reinstated = await reinstateTurnLeaseHolder(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -1258,10 +1264,20 @@ export async function resumeBoxForTurn(
             releaseDeadHolder(status.fence);
             return;
           }
+          if (status.fence === "epoch") {
+            // The lease epoch never regresses: a newer epoch means the box this
+            // holder was registered against is definitively superseded (lost
+            // instance replaced, re-established by a later turn). The holder
+            // row is stale authority for an instance that no longer exists;
+            // drop it promptly instead of pinning a successor's lease.
+            releaseDeadHolder(status.fence);
+            return;
+          }
           // The box is still serving this live holder: keep the provider TTL
           // renewed while the lease is ours (extended, or only rotation-fenced at
-          // the same epoch). An epoch/liveness fence means another owner or the
-          // reaper now governs the instance; leave its expiry alone.
+          // the same epoch). A liveness fence (draining at our epoch) means the
+          // reaper now governs the instance; keep the holder but leave its
+          // expiry alone.
           if (status.leaseExtended || status.fence === "rotation_requested") {
             void maybeRenewProviderExpiration().catch(() => undefined);
           }

@@ -1642,4 +1642,118 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       await dropSession(spawner.established);
     }
   }, 60_000);
+
+  async function waitForHolderGone(
+    workspaceId: string,
+    groupId: string,
+    holderId: string,
+  ): Promise<number> {
+    let count = -1;
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      count = await holderCount(workspaceId, groupId, holderId);
+      if (count === 0) break;
+      await Bun.sleep(20);
+    }
+    return count;
+  }
+
+  test("(2g) an epoch fence (box definitively superseded) still releases the stale holder promptly", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("epoch-fenced-holder");
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+      "turn",
+      holderId,
+    );
+    try {
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // The lease epoch never regresses: a bumped epoch means the instance
+      // this holder registered against was replaced (lost/re-established).
+      await admin`
+        update sandbox_leases set lease_epoch = lease_epoch + 1
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      expect(await waitForHolderGone(workspaceId, groupId, holderId)).toBe(0);
+    } finally {
+      await spawner.release();
+      await dropSession(spawner.established);
+    }
+  }, 60_000);
+
+  test("(2h) a canonical attempt holder whose attempt is closed/superseded is released by the loop", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "exercise canonical holder release",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `canonical-release-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") {
+      throw new Error(`Canonical release fixture did not claim its turn: ${claim.reason}`);
+    }
+    const holderId = sandboxLeaseHolderIdForAttempt(attemptId);
+    const groupId = session.sandboxGroupId;
+    const resumed = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: session.id,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      holderId,
+    );
+    try {
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // Still the live active writer: several ticks keep the holder.
+      await Bun.sleep(200);
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // The attempt closes and the turn no longer points at it (recovering
+      // toward a successor attempt): the canonical holder predicate fails,
+      // heartbeat reports holder_gone, and the loop releases the stale row.
+      await admin.begin(async (tx) => {
+        await tx`
+          update session_turn_attempts set
+            state = 'closed', outcome = 'interrupted_recoverable',
+            closed_at = now(), quiesced_at = now(), updated_at = now()
+          where id = ${attemptId}`;
+        await tx`
+          update session_turns set status = 'recovering', active_attempt_id = null, updated_at = now()
+          where workspace_id = ${workspaceId} and id = ${claim.turn.id}`;
+      });
+      expect(await waitForHolderGone(workspaceId, groupId, holderId)).toBe(0);
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("draining");
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
+  }, 60_000);
 });

@@ -446,7 +446,15 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     rotationEpoch: number,
     rotationGroupId: string,
   ): Promise<"started" | "busy" | "not_rotating"> => {
-    if (sandboxState.rotationInFlight || sandboxRotationController.signal.aborted) return "busy";
+    // A cancelled attempt never starts (or reinstates a holder for) a
+    // checkpoint; its cancellation settlement owns the holder from here.
+    if (
+      sandboxState.rotationInFlight ||
+      sandboxRotationController.signal.aborted ||
+      cancellationSignal?.aborted
+    ) {
+      return "busy";
+    }
     const rotatingLease = await readLease(db, input.workspaceId, rotationGroupId).catch(() => null);
     if (
       !rotatingLease ||
