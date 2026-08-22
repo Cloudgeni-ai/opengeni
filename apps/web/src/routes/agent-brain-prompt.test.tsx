@@ -14,17 +14,22 @@ function catalogModel(
   id: string,
   overrides: {
     selectable?: boolean;
+    source?: WorkspaceModelCatalogModel["source"];
     efforts?: ReasoningEffort[];
     defaultEffort?: ReasoningEffort | null;
     latencyModes?: Array<{ id: LatencyMode; runnable: boolean }>;
   } = {},
 ): WorkspaceModelCatalogModel {
   const selectable = overrides.selectable ?? true;
+  const source =
+    overrides.source ??
+    (id.startsWith("codex/") ? "codex" : id.startsWith("supergrok/") ? "supergrok" : "opengeni");
   return {
     id,
-    label: id,
-    provider: "openai",
-    providerLabel: "OpenAI",
+    label: id === "gpt-5.5" ? "GPT-5.5" : id === "codex/gpt-5.6-luna" ? "GPT-5.6 Luna" : id,
+    provider: source,
+    providerLabel: source === "codex" ? "Codex" : source === "supergrok" ? "SuperGrok" : "OpenGeni",
+    source,
     api: "responses",
     credentialReadiness: {
       status: "ready",
@@ -81,7 +86,13 @@ describe("resolveAgentBrainPromptModel", () => {
         reasoningEffort: "low",
         latencyMode: "standard",
       }),
-    ).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "low", latencyMode: "standard" });
+    ).toEqual({
+      model: "gpt-5.6-sol",
+      label: "gpt-5.6-sol",
+      paymentSource: "OpenGeni credits",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+    });
   });
 
   test("falls back to the first selectable catalog model when the preferred model is blocked", () => {
@@ -147,14 +158,26 @@ describe("resolveAgentBrainPromptModel", () => {
         reasoningEffort: "low",
         latencyMode: "fast",
       }),
-    ).toEqual({ model: "codex/gpt-5.6-luna", reasoningEffort: "high", latencyMode: "standard" });
+    ).toEqual({
+      model: "codex/gpt-5.6-luna",
+      label: "GPT-5.6 Luna",
+      paymentSource: "Codex subscription",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
     expect(
       resolveAgentBrainPromptModel(models, {
         model: "codex/gpt-5.6-luna",
         reasoningEffort: "medium",
         latencyMode: "standard",
       }),
-    ).toEqual({ model: "codex/gpt-5.6-luna", reasoningEffort: "medium", latencyMode: "standard" });
+    ).toEqual({
+      model: "codex/gpt-5.6-luna",
+      label: "GPT-5.6 Luna",
+      paymentSource: "Codex subscription",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    });
   });
 
   test("keeps a non-standard latency mode only when the chosen model can run it", () => {
@@ -202,7 +225,7 @@ const navigate = mock(async (_target: unknown) => undefined);
 
 const appContext: Record<string, any> = {
   client: { getWorkspaceModelCatalog },
-  model: "gpt-5.6-sol",
+  model: "gpt-5.5",
   reasoningEffort: "low",
   latencyMode: "standard",
   busy: false,
@@ -280,13 +303,15 @@ describe("AgentBrainPrompt", () => {
 
     catalogRequest.resolve({
       models: [
-        catalogModel("gpt-5.6-sol", { selectable: false }),
-        catalogModel("codex/gpt-5.6-luna"),
+        catalogModel("gpt-5.5", { selectable: false }),
+        catalogModel("codex/gpt-5.6-luna", { source: "codex" }),
       ],
     });
     await settle();
     expect(button.disabled).toBe(false);
     expect(container.textContent).not.toContain("No model is available");
+    expect(container.textContent).toContain("Model: GPT-5.6 Luna · Codex subscription");
+    expect(container.textContent).not.toContain("GPT-5.5");
 
     await act(async () => {
       (container.querySelector("form") as HTMLFormElement).dispatchEvent(
@@ -336,7 +361,7 @@ describe("AgentBrainPrompt", () => {
     container.remove();
   });
 
-  test("falls back to the context model with a retry control when the catalog fails to load", async () => {
+  test("fails closed with a retry control when the allowed model cannot be resolved", async () => {
     getWorkspaceModelCatalog.mockImplementationOnce(async () => {
       throw new Error("catalog unavailable");
     });
@@ -351,9 +376,9 @@ describe("AgentBrainPrompt", () => {
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     const button = container.querySelector("button[type=submit]") as HTMLButtonElement;
     await setValue(textarea, "Lead with the outcome.");
-    expect(button.disabled).toBe(false);
+    expect(button.disabled).toBe(true);
     expect(container.textContent).toContain(
-      "Could not load the workspace model catalog: catalog unavailable",
+      "Could not resolve an allowed workspace model: catalog unavailable. Retry before creating with OpenGeni.",
     );
     expect(container.textContent).not.toContain("No model is available");
 
@@ -363,19 +388,15 @@ describe("AgentBrainPrompt", () => {
       );
     });
     await settle();
-    expect(startSession).toHaveBeenCalledTimes(1);
-    const [, submission] = startSession.mock.calls[0]!;
-    expect(submission.model).toBe("gpt-5.6-sol");
-    expect(submission.reasoningEffort).toBe("low");
-    expect(submission.latencyMode).toBe("standard");
+    expect(startSession).not.toHaveBeenCalled();
 
     // Retry re-fetches the catalog; a successful reload clears the error and
     // switches to the catalog-resolved model.
     const callsBeforeRetry = getWorkspaceModelCatalog.mock.calls.length;
     getWorkspaceModelCatalog.mockImplementationOnce(async () => ({
       models: [
-        catalogModel("gpt-5.6-sol", { selectable: false }),
-        catalogModel("codex/gpt-5.6-luna"),
+        catalogModel("gpt-5.5", { selectable: false }),
+        catalogModel("codex/gpt-5.6-luna", { source: "codex" }),
       ],
     }));
     const retry = Array.from(container.querySelectorAll("button")).find(
@@ -387,7 +408,8 @@ describe("AgentBrainPrompt", () => {
     });
     await settle();
     expect(getWorkspaceModelCatalog.mock.calls.length).toBe(callsBeforeRetry + 1);
-    expect(container.textContent).not.toContain("Could not load the workspace model catalog");
+    expect(container.textContent).not.toContain("Could not resolve an allowed workspace model");
+    expect(container.textContent).toContain("Model: GPT-5.6 Luna · Codex subscription");
     expect(button.disabled).toBe(false);
 
     await act(async () => {
