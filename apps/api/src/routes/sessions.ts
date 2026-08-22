@@ -68,6 +68,7 @@ import {
   workspaceControlUtf8Bytes,
   type AccessGrant,
   type AttachViewerResponse,
+  type CreateSessionResponse,
   type SandboxBackend,
   type LineageNode,
   type Session,
@@ -505,16 +506,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         422,
       );
     }
-    let session: Session;
+    let session: CreateSessionResponse;
     try {
       session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
-    // Creation has committed by this point. Keep response projection outside
-    // the create-rejection boundary so a post-commit policy read cannot be
-    // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    // Creation has committed by this point. Reload through the same
+    // viewer-aware projection as GET detail so activation-gated tenancy and
+    // personal state survive fresh, repaired, and keyed-replay responses.
+    // Keep this outside the create-rejection boundary so a post-commit read
+    // cannot be misreported as though the session itself was rejected.
+    const projected = await getSessionForSubject(db, workspaceId, session.id, grant.subjectId);
+    if (!projected) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const projectedWithPolicy = await withEffectivePolicy(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      projected,
+    );
+    return c.json(
+      {
+        ...projectedWithPolicy,
+        initialTurnId: session.initialTurnId,
+      },
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {

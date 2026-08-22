@@ -429,9 +429,11 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(createdResponse.status).toBe(202);
     const created = (await createdResponse.json()) as {
       id: string;
-      tenancy: { visibility: string };
+      tenancy: { visibility: string; authorityEpoch: number; ownedByCurrentUser: boolean };
     };
-    expect(created).toMatchObject({ tenancy: { visibility: "private" } });
+    expect(created).toMatchObject({
+      tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
+    });
 
     await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: owner.accountId,
@@ -448,7 +450,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(replayResponse.status).toBe(202);
     expect(await replayResponse.json()).toMatchObject({
       id: created.id,
-      tenancy: { visibility: "private" },
+      tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
     });
 
     const freshResponse = await owner.app.request(endpoint, {
