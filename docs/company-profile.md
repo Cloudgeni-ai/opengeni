@@ -17,6 +17,10 @@ Canonical implementation:
   `packages/sdk/src/company-profile.ts`;
 - concrete durable-learning adapter:
   `packages/core/src/domain/company-profile-durable-learning-adapter.ts`;
+- explicit owner/admin-confirmed agent administration:
+  `packages/core/src/domain/company-profile-agent-admin.ts`,
+  `apps/api/src/mcp/company-profile-agent-admin.ts`, and migration
+  `0317_human_confirmed_company_profile_agent_admin.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
 - admin presentation: the existing Company Brain / Workspace State route at
@@ -36,11 +40,32 @@ account's `account:admin`; `workspace:admin`, delegated services, agent attempt
 grants, and API-key identity cannot activate or roll back through the admin
 route.
 
-Explicit agent-directed and autonomous company-level learning does not use the
-admin route. The canonical durable-learning router is the sole caller of the
-authority-native `writeCompanyProfileLearning` / `rollbackCompanyProfileLearning`
-seam. This authority does not implement the router, its ledger, natural-language
-commands, or learning-policy resolution.
+An exact live agent attempt may administer the profile only through the
+separate `company_profile_propose` → structured human input →
+`company_profile_confirm` path. Proposal admission resolves the logical turn's
+initiating human and requires that human's current active organization
+membership be `owner` or `admin`. The proposal is a complete, inactive,
+immutable profile revision. Confirmation requires the canonical question
+returned by the proposal to have been answered `activate` by that same human,
+then revalidates the current attempt, organization membership, immutable
+proposal provenance/hash, and unchanged active-profile head before activation.
+Dedicated immutable proposal and confirmation receipts retain the exact
+session, turn, attempt generation, membership, human-input request, revision,
+and activation event. The revision uses the distinct `agent_admin` provenance,
+not `durable_learning`. MCP authorization supplies only ordinary exact-session
+control/read capabilities; organization role is resolved authoritatively in
+PostgreSQL, so an agent never receives `account:admin`.
+
+This explicit administration path is not governed learning and never consults
+workspace learning mode. In particular, `learning_policy_off` cannot block an
+owner/admin's explicit request to manage the organization profile. The browser
+HTTP administration route remains direct-human-only.
+
+Autonomous company-level learning remains separate. The canonical
+durable-learning router is the sole caller of the authority-native
+`writeCompanyProfileLearning` / `rollbackCompanyProfileLearning` seam. This
+authority does not implement the router, its ledger, natural-language commands,
+or learning-policy resolution.
 
 ## Bounded structured content
 
@@ -78,6 +103,13 @@ also rejects direct owner mutation outside that function. Each successful call
 atomically changes the head and appends exactly one activation event. A stale
 writer receives `COMPANY_PROFILE_CONFLICT`; it never silently overwrites newer
 truth.
+
+Agent-admin proposals and confirmations add no second mutation mechanism.
+Migration `0317` routes the confirmed operation through the same
+`company_profile_apply_activation` lifecycle function, attributes the event to
+the confirming human, and retains compare-and-swap behavior. Its receipt tables
+are FORCE-RLS, immutable, and have no direct runtime table privileges; the
+runtime role can execute only the two bounded exact-attempt functions.
 
 Rollback creates another immutable event and moves the head to a previously
 active revision. Router rollback tokens restore the exact prior head, including
