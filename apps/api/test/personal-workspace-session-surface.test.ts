@@ -427,8 +427,11 @@ describe("managed-human session surface inside their own personal workspace", ()
       body: JSON.stringify(request),
     });
     expect(createdResponse.status).toBe(202);
-    const created = (await createdResponse.json()) as { id: string; visibility: string };
-    expect(created).toMatchObject({ visibility: "private" });
+    const created = (await createdResponse.json()) as {
+      id: string;
+      tenancy: { visibility: string };
+    };
+    expect(created).toMatchObject({ tenancy: { visibility: "private" } });
 
     await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: owner.accountId,
@@ -443,7 +446,10 @@ describe("managed-human session surface inside their own personal workspace", ()
       body: JSON.stringify(request),
     });
     expect(replayResponse.status).toBe(202);
-    expect(await replayResponse.json()).toMatchObject({ id: created.id, visibility: "private" });
+    expect(await replayResponse.json()).toMatchObject({
+      id: created.id,
+      tenancy: { visibility: "private" },
+    });
 
     const freshResponse = await owner.app.request(endpoint, {
       method: "POST",
@@ -461,7 +467,10 @@ describe("managed-human session surface inside their own personal workspace", ()
       { headers: { cookie: owner.cookie } },
     );
     expect(existing.status).toBe(200);
-    expect(await existing.json()).toMatchObject({ id: created.id, visibility: "private" });
+    expect(await existing.json()).toMatchObject({
+      id: created.id,
+      tenancy: { visibility: "private" },
+    });
   }, 180_000);
 
   test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {

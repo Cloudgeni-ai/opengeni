@@ -49,6 +49,32 @@ async function applyBelow(url: string, upperBound: string): Promise<void> {
   }
 }
 
+async function waitForOrganizationFenceWaiters(
+  admin: SharedTestDatabase["admin"],
+  holderPid: number,
+  expected: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [row] = await admin<Array<{ waiting: number }>>`
+      select count(*)::int as waiting
+      from pg_locks waiting
+      join pg_stat_activity waiter on waiter.pid = waiting.pid
+      join pg_locks held
+        on held.locktype = 'advisory'
+        and held.granted
+        and held.classid = waiting.classid
+        and held.objid = waiting.objid
+        and held.objsubid = waiting.objsubid
+      where waiting.locktype = 'advisory'
+        and not waiting.granted
+        and waiter.datname = current_database()
+        and held.pid = ${holderPid}`;
+    if ((row?.waiting ?? 0) >= expected) return;
+    await Bun.sleep(25);
+  }
+  throw new Error(`timed out waiting for ${expected} organization fence waiter(s)`);
+}
+
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
@@ -66,7 +92,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0315 organization private-session enablement", () => {
+describe("migration 0316 organization private-session enablement", () => {
   test("personal workspaces are private-ready without organization activation", async () => {
     if (!shared || !client) return;
     const userId = `personal-private-${crypto.randomUUID()}`;
@@ -130,7 +156,7 @@ describe("migration 0315 organization private-session enablement", () => {
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (
-        ${sharedGrant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, '0315-test'
+        ${sharedGrant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, '0316-test'
       )`;
     const enableOperationId = crypto.randomUUID();
     const enabled = await updateOrganizationPrivateSessionSettings(client.db, {
@@ -250,13 +276,101 @@ describe("migration 0315 organization private-session enablement", () => {
     }
     expect(nestedPostgresSqlState(denied)).toBe("42501");
   }, 180_000);
+
+  test("disablement fences a queued fresh organization-private create", async () => {
+    if (!shared || !client) return;
+    const userId = `org-private-fence-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Organization private fence",
+    });
+    const access = provisioned.accessContext;
+    const sharedGrant = access.workspaceGrants.find(
+      (grant) => grant.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!sharedGrant) throw new Error("organization authority missing");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${sharedGrant.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, '0316-fence-test'
+      )`;
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: sharedGrant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: 0,
+      operationId: crypto.randomUUID(),
+    });
+
+    const fence = await shared.admin.reserve();
+    let fenceCommitted = false;
+    let disable: ReturnType<typeof updateOrganizationPrivateSessionSettings> | null = null;
+    let createOutcome: Promise<
+      { status: "fulfilled"; value: unknown } | { status: "rejected"; reason: unknown }
+    > | null = null;
+    try {
+      await fence`begin`;
+      const [backend] = await fence<Array<{ pid: number }>>`
+        select pg_backend_pid()::int as pid`;
+      if (!backend) throw new Error("organization fence backend missing");
+      await fence`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${sharedGrant.accountId}`}, 0
+      ))`;
+
+      disable = updateOrganizationPrivateSessionSettings(client.db, {
+        organizationId: sharedGrant.accountId,
+        actorSubjectId: subjectId,
+        enabled: false,
+        expectedVersion: 1,
+        operationId: crypto.randomUUID(),
+      });
+      await waitForOrganizationFenceWaiters(shared.admin, backend.pid, 1);
+
+      createOutcome = createSessionWithIdempotencyKeyResult(client.db, {
+        accountId: sharedGrant.accountId,
+        workspaceId: sharedGrant.workspaceId,
+        visibility: "user_private",
+        initialMessage: "private create queued behind disable",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        subjectId,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createIdempotencyKey: `organization-private-fenced-${crypto.randomUUID()}`,
+      }).then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      );
+      await waitForOrganizationFenceWaiters(shared.admin, backend.pid, 2);
+
+      await fence`commit`;
+      fenceCommitted = true;
+      await expect(disable).resolves.toMatchObject({ enabled: false, version: 2, changed: true });
+      const outcome = await createOutcome;
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "rejected") {
+        expect(outcome.reason).toBeInstanceOf(Error);
+        expect(outcome.reason).toHaveProperty("name", "SessionTenancyNotActivatedError");
+      }
+    } finally {
+      if (!fenceCommitted) await fence`rollback`.catch(() => undefined);
+      fence.release();
+      await Promise.allSettled([disable, createOutcome].filter((value) => value !== null));
+    }
+  }, 180_000);
 });
 
-describe("migration 0315 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
+describe("migration 0316 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {
-    owned = await acquireOwnerMigratedTestDatabase("migration-0315-owner-migrated");
+    owned = await acquireOwnerMigratedTestDatabase("migration-0316-owner-migrated");
     if (!owned && process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
       throw new Error("PostgreSQL required");
     }
@@ -278,11 +392,11 @@ describe("migration 0315 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
     const accountId = crypto.randomUUID();
     await admin`
       insert into managed_accounts (id, name, external_source, external_id)
-      values (${accountId}, 'pre-0315 activated organization', 'test', ${accountId})`;
+      values (${accountId}, 'pre-0316 activated organization', 'test', ${accountId})`;
     await admin`
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (${accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)}, 'pre-0315')`;
+      ) values (${accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)}, 'pre-0316')`;
 
     await migrate(ownerUrl);
 
