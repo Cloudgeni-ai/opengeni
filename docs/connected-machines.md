@@ -420,6 +420,15 @@ Validation (ownership, liveness, epoch fence) is server-side; a rejected target
 comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
+An agent turn that started on a Connected Machine does not pre-lease a managed
+home sandbox. If that turn explicitly swaps a managed-home session back to
+`"session"`/`"default"`, OpenGeni preserves the successful pointer change,
+checkpoints completed model/tool truth, and continues the same logical turn in a
+fresh home-primary attempt. The handoff requires no new user message, never
+silently runs a post-swap operation on the old machine, and never provisions a
+cloud home for machine-only work. Unresolved parallel tool calls are closed as
+interrupted/outcome-unknown rather than replayed automatically.
+
 ## Connect a machine
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.

@@ -5,6 +5,7 @@ import {
   isSessionEventPersistenceError,
 } from "@opengeni/db";
 import {
+  ActiveBackendUnresolvableError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
@@ -238,6 +239,54 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
  */
 export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
+}
+
+/**
+ * Recognize the one active-route transition that cannot finish inside its
+ * originating attempt. A Modal-home session may start on a Connected Machine
+ * without creating or leasing its managed home box. When an explicit attach
+ * clears the active pointer back to home, the pointer commit is authoritative,
+ * but this attempt has no home session to serve the next sandbox operation.
+ *
+ * The Agents SDK may retain the typed routing error directly, through `cause`,
+ * or inside an AggregateError from a parallel function-tool batch. Traverse
+ * only those structural error links with a strict bound; never classify from
+ * message text, which could originate in model or tool content.
+ */
+export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+
+  while (pending.length > 0 && inspected < 64) {
+    const current = pending.shift();
+    inspected += 1;
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    try {
+      const record = current as Record<string, unknown>;
+      if (
+        (current instanceof ActiveBackendUnresolvableError ||
+          record.name === "ActiveBackendUnresolvableError") &&
+        record.code === "home_unavailable_this_turn"
+      ) {
+        return true;
+      }
+
+      for (const key of ["cause", "error"] as const) {
+        const nested = record[key];
+        if (nested && typeof nested === "object") pending.push(nested);
+      }
+      if (Array.isArray(record.errors)) {
+        pending.push(...record.errors.slice(0, 32));
+      }
+    } catch {
+      // A hostile proxy or getter is not a route-transition proof.
+    }
+  }
+
+  return false;
 }
 
 /**

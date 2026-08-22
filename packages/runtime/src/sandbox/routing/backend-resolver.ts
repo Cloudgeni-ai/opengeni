@@ -151,11 +151,11 @@ export interface ActiveBackendResolverDeps {
    * machine-primary turn of a Modal-HOME session (pinned to a machine, group box never
    * established this turn): the null pointer then has nothing to resolve to THIS turn, so
    * rather than silently keep serving the pinned machine as if the detach never happened,
-   * the null branch throws a typed `home_unavailable_this_turn` error — the detach's pointer
-   * commit stands and takes effect on the NEXT turn, which starts null and establishes the
-   * home box normally. Lazily establishing the home box mid-turn on such a clear is a
-   * deferred follow-up (issue #341); until then this makes the gap fail typed-and-specific,
-   * never silent.
+   * the null branch throws a typed `home_unavailable_this_turn` transition — the detach's
+   * pointer commit stands, and worker failure settlement checkpoints completed work before
+   * continuing the same logical turn in a fresh attempt. That attempt starts null and
+   * establishes the home box normally. This makes the boundary typed-and-specific, never
+   * a silent fallback to the machine.
    */
   defaultIsHome?: boolean;
 }
@@ -173,9 +173,9 @@ export interface ActiveBackendResolverDeps {
  *   - `transient_establishment`     — a momentary establish failure worth a retry (reserved;
  *                                     control-plane timeouts surface as their own typed error).
  *   - `home_unavailable_this_turn`  — the pointer was cleared to the session default (home)
- *                                     mid-turn, but this turn started pinned to a machine and
- *                                     never established the home box, so null has nothing to
- *                                     resolve to THIS turn (the detach takes effect next turn). */
+ *                                     mid-turn, but this attempt started pinned to a machine and
+ *                                     never established the home box. The worker checkpoints the
+ *                                     attempt and continues the same logical turn on home. */
 export type BackendUnresolvableCode =
   | "stale_pointer"
   | "offline_enrollment"
@@ -272,12 +272,11 @@ export function makeActiveBackendResolver(
     if (pointer.activeSandboxId === null) {
       // A machine-pinned turn (Modal-home session pinned to a machine) never
       // established its home box, so a mid-turn clear-to-null has no home to resolve
-      // THIS turn. Fail typed-and-specific — the detach was accepted and its pointer
-      // commit STANDS, taking effect on the next turn (which starts null and
-      // establishes the home box) — instead of silently serving the pinned machine as
-      // if the clear never happened. Only an EXPLICIT `false` throws; omitted (the
-      // common path) resolves to the home default as before. (Lazily establishing the
-      // home box mid-turn on such a clear is a deferred follow-up; issue #341.)
+      // THIS attempt. Fail typed-and-specific — the detach was accepted and its pointer
+      // commit STANDS, allowing worker failure settlement to checkpoint and continue the
+      // same logical turn in a new home-primary attempt — instead of silently serving the
+      // pinned machine as if the clear never happened. Only an EXPLICIT `false` throws;
+      // omitted (the common path) resolves to the home default as before.
       if (deps.defaultIsHome === false) {
         throw new ActiveBackendUnresolvableError(
           "home_unavailable_this_turn",
