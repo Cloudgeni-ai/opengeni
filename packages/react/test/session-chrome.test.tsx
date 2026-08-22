@@ -203,6 +203,18 @@ describe("sessionChromeGoalPillState", () => {
         lastError: null,
       }),
     ).toBe("held");
+    // An agent-declared goal_wait hold shares the Held pill: the goal is
+    // deliberately waiting for child results / external input until a deadline.
+    expect(
+      sessionChromeGoalPillState("active", {
+        state: "blocked",
+        reason: "held_for_input",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: "2026-01-01T00:00:00.000Z",
+        lastError: null,
+      }),
+    ).toBe("held");
   });
 });
 

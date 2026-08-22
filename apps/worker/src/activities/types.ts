@@ -345,7 +345,11 @@ export type MaybeContinueGoalInput = {
 };
 
 export type MaybeContinueGoalResult = {
-  action: "none" | "queue" | "continue" | "paused";
+  // `held`: an agent-declared `goal_wait` hold is current. No continuation was
+  // materialized and the goal obligation stays armed; the workflow closes like
+  // `none` and the wake outbox (deadline) or any producer's signalWithStart
+  // restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "held";
 };
 
 export type DispatchScheduledTaskRunInput = {

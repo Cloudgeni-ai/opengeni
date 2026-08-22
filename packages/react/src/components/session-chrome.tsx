@@ -163,7 +163,11 @@ export function sessionChromeGoalPillState(
   }
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    return continuation.reason === "workstream_paused" ? "held" : "blocked";
+    // `held_for_input` is the agent's own goal_wait hold (waiting for child
+    // results / external input until a deadline); it shares the Held pill.
+    return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
+      ? "held"
+      : "blocked";
   }
   return "invariant_broken";
 }

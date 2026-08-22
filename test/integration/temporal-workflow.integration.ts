@@ -1305,6 +1305,83 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "a held goal closes the run without polling and the deadline wake restarts the continuation",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const queuedTurns = [queuedTurn("event-1")];
+      const runs: string[] = [];
+      const goalDecisions: string[] = [];
+      let holdCurrent = true;
+      let continued = false;
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        runs.push(turn.triggerEventId);
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+        maybeContinueGoal: async () => {
+          // The DB materializer returns `held` while the declaring turn is the
+          // latest finished turn and the deadline is ahead; it arms a delayed
+          // outbox wake at the deadline instead of materializing work.
+          if (holdCurrent) {
+            goalDecisions.push("held");
+            return { action: "held" as const };
+          }
+          if (!continued) {
+            continued = true;
+            queuedTurns.push(queuedTurn("goal-after-hold"));
+            goalDecisions.push("continue");
+            return { action: "continue" as const };
+          }
+          goalDecisions.push("none");
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const workflowId = `wf-${crypto.randomUUID()}`;
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        });
+        await handle.result();
+        // The run closed like an idle goal: one turn, no synthesized
+        // continuation, no polling loop while the hold is current.
+        expect(runs).toEqual(["event-1"]);
+        expect(goalDecisions.length).toBeGreaterThanOrEqual(1);
+        expect(goalDecisions.every((decision) => decision === "held")).toBe(true);
+
+        // The deadline passes: the wake-outbox dispatcher restarts the closed
+        // workflow through the same signalWithStart path it uses for every
+        // undelivered revision, and the materializer now continues.
+        holdCurrent = false;
+        const restarted = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+        });
+        await restarted.result();
+        expect(runs).toEqual(["event-1", "goal-after-hold"]);
+        expect(goalDecisions).toContain("continue");
+        expect(goalDecisions[goalDecisions.length - 1]).toBe("none");
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    goalContinuationTestTimeoutMs,
+  );
+
+  test(
     "holds the loop for continueDelayMs before the goal continuation check",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

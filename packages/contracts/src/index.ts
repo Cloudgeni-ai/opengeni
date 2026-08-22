@@ -850,6 +850,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
+  "goal_wait",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -5477,6 +5478,7 @@ export const SessionGoalContinuationReason = z.enum([
   "provider_backpressure",
   "session_cancelled",
   "system_work_pending",
+  "held_for_input",
   "missing_obligation",
 ]);
 export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
@@ -10607,6 +10609,7 @@ export const SessionEventType = z.enum([
   "goal.paused",
   "goal.resumed",
   "goal.cleared",
+  "goal.held",
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
@@ -10813,6 +10816,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "goal.paused",
     "goal.resumed",
     "goal.cleared",
+    "goal.held",
     "goal.continuation",
     "system.update.pending",
     "system.update.delivered",

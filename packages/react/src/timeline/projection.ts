@@ -1013,6 +1013,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.paused":
       case "goal.resumed":
       case "goal.cleared":
+      case "goal.held":
       case "goal.continuation": {
         // Agent tool mutations already appear as tool-call rows in the activity
         // cluster. Re-emitting them as GoalRow landmarks splits "N steps" mid-turn.
@@ -1023,7 +1024,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "goal",
           id: event.id,
           action: event.type.slice("goal.".length) as GoalItem["action"],
-          text: goalText(payload),
+          text:
+            event.type === "goal.held" && typeof payload.reason === "string" && payload.reason
+              ? payload.reason
+              : goalText(payload),
           occurredAt: event.occurredAt,
         });
         break;
@@ -2049,7 +2053,12 @@ function shouldSuppressAgentGoalLandmark(type: string, payload: Record<string, u
   if (type === "goal.completed") {
     return true;
   }
-  if (type === "goal.set" || type === "goal.updated" || type === "goal.paused") {
+  if (
+    type === "goal.set" ||
+    type === "goal.updated" ||
+    type === "goal.paused" ||
+    type === "goal.held"
+  ) {
     return payload.actor === "agent";
   }
   return false;

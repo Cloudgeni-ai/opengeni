@@ -6893,6 +6893,15 @@ export const sessionGoals = pgTable(
     })
       .notNull()
       .default(0),
+    // Agent-declared continuation hold (`goal_wait`, migration 0317). Honored
+    // only while `continuationHoldTurnId` is still the latest finished turn and
+    // the deadline has not passed; it never consumes the wake/observed ledger.
+    // Any newer finished turn, a passed deadline, or a goal mutation clears all
+    // four columns together.
+    continuationHoldTurnId: uuid("continuation_hold_turn_id"),
+    continuationHoldUntil: timestamp("continuation_hold_until", { withTimezone: true }),
+    continuationHoldReason: text("continuation_hold_reason"),
+    continuationHoldSetAt: timestamp("continuation_hold_set_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6910,6 +6919,10 @@ export const sessionGoals = pgTable(
     continuationRevisionValid: check(
       "session_goals_continuation_revision_check",
       sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
+    continuationHoldValid: check(
+      "session_goals_continuation_hold_check",
+      sql`(${table.continuationHoldTurnId} is null and ${table.continuationHoldUntil} is null and ${table.continuationHoldReason} is null and ${table.continuationHoldSetAt} is null) or (${table.continuationHoldTurnId} is not null and ${table.continuationHoldUntil} is not null and ${table.continuationHoldSetAt} is not null and (${table.continuationHoldReason} is null or octet_length(${table.continuationHoldReason}) <= 2048))`,
     ),
   }),
 );

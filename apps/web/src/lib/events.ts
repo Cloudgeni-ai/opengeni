@@ -218,6 +218,7 @@ export function eventLabel(type: string): string {
     "goal.completed": "Goal completed",
     "goal.paused": "Goal paused",
     "goal.resumed": "Goal resumed",
+    "goal.held": "Goal held",
     "goal.continuation": "Goal continuation",
     "memory.saved": "Memory saved",
     "memory.corrected": "Memory corrected",
