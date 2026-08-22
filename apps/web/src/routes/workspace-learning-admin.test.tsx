@@ -29,7 +29,9 @@ const history: WorkspaceLearningHistoryResponse = {
       revision: 2,
       policyHash: "b".repeat(64),
       workspaceMode: "suggest",
-      sourceOverrides: [],
+      sourceOverrides: [
+        { kind: "task-note", id: "00000000-0000-4000-8000-000000000007", mode: "off" },
+      ],
       supersedesRevisionId: firstRevisionId,
       createdBySubjectId: "user:admin",
       createdAt: "2026-08-16T09:59:00.000Z",
@@ -131,7 +133,7 @@ afterAll(() => {
 });
 
 describe("Learning & autonomy", () => {
-  test("shows sanitized history and CAS-fenced controls", async () => {
+  test("renders only the learning-mode selector and saves with preserved overrides", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     try {
@@ -140,10 +142,21 @@ describe("Learning & autonomy", () => {
       );
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
+      expect(container.textContent).toContain("Off");
       expect(container.textContent).toContain("Review first");
-      expect(container.textContent).toContain("92.00% confidence");
-      expect(container.textContent).toContain("effective for the next accepted attempt");
-      expect(container.textContent).not.toContain("private source text");
+      expect(container.textContent).toContain("Autonomous");
+      expect(container.querySelectorAll('input[name="learning-mode"]')).toHaveLength(3);
+      expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
+        true,
+      );
+
+      expect(container.textContent).not.toContain("Advanced source overrides");
+      expect(container.textContent).not.toContain("Policy versions");
+      expect(container.textContent).not.toContain("Learning history");
+      expect(container.textContent).not.toContain("Rollback");
+      expect(container.textContent).not.toContain("Undo");
+      expect(container.textContent).not.toContain("92.00% confidence");
+      expect(container.textContent).not.toContain("Workspace admin access is required");
 
       const autonomous = container.querySelector<HTMLInputElement>('input[value="automatic"]');
       expect(autonomous).not.toBeNull();
@@ -153,17 +166,23 @@ describe("Learning & autonomy", () => {
       const save = [...container.querySelectorAll("button")].find((button) =>
         button.textContent?.includes("Save learning mode"),
       );
+      expect(save).toBeDefined();
       await act(async () => {
         save!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
+      expect(createRevision).toHaveBeenCalledTimes(1);
       expect(createRevision).toHaveBeenCalledWith(
         workspaceId,
         expect.objectContaining({
           workspaceMode: "automatic",
+          sourceOverrides: [
+            { kind: "task-note", id: "00000000-0000-4000-8000-000000000007", mode: "off" },
+          ],
           supersedesRevisionId: secondRevisionId,
         }),
       );
+      expect(activateRevision).toHaveBeenCalledTimes(1);
       expect(activateRevision).toHaveBeenCalledWith(
         workspaceId,
         expect.any(String),
@@ -172,17 +191,92 @@ describe("Learning & autonomy", () => {
           expectedActivationVersion: 2,
         }),
       );
-
-      const rollback = [...container.querySelectorAll("button")].find((button) =>
-        button.textContent?.includes("Rollback to r1"),
-      );
-      expect(rollback).toBeDefined();
-      const undo = [...container.querySelectorAll("button")].find((button) =>
-        button.textContent?.includes("Undo preference change"),
-      );
-      expect(undo).toBeDefined();
+      expect(rollbackRevision).not.toHaveBeenCalled();
+      expect(undoActivation).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Learning mode saved.");
     } finally {
       await act(async () => root.unmount());
+    }
+  });
+
+  test("saves a fresh workspace with no head, no overrides, and version 0", async () => {
+    getHistory.mockResolvedValueOnce({
+      ...history,
+      head: null,
+      revisions: [],
+      policyEvents: [],
+      decisions: [],
+      activations: [],
+      undos: [],
+    });
+    createRevision.mockClear();
+    activateRevision.mockClear();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      expect(container.querySelector<HTMLInputElement>('input[value="off"]')?.checked).toBe(true);
+
+      const reviewFirst = container.querySelector<HTMLInputElement>('input[value="suggest"]');
+      await act(async () => {
+        reviewFirst!.click();
+      });
+      const save = [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Save learning mode"),
+      );
+      await act(async () => {
+        save!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(createRevision).toHaveBeenCalledTimes(1);
+      expect(createRevision).toHaveBeenCalledWith(
+        workspaceId,
+        expect.objectContaining({
+          workspaceMode: "suggest",
+          sourceOverrides: [],
+          supersedesRevisionId: null,
+        }),
+      );
+      expect(activateRevision).toHaveBeenCalledTimes(1);
+      expect(activateRevision).toHaveBeenCalledWith(
+        workspaceId,
+        expect.any(String),
+        expect.objectContaining({
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+        }),
+      );
+      expect(container.textContent).toContain("Learning mode saved.");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("shows the admin-access note and disables saving without workspace:admin", async () => {
+    const previousGrants = context.accessContext.workspaceGrants;
+    context.accessContext.workspaceGrants = [{ workspaceId, permissions: ["workspace:read"] }];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      expect(container.textContent).toContain(
+        "Workspace admin access is required to change learning policy.",
+      );
+      const save = [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Save learning mode"),
+      );
+      expect(save?.disabled).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      context.accessContext.workspaceGrants = previousGrants;
     }
   });
 });

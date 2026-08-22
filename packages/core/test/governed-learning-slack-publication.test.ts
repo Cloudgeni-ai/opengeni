@@ -139,7 +139,7 @@ describe("governed-learning Slack publication adapter", () => {
     });
     expect(projection).toEqual({
       summary:
-        "Automatically activated a workspace preference learned from a task note (revision 1). Review or undo it under Learning & autonomy.",
+        "Automatically activated a workspace preference learned from a task note (revision 1). Undo is available through the workspace learning API.",
       outcome: "activated",
       destination: "preference",
       sourceKind: "task-note",
