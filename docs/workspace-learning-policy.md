@@ -99,12 +99,14 @@ content, credentials, or another human's receipts.
 
 Policy revision creation, activation, and rollback plus exact governed-change
 undo require `workspace:admin` and an authenticated human session. The
-Learning & autonomy Workspace State view maps the primary control directly to
-the canonical backend modes (`Off`, `Review first` = `suggest`, and
-`Autonomous` = `automatic`), keeps exact-source overrides under Advanced, and
-uses activation-version CAS for every change. Rollback and undo remain
-destination-native compensating lifecycle operations rather than history
-mutation.
+Learning & autonomy Workspace State view exposes only the workspace learning
+mode, mapped directly to the canonical backend modes (`Off`, `Review first` =
+`suggest`, and `Autonomous` = `automatic`); a mode change creates and activates
+a new revision under activation-version CAS and carries the active revision's
+existing source overrides forward unchanged. Exact-source overrides, rollback,
+and governed-change undo remain API/SDK operations on the `/learning` routes
+with no web UI. Rollback and undo remain destination-native compensating
+lifecycle operations rather than history mutation.
 
 Destination ownership remains:
 
