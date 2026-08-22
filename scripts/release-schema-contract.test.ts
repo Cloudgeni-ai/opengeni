@@ -150,6 +150,7 @@ describe("release schema contract", () => {
       "0312_quiescent_session_tree_deletion.sql",
       "0313_private_child_session_authority.sql",
       "0314_unregistered_organization_invitations.sql",
+      "0315_human_confirmed_activation_resumed_generation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

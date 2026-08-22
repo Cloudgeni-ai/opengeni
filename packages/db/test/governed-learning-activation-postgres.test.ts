@@ -14,6 +14,7 @@ import {
   appendKnowledgeDocumentVersion,
   appendKnowledgeSourceAclVersion,
   archiveTaskNote,
+  confirmRememberKnowledgeClaim,
   createKnowledgeChangeProposal,
   createDb,
   createSession,
@@ -289,6 +290,99 @@ async function answeredRememberInput(
     )
   `;
   return id;
+}
+
+/**
+ * Model exactly what `claimSessionWorkForAttempt` does when a `requires_action`
+ * human-input pause resumes: the minting attempt is closed, the logical turn's
+ * execution generation advances by one, and a new attempt at that generation
+ * becomes the turn's active attempt.
+ */
+async function resumeTurnOntoNextGeneration(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options: { closedAttemptId: string; nextGeneration: number },
+): Promise<{ attemptId: string; executionGeneration: number }> {
+  const resumedAttemptId = crypto.randomUUID();
+  await shared!.admin.begin(async (sql) => {
+    await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+    await sql`update session_turn_attempts set state = 'closed', outcome = 'requires_action',
+      closed_at = now() where workspace_id = ${f.grant.workspaceId} and id = ${options.closedAttemptId}`;
+    await sql`update session_turns
+      set active_attempt_id = ${resumedAttemptId}, status = 'running',
+        execution_generation = ${options.nextGeneration}
+      where workspace_id = ${f.grant.workspaceId} and id = ${f.writerAttempt.turnId}`;
+    await sql`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, authority_epoch,
+        authority_visibility, authority_owner_organization_membership_id,
+        mcp_approval_policies
+      ) values (
+        ${resumedAttemptId}, ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id},
+        ${f.writerAttempt.turnId}, ${options.nextGeneration}, 'running',
+        ${`activation-${f.writerAttempt.turnId}`},
+        ${`run-${resumedAttemptId}`}, ${`activity-${resumedAttemptId}`}, 0,
+        (select authority_epoch from sessions where id = ${f.session.id}),
+        (select visibility from sessions where id = ${f.session.id}),
+        (select owner_organization_membership_id from sessions where id = ${f.session.id}),
+        '{}'::jsonb
+      )
+    `;
+  });
+  return { attemptId: resumedAttemptId, executionGeneration: options.nextGeneration };
+}
+
+/** Start a different logical turn in the same session and make it the active turn. */
+async function activateDifferentTurn(f: Awaited<ReturnType<typeof fixture>>): Promise<string> {
+  const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  await shared!.admin.begin(async (sql) => {
+    await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+    // Only one current inference turn exists per session: the earlier turn
+    // finished before the later one started.
+    await sql`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() where workspace_id = ${f.grant.workspaceId} and id = ${f.writerAttempt.attemptId}`;
+    await sql`update session_turns
+      set status = 'completed', active_attempt_id = null, finished_at = now()
+      where workspace_id = ${f.grant.workspaceId} and id = ${f.writerAttempt.turnId}`;
+    await sql`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, source, position, prompt, model,
+        reasoning_effort, sandbox_backend, execution_generation,
+        initiator_kind, initiator_subject_id, initiator_context,
+        initiating_human_subject_id
+      ) values (
+        ${turnId}, ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id},
+        ${crypto.randomUUID()}, ${`activation-${turnId}`}, 'running', 'user', 2,
+        'activate again', 'test-model', 'medium', 'none', 2, 'subject',
+        ${f.ownerSubjectId}, '{}'::jsonb, ${f.ownerSubjectId}
+      )
+    `;
+    await sql`update sessions set active_turn_id = ${turnId}, status = 'running'
+      where workspace_id = ${f.grant.workspaceId} and id = ${f.session.id}`;
+    await sql`update session_turns set active_attempt_id = ${attemptId}
+      where workspace_id = ${f.grant.workspaceId} and id = ${turnId}`;
+    await sql`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id,
+        temporal_activity_id, verified_control_revision, authority_epoch,
+        authority_visibility, authority_owner_organization_membership_id,
+        mcp_approval_policies
+      ) values (
+        ${attemptId}, ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id},
+        ${turnId}, 2, 'running', ${`activation-${turnId}`}, ${`run-${attemptId}`},
+        ${`activity-${attemptId}`}, 0,
+        (select authority_epoch from sessions where id = ${f.session.id}),
+        (select visibility from sessions where id = ${f.session.id}),
+        (select owner_organization_membership_id from sessions where id = ${f.session.id}),
+        '{}'::jsonb
+      )
+    `;
+  });
+  return turnId;
 }
 
 async function documentDecision(f: Awaited<ReturnType<typeof fixture>>) {
@@ -1147,6 +1241,167 @@ describe("governed-learning activation PostgreSQL authority", () => {
     ).toMatchObject({
       activations: [{ id: activation.id, authorityKind: "human_confirmed" }],
       undos: [{ id: undo.id }],
+    });
+  });
+
+  test("human confirmation survives the human-input resume onto the next execution generation", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const d = await decision(f, "preference");
+    // The bound question was asked and answered at execution generation 1.
+    const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
+    // Resuming the requires_action turn claims a new attempt at generation 2.
+    const resumed = await resumeTurnOntoNextGeneration(f, {
+      closedAttemptId: f.writerAttempt.attemptId,
+      nextGeneration: 2,
+    });
+    expect(resumed.executionGeneration).toBe(2);
+    const activation = await activateHumanConfirmedLearningDecision(client.db, {
+      caller: f.caller,
+      request: {
+        operationId: crypto.randomUUID(),
+        decisionReceiptId: d.receipt.id,
+        humanInputRequestId: answered,
+      },
+    });
+    expect(activation).toMatchObject({
+      authorityKind: "human_confirmed",
+      humanInputRequestId: answered,
+      destination: "preference",
+      outcome: "activated",
+    });
+    // The answer stays bound to the generation in which it was asked: a row
+    // stamped with the resumed generation does not confirm the gen-1 decision.
+    const f2 = await fixture("suggest");
+    const d2 = await decision(f2, "preference");
+    const resumedAnswer = await answeredRememberInput(
+      f2,
+      d2.write.knowledgeChangeProposalId!,
+      d2.noteText,
+      { turnGeneration: 2 },
+    );
+    await resumeTurnOntoNextGeneration(f2, {
+      closedAttemptId: f2.writerAttempt.attemptId,
+      nextGeneration: 2,
+    });
+    await expect(
+      activateHumanConfirmedLearningDecision(client.db, {
+        caller: f2.caller,
+        request: {
+          operationId: crypto.randomUUID(),
+          decisionReceiptId: d2.receipt.id,
+          humanInputRequestId: resumedAnswer,
+        },
+      }),
+    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+  });
+
+  test("human confirmation never widens to a different logical turn", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const d = await decision(f, "preference");
+    const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
+    // A later turn of the same session is live at a higher generation; the
+    // decision and its answer belong to the earlier turn.
+    const otherTurnId = await activateDifferentTurn(f);
+    expect(otherTurnId).not.toBe(f.writerAttempt.turnId);
+    await expect(
+      activateHumanConfirmedLearningDecision(client.db, {
+        caller: f.caller,
+        request: {
+          operationId: crypto.randomUUID(),
+          decisionReceiptId: d.receipt.id,
+          humanInputRequestId: answered,
+        },
+      }),
+    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+  });
+
+  test("knowledge-claim confirmation survives the human-input resume onto the next execution generation", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    const noteText = `Knowledge source ${crypto.randomUUID()}`;
+    const note = await createTaskNote(client.db, {
+      ...f.writerAttempt,
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: noteText,
+      expiresInDays: 7,
+    });
+    const write = await writeCompanyBrainGovernedProposal(client.db, {
+      attempt: f.writerAttempt,
+      request: {
+        operationId: crypto.randomUUID(),
+        noteId: note.note.id,
+        expectedNoteVersion: 1 as const,
+        kind: "promote_task_note_knowledge" as const,
+        entityType: "user-directed",
+        normalizedKey: crypto.randomUUID(),
+        displayName: "Knowledge fixture",
+        predicateKey: "remember.fact",
+        confidenceBps: 10_000,
+        reason: "Create an exact user-directed Knowledge claim awaiting confirmation.",
+      },
+    });
+    expect(write.knowledgeChangeProposalId).toBeNull();
+    const claimId = write.claimId;
+    const knowledgeQuestion = {
+      questionId: `remember:${claimId}`,
+      prompt: "Save this as workspace knowledge for everyone in this workspace?",
+    };
+    // Asked and answered at generation 1, then resumed onto generation 2.
+    const answered = await answeredRememberInput(f, claimId, noteText, knowledgeQuestion);
+    const laterThanLive = await answeredRememberInput(f, claimId, noteText, {
+      ...knowledgeQuestion,
+      turnGeneration: 3,
+    });
+    const resumed = await resumeTurnOntoNextGeneration(f, {
+      closedAttemptId: f.writerAttempt.attemptId,
+      nextGeneration: 2,
+    });
+    const liveCaller = {
+      ...f.caller,
+      sessionId: f.session.id,
+      turnId: f.writerAttempt.turnId,
+      executionGeneration: resumed.executionGeneration,
+    };
+    // The live turn/attempt generation stays exact: the minting generation no
+    // longer describes the live attempt.
+    await expect(
+      confirmRememberKnowledgeClaim(client.db, {
+        caller: { ...liveCaller, executionGeneration: 1 },
+        request: {
+          operationId: crypto.randomUUID(),
+          claimId,
+          humanInputRequestId: answered,
+        },
+      }),
+    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+    // An answer stamped beyond the live generation cannot confirm.
+    await expect(
+      confirmRememberKnowledgeClaim(client.db, {
+        caller: liveCaller,
+        request: {
+          operationId: crypto.randomUUID(),
+          claimId,
+          humanInputRequestId: laterThanLive,
+        },
+      }),
+    ).rejects.toBeInstanceOf(GovernedLearningActivationAuthorityError);
+    const receipt = await confirmRememberKnowledgeClaim(client.db, {
+      caller: liveCaller,
+      request: {
+        operationId: crypto.randomUUID(),
+        claimId,
+        humanInputRequestId: answered,
+      },
+    });
+    expect(receipt).toMatchObject({
+      claimId,
+      humanInputRequestId: answered,
+      executionGeneration: 2,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+      taskNoteId: note.note.id,
     });
   });
 });
