@@ -160,6 +160,9 @@ export type OrganizationMembershipRole = OrganizationMember["role"];
 export type OrganizationAdministrationOverview = Awaited<
   ReturnType<OpenGeniCoreClient["getOrganizationAdministrationOverview"]>
 >;
+export type OrganizationPrivateSessionSettings = Awaited<
+  ReturnType<OpenGeniCoreClient["getOrganizationPrivateSessionSettings"]>
+>;
 export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
 export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];
 export type OrganizationRetentionPolicy = Awaited<

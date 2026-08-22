@@ -246,11 +246,13 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  UpdateOrganizationPrivateSessionSettingsRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
@@ -3797,6 +3799,26 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationSummary>(
       "PATCH",
       `/v1/organizations/${organizationId}`,
+      request,
+    );
+  }
+
+  async getOrganizationPrivateSessionSettings(
+    organizationId: string,
+  ): Promise<OrganizationPrivateSessionSettings> {
+    return await this.requestJson<OrganizationPrivateSessionSettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/private-session-settings`,
+    );
+  }
+
+  async updateOrganizationPrivateSessionSettings(
+    organizationId: string,
+    request: UpdateOrganizationPrivateSessionSettingsRequest,
+  ): Promise<OrganizationPrivateSessionSettings> {
+    return await this.requestJson<OrganizationPrivateSessionSettings>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/private-session-settings`,
       request,
     );
   }

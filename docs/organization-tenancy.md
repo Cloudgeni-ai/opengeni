@@ -860,8 +860,28 @@ organization and is inserted with owner provenance, visibility, and the first
 event/turn in the existing create transaction. The web checks the capability
 before enabling Only me, explains `not_activated` instead of silently hiding
 the choice, and never sends a restored private draft while that preflight is
-pending or denied. A Personal workspace remains intrinsically owner-only and
-therefore creates through the ordinary workspace-default wire path.
+pending or denied.
+
+Migration 0315 separates operator readiness from product enablement. The
+version-1 `session_tenancy_activations` row remains the drained, evidence-backed
+operator prerequisite. A distinct FORCE-RLS
+`organization_private_session_settings` row is the owner/admin product decision
+for shared organization workspaces. Its managed-session GET/PATCH API is backed
+by subject-bound SECURITY DEFINER functions with active-membership role checks,
+optimistic versioning, and idempotent operation receipts; it never consults the
+organization members endpoint. Existing organizations that were already
+operator-activated are backfilled enabled so the rolling migration does not
+remove a shipped capability. For later activations, an owner or administrator
+must enable Only-me chats before use. Enablement does not grant access: any
+active member may use it only in a workspace where their ordinary grant carries
+`sessions:create`, and the private-create transaction rechecks their exact
+organization membership plus workspace membership.
+
+A managed human's Personal workspace is different: it is intrinsically private,
+so top-level chat creation is forced to `user_private` even when an older client
+sends or defaults `visibility: "workspace"`. This path requires the canonical
+managed-cookie owner and the membership's exact `personal_workspace_id` pointer,
+but does not require either the operator receipt or the organization setting.
 
 **Mutation-active only after an explicit per-organization cutover.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY
@@ -879,7 +899,8 @@ writer of `session.visibility.changed`; core fetches the returned durable event
 id and sequence and performs best-effort live publication without appending a
 second event or waking a workflow.
 
-Migration 0303 itself is rolling and activates no organization. The drained
+Migration 0303 itself is rolling and supplies platform readiness, not the
+owner/admin product preference. The drained
 `bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
 command verifies the canonical opt-in, required migrations, zero-valued tenancy
 parity gates plus exact drainable/bounded lanes, while retaining the inventory

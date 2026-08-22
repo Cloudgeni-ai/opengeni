@@ -9,6 +9,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = ["overview", "people", "retention", "
 export type OrganizationAdminSection = (typeof ORGANIZATION_ADMIN_SECTIONS)[number];
 export type OrganizationAdminResource =
   | "overview"
+  | "private-sessions"
   | "members"
   | "admin-invitations"
   | "incoming-invitations"

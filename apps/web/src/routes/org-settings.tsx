@@ -19,6 +19,7 @@ import { LoadErrorState, PageHeader } from "@/components/common";
 import {
   OrganizationPeopleSection,
   OrganizationOverviewSection,
+  OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
 import { Button } from "@/components/ui/button";
@@ -297,15 +298,24 @@ export function OrgSettingsRoute({
         </nav>
 
         {section === "overview" ? (
-          <OrganizationOverviewSection
-            key={identityKey}
-            client={client}
-            identity={adminIdentity}
-            actorRole={actorRole}
-            managedSession={context.clientConfig.auth.mode === "managedSession"}
-            accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
-            onOrganizationChanged={context.revalidatePrincipalAccess}
-          />
+          <>
+            <OrganizationOverviewSection
+              key={`${identityKey}:overview`}
+              client={client}
+              identity={adminIdentity}
+              actorRole={actorRole}
+              managedSession={context.clientConfig.auth.mode === "managedSession"}
+              accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
+              onOrganizationChanged={context.revalidatePrincipalAccess}
+            />
+            <OrganizationPrivateSessionsSection
+              key={`${identityKey}:private-sessions`}
+              client={client}
+              identity={adminIdentity}
+              actorRole={actorRole}
+              managedSession={context.clientConfig.auth.mode === "managedSession"}
+            />
+          </>
         ) : null}
 
         {section === "people" ? (

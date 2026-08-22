@@ -15,6 +15,7 @@ import type {
   OrganizationInvitation,
   OrganizationMember,
   OrganizationRetentionPolicy,
+  OrganizationPrivateSessionSettings,
 } from "@/types";
 
 const toastSuccess = mock((_message: string) => undefined);
@@ -54,8 +55,12 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
-const { OrganizationOverviewSection, OrganizationPeopleSection, OrganizationRetentionSection } =
-  await import("./organization-admin");
+const {
+  OrganizationOverviewSection,
+  OrganizationPeopleSection,
+  OrganizationPrivateSessionsSection,
+  OrganizationRetentionSection,
+} = await import("./organization-admin");
 
 const identityA: OrganizationAdminIdentity = {
   principalGeneration: 1,
@@ -218,6 +223,58 @@ beforeEach(() => {
 });
 
 describe("organization administration component fences", () => {
+  test("lets an administrator enable Only me chats without loading organization members", async () => {
+    const current = {
+      organizationId: identityA.organizationId,
+      enabled: false,
+      available: true,
+      version: 0,
+      updatedAt: timestamp,
+    } satisfies OrganizationPrivateSessionSettings;
+    const getOrganizationPrivateSessionSettings = mock(async () => current);
+    const updateOrganizationPrivateSessionSettings = mock(async () => ({
+      ...current,
+      enabled: true,
+      version: 1,
+      changed: true,
+    }));
+    const client = {
+      getOrganizationPrivateSessionSettings,
+      updateOrganizationPrivateSessionSettings,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationPrivateSessionsSection
+          client={client}
+          identity={identityA}
+          actorRole="admin"
+          managedSession
+        />,
+      );
+    });
+    await flush();
+    expect(container.textContent).toContain("Only me chats");
+    await act(async () => button(container, "Enable").click());
+    await flush();
+
+    expect(updateOrganizationPrivateSessionSettings).toHaveBeenCalledTimes(1);
+    expect(updateOrganizationPrivateSessionSettings.mock.calls[0]?.[0]).toBe(
+      identityA.organizationId,
+    );
+    expect(updateOrganizationPrivateSessionSettings.mock.calls[0]?.[1]).toMatchObject({
+      enabled: true,
+      expectedVersion: 0,
+    });
+    expect(container.textContent).toContain("permission to start chats");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("renders shared workspace access and keeps rename owned through StrictMode", async () => {
     const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
     const updateOrganizationName = mock(async () => ({

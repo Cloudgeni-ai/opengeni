@@ -111,21 +111,25 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   The four authority/grant tables remain FORCE-RLS with zero direct app DML;
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.
-  All remaining APIs, resources, sessions, and lists remain
-  workspace-owned/workspace-shared. Session RLS is the one place where the
-  schema is ahead of the product: migration 0225 activated owner derivation, the
-  capability-fenced direct-write trigger, and visibility-aware reads, but its
-  `transition_session_visibility` and `fork_session_content` lifecycle functions
-  are deliberately uncalled outside the `packages/db` test lane, so every
-  production session stays `workspace_shared`. Owner derivation reads STATED
+  All remaining APIs and resources stay workspace-owned unless their focused
+  authority document says otherwise. Session RLS is active product authority:
+  migration 0225 activated owner derivation, the capability-fenced direct-write
+  trigger, and visibility-aware reads; migration 0311 added atomic private
+  creation; migration 0315 makes a managed human's Personal workspace create
+  private sessions automatically and adds a separate owner/admin organization
+  setting for Only-me chats in shared workspaces. That setting never grants
+  session creation: after enablement, the ordinary workspace grant must still
+  carry `sessions:create`, and the caller must still be the canonical managed
+  human whose active organization/workspace membership is rechecked by the
+  database. The operator readiness receipt from migration 0303 remains a
+  separate prerequisite for organization-workspace enablement and is never a UI
+  preference. Owner derivation reads STATED
   authority only: an active membership's own `personal_workspace_id` pointer or
   an explicit `workspace_memberships` row (migration 0302). Never widen it to a
   default workspace, `created_by`, or current access, and never let an
   unresolved owner inside an active membership's personal workspace fall back to
-  a silent NULL. Do not add the first caller
-  without the activation prerequisites (cache/pin stripping, cancellation,
-  owner-only grants) and an update to
-  `test/session-visibility-contract-surface.test.ts`. An organization-wide
+  a silent NULL. Visibility transitions and forks remain owner-only and retain
+  their quiescence/activation prerequisites. An organization-wide
   lifecycle seam serializes on the transaction-scoped advisory key
   `hashtextextended('organization-membership:<organization id>')` and may take no
   lock stronger than `managed_accounts FOR KEY SHARE` before the canonical

@@ -8,11 +8,13 @@ import {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  UpdateOrganizationPrivateSessionSettingsRequest,
   UpdateOrganizationRetentionPolicyRequest,
 } from "@opengeni/contracts";
 import {
@@ -26,6 +28,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationAdministrationOverview,
+  getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
   listOrganizationMembers,
@@ -35,6 +38,7 @@ import {
   revokeOrganizationInvitation,
   updateOrganizationMember,
   updateOrganizationName,
+  updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -190,6 +194,55 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.get("/v1/organizations/:organizationId/private-session-settings", async (context) => {
+    const { subjectId } = await requireManagedHuman(context, deps);
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    try {
+      return context.json(
+        OrganizationPrivateSessionSettings.parse(
+          await getOrganizationPrivateSessionSettings(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+          }),
+        ),
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.patch("/v1/organizations/:organizationId/private-session-settings", async (context) => {
+    const { subjectId } = await requireManagedHuman(context, deps);
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const payload = await parseBody(context, UpdateOrganizationPrivateSessionSettingsRequest);
+    try {
+      return context.json(
+        OrganizationPrivateSessionSettings.parse(
+          await updateOrganizationPrivateSessionSettings(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+            ...payload,
+          }),
+        ),
+      );
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "55000") {
+        throw new HTTPException(409, {
+          message: "private-session readiness is not activated for this organization",
+        });
+      }
       rethrowMembershipError(error);
     }
   });

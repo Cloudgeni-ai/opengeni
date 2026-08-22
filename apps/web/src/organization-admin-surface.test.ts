@@ -24,6 +24,8 @@ describe("organization administration surface", () => {
       "listOrganizationInvitations",
       "acceptOrganizationInvitation",
       "updateOrganizationMember",
+      "getOrganizationPrivateSessionSettings",
+      "updateOrganizationPrivateSessionSettings",
       "getOrganizationRetentionPolicy",
       "updateOrganizationRetentionPolicy",
     ]) {

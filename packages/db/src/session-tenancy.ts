@@ -82,6 +82,12 @@ export function nestedSessionTenancyBlocker(error: unknown): SessionTenancyBlock
 
 export type SessionTenancyVisibility = "user_private" | "workspace_shared";
 
+export type PrivateSessionCreatePolicy = {
+  personalWorkspace: boolean;
+  platformAvailable: boolean;
+  organizationEnabled: boolean;
+};
+
 export type TransitionSessionVisibilityInput = {
   workspaceId: string;
   sessionId: string;
@@ -143,6 +149,39 @@ export async function sessionTenancyProductActivated(
     );
     return rows[0]?.activated === true;
   });
+}
+
+export async function getPrivateSessionCreatePolicy(
+  db: Database,
+  input: { workspaceId: string; actorSubjectId: string },
+): Promise<PrivateSessionCreatePolicy> {
+  const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        personalWorkspace: boolean;
+        platformAvailable: boolean;
+        organizationEnabled: boolean;
+      }>(
+        scopedDb,
+        sql`select
+          personal_workspace as "personalWorkspace",
+          platform_available as "platformAvailable",
+          organization_enabled as "organizationEnabled"
+        from get_private_session_create_policy(
+          ${accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId}
+        )`,
+      );
+      const policy = rows[0];
+      if (!policy) throw new SessionTenancyAccessError();
+      return policy;
+    },
+  );
 }
 
 /** Open the exact transaction-local trigger capability used by atomic private create. */

@@ -336,6 +336,72 @@ describe("organization membership routes", () => {
     expect(invitation).not.toHaveProperty("targetRegistrationStatus");
   });
 
+  test("exposes owner-managed private-session settings behind readiness", async () => {
+    if (!shared || !app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const endpoint = `http://x/v1/organizations/${accountId}/private-session-settings`;
+
+    const initial = await app.request(endpoint, { headers: { cookie: "session=present" } });
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({
+      organizationId: accountId,
+      enabled: false,
+      available: false,
+      version: 0,
+    });
+
+    const beforeReadiness = await app.request(endpoint, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+        expectedVersion: 0,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(beforeReadiness.status).toBe(409);
+
+    const memberShapedRequest = await app.request(endpoint, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+        expectedVersion: 0,
+        operationId: crypto.randomUUID(),
+        membershipId: crypto.randomUUID(),
+      }),
+    });
+    expect(memberShapedRequest.status).toBe(422);
+
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-settings-test')`;
+    const enabled = await app.request(endpoint, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+        expectedVersion: 0,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(enabled.status).toBe(200);
+    expect(await enabled.json()).toMatchObject({
+      organizationId: accountId,
+      enabled: true,
+      available: true,
+      version: 1,
+      changed: true,
+    });
+  });
+
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {
     if (!shared || !app) return;
     const membershipResponse = await app.request("http://x/v1/organization-memberships", {

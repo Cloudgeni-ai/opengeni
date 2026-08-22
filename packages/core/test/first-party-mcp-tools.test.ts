@@ -52,6 +52,17 @@ describe("first-party MCP tool selection at session creation", () => {
 });
 
 describe("child session visibility", () => {
+  test("forces top-level Personal workspace sessions private", () => {
+    expect(
+      resolveSessionCreateVisibility({
+        requestedVisibility: "workspace",
+        visibilityProvided: true,
+        parentVisibility: null,
+        personalWorkspace: true,
+      }),
+    ).toBe("user_private");
+  });
+
   test("omission inherits a private parent and explicit widening is rejected", () => {
     expect(
       resolveSessionCreateVisibility({

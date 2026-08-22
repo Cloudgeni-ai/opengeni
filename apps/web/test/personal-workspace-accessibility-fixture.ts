@@ -133,6 +133,7 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           capabilities: {
             activated: true,
             canCreatePrivate: true,
+            personalWorkspace: true,
             reason: "available",
           },
           disabled: false,
@@ -149,6 +150,7 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           capabilities: {
             activated: false,
             canCreatePrivate: false,
+            personalWorkspace: false,
             reason: "not_activated",
           },
           disabled: false,

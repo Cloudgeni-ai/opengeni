@@ -174,6 +174,7 @@ function SessionsIndexRouteContent({
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
+    personalWorkspace: boolean;
     reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
   } | null>(null);
   const tenancyCapabilityGeneration = useRef(0);
@@ -183,6 +184,7 @@ function SessionsIndexRouteContent({
       setTenancyCapabilities({
         activated: true,
         canCreatePrivate: true,
+        personalWorkspace: true,
         reason: "available",
       });
       return;
@@ -204,6 +206,7 @@ function SessionsIndexRouteContent({
         setTenancyCapabilities({
           activated: false,
           canCreatePrivate: false,
+          personalWorkspace: false,
           reason: "unavailable",
         });
         setDraft((current) =>
@@ -501,7 +504,7 @@ function SessionsIndexRouteContent({
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
-                  visibility: personalWorkspace ? "workspace" : submission.options.visibility,
+                  visibility: personalWorkspace ? "private" : submission.options.visibility,
                 },
               );
               if (!created) return null;
@@ -544,7 +547,7 @@ function SessionsIndexRouteContent({
                 channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
-                visibility: personalWorkspace ? "workspace" : submission.options.visibility,
+                visibility: personalWorkspace ? "private" : submission.options.visibility,
                 onFailure: ({ error, request }) =>
                   personalAttachment.onDeliveryError(error, request, "create"),
               },

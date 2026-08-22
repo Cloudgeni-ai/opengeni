@@ -12812,6 +12812,7 @@ export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 export const SessionTenancyCreateCapabilities = z.object({
   activated: z.boolean(),
   canCreatePrivate: z.boolean(),
+  personalWorkspace: z.boolean().default(false),
   reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
 });
 export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;

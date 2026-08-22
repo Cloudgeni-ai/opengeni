@@ -1097,6 +1097,7 @@ export type SessionVisibility = "private" | "workspace";
 export type SessionTenancyCreateCapabilities = {
   activated: boolean;
   canCreatePrivate: boolean;
+  personalWorkspace: boolean;
   reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
 };
 
@@ -3602,9 +3603,22 @@ export type OrganizationAdministrationOverview = {
   organization: OrganizationSummary;
   workspaces: OrganizationWorkspaceAccess[];
 };
+export type OrganizationPrivateSessionSettings = {
+  organizationId: string;
+  enabled: boolean;
+  available: boolean;
+  version: number;
+  updatedAt: string;
+  changed?: boolean;
+};
 export type UpdateOrganizationNameRequest = {
   name: string;
   expectedUpdatedAt: string;
+  operationId: string;
+};
+export type UpdateOrganizationPrivateSessionSettingsRequest = {
+  enabled: boolean;
+  expectedVersion: number;
   operationId: string;
 };
 export type OrganizationRetentionPolicy = {

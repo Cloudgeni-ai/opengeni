@@ -100,6 +100,8 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_private_session_setting_events",
+  "organization_private_session_settings",
   "organization_profile_events",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",

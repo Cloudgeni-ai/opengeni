@@ -5,6 +5,7 @@ import {
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
   OrganizationAdministrationOverview,
+  OrganizationPrivateSessionSettings,
   OrganizationMember,
   OrganizationRetentionDeletionClaim,
   OrganizationRetentionDatabaseFinalization,
@@ -16,6 +17,7 @@ import {
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
+  type OrganizationPrivateSessionSettings as OrganizationPrivateSessionSettingsType,
   type OrganizationMembershipRole,
   type OrganizationRetentionDeletionClaim as OrganizationRetentionDeletionClaimType,
   type OrganizationRetentionDatabaseFinalization as OrganizationRetentionDatabaseFinalizationType,
@@ -510,6 +512,57 @@ export async function updateOrganizationName(
         ) as result`,
       );
       return OrganizationSummary.parse(row?.result);
+    },
+  );
+}
+
+export async function getOrganizationPrivateSessionSettings(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationPrivateSessionSettingsType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select get_organization_private_session_settings(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return OrganizationPrivateSessionSettings.parse(row?.result);
+    },
+  );
+}
+
+export async function updateOrganizationPrivateSessionSettings(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    enabled: boolean;
+    expectedVersion: number;
+    operationId: string;
+  },
+): Promise<OrganizationPrivateSessionSettingsType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select update_organization_private_session_settings(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId},
+          ${input.enabled},
+          ${input.expectedVersion}::bigint,
+          ${input.operationId}::uuid
+        ) as result`,
+      );
+      return OrganizationPrivateSessionSettings.parse(row?.result);
     },
   );
 }
