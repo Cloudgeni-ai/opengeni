@@ -69,12 +69,11 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("visibleBusyResource || incoming.loading");
   });
 
-  test("documents the bounded UI without claiming provider email or unregistered invites", () => {
+  test("documents the bounded UI while keeping provider delivery outside this backend phase", () => {
     expect(tenancyDocs).toContain("bounded organization\nadministration surface");
     expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
-    expect(tenancyDocs).toContain(
-      "Provider email\ndelivery and invitations for unregistered recipients remain non-goals",
-    );
+    expect(tenancyDocs).toContain("Provider email delivery\nremains a non-goal");
+    expect(tenancyDocs).toContain("pre-registration name and initial-workspace access");
     expect(tenancyDocs).not.toContain("member-management\nUI remain deferred");
   });
 });

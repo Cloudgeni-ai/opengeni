@@ -3623,6 +3623,8 @@ export type OrganizationInvitation = {
   id: string;
   organizationId: string;
   targetEmail: string;
+  targetName: string | null;
+  initialWorkspaceIds: string[];
   role: OrganizationMembershipRole;
   status: "pending" | "accepted" | "revoked" | "expired";
   revision: number;
@@ -3685,6 +3687,8 @@ export type OrganizationRetentionPolicy = {
 };
 export type CreateOrganizationInvitationRequest = {
   email: string;
+  name?: string;
+  initialWorkspaceIds?: string[];
   role?: OrganizationMembershipRole;
   expiresAt: string;
   operationId: string;

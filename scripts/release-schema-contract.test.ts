@@ -150,6 +150,7 @@ describe("release schema contract", () => {
       "0312_quiescent_session_tree_deletion.sql",
       "0315_personal_github_repository_selection.sql",
       "0313_private_child_session_authority.sql",
+      "0314_unregistered_organization_invitations.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -164,6 +165,11 @@ describe("release schema contract", () => {
     if (transitionReaper) {
       expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0314_unregistered_organization_invitations.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",

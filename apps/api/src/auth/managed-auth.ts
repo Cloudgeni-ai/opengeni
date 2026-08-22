@@ -161,6 +161,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
           userId: user.id,
           email: user.email,
           name: user.name,
+          emailVerified: true,
         });
       },
     },
@@ -240,10 +241,12 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       user: {
         create: {
           after: async (user) => {
+            if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
               userId: user.id,
               email: user.email,
               name: user.name,
+              emailVerified: true,
             });
           },
         },

@@ -140,6 +140,7 @@ function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
 
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
+    "organization_invitation_binding_events",
     "organization_membership_invitations",
     "organization_membership_lifecycle_events",
     "organization_membership_operation_receipts",
@@ -370,25 +371,25 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 266],
+            [FORCE_RLS_TABLES, 267],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 135],
             [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 46],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 47],
             [RUNTIME_DML_TABLES, 231],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 192],
+            [FORCE_RLS_TABLES, 193],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 25],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 26],
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -402,7 +403,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 277 : 203;
+      const tableCount = hasCurrentMainActivityLedger ? 278 : 204;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
