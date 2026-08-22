@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  ensureManagedAccessForUserWithOrganizationMemberships,
+  type DbClient,
+} from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireSharedTestDatabase,
@@ -352,7 +356,7 @@ describe("organization membership routes", () => {
     if (!ownerMembership) throw new Error("owner membership missing");
 
     const otherUserId = `private-settings-idor-${crypto.randomUUID()}`;
-    const otherAccess = await ensureManagedAccessForUser(client.db, {
+    const otherAccess = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
       userId: otherUserId,
       email: `${otherUserId}@example.test`,
       name: "Other organization owner",

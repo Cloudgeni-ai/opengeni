@@ -23,7 +23,7 @@ import {
 } from "@opengeni/testing";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const ENABLEMENT_MIGRATION = "0315_organization_private_session_enablement.sql";
+const ENABLEMENT_MIGRATION = "0316_organization_private_session_enablement.sql";
 
 async function migrationFiles(): Promise<string[]> {
   return (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
@@ -53,7 +53,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0315-private-session-enablement");
+  shared = await acquireSharedTestDatabase("migration-0316-private-session-enablement");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL required");
     return;

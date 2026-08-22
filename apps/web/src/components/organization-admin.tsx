@@ -3,7 +3,6 @@ import {
   Building2Icon,
   CheckIcon,
   ClockIcon,
-  LockIcon,
   Loader2Icon,
   PencilIcon,
   RefreshCwIcon,
@@ -190,7 +189,7 @@ export function OrganizationPrivateSessionsSection(props: {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <LockIcon className="size-3.5 text-brand" />
+            <ShieldCheckIcon className="size-3.5 text-brand" />
             Only me chats
           </h2>
           <p className="mt-1 max-w-2xl text-xs text-fg-muted">
