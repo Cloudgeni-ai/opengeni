@@ -76,7 +76,9 @@ describe("managed-human session tenancy application service", () => {
           ...canonical,
           grant: {
             ...grant,
-            permissions: grant.permissions.filter((permission) => permission !== "sessions:create"),
+            permissions: grant.permissions.filter(
+              (permission) => permission !== "sessions:create" && permission !== "workspace:admin",
+            ),
           },
         },
         grant.workspaceId,
