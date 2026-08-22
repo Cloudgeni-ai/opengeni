@@ -83,9 +83,7 @@ async function main(): Promise<void> {
     ttlSeconds: args.ttlSeconds,
     useServerProxy: true,
     signedEndpoints: args.signedEndpoints,
-    ...(args.channelBPublicBaseUrl
-      ? { channelBPublicBaseUrl: args.channelBPublicBaseUrl }
-      : {}),
+    ...(args.channelBPublicBaseUrl ? { channelBPublicBaseUrl: args.channelBPublicBaseUrl } : {}),
     readyTimeoutSeconds: args.readyTimeoutSeconds,
     resourceLimits: { cpu: "1", memory: "1Gi" },
     resourceRequests: { cpu: "250m", memory: "512Mi" },

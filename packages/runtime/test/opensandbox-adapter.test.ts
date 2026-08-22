@@ -112,7 +112,11 @@ class FakeOpenSandbox {
       ) {
         self.executedCommands.push(command);
         const cwd = options?.workingDirectory;
-        if (cwd && !self.files.has(cwd) && ![...self.files.keys()].some((path) => path.startsWith(`${cwd}/`))) {
+        if (
+          cwd &&
+          !self.files.has(cwd) &&
+          ![...self.files.keys()].some((path) => path.startsWith(`${cwd}/`))
+        ) {
           throw new SandboxApiException({
             message: `invalid request, validation error working directory does not exist: ${cwd}: stat ${cwd}: no such file or directory`,
             statusCode: 400,

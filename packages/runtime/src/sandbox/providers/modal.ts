@@ -154,7 +154,8 @@ function modalWorkspaceAbsolutePath(path: string, workspaceRoot: string): string
 
 function installModalListDirCompatibility(session: MutableModalSandboxSession): void {
   if (typeof session.listDir === "function") return;
-  if (typeof session.execCommand !== "function" || typeof session.readFile !== "function") return;
+  const execCommand = session.execCommand;
+  if (typeof execCommand !== "function" || typeof session.readFile !== "function") return;
   const workspaceRoot = session.state?.manifest?.root;
   if (!workspaceRoot) {
     throw new Error("Modal listDir compatibility requires a manifest workspace root");
@@ -162,8 +163,11 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
   session.listDir = async (args) => {
     const absoluteResultPaths = args.path.startsWith("/");
     const relativePath = modalWorkspaceRelativePath(args.path, workspaceRoot);
+    // This function is the provider's listDir compatibility surface. Do not
+    // pass it back into Channel A as a native accelerator or fsList() recurses
+    // into this shim instead of using Modal's command data plane.
     const service = new SandboxChannelAService({
-      session: session as ChannelASession,
+      session: { execCommand: execCommand.bind(session) },
       workspaceRoot,
       ...(args.runAs ? { runAs: args.runAs } : {}),
     });

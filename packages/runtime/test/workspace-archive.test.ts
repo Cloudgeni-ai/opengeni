@@ -272,19 +272,30 @@ describe("verified workspace archives", () => {
       mkdirSync(join(root, ".gnupg"), { recursive: true });
       writeFileSync(join(root, "retained.txt"), "retained");
       const run = () => {
-        const result = Bun.spawnSync(["/bin/bash", "-c", command.replace("cd /workspace", `cd ${shellQuote(root)}`)], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        const result = Bun.spawnSync(
+          ["/bin/bash", "-c", command.replace("cd /workspace", `cd ${shellQuote(root)}`)],
+          {
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
         expect(result.exitCode).toBe(0);
         return Buffer.from(result.stdout).toString("utf8");
       };
       const withoutSocket = run();
       const socketPath = join(root, ".gnupg", "S.gpg-agent");
-      const socket = Bun.spawnSync(["python3", "-c", "import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])", socketPath], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const socket = Bun.spawnSync(
+        [
+          "python3",
+          "-c",
+          "import socket, sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])",
+          socketPath,
+        ],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
       expect(socket.exitCode).toBe(0);
       expect(run()).toBe(withoutSocket);
     } finally {

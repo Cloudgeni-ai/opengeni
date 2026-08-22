@@ -1592,9 +1592,7 @@ async function requestExposedController(
         /* metrics must not affect Channel B */
       }
     }
-    throw new BrowserControlTransportError(
-      `browser controller returned HTTP ${response.status}`,
-    );
+    throw new BrowserControlTransportError(`browser controller returned HTTP ${response.status}`);
   }
   return parseEnvelope(responseText, response.status);
 }

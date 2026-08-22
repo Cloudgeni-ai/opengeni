@@ -385,7 +385,10 @@ export function safeSnapshotError(error: unknown): {
         status?: unknown;
         statusCode?: unknown;
       };
-      if (typeof candidate.name === "string" && /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)) {
+      if (
+        typeof candidate.name === "string" &&
+        /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)
+      ) {
         fields.causeName = candidate.name;
       }
       if (typeof candidate.code === "string" && /^[a-z0-9_]{1,64}$/u.test(candidate.code)) {
@@ -557,7 +560,9 @@ async function materializeSpawnEnvelopeArchive(
   if (!envelope || typeof envelope !== "object") return envelope;
   const record = envelope as Record<string, unknown>;
   const sessionState =
-    record.sessionState && typeof record.sessionState === "object" && !Array.isArray(record.sessionState)
+    record.sessionState &&
+    typeof record.sessionState === "object" &&
+    !Array.isArray(record.sessionState)
       ? (record.sessionState as Record<string, unknown>)
       : null;
   if (!sessionState || !parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {

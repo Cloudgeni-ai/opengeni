@@ -57,10 +57,7 @@ import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { nextDurableOpId } from "../op-correlation";
-import {
-  parseOpenSandboxSignedUriPath,
-  redactOpenSandboxSignedUriPath,
-} from "../stream-port";
+import { parseOpenSandboxSignedUriPath, redactOpenSandboxSignedUriPath } from "../stream-port";
 import type { RuntimeMetricsHooks } from "../../metrics";
 
 const WORKSPACE_ROOT = "/workspace";
@@ -294,9 +291,7 @@ function assertStateMatchesOptions(
 }
 
 function isAllowedPrivatePath(absolute: string): boolean {
-  return ALLOWED_PRIVATE_ROOTS.some(
-    (root) => absolute === root || absolute.startsWith(`${root}/`),
-  );
+  return ALLOWED_PRIVATE_ROOTS.some((root) => absolute === root || absolute.startsWith(`${root}/`));
 }
 
 function workspacePath(path: string, options: { allowPrivate?: boolean } = {}): string {
@@ -1374,7 +1369,8 @@ tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --nume
         sandboxId: this.state.sandboxId,
         port,
         expiresAtSeconds: parsed?.expiresAtSeconds ?? null,
-        path: typeof resolved.path === "string" ? redactOpenSandboxSignedUriPath(resolved.path) : null,
+        path:
+          typeof resolved.path === "string" ? redactOpenSandboxSignedUriPath(resolved.path) : null,
       });
       if (signed) {
         recordSignedEndpointMetric(this.options.metrics, { outcome: "minted", port });
@@ -1441,9 +1437,7 @@ function endpointToExposedPort(
   // Channel B is browser → provider-tunnel direct. When we use the lifecycle
   // server proxy, rewrite the advertised host to the configured base URL so a
   // local port-forward (or in-cluster DNS) is what the viewer actually opens.
-  const url = rewriteToBaseUrl
-    ? new URL(`${reported.pathname}${reported.search}`, base)
-    : reported;
+  const url = rewriteToBaseUrl ? new URL(`${reported.pathname}${reported.search}`, base) : reported;
   const tls = url.protocol === "https:" || url.protocol === "wss:";
   return {
     host: url.hostname,

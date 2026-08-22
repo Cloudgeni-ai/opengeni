@@ -1873,12 +1873,7 @@ export async function establishSandboxSessionFromEnvelope(
       const fallbackClient = (
         opts.clientFactory
           ? opts.clientFactory(backend, fallbackSettings, environment)
-          : createSandboxClientForBackend(
-              backend,
-              fallbackSettings,
-              environment,
-              opts.metrics,
-            )
+          : createSandboxClientForBackend(backend, fallbackSettings, environment, opts.metrics)
       ) as ResumeCapableClient | undefined;
       if (!fallbackClient?.create) {
         throw new SandboxConfigError(

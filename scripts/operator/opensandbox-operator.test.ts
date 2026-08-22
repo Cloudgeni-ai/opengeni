@@ -132,9 +132,13 @@ describe("OpenSandbox operator harnesses", () => {
       "OPENSANDBOX_INGRESS_IMAGE=docker.io/opensandbox/ingress@sha256:450cdae23c7987e6b4974e56577f9569cc0eb7e48e54eff88c11f023db3b35b4",
     );
     const rendered = await new Promise<string>((resolvePromise, reject) => {
-      const child = spawn("bash", [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")], {
-        cwd: resolve(import.meta.dir, "../.."),
-      });
+      const child = spawn(
+        "bash",
+        [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")],
+        {
+          cwd: resolve(import.meta.dir, "../.."),
+        },
+      );
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (chunk) => {
@@ -166,16 +170,20 @@ describe("OpenSandbox operator harnesses", () => {
       source,
       `[ingress]\nmode = "gateway"\n\ngateway.address = "gw.example"\ngateway.route.mode = "uri"\n`,
     );
-    const child = spawn("python3", [resolve(import.meta.dir, "opensandbox-materialize-secure-access-config.py")], {
-      cwd: dir,
-      env: {
-        ...process.env,
-        SANDBOX_CONFIG_PATH: source,
-        OPENSANDBOX_RUNTIME_CONFIG_PATH: dest,
-        OPENSANDBOX_SECURE_ACCESS_KEYS: "a=dGVzdC1rZXktYnl0ZXMtZm9yLXVuaXQ=",
-        OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY: "a",
+    const child = spawn(
+      "python3",
+      [resolve(import.meta.dir, "opensandbox-materialize-secure-access-config.py")],
+      {
+        cwd: dir,
+        env: {
+          ...process.env,
+          SANDBOX_CONFIG_PATH: source,
+          OPENSANDBOX_RUNTIME_CONFIG_PATH: dest,
+          OPENSANDBOX_SECURE_ACCESS_KEYS: "a=dGVzdC1rZXktYnl0ZXMtZm9yLXVuaXQ=",
+          OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY: "a",
+        },
       },
-    });
+    );
     const stderr = await new Promise<string>((resolvePromise, reject) => {
       let out = "";
       let err = "";
@@ -242,9 +250,13 @@ metadata:
   name: opensandbox-server
 `;
     const rendered = await new Promise<string>((resolvePromise, reject) => {
-      const child = spawn("bash", [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")], {
-        cwd: resolve(import.meta.dir, "../.."),
-      });
+      const child = spawn(
+        "bash",
+        [resolve(import.meta.dir, "opensandbox-image-post-renderer.sh")],
+        {
+          cwd: resolve(import.meta.dir, "../.."),
+        },
+      );
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (chunk) => {

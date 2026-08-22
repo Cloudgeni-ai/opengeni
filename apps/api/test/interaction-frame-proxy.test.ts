@@ -40,7 +40,8 @@ describe("interaction frame proxy", () => {
     const attachment = createInteractionFrameProxyAttachment({
       requestUrl: `${publicOrigin}/v1/workspaces/workspace/computer-sessions/session/attachments`,
       rootSecret,
-      upstreamUrl: "ws://127.0.0.1:18090/v1/sandboxes/box/proxy/7682/v1/computer-sessions/cs/targets/screen%3A0/rfb",
+      upstreamUrl:
+        "ws://127.0.0.1:18090/v1/sandboxes/box/proxy/7682/v1/computer-sessions/cs/targets/screen%3A0/rfb",
       upstreamProtocols: [
         "binary",
         "opengeni.computer.rfb.v1",
