@@ -369,8 +369,8 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ).length;
-        const contracts = hasCurrentMainActivityLedger
-          ? ([
+      const contracts = hasCurrentMainActivityLedger
+        ? ([
             [FORCE_RLS_TABLES, 274],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 142],
