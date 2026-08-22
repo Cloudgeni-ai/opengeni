@@ -234,6 +234,11 @@ describe("company-profile agent administration", () => {
     expect(migration.match(/FOREIGN KEY \(workspace_id, session_id\)/g)).toHaveLength(2);
     expect(migration.match(/REFERENCES sessions\(workspace_id, id\)/g)).toHaveLength(2);
     expect(migration).not.toContain("REFERENCES sessions(account_id, workspace_id, id)");
+    expect(migration.match(/FOREIGN KEY \(workspace_id, turn_id\)/g)).toHaveLength(2);
+    expect(migration.match(/REFERENCES session_turns\(workspace_id, id\)/g)).toHaveLength(2);
+    expect(migration).not.toContain(
+      "REFERENCES session_turns(account_id, workspace_id, session_id, id)",
+    );
     expect(migration).not.toContain("workspace_learning_policy");
     expect(migration).not.toContain("governed_learning");
   });
