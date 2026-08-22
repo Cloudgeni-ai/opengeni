@@ -1,5 +1,232 @@
 # @opengeni/api-router
 
+## 2.0.0
+
+### Major Changes
+
+- 2027bc3: Stop silently creating personal Connections when the caller never asked for one.
+
+  ## Read before upgrading
+
+  **1. `configured` product-access-mode deployments lose personal Connections
+  entirely.** If your deployment runs `OPENGENI_PRODUCT_ACCESS_MODE=configured`
+  (a shared operator key rather than managed sign-in), personal Gmail, hosted
+  Slack MCP, Google Drive, and Atlassian connect will stop working after this
+  upgrade, and there is no workspace-owned alternative for the personal-only
+  providers. The shared configured key resolves to
+  `principalKind: "configured_key"`, and its subject comes from a caller-supplied
+  `x-opengeni-subject` header that proves nothing — a shared operator key cannot
+  supply the per-human consent a personal Connection represents. Existing personal
+  Connections in such a deployment keep working until their refresh token fails
+  (see below), but no new one can be created and none can be re-consented. Move to
+  `managed` mode if you need personal Connections. `local` mode is unaffected: its
+  bootstrap `dev` subject is a `human_session` and genuinely is the sole operator.
+
+  **2. Breaking for direct API/SDK callers of
+  `POST /v1/workspaces/:workspaceId/integrations/oauth/start`.** An omitted
+  `ownership` is now a **422** when the resolved provider profile allows both
+  ownerships; the caller must choose. Reconnects and single-ownership profiles
+  (Gmail, hosted Slack MCP) are unaffected, as is the web app, which always sends
+  an explicit value.
+
+  **3. Machine-owned personal Connections have no re-consent path.** See
+  "Existing rows" below for the remediation and a survey query to run first.
+
+  ## What changed
+
+  The Integration Definition OAuth start resolved an omitted `ownership` to
+  `personal`, inverting the documented workspace-owned default. It no longer
+  guesses. Resolving the omission to `workspace` instead was rejected
+  deliberately: an executed probe confirmed it flips a newly connected Outlook
+  mailbox (and Drive/OneDrive) from subject-scoped to workspace-shared, which is a
+  real narrow-to-broad widening, and this change must only narrow or make
+  explicit. The MCP OAuth start keeps its existing, already-correct
+  `defaultOwnershipFor` behaviour.
+
+  Personal ownership is now restricted to a managed human on every path that mints
+  a new personal owner: MCP OAuth start, Integration Definition OAuth start,
+  manual `POST /connections`, first-party social OAuth start, and the
+  personal-only Google Drive and Atlassian install routes. An API key, the shared
+  `configured:` key, a service principal, an agent attempt, a grant that fails
+  `contextIntegrity`, or a principal substituting another subject now gets an
+  explicit **422** instead of a machine-owned personal Connection. That is a
+  refusal, never a silent downgrade — Gmail and Slack's hosted MCP are
+  personal-only and must not become workspace-owned. This helper shares the
+  following core checks with the pre-existing `requireConnectionAuthorityOwner`:
+  `contextIntegrity`, exact authenticated/grant subject identity,
+  `principalKind: "human_session"`, and no service-initiator provenance. This
+  ownership-value helper intentionally adds a stricter defence-in-depth rejection
+  for OpenGeni's reserved machine-subject namespaces; the predicates are not
+  identical. Start-time ownership-value rejection is a 422, while the sibling
+  self-owner authority surface uses a 403.
+
+  An OAuth callback carries signed state, not a live principal, so it cannot
+  re-evaluate `principalKind`. Every start path that may persist a personal owner
+  now stamps a `personalOwnerVerified` claim into its HMAC-signed state, and **all
+  five** callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
+  Google Drive, Atlassian, and social — require it. A state minted before the
+  claim existed lacks it and fails closed, which closes the one `oauthStateTtlMs`
+  in-flight window across a rolling deploy and is why the MCP callback's legacy
+  `?? "personal"` decode can no longer land a machine-owned row.
+  Callback refusals use each flow's existing bounded redirect/error projection;
+  they are not uniformly surfaced as HTTP 422 (for example, Integration
+  Definition OAuth reports `connection_conflict` and social OAuth reports
+  `not_authorized`).
+
+  ## Existing rows
+
+  No schema change and no data migration. Existing personal Connections owned by a
+  machine subject already sit on the `legacy_user` authority lane
+  (`bind_connection_authority` mints the `user` scope only for a subject with an
+  active organization membership), they remain listable and readable, and they
+  **are** runtime-resolvable today: `personalConnectionDelegationSourceForGrant`
+  returns a subject source for an `api_key` grant, so an api_key-owned Connection
+  still resolves for that api_key. Credential-broker refresh-token renewal is
+  untouched.
+
+  What they lose is any **re-consent path**: interactive OAuth start refuses the
+  machine principal, callbacks fail closed through their flow-specific
+  redirect/error projections, and migration 0256 makes the owner column immutable,
+  so the owner cannot be converted in place. When such a Connection's stored
+  refresh token finally fails, the remediation is to create a replacement
+  Connection as workspace-owned (or personal, connected by the human who should
+  own it), repoint the capability at it, then revoke the stale row. Survey the
+  population before upgrading:
+
+  ```sql
+  select coalesce(authority_scope, '(pre-0256)') as scope,
+         split_part(subject_id, ':', 1) as subject_prefix,
+         count(*)
+  from connections
+  where subject_id is not null
+  group by 1, 2
+  order by 3 desc;
+  ```
+
+### Minor Changes
+
+- 3e1ad07: Add turn-atomic personal Variable Set and Rig attachments for create, Send, and
+  Steer, including logical-turn once receipts, recovery-safe snapshots, warning
+  acknowledgement, and SDK contracts.
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- dc8c73f: Add professional organization administration with canonical rename and a
+  Personal-safe shared-workspace access inventory, explicit Organization /
+  Workspace / Only-me scope at Rig and Variable Set creation, and activation-gated
+  atomic private visibility when creating sessions.
+- fbc760e: Add the first-party `goal_wait` MCP tool and a durable goal continuation hold.
+  An orchestrator whose active goal depends on child sessions or an external
+  event records a bounded hold (reason plus mandatory deadline, at most 7 days)
+  with a `goal.held` timeline fact instead of busy-polling. The continuation
+  materializer returns `held` while the declaring turn is still the latest
+  finished turn and the deadline is ahead: it never consumes the goal wake
+  revision and re-arms a delayed workflow wake at the deadline on every idle
+  evaluation. Pending machine input wins with `queue`, and any newer finished
+  turn, a passed deadline, or a human/API/agent goal mutation clears the hold.
+  The goal projection reports a current hold as `blocked` / `held_for_input`
+  with `nextAttemptAt` at the deadline (rolling migration 0317).
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- fe54954: Add an authorized, quiescence-fenced API and SDK operation for permanently deleting a root session tree.
+- 8cb165d: Add the default-off personal GitHub smart-HTTP broker and managed-sandbox runtime consumer.
+  Short encrypted attempt-bound bearers and stable repository-bound routes keep broad OAuth
+  credentials server-side while exact connection, selection, live provider permission, and
+  read/write authority are revalidated before every streamed Git request.
+- f7497fd: Add a disabled-by-default, user-owned personal GitHub OAuth lifecycle with
+  separate deployment credentials, signed PKCE state, encrypted token custody,
+  verified GitHub identity, typed SDK routes, reconnect fencing, and idempotent
+  disconnect.
+- ff011e6: Add bounded owner-only personal GitHub repository discovery, immutable selected-repository
+  authority storage, full-replacement and verification APIs, typed SDK methods, and exact
+  accepted-turn/scheduled-task authority snapshots for explicitly bound repository resources.
+  The dedicated `connectionType: "github_personal"` resource discriminator preserves existing
+  host-opaque Git credential bindings without reclassifying them as personal OAuth authority.
+  Runtime Git and GitHub API execution remain unavailable until their separately audited broker
+  and provider-consumer phases land.
+- ba0be3d: Add activation-gated owner management for personal-resource session and standing grants, with kind-derived actions and permissions, exact session authority epochs, route-workspace-fenced revocation, RFC3339 lifecycle timestamps, bounded keyset pages, complete credential-free delegation receipts, FORCE-RLS-safe expiry and invalid-action settlement, and SDK methods that intentionally exclude standalone `once` and custom expiry.
+- c7cafb1: Activate owner-only session visibility changes and same-workspace private forks
+  through the public API and SDK after per-organization tenancy activation.
+
+  Expose activation-gated session tenancy metadata, typed quiescence and
+  idempotency conflicts, exact durable event fanout, and explicit retry fences.
+
+- 5a651c8: Add the blocking first-party `session_wait` MCP tool so an agent can wait for new durable events on child or peer sessions, or for its own pending machine input, in one bounded call instead of sleeping and polling `session_events`/`session_get`/`sessions_list`.
+- 48b9f09: Allow organization administrators to invite an email before registration, bind
+  the invitation only after exact Better Auth email verification, and apply its
+  initial shared-workspace access when the invited user joins without creating a
+  redundant fallback organization.
+
+### Patch Changes
+
+- 3825727: Normalize legacy or malformed workspace-membership permissions before member listing and authorization, without restoring any obsolete authority.
+- 9b4d5d5: Create Stripe invoices for prepaid-credit Checkout payments and expose an authorized Stripe Customer Portal session for invoices and payment information.
+- 650d6f9: Route OpenSandbox browser and computer streams through the API frame-proxy so the workbench can show live JPEG/RFB when the lifecycle proxy cannot carry browserd WebSocket grants.
+- d8ba09d: Make private children inherit their parent's visibility through an exact live-attempt capability, expose effective tool policy in session monitoring, keep late child results from restarting settled parents, and preserve private-owner authority on internal-update turns.
+- 3b6b30e: Make the workspace control prefix fair and bounded: `lockWorkspaceInferenceControl` takes a FIFO transaction advisory lock before the row lock so Pause/Resume cannot be starved by continuous shared claim/settlement/append traffic, Send/Steer/queued Steer/realtime sync hold the prefix shared while the target branch is active and escalate through a savepoint only for a paused branch, and request-scoped API mutations fail with a typed retryable `WorkspaceControlBusyError` (HTTP 503) instead of parking a pooled connection and snapshot when the prefix stays busy.
+- 3eb159a: Give the API a wider postgres pool so rail polls no longer jam a 10-wide checkout, and make the workspace switcher open and list every accessible workspace.
+- Updated dependencies [7d15265]
+- Updated dependencies [3e1ad07]
+- Updated dependencies [e57ce11]
+- Updated dependencies [438e476]
+- Updated dependencies [3825727]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [3999dd5]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [66593eb]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [cc2fa1b]
+- Updated dependencies [e9ff652]
+- Updated dependencies [3141b5d]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [8cb165d]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [fba437f]
+- Updated dependencies [9530e19]
+- Updated dependencies [d8ba09d]
+- Updated dependencies [f51adf8]
+- Updated dependencies [009b947]
+- Updated dependencies [72736ef]
+- Updated dependencies [5b509be]
+- Updated dependencies [6909443]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [c83c590]
+- Updated dependencies [48b9f09]
+- Updated dependencies [3b6b30e]
+  - @opengeni/runtime@1.2.0
+  - @opengeni/contracts@2.1.0
+  - @opengeni/db@3.0.0
+  - @opengeni/core@2.0.0
+  - @opengeni/config@0.18.0
+  - @opengeni/codex@0.2.18
+  - @opengeni/github@0.5.0
+  - @opengeni/capabilities@0.3.0
+  - @opengeni/codemode@0.4.10
+  - @opengeni/artifact-tool@0.3.2
+  - @opengeni/documents@0.6.7
+  - @opengeni/events@0.3.121
+  - @opengeni/observability@0.8.1
+  - @opengeni/storage@0.2.103
+
 ## 1.0.1
 
 ### Patch Changes

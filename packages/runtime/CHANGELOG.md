@@ -1,5 +1,73 @@
 # @opengeni/runtime
 
+## 1.2.0
+
+### Minor Changes
+
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- 8cb165d: Add the default-off personal GitHub smart-HTTP broker and managed-sandbox runtime consumer.
+  Short encrypted attempt-bound bearers and stable repository-bound routes keep broad OAuth
+  credentials server-side while exact connection, selection, live provider permission, and
+  read/write authority are revalidated before every streamed Git request.
+- 29a44c2: Spill oversized model-visible tool results to a workspace File instead of failing the tool or stuffing huge JSON into history. Codemode keeps the 16 MiB journal cap.
+
+### Patch Changes
+
+- 7d15265: Make eager-vs-lazy a function of tool origin, not provider transport: the base sandbox tools stay in the first request on every path, and Browser/Computer plus `generate_image`/`generate_video`/`get_video_generation_capabilities` hide behind search on Codex and OpenAI too.
+- 1cd0eb0: Omit Responses output-only item `status` when persisting conversation history, and omit opaque `encrypted_content` from the portable compaction temporary copy, so SuperGrok-origin portable sessions can continue and compact on Codex. Keep the Codex wire strip as defense for already-stored rows and mid-turn SDK items. Durable history is not rewritten on a model switch.
+- 3999dd5: Fail closed when Modal Computer/Browser is enabled without a digest-pinned desktop image, and classify a missing `opengeni-browserd-up` as unsupported instead of a retryable driver failure.
+- cc2fa1b: Keep a live sandbox turn holder alive through a provider-deadline rotation: the resume-side holder-liveness loop releases only when the holder itself is gone or its attempt is superseded (`heartbeatLeaseHolderStatus` separates holder liveness from lease extension), the turn-side rotation checkpoint reinstates its exact lost holder at the same epoch/instance before the warm capture, mutation admission under a requested rotation reports `rotation_in_progress` instead of `lease_fenced` and starts that checkpoint, `write_stdin` to a retained PTY renders admission faults as the tool result instead of failing the turn, and `sandbox.box.terminated` carries the drain reason.
+- 3141b5d: Clarify that first-request tool visibility is a closed non-MCP allowlist, and cover image/video adapter schemas in the lazy-transport tests.
+- 650d6f9: Route OpenSandbox browser and computer streams through the API frame-proxy so the workbench can show live JPEG/RFB when the lifecycle proxy cannot carry browserd WebSocket grants.
+- f51adf8: Add the reusable first-party local MCP bridge contract and adapter registry,
+  and route Gmail's reviewed REST bridge through the generic adapter selection
+  seam.
+- 009b947: Teach agents to emit `sandbox:/workspace/...` markdown file links with an optional line number, matching the session renderer.
+- 5b509be: Advertise cwd-relative sandbox file paths to the model, and return the SDK execCommand banner (exit code + stdout/stderr) from Connected Machines.
+- 5a651c8: Add the blocking first-party `session_wait` MCP tool so an agent can wait for new durable events on child or peer sessions, or for its own pending machine input, in one bounded call instead of sleeping and polling `session_events`/`session_get`/`sessions_list`.
+- Updated dependencies [3e1ad07]
+- Updated dependencies [438e476]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [3999dd5]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [52456f9]
+- Updated dependencies [f51adf8]
+- Updated dependencies [5b509be]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [48b9f09]
+  - @opengeni/contracts@2.1.0
+  - @opengeni/sdk@2.1.0
+  - @opengeni/config@0.18.0
+  - @opengeni/codex@0.2.18
+  - @opengeni/capabilities@0.3.0
+  - @opengeni/codemode@0.4.10
+
 ## 1.1.3
 
 ### Patch Changes

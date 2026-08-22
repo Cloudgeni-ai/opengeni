@@ -647,19 +647,34 @@ branch is active (it still excludes every control mutation, so the observed
 state cannot change inside the transaction), escalating to the exclusive prefix
 for a paused branch only after rolling back a savepoint, because an in-place
 upgrade deadlocks as soon as two sharers escalate together. Request-scoped API
-mutations pass `workspaceControlRequestLockTimeoutMs()` (default 20 s, override
-with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`): one wall-clock budget shared
-by every lock step of the admission (advisory lock, row lock, and a savepoint
-escalation), so the total wait never exceeds the bound. Exceeding it fails with
+mutations pass `workspaceControlRequestLockTimeoutMs()`: one wall-clock budget
+shared by every lock step of the admission (advisory lock, row lock, and a
+savepoint escalation), so the total wait never exceeds the bound. The budget is
+the `@opengeni/config` setting `workspaceControlLockTimeoutMs`
+(`OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`, positive integer milliseconds,
+default 20000, validated at boot); the API installs it into `@opengeni/db` once
+at app construction through `configureWorkspaceControlRequestLockTimeoutMs`,
+and nothing parses the env per request. Exceeding it fails with
 the typed retryable `WorkspaceControlBusyError` before any write; `app.onError`
 renders it for every route as HTTP 503 with `retryable: true`,
 `outcomeUnknown: false`, and `details.code: WORKSPACE_CONTROL_BUSY`, the MCP
 orchestration envelope reports `<tool>_workspace_busy` with a retry hint, and
 Slack interactions keep the raw error so their classifier retries it. Worker
-settlement and claims never pass a bound. `updateWorkspaceSettings` and
-`deleteSessionTreeIfQuiescent` keep an unbounded exclusive wait, and queue
-move/edit/delete keep an unbounded shared wait: they are rare, and a bound there
-would only trade a slow admin action for a failed one. Generic
+settlement and claims never pass a bound. The bounded request-scoped takers are
+exactly: Send, Steer, queued Steer, Pause/Resume/Cancel, workspace
+Pause/Resume, realtime ledger sync, queue move/edit/delete, composer draft save,
+the MCP agent message and agent Steer, `updateWorkspaceSettings` (settings
+narrowing, exclusive prefix), and `deleteSessionTreeIfQuiescent` (exclusive
+prefix); each accepts an optional `controlLockTimeoutMs`, the API routes and
+`@opengeni/core` commands pass the request budget, and a lifecycle caller that
+omits it keeps the unbounded wait. The remaining HTTP-originated shared takers
+stay unbounded by design: session create (`lockWorkspaceForSessionCreate`),
+goal clear/update (`clearSessionGoal`, `updateSessionGoalWithEvent`), the
+session MCP approval-policy and tool-policy writers
+(`appendSessionEventsWithLockedSessionUpdate`, shared with worker writers), and
+realtime session begin/end. They only hold `FOR SHARE`, so they wait solely
+behind an exclusive holder or a queued mutator and never behind each other; a
+bound there would trade a brief wait for a failed request. Generic
 audit/title appends skip the control row but use the same
 workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
 before insert so its turn/attempt FK checks cannot invert against event writers;

@@ -33,6 +33,7 @@ import {
   CodemodePayloadTooLargeError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
+  configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getWorkspace,
   rlsContextForWorkspace,
@@ -181,6 +182,10 @@ export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
 } {
+  // The request-scoped workspace control-prefix budget is validated once by
+  // @opengeni/config at boot; install it for every request-scoped db command
+  // (Send/Steer/control/queue/settings/delete) built by this app.
+  configureWorkspaceControlRequestLockTimeoutMs(deps.settings.workspaceControlLockTimeoutMs);
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;

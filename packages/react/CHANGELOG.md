@@ -1,5 +1,70 @@
 # @opengeni/react
 
+## 2.1.0
+
+### Minor Changes
+
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- fbc760e: Add the first-party `goal_wait` MCP tool and a durable goal continuation hold.
+  An orchestrator whose active goal depends on child sessions or an external
+  event records a bounded hold (reason plus mandatory deadline, at most 7 days)
+  with a `goal.held` timeline fact instead of busy-polling. The continuation
+  materializer returns `held` while the declaring turn is still the latest
+  finished turn and the deadline is ahead: it never consumes the goal wake
+  revision and re-arms a delayed workflow wake at the deadline on every idle
+  evaluation. Pending machine input wins with `queue`, and any newer finished
+  turn, a passed deadline, or a human/API/agent goal mutation clears the hold.
+  The goal projection reports a current hold as `blocked` / `held_for_input`
+  with `nextAttemptAt` at the deadline (rolling migration 0317).
+- c9faa51: Replace the horizontally scrolling workspace tabs with a responsive vertical
+  activity rail, add a panel-local Hide workspace action, and distinguish managed
+  sleeping compute from genuinely offline Connected Machines.
+
+### Patch Changes
+
+- 66593eb: Reconcile and verify the session-list visibility predicate grant when a fresh
+  deployment runs migrations before creating its restricted application role,
+  and keep app-supplied composer controls shrinkable within a single footer row.
+- 650d6f9: Route OpenSandbox browser and computer streams through the API frame-proxy so the workbench can show live JPEG/RFB when the lifecycle proxy cannot carry browserd WebSocket grants.
+- 52456f9: Expose the personal-resource attachment contracts from the SDK and preserve
+  atomic attachment intent through durable React composer Send/Steer delivery,
+  including exact uncertain retries and authoritative stale-epoch
+  reconfirmation. The managed web console can now choose fixed personal Variable
+  Sets and Rigs for create and attach them with once, session, or always scope.
+- 5880ec8: Keep channel/project hooks cache-coherent across mounted consumers, including immediate confirmed-create projections with stale-read protection and failure rollback.
+- 428300c: Open agent `sandbox:/workspace/...:line` links in the Files workbench at that line, and accept `/workspace/...` hrefs as the same session-local file shape.
+- 0e5a644: Keep structured human-input decisions in the main conversation: pending forms
+  render at the timeline tip, settled history preserves both the agent's question
+  and the human's readable answer, the duplicate generic Ask step is omitted, and
+  every choice question offers an inline Other answer without losing exact text.
+- 7918925: Keep optimistic user messages continuously mounted while their canonical durable events arrive, and show actionable delivery failures without an ordinary sending label.
+- Updated dependencies [3e1ad07]
+- Updated dependencies [438e476]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [52456f9]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [48b9f09]
+  - @opengeni/sdk@2.1.0
+
 ## 2.0.1
 
 ### Patch Changes

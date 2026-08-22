@@ -1737,6 +1737,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
       sessionId: c.req.param("sessionId"),
+      controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
     });
     switch (deleted.status) {
       case "deleted":
