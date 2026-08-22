@@ -357,19 +357,32 @@ function lockClause(mode: WorkspaceControlLockMode) {
  * connection and a snapshot for as long as the HTTP client (or ingress) keeps
  * the socket open. Worker settlement, claims, and event appends never pass a
  * bound: a legitimate wait there must not become a failed settlement.
- * Override per deployment with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`.
+ * The deployment value is `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`, parsed
+ * and validated once at boot by `@opengeni/config`
+ * (`settings.workspaceControlLockTimeoutMs`) and handed to this module through
+ * `configureWorkspaceControlRequestLockTimeoutMs` when the API app is built.
+ * This module never reads `process.env` per request.
  */
 export const WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS = 20_000;
 
-/** The request-scoped budget in milliseconds, honoring the deployment override. */
-export function workspaceControlRequestLockTimeoutMs(): number {
-  const raw = process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS?.trim();
-  if (!raw) return WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS;
-  const parsed = Number(raw);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer");
+let configuredRequestLockTimeoutMs = WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS;
+
+/**
+ * Install the validated request-scoped budget for this process. The API calls
+ * this once from its settings at app construction; workers never call it
+ * because they never pass a bound. A non-positive or non-integer value is a
+ * programming error here (the config layer already rejected it at boot).
+ */
+export function configureWorkspaceControlRequestLockTimeoutMs(lockTimeoutMs: number): void {
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new Error("Workspace control request lock timeout must be a positive integer (ms)");
   }
-  return parsed;
+  configuredRequestLockTimeoutMs = lockTimeoutMs;
+}
+
+/** The request-scoped budget in milliseconds currently configured for this process. */
+export function workspaceControlRequestLockTimeoutMs(): number {
+  return configuredRequestLockTimeoutMs;
 }
 
 export class WorkspaceControlBusyError extends Error {

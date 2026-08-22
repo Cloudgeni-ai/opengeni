@@ -177,6 +177,15 @@ export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
 ];
 
+/** Optional request-admission tuning for the API. The workspace control-prefix
+ * budget bounds how long one HTTP-originated session/workspace mutation waits
+ * to enter `workspace_inference_controls` before the retryable 503; it is
+ * validated at boot by @opengeni/config (positive integer ms, default 20000)
+ * and is a valueEnv passthrough, emitted only when set. */
+export const WORKSPACE_CONTROL_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
+];
+
 /** Optional remote-browser authorities and launch policy. These remain API
  * runtime secrets/settings; browserd receives only a per-session private
  * transport envelope over its placement-local control channel. */
@@ -2465,6 +2474,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SANDBOX_LIFECYCLE_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of WORKSPACE_CONTROL_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {

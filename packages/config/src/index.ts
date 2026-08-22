@@ -1103,6 +1103,21 @@ const SettingsSchema = z.object({
   // (a liveness/reaper cadence), this bounds how long one turn waits for capacity
   // or provider creation before surfacing a clear turn.failed error.
   sandboxWarmingTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Request-scoped workspace control-prefix budget: how long one HTTP-originated
+  // session/workspace mutation (Send, Steer, Pause/Resume/Cancel, queue
+  // move/edit/delete, composer draft, settings narrowing, quiescent tree
+  // deletion) may wait to enter the fair `workspace_inference_controls` prefix
+  // before failing with the retryable 503 `WORKSPACE_CONTROL_BUSY`. Worker
+  // settlement and claims never use it. The API installs the validated value
+  // into @opengeni/db once at app construction; nothing reads the env per
+  // request. Env: OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS. Default 20 s.
+  workspaceControlLockTimeoutMs: z.coerce
+    .number({
+      message: "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)",
+    })
+    .int("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
+    .positive("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
+    .default(20_000),
   // Rig setup-script budget (M3): the wall-clock timeout the rig-setup lifecycle
   // hook runs its script under, distinct from the 120s per-command lifecycle
   // default (a rig may compile/install heavy tooling on first cold create).
@@ -2479,6 +2494,7 @@ export function getSettings(): Settings {
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
+    workspaceControlLockTimeoutMs: optional("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",

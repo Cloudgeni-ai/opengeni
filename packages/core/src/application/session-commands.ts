@@ -309,6 +309,7 @@ export async function sendAgentSessionMessage(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           text: input.text,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -498,6 +499,7 @@ export async function moveHumanQueuePrompt(
           expectedQueueVersion: input.expectedQueueVersion,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -539,6 +541,7 @@ export async function deleteHumanQueuePrompt(
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
           reason: input.reason ?? null,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -581,6 +584,7 @@ export async function editHumanQueuePrompt(
           replaceDraft: input.replaceDraft,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -796,6 +800,7 @@ export async function saveHumanComposerDraft(
           annotations,
           resources: normalizeResources(input.resources),
           subjectId: context.subjectId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
       ),
   );

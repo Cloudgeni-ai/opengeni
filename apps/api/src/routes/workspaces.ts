@@ -37,6 +37,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
 } from "@opengeni/db";
@@ -182,7 +183,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace settings patch" });
     }
-    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
+    // Request-scoped: bound the exclusive control-prefix wait so a busy
+    // workspace yields the retryable 503 instead of parking this request.
+    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data, {
+      controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+    });
     return c.json(Workspace.parse(workspace));
   });
 

@@ -12,6 +12,7 @@ import {
   SANDBOX_REQUIRED_ENV,
   SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
+  WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
 } from "../src/index";
@@ -1205,6 +1206,9 @@ describe("deployment contract", () => {
         "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
       ]),
     );
+    expect(WORKSPACE_CONTROL_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
+    ]);
     expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_BROWSERBASE_API_KEY",
       "OPENGENI_KERNEL_API_KEY",
@@ -1336,6 +1340,23 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_MODAL_IMAGE_REF=ghcr.io/opengeni/modal:latest",
     );
+  });
+
+  test("renders the workspace control lock budget only when configured", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: "45000",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS=45000");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {
