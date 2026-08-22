@@ -13,8 +13,19 @@
  * Timing facts: the built-in `opengeni` MCP server entry carries no
  * `timeoutMs`, so the worker's MCP client uses the SDK default request timeout
  * of 60 s and a longer call would surface as a `-32001` tool error. The wait is
- * therefore capped at {@link SESSION_WAIT_MAX_SECONDS}. The API's
- * `Bun.serve` `idleTimeout` is 255 s, far above that cap.
+ * therefore capped at {@link SESSION_WAIT_MAX_SECONDS} both in the tool schema
+ * and inside {@link waitForSessionChanges}. The API's `Bun.serve`
+ * `idleTimeout` is 255 s, far above that cap.
+ *
+ * Cancellation: the API serves one transport per POST, so the worker's MCP
+ * `notifications/cancelled` never reaches this handler; instead the route binds
+ * the HTTP request's own abort to `transport.close()` (`request-abort.ts`),
+ * which aborts `extra.signal`. A worker that drops the call on Steer/Pause
+ * therefore ends the server-side wait promptly; the deadline bounds it anyway.
+ *
+ * The live bus is best-effort: a failed subscription degrades the wait to the
+ * durable pre-check plus the deadline re-check and is reported as
+ * `liveFanout: false` rather than failing the tool.
  */
 
 import type {
@@ -124,6 +135,8 @@ export type SessionWaitResult = {
   waitedMs: number;
   timedOut: boolean;
   aborted: boolean;
+  /** False when at least one live-fanout subscription failed; the wait then relied on the deadline re-check. */
+  liveFanout: boolean;
   truncated: boolean;
   bytes: number;
   maxBytes: number;
@@ -141,6 +154,11 @@ export type SessionWaitSource = {
     sessionId: string,
     onEvents: (events: SessionEvent[]) => void | Promise<void>,
   ) => Promise<() => void>;
+  /**
+   * Re-run target authorization for the sessions about to be returned after a
+   * wait (parity with SSE re-authorization). Throws to refuse the result.
+   */
+  reauthorizeTargets?: ((sessionIds: readonly string[]) => Promise<void>) | undefined;
 };
 
 export type SessionWaitInput = {
@@ -158,7 +176,12 @@ type WakeReason = "bus" | "deadline" | "abort";
 export async function waitForSessionChanges(input: SessionWaitInput): Promise<SessionWaitResult> {
   const now = input.now ?? Date.now;
   const startedAt = now();
-  const deadlineAt = startedAt + Math.max(0, input.maxWaitMs);
+  // The cap is enforced here as well as in the tool schema: no caller can hold
+  // the API past the worker's 60 s MCP request timeout.
+  const deadlineAt =
+    startedAt + Math.min(Math.max(0, input.maxWaitMs), SESSION_WAIT_MAX_SECONDS * 1_000);
+  let liveFanout = true;
+  let waited = false;
   const ownSessionId = input.source.readOwnPendingUpdateKinds ? input.ownSessionId : null;
 
   // One subscription per distinct session; a session may be both a target and
@@ -243,11 +266,16 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     return { changed, ownPendingUpdateKinds: [...ownKinds] };
   };
 
-  const finish = (
+  const finish = async (
     read: { changed: SessionWaitTargetResult[]; ownPendingUpdateKinds: string[] },
     outcome: { timedOut: boolean; aborted: boolean },
-  ): SessionWaitResult =>
-    boundSessionWaitResult(
+  ): Promise<SessionWaitResult> => {
+    // Authorization ran immediately before the first durable read; a result
+    // produced after waiting re-proves every returned target first.
+    if (waited && read.changed.length > 0 && input.source.reauthorizeTargets) {
+      await input.source.reauthorizeTargets(read.changed.map((target) => target.sessionId));
+    }
+    return boundSessionWaitResult(
       {
         changed: read.changed,
         ownPendingUpdates: read.ownPendingUpdateKinds.length,
@@ -255,27 +283,37 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
         waitedMs: Math.max(0, now() - startedAt),
         timedOut: outcome.timedOut,
         aborted: outcome.aborted,
+        liveFanout,
       },
       input.maxBytes,
     );
+  };
 
   try {
     if (input.signal?.aborted) {
-      return finish({ changed: [], ownPendingUpdateKinds: [] }, { timedOut: false, aborted: true });
+      return await finish(
+        { changed: [], ownPendingUpdateKinds: [] },
+        { timedOut: false, aborted: true },
+      );
     }
     // Subscribe first, then read: an event committed between the read and the
-    // subscription would otherwise be missed until the deadline re-check.
+    // subscription would otherwise be missed until the deadline re-check. A
+    // failed subscription degrades to pre-check plus deadline re-check.
     for (const sessionId of subscribedSessionIds) {
-      const unsubscribe = await input.source.subscribe(sessionId, (events) => {
-        if (matchesWake(sessionId, events)) signalWake();
-      });
-      unsubscribes.push(unsubscribe);
+      try {
+        const unsubscribe = await input.source.subscribe(sessionId, (events) => {
+          if (matchesWake(sessionId, events)) signalWake();
+        });
+        unsubscribes.push(unsubscribe);
+      } catch {
+        liveFanout = false;
+      }
       if (input.signal?.aborted) break;
     }
 
     for (;;) {
       if (input.signal?.aborted) {
-        return finish(
+        return await finish(
           { changed: [], ownPendingUpdateKinds: [] },
           { timedOut: false, aborted: true },
         );
@@ -283,19 +321,20 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
       wakePending = false;
       const read = await readAll();
       if (read.changed.length > 0 || read.ownPendingUpdateKinds.length > 0) {
-        return finish(read, { timedOut: false, aborted: false });
+        return await finish(read, { timedOut: false, aborted: false });
       }
       const remainingMs = deadlineAt - now();
       if (remainingMs <= 0) {
-        return finish(read, { timedOut: true, aborted: false });
+        return await finish(read, { timedOut: true, aborted: false });
       }
       if (wakePending) continue;
       const reason = await waitForWake(remainingMs, input.signal, (resolve) => {
         wake = resolve;
       });
       wake = null;
+      waited = true;
       if (reason === "abort") {
-        return finish(
+        return await finish(
           { changed: [], ownPendingUpdateKinds: [] },
           { timedOut: false, aborted: true },
         );

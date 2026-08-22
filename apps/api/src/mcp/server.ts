@@ -4112,7 +4112,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). timedOut=true means nothing changed. The whole result is byte-bounded; truncated rows remain readable through session_events. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds; loop on the tool for longer waits.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4144,9 +4144,13 @@ function registerWorkspaceOrchestrationTools(
           await requireSession(deps.db, grant.workspaceId, target.sessionId);
         }
         const ownSessionId = includeOwnPendingUpdates === false ? null : callerSessionId;
-        // The MCP SDK aborts `extra.signal` when the client cancels the request
-        // (Steer/Pause/turn interruption); the test harness passes no extra.
-        const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
+        // The API serves one transport per POST, so the worker's MCP cancel
+        // notification never reaches this handler; the route binds the HTTP
+        // request's abort to transport.close() (mcp/request-abort.ts), which
+        // aborts `extra.signal` when the worker drops the call on Steer/Pause.
+        // The deadline bounds the wait regardless. Direct handler invocation
+        // (tests) may pass no extra at all.
+        const signal: AbortSignal | undefined = extra?.signal;
         const workspaceId = grant.workspaceId;
         // A NATS subscription is live fanout only; the durable session_events
         // read below is the authority. Bun.serve idleTimeout (255 s) and the
@@ -4158,6 +4162,16 @@ function registerWorkspaceOrchestrationTools(
             maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
             signal,
             source: {
+              reauthorizeTargets: async (sessionIds) => {
+                for (const targetSessionId of sessionIds) {
+                  await authorizeFirstPartySession(
+                    deps,
+                    grant,
+                    targetSessionId,
+                    "session.events.read",
+                  );
+                }
+              },
               readTargetEvents: async (target) => {
                 const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
                   after: target.afterSequence,

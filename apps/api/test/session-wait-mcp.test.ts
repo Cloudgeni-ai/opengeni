@@ -411,4 +411,196 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
       changed!.events.every((event) => SESSION_WAIT_EVENT_TYPES.includes(event.type as never)),
     ).toBeTrue();
   }, 30_000);
+
+  test("degrades to the durable pre-check and deadline when live fanout is unavailable", async () => {
+    const brokenBus = new MemoryEventBus();
+    brokenBus.subscribe = async () => {
+      throw new Error("NATS unavailable");
+    };
+    const degraded = buildOpenGeniMcpServer(fakeDeps(brokenBus), grant);
+    const target = await newSession(workspaceId, "degraded child fixture");
+    await appendSessionEvents(client.db, workspaceId, target, [
+      { type: "turn.completed", payload: { result: "already there" } },
+    ]);
+    const hit = await callSessionWait(
+      {
+        targets: [{ sessionId: target, afterSequence: 0 }],
+        includeOwnPendingUpdates: false,
+        maxWaitSeconds: 5,
+      },
+      {},
+      degraded,
+    );
+    expect(hit.liveFanout).toBe(false);
+    expect(hit.timedOut).toBe(false);
+    expect(hit.changed[0]!.events.map((event) => event.type)).toEqual(["turn.completed"]);
+
+    const cursor = await lastSequence(target);
+    const pending = callSessionWait(
+      {
+        targets: [{ sessionId: target, afterSequence: cursor }],
+        includeOwnPendingUpdates: false,
+        maxWaitSeconds: 2,
+      },
+      {},
+      degraded,
+    );
+    await Bun.sleep(300);
+    // Committed while waiting, with no live fanout: the deadline re-check finds it.
+    await appendSessionEvents(client.db, workspaceId, target, [
+      { type: "turn.failed", payload: { error: "late failure" } },
+    ]);
+    const late = await pending;
+    expect(late.liveFanout).toBe(false);
+    expect(late.timedOut).toBe(false);
+    expect(late.waitedMs).toBeGreaterThanOrEqual(1_500);
+    expect(late.changed[0]!.events.map((event) => event.type)).toEqual(["turn.failed"]);
+  }, 30_000);
+
+  test("an exact live agent attempt can wait on a child and on its own pending input", async () => {
+    const claimSessionId = await newSession(workspaceId, "claimed manager fixture");
+    const childOfClaim = await newSession(workspaceId, "claimed child fixture");
+    const humanSubjectId = grant.subjectId;
+    // The attempt's frozen initiating human is a different person than the
+    // workspace member who will own the private session below.
+    const otherHuman = `session-wait-other-human-${crypto.randomUUID()}`;
+    const executionGeneration = 1;
+    const [turn] = await shared.admin<Array<{ id: string }>>`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id,
+        initiating_human_subject_id, initiator_context
+      ) values (
+        ${accountId}, ${workspaceId}, ${claimSessionId}, gen_random_uuid(),
+        ${`session-wait-${crypto.randomUUID()}`}, 'running', 0, 'wait for the child',
+        'test-model', 'medium', 'none', ${executionGeneration}, 'subject', ${otherHuman},
+        ${otherHuman}, '{"accepted":true}'::jsonb
+      ) returning id
+    `;
+    const [authority] = await shared.admin<
+      Array<{
+        authorityEpoch: number;
+        visibility: string;
+        ownerOrganizationMembershipId: string | null;
+      }>
+    >`
+      select authority_epoch as "authorityEpoch", visibility,
+        owner_organization_membership_id as "ownerOrganizationMembershipId"
+      from sessions where id = ${claimSessionId}
+    `;
+    const attemptId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+      await tx`
+        update sessions set active_turn_id = ${turn!.id}, status = 'running'
+        where id = ${claimSessionId}
+      `;
+      await tx`
+        update session_turns set active_attempt_id = ${attemptId}, status = 'running'
+        where id = ${turn!.id}
+      `;
+      await tx`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, authority_epoch, authority_visibility,
+          authority_owner_organization_membership_id, mcp_approval_policies,
+          connector_action_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${workspaceId}, ${claimSessionId}, ${turn!.id},
+          ${executionGeneration}, 'running', 'session-wait', ${`run-${attemptId}`},
+          ${`activity-${attemptId}`}, 0, ${authority!.authorityEpoch},
+          ${authority!.visibility}, ${authority!.ownerOrganizationMembershipId},
+          '{}'::jsonb, '[]'::jsonb
+        )
+      `;
+    });
+    const attemptGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      permissions: ["sessions:read"],
+      metadata: {
+        sessionId: claimSessionId,
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration,
+        firstPartyMcpTools: ["session_wait"],
+      },
+    };
+    const attemptBus = new MemoryEventBus();
+    const attemptServer = buildOpenGeniMcpServer(fakeDeps(attemptBus), attemptGrant);
+    expect(registeredToolNames(attemptServer)).toEqual(["session_wait"]);
+
+    const pending = callSessionWait(
+      { targets: [{ sessionId: childOfClaim, afterSequence: 0 }], maxWaitSeconds: 20 },
+      {},
+      attemptServer,
+    );
+    await Bun.sleep(300);
+    const appended = await appendSessionEvents(client.db, workspaceId, childOfClaim, [
+      { type: "goal.completed", payload: { summary: "child goal done" } },
+    ]);
+    await attemptBus.publish(workspaceId, childOfClaim, appended);
+    const result = await pending;
+    expect(result.timedOut).toBe(false);
+    expect(result.changed[0]!.events.map((event) => event.type)).toEqual(["goal.completed"]);
+    expect(result.ownPendingUpdates).toBe(0);
+
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `session-wait-claim:${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: { type: "child_terminal_result", childSessionId: childOfClaim, status: "idle" },
+    });
+    expect(update.added).toBe(true);
+    const own = await callSessionWait(
+      {
+        targets: [{ sessionId: childOfClaim, afterSequence: result.changed[0]!.latestSequence }],
+        maxWaitSeconds: 5,
+      },
+      {},
+      attemptServer,
+    );
+    expect(own.ownPendingUpdates).toBe(1);
+    expect(own.changed).toEqual([]);
+
+    // A Slack-private session outside this attempt's root is refused: the
+    // durable Slack ownership fence runs inside requireSessionAuthorization
+    // even without an embedding-host port.
+    const privateSession = await newSession(workspaceId, "slack private fixture");
+    const [connection] = await shared.admin<Array<{ id: string }>>`
+      insert into connections (
+        account_id, workspace_id, provider_domain, kind, status, credential_encrypted
+      ) values (${accountId}, ${workspaceId}, 'slack.com', 'app_install', 'active', 'sealed')
+      returning id
+    `;
+    await shared.admin`
+      insert into slack_interactions (
+        account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+        slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
+        visibility, session_reservation_id, session_id
+      ) values (
+        ${accountId}, ${workspaceId}, ${connection!.id}, 'T1', 'D1', '1.1',
+        ${`route-${crypto.randomUUID()}`}, ${`evt-${crypto.randomUUID()}`},
+        ${humanSubjectId}, 'private', ${privateSession}, ${privateSession}
+      )
+    `;
+    const before = subscribeCalls;
+    await expect(
+      callSessionWait(
+        { targets: [{ sessionId: privateSession, afterSequence: 0 }], maxWaitSeconds: 1 },
+        {},
+        attemptServer,
+      ),
+    ).rejects.toThrow();
+    expect(subscribeCalls).toBe(before);
+  }, 60_000);
 });

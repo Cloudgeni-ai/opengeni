@@ -41,6 +41,7 @@ import {
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
@@ -611,7 +612,9 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceMemoryPromptMode,
       });
       await mcp.connect(transport);
-      return await transport.handleRequest(boundedRequest);
+      // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
+      // worker that drops the call (Steer/Pause) aborts a blocking tool here.
+      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
     });
   });
 
