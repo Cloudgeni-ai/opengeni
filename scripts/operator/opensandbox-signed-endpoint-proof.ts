@@ -1,5 +1,5 @@
 /**
- * Dossier §16 / §22 Channel B signed-endpoint proof.
+ * OpenSandbox Channel B signed-endpoint proof.
  *
  * Mints OSEP-0011 signed URIs against a live OpenSandbox box and proves:
  *   - JSON host-fetch forwards the browserd Bearer (not lifecycle `/proxy/`)
