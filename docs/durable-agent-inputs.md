@@ -29,6 +29,15 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
+Pending machine input also wakes a held orchestrator. An active goal whose
+latest turn declared a `goal_wait` hold (see [`goals.md`](goals.md)) does not
+materialize a goal continuation at idle, but a pending `session_system_updates`
+row (a child result, agent message, or schedule) still makes the session
+runnable: the idle evaluation returns `queue` instead of `held`, the next claim
+delivers the batch, and that delivering turn retires the hold because it is a
+newer finished turn. The hold only suppresses the synthesized continuation
+between real inputs and the hold deadline.
+
 ## Queue and timeline
 
 The human prompt queue and pending machine inputs remain distinct canonical

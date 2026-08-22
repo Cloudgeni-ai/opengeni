@@ -1492,7 +1492,7 @@ export async function reserveSessionCommandReceipt(
   if (
     identityScope === "goal_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      !["goal.update", "goal.progress"].includes(input.action) ||
+      !["goal.update", "goal.progress", "goal.wait"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {

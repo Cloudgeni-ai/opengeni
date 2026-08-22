@@ -89,6 +89,17 @@ A goal is `active`, `paused`, or `completed`.
   completed goal.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
+- `goal_wait { reason, untilSeconds, idempotencyKey? }` declares a
+  continuation hold: the active goal's next automatic continuation waits for
+  child results, an agent message, a human prompt, or the deadline instead of
+  materializing as soon as the declaring turn ends. It is for progress that
+  depends on child sessions or an external event, never a substitute for
+  `goal_pause` when a human decision is required, and the agent must end its
+  turn right after calling it. `untilSeconds` is mandatory (30 s to 7 days),
+  the reason is bounded to 2 KiB, and the hold, its `goal.held` timeline fact,
+  and the target-scoped operation receipt commit together under the canonical
+  goal event-write prefix. See "The continuation loop" for what honors and
+  clears a hold.
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
 and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
@@ -100,8 +111,8 @@ compaction stay bounded without rewriting canonical history.
 
 Every transition lands on the session timeline as `goal.set`, `goal.updated`,
 `goal.progress`, `goal.rewrite.proposed`,
-`goal.completed`, `goal.paused`, `goal.resumed`, `goal.cleared`, or
-`goal.continuation` events.
+`goal.completed`, `goal.paused`, `goal.resumed`, `goal.cleared`, `goal.held`,
+or `goal.continuation` events.
 
 ## The continuation loop
 
@@ -135,18 +146,41 @@ The locked decision applies these rules:
    the queue wins. A pending human approval is never bypassed by a
    continuation.
    A pending human/API prompt and an authoritative Steer instruction also win
-   even if they race materialization.
-3. Budget/admission policy can pause the goal visibly with reason `limits`.
+   even if they race materialization. Any other pending machine input
+   (`session_system_updates` row such as a child result, agent message, or
+   schedule) also wins with `queue`: it is delivered by the next claim rather
+   than shadowed by a synthesized continuation, and because peek and
+   materialization serialize on the session lock, input that lands between
+   them cannot be missed.
+3. An agent-declared `goal_wait` hold is honored only while its declaring turn
+   is still the latest finished turn and `now < continuation_hold_until`. The
+   materializer then returns `held`: it does not advance
+   `continuation_observed_revision` (a crash cannot lose the obligation) and,
+   in the same transaction, re-arms a delayed workflow wake
+   (`goal_hold_deadline`, `notBefore = hold_until`) through the session
+   workflow-wake outbox. Re-arming on every idle evaluation is required: an
+   earlier immediate wake (for example a child result) delivered in between
+   advances the outbox's delivered revision and would otherwise drop the
+   deadline row; an undelivered earlier wake coalesces with
+   `least(next_attempt_at, notBefore)`. A hold that belongs to an older turn or
+   whose deadline has passed is cleared in that same transaction and
+   evaluation continues as before. Human/API goal `PATCH` (pause, resume,
+   redirect), `DELETE`, and agent `goal_set`/`goal_update`/`goal_complete`/
+   `goal_pause` clear the hold inside their own transactions, so a human
+   redirect never sits behind an agent-declared wait. The API projects a
+   current hold as `blocked` / `held_for_input` with `nextAttemptAt` at the
+   deadline.
+4. Budget/admission policy can pause the goal visibly with reason `limits`.
    OpenGeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
-4. Goals are NOT capped by continuation count by default — runs legitimately
+5. Goals are NOT capped by continuation count by default — runs legitimately
    span days. If a deployment sets
    `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` it becomes a hard ceiling
    (`min(goal.maxAutoContinuations, setting)`, pause reason
    `"max_auto_continuations"`); a per-goal `maxAutoContinuations` applies on
    its own even without the deployment setting.
-5. Otherwise one deterministic goal-continuation internal update is recorded.
+6. Otherwise one deterministic goal-continuation internal update is recorded.
    At claim, its exact prompt becomes one canonical user-role model-memory item
    with the frozen goal snapshot; it is not duplicated into the generic
    internal-update envelope. Any unrelated machine updates coalesced with it
@@ -213,8 +247,9 @@ recovery of the same turn, not creation or charging of another continuation.
   status alone: `running` is reserved for a live goal-owned turn and alone
   means "Pursuing". A live human/API or system turn blocks autonomous
   continuation; recovering or queued work is scheduled. Pause, approval,
-  provider backpressure, cancellation, pending wake/update, and a missing
-  obligation are distinct truthful states.
+  provider backpressure, cancellation, pending wake/update, an agent-declared
+  `goal_wait` hold (`blocked` / `held_for_input`, `nextAttemptAt` at the
+  deadline), and a missing obligation are distinct truthful states.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
@@ -256,8 +291,10 @@ requires an explicit `changeKind`, non-empty `rationale`, and
 separate `goal_progress` tool but do not gate continuation. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
-`goal_set`/`goal_update`/`goal_progress`/`goal_complete`/`goal_pause` only for grants carrying
-that claim plus the `goals:manage` permission. A top-level session with no
+`goal_set`/`goal_update`/`goal_progress`/`goal_wait`/`goal_complete`/`goal_pause` only for grants carrying
+that claim plus the `goals:manage` permission. `goal_wait` is in the default
+first-party tool selection but is not one of the names a goal-bearing session
+is required to select, so existing explicit selections keep working. A top-level session with no
 first-party permission override uses the worker default. A child inherits its
 creator's exact effective permissions, and an explicit set may only narrow
 them; goal-bearing creation is rejected when that resulting set omits
