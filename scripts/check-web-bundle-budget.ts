@@ -110,8 +110,12 @@ const budgets = {
   // the Linux/x64 CI production build. Advance only the direct-session raw
   // envelope to the next whole KiB; gzip, file-count, lazy, CSS, and all other
   // graph limits stay fixed.
-  directSessionRaw: 2064 * kib,
-  directSessionGzip: 575 * kib,
+  // The new-chat project cache-coherence fix measures 2,114,353 raw and
+  // 589,011 gzip bytes on canonical Bun 1.3.14 Linux/x64, versus current
+  // main's 2,113,348 raw and 588,574 gzip bytes. Advance only these direct
+  // session envelopes to the next whole KiB; all other caps remain unchanged.
+  directSessionRaw: 2065 * kib,
+  directSessionGzip: 576 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
