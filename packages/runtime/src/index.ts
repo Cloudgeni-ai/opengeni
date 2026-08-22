@@ -7697,9 +7697,8 @@ export type SandboxLifecycleHookContext = {
   // TOKEN-BROKER (B1): back-compat GitHub alias for gitTokenSeeds.github.
   gitTokenSeed?: string;
   // Provider tokens to seed into box token FILES before repository clone/setup
-  // runs. Threaded OFF-MANIFEST — they ride ONLY the setup exec command prefix,
-  // NEVER the box/agent manifest env (validateNoEnvironmentDelta must never see
-  // rotating values).
+  // runs. Direct tokens retain the off-manifest setup prefix; smart-Git broker
+  // bearers use the private editor/file ingress and never enter command text.
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
   codemodeTokenSeed?: string;
@@ -8100,10 +8099,71 @@ function gitBindingSeedEnv(binding: GitCredentialBindingSeed): string {
   return `OPENGENI_GIT_BINDING_${gitCredentialBindingHash(binding.credentialBindingId).toUpperCase()}_TOKEN_SEED`;
 }
 
+type StagedGitCredentialBindingSeed = {
+  bindingHash: string;
+  path: string;
+};
+
 function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed[]): string {
   return bindings
+    .filter((binding) => binding.transport?.kind !== "http_broker")
     .map((binding) => `export ${gitBindingSeedEnv(binding)}=${shellQuote(binding.token)}`)
     .join("\n");
+}
+
+async function stageGitHttpBrokerBindingSeeds(
+  session: GitCredentialTokenWriterSession,
+  bindings: GitCredentialBindingSeed[],
+  runAs?: string,
+): Promise<{
+  editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
+  staged: StagedGitCredentialBindingSeed[];
+}> {
+  const brokered = bindings.filter((binding) => binding.transport?.kind === "http_broker");
+  if (brokered.length === 0) return { editor: null, staged: [] };
+  const editor = session.createEditor?.(runAs);
+  if (!editor) {
+    throw new Error("Sandbox does not support private Git broker credential delivery");
+  }
+  const staged: StagedGitCredentialBindingSeed[] = [];
+  const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
+  try {
+    for (const binding of brokered) {
+      const bindingHash = gitCredentialBindingHash(binding.credentialBindingId);
+      const path = `/workspace/.opengeni/git-broker-seeds/${randomUUID()}`;
+      const candidate = { bindingHash, path };
+      const diff = binding.token
+        .split("\n")
+        .map((line) => `+${line}`)
+        .join("\n");
+      // A routed editor write can take effect remotely and still reject if its
+      // response is lost. Register the random path for best-effort cleanup
+      // before awaiting, but expose it to the token command only after success.
+      cleanupEligible.push(candidate);
+      await editor.createFile({ type: "create_file", path, diff });
+      staged.push(candidate);
+    }
+    return { editor, staged };
+  } catch {
+    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible);
+    throw new Error("Sandbox could not receive the Git broker credential");
+  }
+}
+
+async function cleanupStagedGitCredentialSeeds(
+  editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
+  staged: StagedGitCredentialBindingSeed[],
+): Promise<void> {
+  await Promise.all(
+    staged.map(async ({ path }) => {
+      try {
+        await editor.deleteFile({ type: "delete_file", path });
+      } catch {
+        // Cleanup is best effort. The staged path is random, excluded from
+        // workspace capture, and the broker bearer expires within five minutes.
+      }
+    }),
+  );
 }
 
 function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
@@ -8416,13 +8476,24 @@ function gitAskpassHostProviderCaseLines(
   ];
 }
 
-function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed[] = []): string[] {
+function gitCredentialTokenWriterCommandLines(
+  bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+): string[] {
+  const stagedByBindingHash = new Map(
+    stagedSeeds.map((seed) => [seed.bindingHash, seed.path] as const),
+  );
   const bindingWrites = bindings.flatMap((binding) => {
     const hash = gitCredentialBindingHash(binding.credentialBindingId);
     const seedEnv = gitBindingSeedEnv(binding);
     const count = Math.max(1, binding.providerBindingCount ?? 1);
     const provider = binding.provider;
-    const lines = [`write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`];
+    const stagedPath = stagedByBindingHash.get(hash);
+    const lines = [
+      stagedPath
+        ? `write_git_binding_token_file ${shellQuote(hash)} ${shellQuote(stagedPath)}`
+        : `write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`,
+    ];
     if (count === 1 && binding.transport?.kind !== "http_broker") {
       lines.push(`write_git_provider_token ${shellQuote(provider)} "\${${seedEnv}:-}"`);
     } else {
@@ -8451,6 +8522,17 @@ function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    "}",
+    "write_git_binding_token_file() {",
+    '  binding_hash="$1"',
+    '  seed_file="$2"',
+    '  [ -f "$seed_file" ] && [ ! -L "$seed_file" ] || return 73',
+    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  mkdir -p "$credential_dir"',
+    '  token_file="$credential_dir/$binding_hash-token"',
+    '  command cat -- "$seed_file" > "$token_file.tmp.$$"',
+    '  rm -f -- "$seed_file"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
     "}",
     "remove_git_provider_token() {",
@@ -8506,6 +8588,7 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string[] {
   const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
@@ -8583,7 +8666,7 @@ function gitCredentialHelperCommandLines(
     .filter(([, counts]) => counts.brokered > 0 && counts.direct === 0)
     .map(([provider]) => provider);
   return [
-    ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
     ...gitCredentialBindingInventoryCommandLines(resources, bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these
@@ -8819,15 +8902,16 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 
 export function gitCredentialBindingTokenRefreshCommand(
   bindings: GitCredentialBindingSeed[],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string {
   const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
-  if (!seedPrefix) return "";
+  if (!seedPrefix && stagedSeeds.length === 0) return "";
   return [
     "set +x",
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
-    ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
   ].join("\n");
 }
 
@@ -8864,24 +8948,30 @@ export async function refreshGitCredentialBindingTokenFiles(
     commandRunner?: SandboxLifecycleCommandRunner;
   } = {},
 ): Promise<void> {
-  const command = gitCredentialBindingTokenRefreshCommand(bindings);
-  if (!command) return;
-  const args = {
-    cmd: command,
-    workdir: "/workspace",
-    ...(options.runAs ? { runAs: options.runAs } : {}),
-    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-    maxOutputTokens: 4_000,
-  };
-  assertSandboxCommandSucceeded(
-    await runSandboxLifecycleCommand(session, args, options.commandRunner),
-    "Git credential binding refresh",
-  );
+  const { editor, staged } = await stageGitHttpBrokerBindingSeeds(session, bindings, options.runAs);
+  try {
+    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged);
+    if (!command) return;
+    const args = {
+      cmd: command,
+      workdir: "/workspace",
+      ...(options.runAs ? { runAs: options.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    };
+    assertSandboxCommandSucceeded(
+      await runSandboxLifecycleCommand(session, args, options.commandRunner),
+      "Git credential binding refresh",
+    );
+  } finally {
+    if (editor) await cleanupStagedGitCredentialSeeds(editor, staged);
+  }
 }
 
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string {
   const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
@@ -8905,7 +8995,7 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
-    ...gitCredentialHelperCommandLines(resources, bindings),
+    ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
     "clone_repository() {",
     '  target="$1"',
     '  uri="$2"',
@@ -9490,27 +9580,36 @@ export async function runRepositoryCloneHook(
     type: "sandbox.operation.started",
     payload,
   });
+  let stagedBrokerSeeds: Awaited<ReturnType<typeof stageGitHttpBrokerBindingSeeds>> = {
+    editor: null,
+    staged: [],
+  };
   try {
-    // TOKEN-BROKER (B1): thread run-scoped provider tokens PER-EXEC, never on
-    // the manifest. The SDK's ExecCommandArgs has no `environment` field (exec
-    // inherits the box's manifest env), so we can't hand seeds through an exec
-    // option — and we MUST NOT put them on the manifest (validateNoEnvironmentDelta
-    // would see rotating values). We inline ephemeral `export` prefixes on THIS
-    // exec's command text only. The clone command writes them to provider token
-    // FILES before fetch/CLI use. Absent seeds -> no prefix; helper wrappers still
-    // install and passthrough cleanly.
+    // Direct provider tokens retain the established off-manifest per-exec seed.
+    // Smart-Git broker bearers take a stricter path: stage opaque bytes through
+    // the sandbox editor, then let a token-free command atomically move them into
+    // the stable binding file. No broker bearer enters command text or argv.
     const gitTokenSeeds = {
       ...(context.gitTokenSeeds ?? {}),
       ...(context.gitTokenSeed ? { github: context.gitTokenSeed } : {}),
     } satisfies GitTokenSeeds;
     const gitCredentialBindings = context.gitCredentialBindings ?? [];
+    stagedBrokerSeeds = await stageGitHttpBrokerBindingSeeds(
+      session,
+      gitCredentialBindings,
+      context.runAs,
+    );
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
     ]
       .filter(Boolean)
       .join("\n");
-    const cloneCommand = repositoryCloneCommand(resources, gitCredentialBindings);
+    const cloneCommand = repositoryCloneCommand(
+      resources,
+      gitCredentialBindings,
+      stagedBrokerSeeds.staged,
+    );
     const command = seedPrefix ? `set +x\n${seedPrefix}\n${cloneCommand}` : cloneCommand;
     const result = await runSandboxLifecycleCommand(
       session,
@@ -9537,6 +9636,10 @@ export async function runRepositoryCloneHook(
       },
     });
     throw error;
+  } finally {
+    if (stagedBrokerSeeds.editor) {
+      await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
+    }
   }
 }
 

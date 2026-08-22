@@ -7,7 +7,15 @@ import type {
   GitHubUserInstallationAccess,
   GitHubUserRepositoryAccess,
 } from "@opengeni/contracts";
-import { createHmac, createPrivateKey, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  createPrivateKey,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
 
 const githubApiBase = "https://api.github.com";
@@ -16,6 +24,212 @@ const githubTokenMintTimeoutMs = 60_000;
 export const stateMaxAgeSeconds = 60 * 60;
 const pkcs8PrivateKeyHeader = `-----BEGIN ${"PRIVATE KEY"}-----`;
 const rsaPrivateKeyHeader = `-----BEGIN ${"RSA PRIVATE KEY"}-----`;
+
+const PERSONAL_GITHUB_GIT_BROKER_TOKEN_PREFIX = "oggh1";
+const PERSONAL_GITHUB_GIT_BROKER_KEY_CONTEXT = "opengeni:personal-github:git-broker:v1";
+export const PERSONAL_GITHUB_GIT_BROKER_TOKEN_TTL_SECONDS = 5 * 60;
+
+export type PersonalGitHubGitBrokerRepositoryClaim = {
+  repositoryId: string;
+  fullName: string;
+  canonicalUrl: string;
+  ref: string;
+  access: "read" | "write";
+  selectionGeneration: number;
+  routeId: string;
+};
+
+export type PersonalGitHubGitBrokerClaims = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  originWorkspaceId: string;
+  connectionId: string;
+  connectionAuthorityGeneration: number;
+  ownerSubjectId: string;
+  credentialBindingId: string;
+  selectionGeneration: number;
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
+};
+
+export function personalGitHubGitBrokerRouteId(
+  secret: string,
+  input: Omit<PersonalGitHubGitBrokerClaims, "nonce" | "issuedAt" | "expiresAt"> & {
+    repository: Omit<PersonalGitHubGitBrokerRepositoryClaim, "routeId">;
+  },
+): string {
+  const hmac = createHmac("sha256", personalGitHubGitBrokerKey(secret));
+  for (const value of [
+    String(input.version),
+    input.accountId,
+    input.workspaceId,
+    input.sessionId,
+    input.rootSessionId,
+    input.turnId,
+    input.attemptId,
+    String(input.executionGeneration),
+    input.originWorkspaceId,
+    input.connectionId,
+    String(input.connectionAuthorityGeneration),
+    input.ownerSubjectId,
+    input.credentialBindingId,
+    String(input.selectionGeneration),
+    input.repository.repositoryId,
+    input.repository.fullName,
+    input.repository.canonicalUrl,
+    input.repository.ref,
+    input.repository.access,
+    String(input.repository.selectionGeneration),
+  ]) {
+    const bytes = Buffer.from(value, "utf8");
+    hmac.update(Buffer.from(String(bytes.byteLength), "ascii"));
+    hmac.update(":");
+    hmac.update(bytes);
+    hmac.update(";");
+  }
+  return hmac.digest("base64url");
+}
+
+/**
+ * Seal exact Git broker authority into a confidential, authenticated bearer.
+ * The payload is encrypted rather than merely signed so tenant, session,
+ * connection, and repository identities are not readable from the sandbox's
+ * short-lived token file.
+ */
+export function sealPersonalGitHubGitBrokerClaims(
+  secret: string,
+  claims: PersonalGitHubGitBrokerClaims,
+): string {
+  assertPersonalGitHubGitBrokerClaims(claims);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", personalGitHubGitBrokerKey(secret), iv);
+  cipher.setAAD(Buffer.from(PERSONAL_GITHUB_GIT_BROKER_TOKEN_PREFIX, "ascii"));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(claims), "utf8"), cipher.final()]);
+  return [
+    PERSONAL_GITHUB_GIT_BROKER_TOKEN_PREFIX,
+    iv.toString("base64url"),
+    ciphertext.toString("base64url"),
+    cipher.getAuthTag().toString("base64url"),
+  ].join(".");
+}
+
+export function openPersonalGitHubGitBrokerClaims(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): PersonalGitHubGitBrokerClaims | null {
+  const [prefix, encodedIv, encodedCiphertext, encodedTag, extra] = token.split(".");
+  if (
+    prefix !== PERSONAL_GITHUB_GIT_BROKER_TOKEN_PREFIX ||
+    !encodedIv ||
+    !encodedCiphertext ||
+    !encodedTag ||
+    extra !== undefined
+  ) {
+    return null;
+  }
+  try {
+    const iv = Buffer.from(encodedIv, "base64url");
+    const ciphertext = Buffer.from(encodedCiphertext, "base64url");
+    const tag = Buffer.from(encodedTag, "base64url");
+    if (iv.byteLength !== 12 || tag.byteLength !== 16 || ciphertext.byteLength > 4_096) {
+      return null;
+    }
+    const decipher = createDecipheriv("aes-256-gcm", personalGitHubGitBrokerKey(secret), iv);
+    decipher.setAAD(Buffer.from(PERSONAL_GITHUB_GIT_BROKER_TOKEN_PREFIX, "ascii"));
+    decipher.setAuthTag(tag);
+    const payload = JSON.parse(
+      Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8"),
+    ) as unknown;
+    assertPersonalGitHubGitBrokerClaims(payload);
+    if (payload.issuedAt > nowSeconds + 60 || nowSeconds >= payload.expiresAt) return null;
+    if (payload.expiresAt - payload.issuedAt > PERSONAL_GITHUB_GIT_BROKER_TOKEN_TTL_SECONDS) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function personalGitHubGitBrokerKey(secret: string): Buffer {
+  const normalized = secret.trim();
+  if (!normalized) throw new Error("personal GitHub Git broker signing secret is unavailable");
+  return createHash("sha256")
+    .update(PERSONAL_GITHUB_GIT_BROKER_KEY_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(normalized, "utf8")
+    .digest();
+}
+
+function assertPersonalGitHubGitBrokerClaims(
+  value: unknown,
+): asserts value is PersonalGitHubGitBrokerClaims {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid personal GitHub Git broker claims");
+  }
+  const claims = value as Record<string, unknown>;
+  const expectedKeys = new Set([
+    "version",
+    "accountId",
+    "workspaceId",
+    "sessionId",
+    "rootSessionId",
+    "turnId",
+    "attemptId",
+    "executionGeneration",
+    "originWorkspaceId",
+    "connectionId",
+    "connectionAuthorityGeneration",
+    "ownerSubjectId",
+    "credentialBindingId",
+    "selectionGeneration",
+    "nonce",
+    "issuedAt",
+    "expiresAt",
+  ]);
+  const strings = [
+    "accountId",
+    "workspaceId",
+    "sessionId",
+    "rootSessionId",
+    "turnId",
+    "attemptId",
+    "originWorkspaceId",
+    "connectionId",
+    "ownerSubjectId",
+    "credentialBindingId",
+    "nonce",
+  ];
+  if (
+    claims.version !== 1 ||
+    strings.some(
+      (field) =>
+        typeof claims[field] !== "string" ||
+        claims[field].length === 0 ||
+        claims[field].length > (field === "ownerSubjectId" ? 512 : 128),
+    ) ||
+    !positiveIntegerClaim(claims.executionGeneration) ||
+    !positiveIntegerClaim(claims.connectionAuthorityGeneration) ||
+    !positiveIntegerClaim(claims.selectionGeneration) ||
+    !positiveIntegerClaim(claims.issuedAt) ||
+    !positiveIntegerClaim(claims.expiresAt) ||
+    Object.keys(claims).some((key) => !expectedKeys.has(key))
+  ) {
+    throw new Error("invalid personal GitHub Git broker claims");
+  }
+}
+
+function positiveIntegerClaim(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
 
 export class GitHubAppConfigurationError extends Error {
   constructor(readonly missing: string[]) {

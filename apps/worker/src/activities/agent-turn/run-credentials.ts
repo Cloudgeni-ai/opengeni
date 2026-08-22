@@ -73,6 +73,7 @@ export type PrepareRunCredentialsDeps = {
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
   connectionCredentials: ActivityServices["connectionCredentials"];
+  personalGitHubCredentials: ActivityServices["personalGitHubCredentials"];
   eventing: EventingState;
   attempt: AttemptIdentityState;
   renewals: RenewalState;
@@ -111,6 +112,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     observability,
     cancellationSignal,
     connectionCredentials,
+    personalGitHubCredentials,
     eventing,
     attempt,
     renewals,
@@ -244,7 +246,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // host that supplies both ports must never see two independently resolved
   // roots for the same execution merely because the call sites are far apart.
   const needsHostCredentialRoot = Boolean(
-    connectionCredentials?.gitCredentials || connectionCredentials?.mcpCredentials,
+    connectionCredentials?.gitCredentials ||
+    personalGitHubCredentials ||
+    connectionCredentials?.mcpCredentials,
   );
   const hostCredentialRootSessionId = needsHostCredentialRoot
     ? await getSessionRootId(db, input.workspaceId, input.sessionId)
@@ -253,7 +257,8 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     throw new Error(`cannot resolve host credentials for missing session ${input.sessionId}`);
   }
   const gitCredentialAuthority =
-    connectionCredentials?.gitCredentials && hostCredentialRootSessionId
+    (connectionCredentials?.gitCredentials || personalGitHubCredentials) &&
+    hostCredentialRootSessionId
       ? gitCredentialAuthorityForTurn({
           sessionId: input.sessionId,
           rootSessionId: hostCredentialRootSessionId,
@@ -294,6 +299,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         scope: connectionScope,
         ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
         gitCredentials: connectionCredentials?.gitCredentials,
+        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
         authorizeGitHubTokenMint,
         codemodeAuthority,
       },
@@ -347,6 +353,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         scope: connectionScope,
         ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
         gitCredentials: connectionCredentials?.gitCredentials,
+        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
         authorizeGitHubTokenMint,
       }),
       cancellationSignal,
@@ -369,6 +376,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       let pendingBinding: typeof initialBinding | undefined;
       return startGitCredentialRenewalLoop({
         expectedProviders: [initialBinding.provider],
+        ...(initialBinding.transport?.kind === "http_broker" ? { expiryLeadMs: 60_000 } : {}),
         initialExpiresAt: initialBinding.expiresAt
           ? { [initialBinding.provider]: initialBinding.expiresAt }
           : {},
@@ -382,6 +390,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
               scope: connectionScope,
               ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
               gitCredentials: connectionCredentials?.gitCredentials,
+              personalGitHubCredentials: personalGitHubCredentials ?? undefined,
               authorizeGitHubTokenMint,
             },
           );
