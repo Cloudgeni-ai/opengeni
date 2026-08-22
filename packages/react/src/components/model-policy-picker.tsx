@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  Globe2Icon,
   KeyRoundIcon,
   ZapIcon,
 } from "lucide-react";
@@ -63,6 +64,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   codexOnly: "Codex-only session",
   billingHints: {
     opengeni_credits: "Will use credits",
+    external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
     byok: "Billed to your AI Gateway",
@@ -152,6 +154,7 @@ export function BillingClassMark(props: {
 }) {
   const labels: Record<PickerBillingClass, string> = {
     opengeni_credits: "OpenGeni",
+    external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
     byok: "Bring your own key",
@@ -174,6 +177,8 @@ export function BillingClassMark(props: {
     >
       {props.billingClass === "opengeni_credits" ? (
         <OpenGeniMark className={mark} />
+      ) : props.billingClass === "external" ? (
+        <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (

@@ -2,6 +2,7 @@ import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@
 
 export type PickerBillingClass =
   | "opengeni_credits"
+  | "external"
   | "codex_subscription"
   | "supergrok_subscription"
   | "byok";
@@ -24,6 +25,7 @@ export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_ORDER: PickerBillingClass[] = [
   "opengeni_credits",
+  "external",
   "codex_subscription",
   "supergrok_subscription",
   "byok",
@@ -31,6 +33,7 @@ const BILLING_CLASS_ORDER: PickerBillingClass[] = [
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
+  external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
   byok: "Your Gateway",
@@ -47,6 +50,9 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment") {
+    return "external";
+  }
   if (model.source === "supergrok") {
     return "supergrok_subscription";
   }
@@ -153,13 +159,15 @@ export function payerSummaryForModel(model: ClientModel): string {
   if (billing.upstreamPayer === "workspace") {
     return "Billed to your AI Gateway";
   }
-  return "Deployment route · external billing";
+  return "External provider · no OpenGeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
-    return null;
+    return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
+      ? "Deployment route · no authentication"
+      : null;
   }
   if (source.kind === "connected_subscription") {
     return source.provider === "xai"
