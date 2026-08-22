@@ -31,6 +31,11 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  commitSessionBranchPage,
+  sessionBranchSummaryKey,
+  upsertSessionBranchChild,
+} from "./lib/session-branch-cache";
+import {
   buildPinnedRailSections,
   buildRailForest,
   groupSessionsForRail,
@@ -340,6 +345,125 @@ describe("rail session grouping", () => {
         treeStats: refreshedStats,
       }).treeStats,
     ).toEqual(refreshedStats);
+  });
+
+  test("branch summaries change when the server reports a newly spawned child", () => {
+    const manager = railSession({
+      id: "manager",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 2,
+        runningDescendants: 2,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const next = {
+      ...manager,
+      treeStats: { ...manager.treeStats!, directChildren: 3, totalDescendants: 3 },
+    };
+
+    expect(sessionBranchSummaryKey(next)).not.toBe(sessionBranchSummaryKey(manager));
+    expect(sessionBranchSummaryKey({ ...manager, updatedAt: "2026-06-19T12:00:00.000Z" })).not.toBe(
+      sessionBranchSummaryKey(manager),
+    );
+  });
+
+  test("a loaded branch renders N to N+1 children after poll invalidation without remount", () => {
+    const manager = railSession({
+      id: "manager",
+      updatedAt: "2026-06-19T10:00:00.000Z",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 1,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const workerA = railSession({ id: "worker-a", parentSessionId: manager.id });
+    let pages = commitSessionBranchPage(new Map(), manager.id, {
+      sessions: [workerA],
+      nextCursor: null,
+    });
+    const branchChildren = (parent: Session): string[] => {
+      const forest = buildRailForest([parent, ...pages.get(parent.id)!.sessions], NOW);
+      const roots = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+      return roots
+        .find((node) => node.session.id === parent.id)!
+        .children.map((child) => child.session.id);
+    };
+    expect(branchChildren(manager)).toEqual(["worker-a"]);
+
+    const polledManager = railSession({
+      ...manager,
+      updatedAt: "2026-06-19T10:01:00.000Z",
+      treeStats: { ...manager.treeStats!, directChildren: 2, totalDescendants: 2 },
+    });
+    expect(sessionBranchSummaryKey(polledManager)).not.toBe(sessionBranchSummaryKey(manager));
+    const workerB = railSession({ id: "worker-b", parentSessionId: manager.id });
+    pages = commitSessionBranchPage(pages, manager.id, {
+      sessions: [workerA, workerB],
+      nextCursor: null,
+    });
+
+    expect(branchChildren(polledManager)).toEqual(["worker-b", "worker-a"]);
+  });
+
+  test("an opened child persists in its parent branch and keeps list-only subtree facts", () => {
+    const cached = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const routeProjection = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+    });
+    const pages = new Map([
+      [
+        "manager",
+        { sessions: [cached], nextCursor: null, loading: false, failed: false, stale: false },
+      ],
+    ]);
+
+    const next = upsertSessionBranchChild(pages, routeProjection);
+    expect(next.get("manager")?.sessions).toHaveLength(1);
+    expect(next.get("manager")?.sessions[0]).toMatchObject({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+      treeStats: cached.treeStats,
+    });
+
+    const sibling = railSession({ id: "sibling", parentSessionId: "manager" });
+    const reconciled = commitSessionBranchPage(
+      next,
+      "manager",
+      { sessions: [sibling], nextCursor: null },
+      { preserve: [routeProjection] },
+    );
+    expect(reconciled.get("manager")?.sessions.map((entry) => entry.id)).toEqual([
+      "worker",
+      "sibling",
+    ]);
   });
 
   test("visibleForestRows expands only where the set says so", () => {

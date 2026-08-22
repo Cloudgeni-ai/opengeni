@@ -131,6 +131,12 @@ import {
 } from "@/lib/sessions-group";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import {
+  commitSessionBranchPage,
+  sessionBranchSummaryKey,
+  upsertSessionBranchChild,
+  type SessionBranchPage,
+} from "@/lib/session-branch-cache";
 import { cn } from "@/lib/utils";
 import type { Channel, Session } from "@/types";
 
@@ -192,12 +198,7 @@ type PendingPinFocus = {
   target: PinFocusTarget;
   settled: boolean;
 };
-type ChildPageState = {
-  sessions: Session[];
-  nextCursor: string | null;
-  loading: boolean;
-  failed: boolean;
-};
+type ChildPageState = SessionBranchPage;
 
 const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
 
@@ -336,8 +337,12 @@ export function SessionList() {
     () => new Map(),
   );
   const childLoadEpoch = useRef(0);
+  const branchSummaryKeys = useRef(new Map<string, string>());
+  const activeBranchHydration = useRef<string | null>(null);
   useEffect(() => {
     childLoadEpoch.current += 1;
+    branchSummaryKeys.current.clear();
+    activeBranchHydration.current = null;
     setChildPages(new Map());
   }, [rail.workspaceId, hierarchyMode]);
   // Short-lived optimistic projections only. The page returned by the server
@@ -887,7 +892,11 @@ export function SessionList() {
     setManualCollapsed(new Set());
   }, [rail.workspaceId]);
   const loadChildPage = useCallback(
-    async (parentSessionId: string, cursor?: string): Promise<void> => {
+    async (
+      parentSessionId: string,
+      cursor?: string,
+      preserve: readonly Session[] = [],
+    ): Promise<void> => {
       const epoch = childLoadEpoch.current;
       setChildPages((current) => {
         const previous = current.get(parentSessionId);
@@ -896,6 +905,7 @@ export function SessionList() {
           nextCursor: previous?.nextCursor ?? null,
           loading: true,
           failed: false,
+          stale: false,
         });
       });
       try {
@@ -906,23 +916,20 @@ export function SessionList() {
           archivedOnly: false,
         });
         if (childLoadEpoch.current !== epoch) return;
-        setChildPages((current) => {
-          const previous = current.get(parentSessionId);
-          const merged = new Map<string, Session>();
-          for (const session of [
-            ...(cursor ? (previous?.sessions ?? []) : []),
-            ...page.sessions,
-            ...page.pinned,
-          ]) {
-            merged.set(session.id, session);
-          }
-          return new Map(current).set(parentSessionId, {
-            sessions: [...merged.values()],
-            nextCursor: page.nextCursor,
-            loading: false,
-            failed: false,
-          });
-        });
+        setChildPages((current) =>
+          commitSessionBranchPage(
+            current,
+            parentSessionId,
+            {
+              sessions: [...page.sessions, ...page.pinned],
+              nextCursor: page.nextCursor,
+            },
+            {
+              append: cursor !== undefined,
+              preserve,
+            },
+          ),
+        );
       } catch {
         if (childLoadEpoch.current !== epoch) return;
         setChildPages((current) => {
@@ -932,12 +939,89 @@ export function SessionList() {
             nextCursor: previous?.nextCursor ?? null,
             loading: false,
             failed: true,
+            stale: false,
           });
         });
       }
     },
     [context.client, rail.workspaceId],
   );
+  // The active route supplies exact child + ancestor detail even before the
+  // lazy branch query catches up. Commit that projection into the branch cache
+  // and reconcile the complete sibling page once, so leaving the child route
+  // cannot make the row disappear again.
+  useEffect(() => {
+    const active = context.session;
+    if (!hierarchyMode || !active?.parentSessionId) {
+      activeBranchHydration.current = null;
+      return;
+    }
+    setChildPages((current) => upsertSessionBranchChild(current, active));
+    const hydrationKey = `${active.parentSessionId}:${active.id}`;
+    if (activeBranchHydration.current === hydrationKey) return;
+    activeBranchHydration.current = hydrationKey;
+    void loadChildPage(active.parentSessionId, undefined, [active]);
+  }, [context.session, hierarchyMode, loadChildPage]);
+
+  // Deep active routes auto-expand their ancestor path. Load every missing
+  // parent page on that path, not just the active session's immediate siblings,
+  // so leaving the route does not collapse lineage-only projections back out of
+  // the durable rail hierarchy.
+  useEffect(() => {
+    if (!hierarchyMode) return;
+    const activeParentSessionId = context.session?.parentSessionId ?? null;
+    for (const parentId of autoExpanded) {
+      if (parentId === activeParentSessionId) continue;
+      const page = childPages.get(parentId);
+      if (page && !page.stale) continue;
+      const node = nodesById.get(parentId);
+      const knownDirectChildren =
+        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      if (knownDirectChildren > 0) void loadChildPage(parentId);
+    }
+  }, [
+    autoExpanded,
+    childPages,
+    context.session?.parentSessionId,
+    hierarchyMode,
+    loadChildPage,
+    nodesById,
+  ]);
+
+  // Root pages are polled server truth and carry bounded descendant summaries.
+  // When a loaded branch's summary changes (notably directChildren after an
+  // orchestrator spawn), refresh that exact branch instead of retaining its old
+  // child list forever. This preserves root-only pagination and lazy hierarchy
+  // while making newly authorized children durable sidebar state.
+  useEffect(() => {
+    const parentsById = new Map(allSessions.map((session) => [session.id, session]));
+    const loadedParentIds = new Set(childPages.keys());
+    const newlyStale = new Set<string>();
+    for (const parentId of branchSummaryKeys.current.keys()) {
+      if (!loadedParentIds.has(parentId)) branchSummaryKeys.current.delete(parentId);
+    }
+    for (const [parentId, page] of childPages) {
+      const parent = parentsById.get(parentId);
+      if (!parent) continue;
+      const nextKey = sessionBranchSummaryKey(parent);
+      const previousKey = branchSummaryKeys.current.get(parentId);
+      branchSummaryKeys.current.set(parentId, nextKey);
+      if (previousKey !== undefined && previousKey !== nextKey && !page.loading) {
+        if (expanded.has(parentId)) void loadChildPage(parentId);
+        else if (!page.stale) newlyStale.add(parentId);
+      }
+    }
+    if (newlyStale.size > 0) {
+      setChildPages((current) => {
+        const next = new Map(current);
+        for (const parentId of newlyStale) {
+          const page = next.get(parentId);
+          if (page) next.set(parentId, { ...page, stale: true });
+        }
+        return next;
+      });
+    }
+  }, [allSessions, childPages, expanded, loadChildPage]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -956,7 +1040,14 @@ export function SessionList() {
       const node = nodesById.get(sessionId);
       const knownDirectChildren =
         node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
-      if (opening && hierarchyMode && knownDirectChildren > 0 && !childPages.has(sessionId)) {
+      if (
+        opening &&
+        hierarchyMode &&
+        knownDirectChildren > 0 &&
+        (!childPages.has(sessionId) ||
+          childPages.get(sessionId)?.failed === true ||
+          childPages.get(sessionId)?.stale === true)
+      ) {
         void loadChildPage(sessionId);
       }
     },
