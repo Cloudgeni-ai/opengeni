@@ -246,6 +246,21 @@ async function replaceAttempt(attempt: Attempt): Promise<Attempt> {
   const executionGeneration = attempt.executionGeneration + 1;
   await shared.admin.begin(async (tx) => {
     await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    // Mirror the production session -> turn -> attempt lock order. Taking the
+    // attempt first can deadlock an exact-attempt reader that already holds the
+    // session/turn share locks while it waits for this attempt row.
+    await tx`
+      SELECT id FROM sessions
+      WHERE id = ${attempt.sessionId}
+      FOR UPDATE`;
+    await tx`
+      SELECT id FROM session_turns
+      WHERE id = ${attempt.turnId}
+      FOR UPDATE`;
+    await tx`
+      SELECT id FROM session_turn_attempts
+      WHERE id = ${attempt.attemptId}
+      FOR UPDATE`;
     await tx`
       UPDATE session_turn_attempts
       SET state = 'closed', outcome = 'superseded', closed_at = now(), updated_at = now()
