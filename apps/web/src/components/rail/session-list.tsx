@@ -132,8 +132,11 @@ import {
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import {
+  beginSessionBranchRequest,
   commitSessionBranchPage,
+  failSessionBranchRequest,
   sessionBranchSummaryKey,
+  sessionBranchSummaryDecision,
   upsertSessionBranchChild,
   type SessionBranchPage,
 } from "@/lib/session-branch-cache";
@@ -337,6 +340,7 @@ export function SessionList() {
     () => new Map(),
   );
   const childLoadEpoch = useRef(0);
+  const childRequestSequence = useRef(0);
   const branchSummaryKeys = useRef(new Map<string, string>());
   const activeBranchHydration = useRef<string | null>(null);
   useEffect(() => {
@@ -898,16 +902,11 @@ export function SessionList() {
       preserve: readonly Session[] = [],
     ): Promise<void> => {
       const epoch = childLoadEpoch.current;
-      setChildPages((current) => {
-        const previous = current.get(parentSessionId);
-        return new Map(current).set(parentSessionId, {
-          sessions: previous?.sessions ?? [],
-          nextCursor: previous?.nextCursor ?? null,
-          loading: true,
-          failed: false,
-          stale: false,
-        });
-      });
+      childRequestSequence.current += 1;
+      const requestId = childRequestSequence.current;
+      setChildPages((current) =>
+        beginSessionBranchRequest(current, parentSessionId, requestId, cursor),
+      );
       try {
         const page = await context.client.listSessionPage(rail.workspaceId, {
           limit: 50,
@@ -927,21 +926,13 @@ export function SessionList() {
             {
               append: cursor !== undefined,
               preserve,
+              requestId,
             },
           ),
         );
       } catch {
         if (childLoadEpoch.current !== epoch) return;
-        setChildPages((current) => {
-          const previous = current.get(parentSessionId);
-          return new Map(current).set(parentSessionId, {
-            sessions: previous?.sessions ?? [],
-            nextCursor: previous?.nextCursor ?? null,
-            loading: false,
-            failed: true,
-            stale: false,
-          });
-        });
+        setChildPages((current) => failSessionBranchRequest(current, parentSessionId, requestId));
       }
     },
     [context.client, rail.workspaceId],
@@ -1005,11 +996,16 @@ export function SessionList() {
       if (!parent) continue;
       const nextKey = sessionBranchSummaryKey(parent);
       const previousKey = branchSummaryKeys.current.get(parentId);
-      branchSummaryKeys.current.set(parentId, nextKey);
-      if (previousKey !== undefined && previousKey !== nextKey && !page.loading) {
-        if (expanded.has(parentId)) void loadChildPage(parentId);
-        else if (!page.stale) newlyStale.add(parentId);
-      }
+      const decision = sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: page.loading,
+        expanded: expanded.has(parentId),
+        stale: page.stale,
+      });
+      if (decision.acknowledge) branchSummaryKeys.current.set(parentId, nextKey);
+      if (decision.refresh) void loadChildPage(parentId);
+      else if (decision.markStale) newlyStale.add(parentId);
     }
     if (newlyStale.size > 0) {
       setChildPages((current) => {
@@ -2206,7 +2202,7 @@ function SessionTreeRow(props: {
               depth={props.depth + 1}
               text="Retry loading sessions"
               onClick={() =>
-                void props.onLoadMoreChildren(node.session.id, childPage.nextCursor ?? undefined)
+                void props.onLoadMoreChildren(node.session.id, childPage.retryCursor ?? undefined)
               }
             />
           ) : null}

@@ -8,6 +8,14 @@ export type SessionBranchPage = {
   loading: boolean;
   failed: boolean;
   stale: boolean;
+  requestId: number | null;
+  retryCursor: string | null;
+};
+
+export type SessionBranchSummaryDecision = {
+  acknowledge: boolean;
+  refresh: boolean;
+  markStale: boolean;
 };
 
 /**
@@ -60,6 +68,27 @@ export function upsertSessionBranchChild(
     loading: page?.loading ?? false,
     failed: page?.failed ?? false,
     stale: page?.stale ?? false,
+    requestId: page?.requestId ?? null,
+    retryCursor: page?.retryCursor ?? null,
+  });
+}
+
+/** Mark one exact branch request active without discarding loaded children. */
+export function beginSessionBranchRequest(
+  pages: ReadonlyMap<string, SessionBranchPage>,
+  parentSessionId: string,
+  requestId: number,
+  cursor?: string,
+): ReadonlyMap<string, SessionBranchPage> {
+  const previous = pages.get(parentSessionId);
+  return new Map(pages).set(parentSessionId, {
+    sessions: previous?.sessions ?? [],
+    nextCursor: previous?.nextCursor ?? null,
+    loading: true,
+    failed: false,
+    stale: false,
+    requestId,
+    retryCursor: cursor ?? null,
   });
 }
 
@@ -68,16 +97,26 @@ export function commitSessionBranchPage(
   pages: ReadonlyMap<string, SessionBranchPage>,
   parentSessionId: string,
   input: { sessions: readonly Session[]; nextCursor: string | null },
-  options: { append?: boolean; preserve?: readonly Session[] } = {},
+  options: { append?: boolean; preserve?: readonly Session[]; requestId?: number } = {},
 ): ReadonlyMap<string, SessionBranchPage> {
   const previous = pages.get(parentSessionId);
+  if (options.requestId !== undefined && previous?.requestId !== options.requestId) return pages;
   const merged = new Map<string, Session>();
-  for (const session of [
-    ...(options.append ? (previous?.sessions ?? []) : []),
-    ...(options.preserve ?? []),
-    ...input.sessions,
-  ]) {
-    merged.set(session.id, session);
+  if (options.append) {
+    for (const session of [
+      ...(previous?.sessions ?? []),
+      ...(options.preserve ?? []),
+      ...input.sessions,
+    ]) {
+      merged.set(session.id, session);
+    }
+  } else {
+    // A refreshed first page owns the leading order. Retain already-loaded
+    // tail entries (including an active child outside the first 50) behind it.
+    for (const session of input.sessions) merged.set(session.id, session);
+    for (const session of [...(previous?.sessions ?? []), ...(options.preserve ?? [])]) {
+      if (!merged.has(session.id)) merged.set(session.id, session);
+    }
   }
   return new Map(pages).set(parentSessionId, {
     sessions: [...merged.values()],
@@ -85,5 +124,45 @@ export function commitSessionBranchPage(
     loading: false,
     failed: false,
     stale: false,
+    requestId: null,
+    retryCursor: null,
   });
+}
+
+/** Fail only the still-current request and retain its exact retry cursor. */
+export function failSessionBranchRequest(
+  pages: ReadonlyMap<string, SessionBranchPage>,
+  parentSessionId: string,
+  requestId: number,
+): ReadonlyMap<string, SessionBranchPage> {
+  const previous = pages.get(parentSessionId);
+  if (!previous || previous.requestId !== requestId) return pages;
+  return new Map(pages).set(parentSessionId, {
+    ...previous,
+    loading: false,
+    failed: true,
+    stale: false,
+    requestId: null,
+  });
+}
+
+/** Decide whether a changed parent summary can be acknowledged right now. */
+export function sessionBranchSummaryDecision(input: {
+  previousKey: string | undefined;
+  nextKey: string;
+  loading: boolean;
+  expanded: boolean;
+  stale: boolean;
+}): SessionBranchSummaryDecision {
+  if (input.previousKey === undefined || input.previousKey === input.nextKey) {
+    return { acknowledge: true, refresh: false, markStale: false };
+  }
+  if (input.loading) {
+    return { acknowledge: false, refresh: false, markStale: false };
+  }
+  return {
+    acknowledge: true,
+    refresh: input.expanded,
+    markStale: !input.expanded && !input.stale,
+  };
 }
