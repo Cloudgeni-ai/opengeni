@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
@@ -16,11 +17,17 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { Hono } from "hono";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { registerSessionRoutes } from "../src/routes/sessions";
+
+const REST_DELEGATION_SECRET = "session-events-mcp-rest-secret";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
 let mcp: unknown;
+let restApp: Hono;
+let restAuthorization: string;
 let grant: AccessGrant;
 let workspaceId: string;
 let sessionId: string;
@@ -72,21 +79,22 @@ beforeAll(async () => {
   sessionId = session.id;
 
   const noop = async () => undefined;
+  const workflowClient = {
+    signalUserMessage: noop,
+    wakeSessionWorkflow: noop,
+    requestSessionWorkflowWakeDispatch: noop,
+    signalApprovalDecision: noop,
+    signalSessionControl: noop,
+    syncScheduledTask: noop,
+    deleteScheduledTaskSchedule: noop,
+    triggerScheduledTask: noop,
+  } as unknown as SessionWorkflowClient;
   mcp = buildOpenGeniMcpServer(
     {
       settings: testSettings({ databaseUrl: shared.appUrl }),
       db: client.db,
       bus: new MemoryEventBus(),
-      workflowClient: {
-        signalUserMessage: noop,
-        wakeSessionWorkflow: noop,
-        requestSessionWorkflowWakeDispatch: noop,
-        signalApprovalDecision: noop,
-        signalSessionControl: noop,
-        syncScheduledTask: noop,
-        deleteScheduledTaskSchedule: noop,
-        triggerScheduledTask: noop,
-      } as unknown as SessionWorkflowClient,
+      workflowClient,
       objectStorage: null,
       githubStateSecret: "test",
       documentIndexer: { indexDocument: noop },
@@ -94,6 +102,31 @@ beforeAll(async () => {
     } as unknown as ApiRouteDeps,
     grant,
   );
+  // The REST events API the browser composer uses to reconcile a Send; it must
+  // keep every stored row while the MCP monitoring read applies its boundary.
+  restApp = new Hono();
+  registerSessionRoutes(restApp, {
+    settings: testSettings({
+      databaseUrl: shared.appUrl,
+      productAccessMode: "managed",
+      delegationSecret: REST_DELEGATION_SECRET,
+    }),
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient,
+    objectStorage: null,
+    githubStateSecret: "test",
+    documentIndexer: { indexDocument: noop },
+    getDocumentServices: () => ({}) as never,
+  } as unknown as ApiRouteDeps);
+  restAuthorization = `Bearer ${await signDelegatedAccessToken(REST_DELEGATION_SECRET, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    permissions: ["sessions:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
 
   await appendSessionEvents(client.db, workspaceId, sessionId, [
     ...Array.from({ length: 40 }, () => ({
@@ -293,6 +326,30 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
       payloadMode: "full",
     });
     expect(forensic.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: accepted.acceptedEventId,
+          type: "user.message",
+          payload: expect.objectContaining({ text: queuedText }),
+        }),
+      ]),
+    );
+
+    // REST monitoring mode (the composer's `includeTypes=user.message` Send
+    // reconciliation shape) keeps the exact stored row: the boundary is applied
+    // only by the MCP monitoring read.
+    const rest = await restApp.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${queued.id}/events?mode=monitoring&includeTypes=user.message&payloadMode=full&limit=50`,
+      { headers: { authorization: restAuthorization } },
+    );
+    expect(rest.status).toBe(200);
+    expect(rest.headers.get("X-OpenGeni-Event-Mode")).toBe("monitoring");
+    const restBody = (await rest.json()) as Array<{
+      id: string;
+      type: string;
+      payload: { text?: string };
+    }>;
+    expect(restBody).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: accepted.acceptedEventId,

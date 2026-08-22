@@ -5506,6 +5506,11 @@ export const sessionTurns = pgTable(
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+    // Agent-monitoring "was this prompt's turn ever claimed" probe
+    // (`excludeUnclaimedHumanPromptEventFilter`), migration 0322.
+    unclaimedPromptTrigger: index("session_turns_unclaimed_prompt_trigger_idx")
+      .on(table.workspaceId, table.sessionId, table.triggerEventId)
+      .where(sql`${table.startedAt} is null`),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
