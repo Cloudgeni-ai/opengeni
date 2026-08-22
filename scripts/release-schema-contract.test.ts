@@ -157,6 +157,7 @@ describe("release schema contract", () => {
       "0319_event_triggered_automations.sql",
       "0320_pr_review_pack.sql",
       "0322_session_turns_unclaimed_prompt_trigger_index.sql",
+      "0324_human_confirmed_company_profile_agent_admin.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

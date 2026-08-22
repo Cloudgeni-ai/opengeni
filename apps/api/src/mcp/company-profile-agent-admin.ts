@@ -1,19 +1,19 @@
 import {
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_ENTRY_MAX_COUNT,
+  COMPANY_PROFILE_REASON_MAX_CHARS,
   COMPANY_PROFILE_SCALAR_MAX_CHARS,
   COMPANY_PROFILE_STABLE_KEY_MAX_CHARS,
   CompanyProfileContent,
   normalizeCompanyProfileStableKey,
-  type CompanyBrainGovernedWriteAttempt,
+  type CompanyProfileAgentAttempt,
   type CompanyProfileEntry,
 } from "@opengeni/contracts";
 import {
-  CompanyProfileOperationReuseError,
-  proposeCompanyProfile,
-  type CompanyProfileProposalResult,
-  type Database,
-} from "@opengeni/db";
+  CompanyProfileAgentAdminError,
+  createCompanyProfileAgentAdminRouter,
+} from "@opengeni/core";
+import type { Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -21,30 +21,14 @@ type JsonResult = (value: unknown) => {
   content: { type: "text"; text: string }[];
 };
 
-export type CompanyProfileProposeInput = {
-  operationId: string;
-  accountId: string;
-  workspaceId: string;
-  profile: CompanyProfileContent;
-  actorSubjectId: string;
-  sourceId: string;
-};
-
-export type RegisterCompanyProfileToolsInput = {
+export type RegisterCompanyProfileAgentAdminToolsInput = {
   server: McpServer;
   db: Database;
-  attempt: CompanyBrainGovernedWriteAttempt;
-  /** Subject recorded as the proposal creator; the worker-signed attempt grant subject. */
-  actorSubjectId: string;
+  attempt: CompanyProfileAgentAttempt;
   authorize: () => Promise<void>;
   json: JsonResult;
-  propose?: (input: CompanyProfileProposeInput) => Promise<CompanyProfileProposalResult>;
+  router?: Pick<ReturnType<typeof createCompanyProfileAgentAdminRouter>, "propose" | "confirm">;
 };
-
-export const COMPANY_PROFILE_PROPOSE_NEXT_ACTION =
-  "An organization owner or admin can review and activate this proposal under Company Brain → Company profile & goals.";
-
-const STABLE_KEY_WORDS = 6;
 
 const scalar = z.string().trim().min(1).max(COMPANY_PROFILE_SCALAR_MAX_CHARS).nullable();
 const entry = z.object({
@@ -52,6 +36,8 @@ const entry = z.object({
   content: z.string().trim().min(1).max(COMPANY_PROFILE_ENTRY_MAX_CHARS),
 });
 const entries = z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT);
+const DEFAULT_PROPOSAL_REASON = "Activate agent-proposed organization company profile";
+const STABLE_KEY_WORDS = 6;
 
 type EntryInput = z.infer<typeof entry>;
 
@@ -106,17 +92,22 @@ function boundedIssueMessage(error: z.ZodError): string {
 }
 
 /**
- * Agent-facing company-profile proposal. The exact worker-signed attempt owns
- * tenant authority; tool input carries only the proposed full profile. The
- * tool records one inactive proposal revision and never activates it.
+ * Register the explicit owner-confirmed organization profile path. This is
+ * administration, not derived learning: workspace learning mode is never
+ * consulted, the initiating human must be the organization's active owner (the
+ * same authority as the manual `account:admin` route), and the proposal cannot
+ * become active without the exact bound human-input response returned by the
+ * first call.
  */
-export function registerCompanyProfileTools(input: RegisterCompanyProfileToolsInput): void {
-  const propose = input.propose ?? ((request) => proposeCompanyProfile(input.db, request));
+export function registerCompanyProfileAgentAdminTools(
+  input: RegisterCompanyProfileAgentAdminToolsInput,
+): void {
+  const router = input.router ?? createCompanyProfileAgentAdminRouter({ db: input.db });
   input.server.registerTool(
     "company_profile_propose",
     {
       description:
-        "Record an inactive proposal for the organization-wide company profile (identity, mission, products, customers, goals, critical constraints). It never activates itself: an organization owner or admin reviews and activates the proposal in Company Brain → Company profile & goals. Send the complete profile, not a delta; omitted list keys are derived from the content. Use it only after the user confirmed the proposed profile. Do not save company context as Memory, Documents, workspace policy, or a preference.",
+        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. Omitted list keys are derived from content. This creates only an immutable inactive proposal for the exact live turn initiated by the organization owner and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
       inputSchema: {
         operationId: z.string().uuid(),
         identity: scalar,
@@ -125,6 +116,7 @@ export function registerCompanyProfileTools(input: RegisterCompanyProfileToolsIn
         customers: entries,
         goals: entries,
         constraints: entries,
+        reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS).optional(),
       },
     },
     async (request) => {
@@ -145,28 +137,43 @@ export function registerCompanyProfileTools(input: RegisterCompanyProfileToolsIn
         });
       }
       try {
-        const result = await propose({
-          operationId: request.operationId,
-          accountId: input.attempt.accountId,
-          workspaceId: input.attempt.workspaceId,
-          profile: parsed.data,
-          actorSubjectId: input.actorSubjectId,
-          sourceId: `agent-attempt:${input.attempt.attemptId}`,
-        });
-        return input.json({
-          status: "proposed",
-          operationId: request.operationId,
-          revisionId: result.revision.id,
-          revision: result.revision.revision,
-          nextAction: COMPANY_PROFILE_PROPOSE_NEXT_ACTION,
-        });
+        return input.json(
+          await router.propose({
+            attempt: input.attempt,
+            request: {
+              operationId: request.operationId,
+              profile: parsed.data,
+              reason: request.reason ?? DEFAULT_PROPOSAL_REASON,
+            },
+          }),
+        );
       } catch (error) {
-        if (error instanceof CompanyProfileOperationReuseError) {
-          return input.json({
-            status: "not_proposed",
-            code: "operation_reused",
-            message: error.message,
-          });
+        if (error instanceof CompanyProfileAgentAdminError) {
+          return input.json({ status: "not_proposed", code: error.code, message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  input.server.registerTool(
+    "company_profile_confirm",
+    {
+      description:
+        "Activate a `company_profile_propose` receipt only after the exact initiating organization owner answered Activate on the returned `request_human_input` prompt. Pass the proposalReceiptId and requestId unchanged. Confirmation revalidates the live turn, organization role, proposal hash, and unchanged active-profile baseline, then returns the immutable activation receipt.",
+      inputSchema: {
+        operationId: z.string().uuid(),
+        proposalReceiptId: z.string().uuid(),
+        humanInputRequestId: z.string().uuid(),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      try {
+        return input.json(await router.confirm({ attempt: input.attempt, request }));
+      } catch (error) {
+        if (error instanceof CompanyProfileAgentAdminError) {
+          return input.json({ status: "not_confirmed", code: error.code, message: error.message });
         }
         throw error;
       }

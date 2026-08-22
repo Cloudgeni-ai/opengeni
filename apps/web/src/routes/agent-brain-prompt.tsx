@@ -24,7 +24,7 @@ function promptCopy(kind: AgentBrainPromptKind): {
       openingMessage: (request) =>
         `Help me create or update our organization-wide company profile and goals.\n\nWhat I want agents to know:\n${request}`,
       instructions:
-        "Help the user create concise organization-wide company context covering only useful identity, mission, products, customers, goals, and critical constraints. Ask only essential follow-up questions. Show the proposed profile before applying it. After explicit confirmation, call the company_profile_propose tool once with the full profile; it records an inactive proposal that an organization owner or admin activates in Company Brain. Do not save this as ordinary Memory, Documents, workspace policy, or a preference.",
+        "Help the user create concise organization-wide company context covering only useful identity, mission, products, customers, goals, and critical constraints. Ask only essential follow-up questions. Show the complete proposed profile before applying it. Use company_profile_propose, pass its humanInput payload verbatim to request_human_input, and only after the organization owner confirms Activate call company_profile_confirm. This explicit administration path is independent of workspace learning policy. Do not save this as ordinary Memory, Documents, workspace policy, or a preference. If either company-profile tool is unavailable, say so briefly and leave the final proposal ready for the manual editor.",
     };
   }
   if (kind === "workspace_instructions") {
