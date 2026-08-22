@@ -120,7 +120,11 @@ const budgets = {
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.
-  directSessionRaw: 2073 * kib,
+  // The exact merged-main Linux/x64 workload build, which also embeds the
+  // immutable deployment revision, measures 2,122,755 raw bytes. Advance only
+  // this aggregate to the next whole-KiB envelope; every compressed, file-count,
+  // per-file, lazy-chunk, CSS, and initial-graph cap remains unchanged.
+  directSessionRaw: 2074 * kib,
   directSessionGzip: 576 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
