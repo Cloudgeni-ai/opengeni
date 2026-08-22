@@ -154,11 +154,15 @@ export function sessionBranchSummaryDecision(input: {
   expanded: boolean;
   stale: boolean;
 }): SessionBranchSummaryDecision {
+  if (input.loading) {
+    return {
+      acknowledge: input.previousKey === input.nextKey,
+      refresh: false,
+      markStale: false,
+    };
+  }
   if (input.previousKey === undefined || input.previousKey === input.nextKey) {
     return { acknowledge: true, refresh: false, markStale: false };
-  }
-  if (input.loading) {
-    return { acknowledge: false, refresh: false, markStale: false };
   }
   return {
     acknowledge: true,
