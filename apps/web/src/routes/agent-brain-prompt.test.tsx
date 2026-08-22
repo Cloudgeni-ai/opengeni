@@ -334,6 +334,67 @@ describe("AgentBrainPrompt", () => {
     await setValue(textarea, "We build agents.");
     expect(button.disabled).toBe(true);
     expect(container.textContent).toContain("No model is available for this workspace.");
+    expect(container.textContent).not.toContain("Could not load the workspace model catalog");
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  test("falls back to the context model with a retry control when the catalog fails to load", async () => {
+    getWorkspaceModelCatalog.mockImplementationOnce(async () => {
+      throw new Error("catalog unavailable");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<AgentBrainPrompt kind="preference" workspaceId={workspaceId} />);
+    });
+    await settle();
+
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    const button = container.querySelector("button[type=submit]") as HTMLButtonElement;
+    await setValue(textarea, "Lead with the outcome.");
+    expect(button.disabled).toBe(false);
+    expect(container.textContent).toContain(
+      "Could not load the workspace model catalog: catalog unavailable",
+    );
+    expect(container.textContent).not.toContain("No model is available");
+
+    await act(async () => {
+      (container.querySelector("form") as HTMLFormElement).dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle();
+    expect(startSession).toHaveBeenCalledTimes(1);
+    const [, submission] = startSession.mock.calls[0]!;
+    expect(submission.model).toBe("gpt-5.6-sol");
+    expect(submission.reasoningEffort).toBe("low");
+    expect(submission.latencyMode).toBe("standard");
+
+    // Retry re-fetches the catalog; a successful reload clears the error and
+    // switches to the catalog-resolved model.
+    const callsBeforeRetry = getWorkspaceModelCatalog.mock.calls.length;
+    getWorkspaceModelCatalog.mockImplementationOnce(async () => ({
+      models: [
+        catalogModel("gpt-5.6-sol", { selectable: false }),
+        catalogModel("codex/gpt-5.6-luna"),
+      ],
+    }));
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent === "Retry",
+    ) as HTMLButtonElement;
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry.click();
+    });
+    await settle();
+    expect(getWorkspaceModelCatalog.mock.calls.length).toBe(callsBeforeRetry + 1);
+    expect(container.textContent).not.toContain("Could not load the workspace model catalog");
+    expect(button.disabled).toBe(false);
 
     await act(async () => {
       root.unmount();

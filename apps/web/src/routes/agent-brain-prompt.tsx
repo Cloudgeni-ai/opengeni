@@ -64,7 +64,7 @@ export function AgentBrainPrompt({
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const modelSelection = useMemo(
+  const catalogSelection = useMemo(
     () =>
       resolveAgentBrainPromptModel(modelCatalog.rows, {
         model: context.model,
@@ -73,7 +73,20 @@ export function AgentBrainPrompt({
       }),
     [modelCatalog.rows, context.model, context.reasoningEffort, context.latencyMode],
   );
-  const noModelAvailable = !modelCatalog.loading && modelSelection === null;
+  // When the catalog fetch itself failed there is no policy verdict to act on,
+  // so fall back to the context defaults (the pre-catalog behaviour) rather than
+  // blocking the form; only a loaded catalog with no selectable row fails closed.
+  const catalogFailed = !modelCatalog.loading && modelCatalog.error !== null;
+  const modelSelection =
+    catalogSelection ??
+    (catalogFailed
+      ? {
+          model: context.model,
+          reasoningEffort: context.reasoningEffort,
+          latencyMode: context.latencyMode,
+        }
+      : null);
+  const noModelAvailable = !modelCatalog.loading && !catalogFailed && catalogSelection === null;
   const canSubmit =
     Boolean(request.trim()) &&
     !starting &&
@@ -134,9 +147,16 @@ export function AgentBrainPrompt({
           credentials.
         </p>
       ) : null}
-      {modelCatalog.error && modelSelection === null ? (
-        <p className="text-xs leading-5 text-fg-subtle">
-          Could not load the workspace model catalog: {modelCatalog.error}
+      {catalogFailed ? (
+        <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
+          <span>Could not load the workspace model catalog: {modelCatalog.error}</span>
+          <button
+            type="button"
+            className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-fg hover:bg-surface-muted"
+            onClick={() => void modelCatalog.refresh()}
+          >
+            Retry
+          </button>
         </p>
       ) : null}
       <div>
