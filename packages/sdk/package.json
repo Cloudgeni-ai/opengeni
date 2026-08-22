@@ -46,6 +46,10 @@
       "types": "./src/pr-review.ts",
       "default": "./src/pr-review.ts"
     },
+    "./organization-private-session-settings": {
+      "types": "./src/organization-private-session-settings.ts",
+      "default": "./src/organization-private-session-settings.ts"
+    },
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"

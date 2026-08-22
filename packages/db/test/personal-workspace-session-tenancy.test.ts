@@ -9,6 +9,7 @@ import {
   createSessionWithIdempotencyKey,
   ensureManagedAccessForUser,
   forkSessionContent,
+  getOrganizationPrivateSessionSettings,
   getSessionEventForSubject,
   getSessionForSubject,
   getOrCreateCompanyProfileSnapshot,
@@ -21,6 +22,7 @@ import {
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withRlsContext,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
@@ -80,6 +82,19 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
     ) values (
       ${personalGrant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
     ) on conflict (account_id) do nothing`;
+  const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: personalGrant.accountId,
+    actorSubjectId: subjectId,
+  });
+  if (!privateSessionSettings.enabled) {
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: personalGrant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
+  }
   return {
     subjectId,
     accountId: personalGrant.accountId,

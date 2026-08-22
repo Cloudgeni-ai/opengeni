@@ -48,7 +48,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
-  test("reports private-create availability only to the exact managed human after activation", async () => {
+  test("reports private-create availability to members only after organization enablement", async () => {
     if (!shared || !client) return;
     const userId = `core-private-create-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
@@ -70,6 +70,22 @@ describe("managed-human session tenancy application service", () => {
     } satisfies AccessGrantAuthorization;
 
     await expect(
+      getManagedHumanSessionCreateCapabilities(
+        { db: client.db },
+        {
+          ...canonical,
+          grant: {
+            ...grant,
+            permissions: grant.permissions.filter(
+              (permission) => permission !== "sessions:create" && permission !== "workspace:admin",
+            ),
+          },
+        },
+        grant.workspaceId,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: false,
@@ -84,7 +100,44 @@ describe("managed-human session tenancy application service", () => {
       )`;
     await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
-    ).resolves.toEqual({ activated: true, canCreatePrivate: true, reason: "available" });
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+    });
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${grant.accountId} and subject_id = ${subjectId}`;
+    if (!membership) throw new Error("organization membership missing");
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, ${membership.id})`;
+    await shared.admin`
+      update organization_memberships set role = 'member' where id = ${membership.id}`;
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
+    });
+    // A canonical managed human without an ACTIVE organization membership is a
+    // capability answer (not private-ready), never an unmapped database error.
+    await shared.admin`
+      update organization_memberships set status = 'suspended' where id = ${membership.id}`;
+    try {
+      await expect(
+        getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+      ).resolves.toEqual({
+        activated: false,
+        canCreatePrivate: false,
+        reason: "not_activated",
+      });
+    } finally {
+      await shared.admin`
+        update organization_memberships set status = 'active' where id = ${membership.id}`;
+    }
 
     await expect(
       getManagedHumanSessionCreateCapabilities(
