@@ -356,10 +356,19 @@ describe("organization membership routes", () => {
     if (!ownerMembership) throw new Error("owner membership missing");
 
     const otherUserId = `private-settings-idor-${crypto.randomUUID()}`;
+    const otherEmail = `${otherUserId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${otherUserId}, 'Other organization owner', ${otherEmail}, true)`;
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${otherUserId}, 'credential', ${otherUserId})`;
+    await synchronizeCanonicalHumanLoginBindings(client.db, otherUserId);
     const otherAccess = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
       userId: otherUserId,
-      email: `${otherUserId}@example.test`,
+      email: otherEmail,
       name: "Other organization owner",
+      emailVerified: true,
     });
     const otherOrganizationId = otherAccess.organizationMemberships[0]?.accountId;
     if (!otherOrganizationId) throw new Error("other organization missing");
