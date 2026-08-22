@@ -36,6 +36,10 @@
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
+    },
+    "./github-rest-mcp": {
+      "types": "./src/github-rest-mcp.ts",
+      "default": "./src/github-rest-mcp.ts"
     }
   },
   "publishConfig": {

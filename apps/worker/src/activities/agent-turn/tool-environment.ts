@@ -18,6 +18,7 @@ import {
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "../api-integrations";
+import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
@@ -399,7 +400,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     await eventing.publish!([{ type: "tool.auth_needed", payload }], true);
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
-  const localMcpServers = buildApiIntegrationServersForTurn({
+  const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
     settings: runSettings,
     integrations: installedApiIntegrations.filter((integration) =>
       selectedApiIntegrationServerIds.has(integration.serverId),
@@ -416,6 +417,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
     onAuthNeeded: publishToolAuthNeeded,
   });
+  const githubRestMcp = await buildGitHubRestMcpForTurn({
+    db,
+    settings: runSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    turn,
+    resources: mergeResourceRefs(session.resources, turn.resources),
+    tools: turnTools,
+    resolveCredential,
+  });
+  const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   const codexAppsAuth = codexAppsCredentialId
     ? (() => {
         const resolver = buildCodexTokenResolver(
@@ -498,7 +512,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     outcome: "completed",
     durationSeconds: (performance.now() - toolContextPreparationStartedAt) / 1_000,
-    count: turnTools.length,
+    count: githubRestMcp.tools.length,
   });
   await eventing.publish!([
     {
@@ -559,7 +573,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   };
   try {
     eventing.preparedTools = await waitForTurnOperation(
-      runtime.prepareTools(runSettings, turnTools, {
+      runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -587,7 +601,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             backend: activeSandboxBackend ?? groupBoxBackend,
             outcome: measurement.outcome,
             durationSeconds: measurement.durationSeconds,
-            count: turnTools.length,
+            count: githubRestMcp.tools.length,
           });
         },
         onAttemptToolCatalog: async (catalog) => {
@@ -602,23 +616,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
-        ...(googleDrivePublicationTarget && googleDrivePublicationAllowed
+        ...((googleDrivePublicationTarget && googleDrivePublicationAllowed) ||
+        githubRestMcp.authorizeCodemodeCall
           ? {
-              attemptToolAuthorize: async ({ call }) => {
+              attemptToolAuthorize: async (authorization) => {
+                const { call } = authorization;
                 if (
-                  call.caller.kind !== "codemode" ||
-                  call.identity.serverId !== "google-drive-publishing" ||
-                  call.identity.toolName !== "google_drive_publish_file"
+                  googleDrivePublicationTarget &&
+                  googleDrivePublicationAllowed &&
+                  call.caller.kind === "codemode" &&
+                  call.identity.serverId === "google-drive-publishing" &&
+                  call.identity.toolName === "google_drive_publish_file"
                 ) {
-                  return;
+                  await authorizeGoogleDrivePublicationAttempt({
+                    db,
+                    identity: connectorActionIdentity,
+                    target: googleDrivePublicationTarget,
+                    approvalId: call.operationId,
+                    arguments: call.arguments,
+                  });
                 }
-                await authorizeGoogleDrivePublicationAttempt({
-                  db,
-                  identity: connectorActionIdentity,
-                  target: googleDrivePublicationTarget,
-                  approvalId: call.operationId,
-                  arguments: call.arguments,
-                });
+                await githubRestMcp.authorizeCodemodeCall?.(authorization);
               },
             }
           : {}),
@@ -637,7 +655,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       backend: activeSandboxBackend ?? groupBoxBackend,
       outcome: toolPreparationOutcome,
       durationSeconds: toolPreparationDurationMs / 1_000,
-      count: turnTools.length,
+      count: githubRestMcp.tools.length,
     });
     await eventing.publish!([
       {
@@ -693,7 +711,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // resets on continueAsNew). Drives the one-shot title hint appended to the
   // agent's instructions; later attempts and goal continuations never match.
   return {
-    googleDriveConnectorBindings,
+    attemptConnectorActionBindings: [
+      ...googleDriveConnectorBindings,
+      ...githubRestMcp.connectorBindings,
+    ],
     connectorActionIdentity,
     postToolPreparationStartedAt,
   };

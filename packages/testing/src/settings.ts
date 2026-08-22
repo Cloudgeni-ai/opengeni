@@ -319,6 +319,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     githubAppId: undefined,
     githubClientId: undefined,
     githubClientSecret: undefined,
+    githubRestMcpEnabled: false,
     githubPersonalOauthEnabled: false,
     githubPersonalOauthClientId: undefined,
     githubPersonalOauthClientSecret: undefined,

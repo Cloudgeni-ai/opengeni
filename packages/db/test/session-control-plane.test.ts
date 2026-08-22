@@ -6088,6 +6088,12 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, {
+        ...call("connector-write-default", "unmanaged_write"),
+        approvalMode: "connector_write",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
 
     const allowCall = call("connector-allow", "read");
     expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(

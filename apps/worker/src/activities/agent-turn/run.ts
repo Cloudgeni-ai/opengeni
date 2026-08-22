@@ -1060,7 +1060,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throwIfTurnCancelled,
       });
       const {
-        googleDriveConnectorBindings,
+        attemptConnectorActionBindings,
         connectorActionIdentity,
         postToolPreparationStartedAt,
       } = toolRuntime;
@@ -1115,7 +1115,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxGitCredentialBindings,
         sandboxCodemodeToken,
         fileResourceDownloads,
-        googleDriveConnectorBindings,
+        attemptConnectorActionBindings,
         connectorActionIdentity,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
