@@ -177,7 +177,7 @@ attempt at a later execution generation (and a recovery re-claim before the
 pause or another interruption answered first likewise advances the pending
 request row's generation), the capability requires the turn's current live
 attempt of the same logical turn at the minting generation or later rather than
-the minting attempt (migration 0315); neither the answered row nor the live
+the minting attempt (migration 0316); neither the answered row nor the live
 attempt may belong to another turn or an earlier generation. Agents cannot
 fabricate that answer: the human-input row is written only by the authenticated
 human's response route.

@@ -51,7 +51,7 @@ receipt only after the exact initiating human answered the bound
 `remember:<proposalId>` structured human-input question with `save` on the same
 logical turn, and stamps `authority_kind = human_confirmed` plus the
 human-input request id on the activation receipt. The generation rule
-(migration 0315, and likewise for `confirm_remember_knowledge_claim`): the
+(migration 0316, and likewise for `confirm_remember_knowledge_claim`): the
 answer is bound to the same logical turn and exact proposal, not to one
 execution generation. Resuming the `requires_action` human-input pause always
 increments the turn's execution generation, and a recovery re-claim before the
