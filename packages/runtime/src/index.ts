@@ -349,7 +349,10 @@ export {
 export {
   CodexSubscriptionUnavailableError,
   MultiProviderModelProvider,
+  OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
+  UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
@@ -8928,7 +8931,20 @@ export function repositoryCloneCommand(
     '  rm -rf "$tmp"',
     // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
     // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" remote set-head origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
+    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+    '    rm -rf "$tmp"',
+    '    echo "Repository resource fetch failed for $target" >&2',
+    "    exit 1",
+    "  fi",
+    // origin/HEAD is best-effort: workspace capture diffs the branch against it
+    // when present and already treats a missing origin/HEAD as additive. `git
+    // remote set-head` only accepts a branch that the fetch materialized under
+    // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
+    // must not turn a successful fetch into a failed clone.
+    '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+    "  fi",
+    '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
     "    exit 1",

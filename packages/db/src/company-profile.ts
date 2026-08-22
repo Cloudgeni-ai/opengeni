@@ -747,6 +747,74 @@ export async function writeCompanyProfileLearning(
   );
 }
 
+export type CompanyProfileProposalResult = {
+  outcome: "proposed";
+  revision: CompanyProfileRevision;
+};
+
+/**
+ * Record one inactive full-profile proposal revision on behalf of an exact
+ * agent attempt (the `company_profile_propose` first-party tool). It never
+ * touches the head or activation events; an organization account admin
+ * activates it later through `activateCompanyProfileRevision`. Replay of the
+ * same operation id with the same payload converges on the original revision;
+ * a changed payload under a used operation id is rejected.
+ */
+export async function proposeCompanyProfile(
+  db: Database,
+  input: {
+    operationId: string;
+    accountId: string;
+    workspaceId: string;
+    profile: CompanyProfileContentType;
+    actorSubjectId: string;
+    sourceId: string;
+  },
+): Promise<CompanyProfileProposalResult> {
+  const profile = canonicalProfile(input.profile);
+  const requestFingerprint = operationFingerprint("agent_proposal", {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    profile,
+    actorSubjectId: input.actorSubjectId,
+    sourceId: input.sourceId,
+  });
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await lockAccount(scopedDb, input.accountId);
+      const existingRevision = await getRevisionByOperation(
+        scopedDb,
+        input.accountId,
+        input.operationId,
+      );
+      if (existingRevision) {
+        if (existingRevision.requestFingerprint !== requestFingerprint) {
+          throw new CompanyProfileOperationReuseError();
+        }
+        return { outcome: "proposed", revision: revisionFromRow(existingRevision) };
+      }
+      if (await getEventByOperation(scopedDb, input.accountId, input.operationId)) {
+        throw new CompanyProfileOperationReuseError();
+      }
+      const current = await getHeadInTransaction(scopedDb, input.accountId);
+      const revision = await createRevisionInTransaction(scopedDb, {
+        operationId: input.operationId,
+        requestFingerprint,
+        accountId: input.accountId,
+        intent: "proposal",
+        profile,
+        provenanceSource: "durable_learning",
+        provenanceSourceId: input.sourceId,
+        supersedesRevisionId: current?.revisionId ?? null,
+        createdBySubjectId: input.actorSubjectId,
+      });
+      return { outcome: "proposed", revision: revisionFromRow(revision) };
+    },
+  );
+}
+
 export async function rollbackCompanyProfileLearning(
   db: Database,
   input: {

@@ -146,6 +146,47 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
+  test("an anonymous external provider bypasses the 0-credit gate without a connection", async () => {
+    const restoreBal = mockZeroBalance();
+    const settings = billedSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          kind: "anonymous",
+          id: "opencode-zen",
+          label: "OpenCode Zen",
+          api: "chat",
+          baseUrl: "https://opencode.ai/zen/v1",
+          models: [
+            {
+              id: "opencode/x-preview-f-free",
+              upstreamModelId: "x-preview-f-free",
+              label: "OpenCode Ox Alpha",
+            },
+          ],
+        },
+      ]),
+    });
+    try {
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "opencode/x-preview-f-free",
+      });
+      expect(decision.allowed).toBe(true);
+      await requireLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "opencode/x-preview-f-free",
+      });
+    } finally {
+      restoreBal();
+    }
+  });
+
   test("infra cap (workspace:create) never reads codex credential and is unaffected", async () => {
     const restoreBal = mockZeroBalance();
     // workspace:create is a non-costly action with no workspaceId/model: getBillingBalance

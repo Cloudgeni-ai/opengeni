@@ -1403,6 +1403,29 @@ describe("contracts", () => {
     expect(without.shortLabel).toBeUndefined();
   });
 
+  test("keeps externally metered client models compatible without widening closed enums", () => {
+    const model = ClientModel.parse({
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      api: "chat",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    expect(model.source).toBeUndefined();
+    expect(model.credentialSource).toBeUndefined();
+    expect(
+      ModelCredentialSourceV1.safeParse({ kind: "deployment", mechanism: "none" }).success,
+    ).toBe(false);
+    expect(
+      TurnExecutionPolicyV1.safeParse({
+        ...turnExecutionPolicy,
+        credentialSource: { kind: "deployment", mechanism: "none" },
+        billing: { upstreamPayer: "deployment", metering: "external" },
+      }).success,
+    ).toBe(true);
+  });
+
   test("accepts additive normalized model definitions and authenticated availability", () => {
     const normalized = ClientModel.parse({
       id: "xai/grok-4.5",

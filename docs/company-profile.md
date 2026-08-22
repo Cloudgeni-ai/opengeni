@@ -124,6 +124,22 @@ The operation identity is the router attempt id, so exact router retry converges
 without duplicate profile state. The router remains responsible for attempt-ledger
 receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
+## Agent proposals
+
+The first-party `company_profile_propose` tool (`apps/api/src/mcp/company-profile.ts`,
+over `proposeCompanyProfile` in `packages/db/src/company-profile.ts`) is the
+agent-facing path the Company Brain "Create with OpenGeni" prompt directs a
+session to. It registers only for exact worker-signed agent attempts with
+`workspace:read` plus `sessions:control`, takes the complete proposed profile
+(omitted list keys are derived from the entry content and de-duplicated), and
+appends exactly one inactive `proposal` revision with `durable_learning`
+provenance and source id `agent-attempt:<attemptId>`. It is idempotent by
+operation id plus canonical request fingerprint, never changes the head or
+activation events, and has no active-authority mode. Activation stays with a
+direct organization `account:admin` through the existing activation route; the
+Company Brain → Company profile & goals view lists such revisions under
+"Pending proposals" with their content and an Activate action for admins.
+
 ## Exact-attempt prompt delivery and precedence
 
 Every accepted execution attempt creates or replays one immutable

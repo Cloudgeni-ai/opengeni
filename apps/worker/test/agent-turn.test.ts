@@ -36,6 +36,8 @@ import {
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
+  UnknownModelFinishReasonError,
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
@@ -4332,6 +4334,15 @@ describe("Codex response timeout fail-closed settlement", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("an unknown Chat Completions finish reason recovers the same accepted turn", () => {
+    expect(agentRunFailurePayload(new UnknownModelFinishReasonError())).toEqual({
+      error:
+        "The model provider ended its response ambiguously. Partial output was not accepted as complete; the same turn will retry from durable history.",
+      code: UNKNOWN_MODEL_FINISH_REASON_CODE,
+      retryable: true,
+    });
+  });
+
   test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
     const observed = await actualCodexNullBodyFailure();
     expect(observed.calls).toBe(1);
@@ -5160,6 +5171,7 @@ describe("lazyToolTransportForTurn", () => {
     expect(lazyToolTransportForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
       "generic_dispatch",
     );
+    expect(lazyToolTransportForTurn(resolved("anonymous", "chat"))).toBe("generic_dispatch");
     expect(lazyToolTransportForTurn(resolved("api-key", "chat"))).toBe("generic_dispatch");
   });
 });

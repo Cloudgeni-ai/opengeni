@@ -1668,7 +1668,7 @@ export type ModelExecutionLimitsV1 = {
 };
 
 export type CredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
@@ -1689,11 +1689,13 @@ export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
  * Registry provider kind. "api-key" providers carry their own static key/headers;
- * connected-subscription providers resolve a workspace account token at call
- * time and never carry a static key in the registry definition.
+ * "anonymous" providers intentionally send no credential and are externally
+ * metered; connected-subscription providers resolve a workspace account token
+ * at call time and never carry a static key in the registry definition.
  */
 export const RegistryProviderKind = z.enum([
   "api-key",
+  "anonymous",
   "codex-subscription",
   "xai-subscription",
   "vercel-gateway-managed",
@@ -1751,24 +1753,72 @@ const RegistryModelSchema = z
   });
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
-const RegistryProviderSchema = z.object({
-  kind: RegistryProviderKind.default("api-key"),
-  id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
-  label: z.string().min(1).optional(),
-  api: ModelProviderApi.default("chat"),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(), // inline key (pragmatic) ...
-  apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
-  defaultQuery: z.record(z.string(), z.string()).optional(),
-  defaultHeaders: z.record(z.string(), z.string()).optional(),
-  publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
-  publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
-  // V1 derives these from provider kind. Workspace BYOK is deliberately not a
-  // registry switch and requires a separately reviewed encrypted broker.
-  credentialSource: z.never().optional(),
-  billing: z.never().optional(),
-  models: z.array(RegistryModelSchema).min(1),
-});
+const RegistryProviderSchema = z
+  .object({
+    kind: RegistryProviderKind.default("api-key"),
+    id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
+    label: z.string().min(1).optional(),
+    api: ModelProviderApi.default("chat"),
+    baseUrl: z.string().url(),
+    apiKey: z.string().optional(), // inline key (pragmatic) ...
+    apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
+    defaultQuery: z.record(z.string(), z.string()).optional(),
+    defaultHeaders: z.record(z.string(), z.string()).optional(),
+    publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
+    publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
+    // V1 derives these from provider kind. Workspace BYOK is deliberately not a
+    // registry switch and requires a separately reviewed encrypted broker.
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    models: z.array(RegistryModelSchema).min(1),
+  })
+  .superRefine((provider, ctx) => {
+    if (provider.kind !== "anonymous") {
+      return;
+    }
+    if (provider.apiKey !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "anonymous providers must not declare apiKey",
+      });
+    }
+    if (provider.apiKeyEnv !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKeyEnv"],
+        message: "anonymous providers must not declare apiKeyEnv",
+      });
+    }
+    if (provider.defaultHeaders !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultHeaders"],
+        message: "anonymous providers must not declare defaultHeaders",
+      });
+    }
+    if (provider.defaultQuery !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultQuery"],
+        message: "anonymous providers must not declare defaultQuery",
+      });
+    }
+    if (provider.publicDefaultHeaderNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultHeaderNames"],
+        message: "anonymous providers must not declare publicDefaultHeaderNames",
+      });
+    }
+    if (provider.publicDefaultQueryNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultQueryNames"],
+        message: "anonymous providers must not declare publicDefaultQueryNames",
+      });
+    }
+  });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 
 export const IntegrationOAuthClientConfigSchema = z.object({
@@ -1790,7 +1840,7 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
 export interface ResolvedModelProvider {
   id: string; // "openai" | "azure" | registry id
   label: string;
-  kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "codex-subscription"
+  kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "anonymous" | subscription
   api: ModelProviderApi;
   builtin: boolean;
   baseUrl?: string | undefined;
@@ -3277,6 +3327,9 @@ function assertLatencyModeRunnable(
 }
 
 function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
+  if (provider.kind === "anonymous") {
+    return { kind: "deployment", mechanism: "none" };
+  }
   if (provider.kind === "codex-subscription") {
     return { kind: "connected_subscription", provider: "codex" };
   }
@@ -3290,6 +3343,9 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
 }
 
 function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
+  if (provider.kind === "anonymous") {
+    return { upstreamPayer: "deployment", metering: "external" };
+  }
   if (provider.kind === "codex-subscription" || provider.kind === "xai-subscription") {
     return { upstreamPayer: "connected_subscription", metering: "external" };
   }
@@ -5661,10 +5717,12 @@ function validateSettings(settings: Settings): void {
   // Model provider registry: parse it here so JSON/zod errors surface at boot,
   // reject a registry id colliding with the built-in provider id (it would
   // shadow the built-in in configuredProviders), reject duplicate registry
-  // ids, and require a resolvable API key for every registry provider (a
-  // provider with no usable key can never serve a turn). Registry models flow
-  // through configuredAllowedModels, so the managed-billing pricing check above
-  // already covers them.
+  // ids, and preserve the existing key requirement for every registry provider
+  // except connected Codex and the explicit anonymous opt-in. Anonymous
+  // providers are externally metered; a missing key on every other ordinary
+  // provider remains a boot error.
+  // Registry models flow through configuredAllowedModels, so the managed-billing
+  // pricing check above already covers the OpenGeni-credit providers.
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
   const providerIds = new Set<string>();
@@ -5689,7 +5747,11 @@ function validateSettings(settings: Settings): void {
       );
     }
     providerIds.add(provider.id);
-    if (provider.kind !== "codex-subscription" && !resolveProviderApiKey(provider)) {
+    if (
+      provider.kind !== "codex-subscription" &&
+      provider.kind !== "anonymous" &&
+      !resolveProviderApiKey(provider)
+    ) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`,
       );

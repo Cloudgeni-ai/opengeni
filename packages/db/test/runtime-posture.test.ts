@@ -346,6 +346,9 @@ describe("runtime database posture evaluator", () => {
       const personalResourceProtectedTableCount = [
         "connection_use_once_consumption_receipts",
         "personal_resource_once_consumption_receipts",
+        "personal_github_repository_selection_heads",
+        "personal_github_repository_selection_operations",
+        "personal_github_repository_selections",
         "scheduled_task_personal_resource_authorities",
         "scheduled_task_personal_resource_snapshots",
         "scheduled_task_run_personal_resource_admissions",
@@ -565,6 +568,7 @@ describe("runtime database posture evaluator", () => {
     for (const routine of posture.targetRoutines) {
       if (
         routine.name.includes("personal_document") ||
+        routine.name.includes("personal_github_repository") ||
         routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
         (routine.name.includes("scoped_rig") && !routine.name.startsWith("scheduled_")) ||
@@ -689,6 +693,24 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("classifies personal GitHub repository selections as lifecycle-only owner authority", () => {
+    for (const table of [
+      "personal_github_repository_selection_heads",
+      "personal_github_repository_selection_operations",
+      "personal_github_repository_selections",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
+        "mutate_self_personal_github_repository_selection(uuid, uuid, text, uuid, bigint, bigint, text, jsonb, boolean)",
+      ]),
+    );
   });
 
   test("classifies the Company Brain preference receipt as FORCE-RLS capability-only state", () => {

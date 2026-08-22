@@ -325,4 +325,28 @@ describe("ModelPolicyPicker", () => {
       container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
     ).toBeTruthy();
   });
+
+  test("renders the External rail mark for an anonymous provider", async () => {
+    const external: ClientModel = {
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      api: "chat",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    };
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[external]}
+        model={external.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
+  });
 });

@@ -68,6 +68,23 @@ const fireworksRegistry = JSON.stringify([
   },
 ]);
 
+const openCodeZenRegistry = JSON.stringify([
+  {
+    kind: "anonymous",
+    id: "opencode-zen",
+    label: "OpenCode Zen",
+    api: "chat",
+    baseUrl: "https://opencode.ai/zen/v1",
+    models: [
+      {
+        id: "opencode/x-preview-f-free",
+        upstreamModelId: "x-preview-f-free",
+        label: "OpenCode Ox Alpha",
+      },
+    ],
+  },
+]);
+
 // The synthetic codex-subscription provider the worker overlay injects into
 // runSettings for a workspace with an active Codex subscription (mirrors
 // apps/worker withCodexProvider). No apiKey — the per-request bearer is supplied
@@ -328,6 +345,46 @@ describe("parseModelProvidersJson", () => {
     expect(provider.models[0]?.id).toBe("accounts/fireworks/models/glm-5p2");
   });
 
+  test("parses an explicit anonymous provider without a key", () => {
+    const [provider] = parseModelProvidersJson(openCodeZenRegistry);
+    expect(provider).toMatchObject({
+      kind: "anonymous",
+      id: "opencode-zen",
+      api: "chat",
+      baseUrl: "https://opencode.ai/zen/v1",
+    });
+    expect(provider?.apiKey).toBeUndefined();
+    expect(provider?.apiKeyEnv).toBeUndefined();
+  });
+
+  test("rejects credentials and all configured request metadata on anonymous providers", () => {
+    for (const forbidden of [
+      { apiKey: "must-not-send" },
+      { apiKeyEnv: "MUST_NOT_RESOLVE" },
+      { defaultHeaders: { "x-api-key": "must-not-send" } },
+      { defaultHeaders: { Cookie: "session=must-not-send" } },
+      { defaultHeaders: { "x-trace-id": "also-not-allowed" } },
+      { defaultQuery: { access_token: "must-not-send" } },
+      { defaultQuery: { locale: "also-not-allowed" } },
+      { publicDefaultHeaderNames: ["x-version"] },
+      { publicDefaultQueryNames: ["api-version"] },
+    ]) {
+      expect(() =>
+        parseModelProvidersJson(
+          JSON.stringify([
+            {
+              kind: "anonymous",
+              id: "public-endpoint",
+              baseUrl: "https://public.example/v1",
+              ...forbidden,
+              models: [{ id: "public/model" }],
+            },
+          ]),
+        ),
+      ).toThrow("anonymous providers must not declare");
+    }
+  });
+
   test("rejects non-array JSON", () => {
     expect(() => parseModelProvidersJson('{"id":"fireworks"}')).toThrow("must be a JSON array");
   });
@@ -574,6 +631,25 @@ describe("configuredProviders", () => {
       builtin: false,
       baseUrl: "https://api.fireworks.ai/inference/v1",
       apiKey: "fw_inline",
+    });
+  });
+
+  test("classifies an anonymous registry provider as keyless and externally metered", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: openCodeZenRegistry,
+      },
+      () => getSettings(),
+    );
+    const provider = configuredProviders(settings)[1];
+    expect(provider).toMatchObject({
+      id: "opencode-zen",
+      kind: "anonymous",
+      api: "chat",
+      apiKey: undefined,
+      credentialSource: { kind: "deployment", mechanism: "none" },
+      billing: { upstreamPayer: "deployment", metering: "external" },
     });
   });
 
@@ -1677,6 +1753,17 @@ describe("validateSettings registry checks", () => {
         () => getSettings(),
       ),
     ).toThrow("requires a resolvable API key");
+  });
+
+  test("accepts an explicitly anonymous registry provider with no API key", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: openCodeZenRegistry,
+      },
+      () => getSettings(),
+    );
+    expect(configuredProviders(settings)[1]?.kind).toBe("anonymous");
   });
 
   test("accepts a registry provider whose key resolves from the environment", () => {

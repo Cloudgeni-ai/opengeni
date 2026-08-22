@@ -232,6 +232,7 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
   omitOutputOnlyHistoryItemFields,
@@ -393,6 +394,7 @@ export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
+export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
@@ -1251,8 +1253,13 @@ export type BootstrapWorkspaceInput = {
   workspacePermissions?: Permission[];
 };
 
-function samePermissionSet(left: readonly string[], right: readonly Permission[]): boolean {
-  return left.length === right.length && right.every((permission) => left.includes(permission));
+function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
+  if (!Array.isArray(left) || left.length !== right.length) return false;
+  const normalized = normalizeWorkspaceMembershipPermissions(left);
+  return (
+    normalized.length === left.length &&
+    right.every((permission) => normalized.includes(permission))
+  );
 }
 
 export async function bootstrapWorkspace(
@@ -1433,7 +1440,7 @@ export async function bootstrapWorkspace(
         accountId: row.workspace.accountId,
         subjectId: input.subjectId,
         ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         ...(input.accountExternalSource === "opengeni:local"
           ? { principalKind: "human_session" as const }
           : input.accountExternalSource === "opengeni:configured"
@@ -1521,7 +1528,7 @@ async function projectManagedOrganizationAccess(
         accountId: row.workspace.accountId,
         subjectId: input.subjectId,
         subjectLabel: input.subjectLabel,
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         principalKind: "human_session" as const,
       })),
     );
@@ -1872,7 +1879,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       accountId: row.workspace.accountId,
       subjectId,
       subjectLabel,
-      permissions: row.membership.permissions as Permission[],
+      permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
       principalKind: "human_session",
     }));
     const [organizationMembershipResult] = await rawRows<{ result: unknown }>(
@@ -1930,7 +1937,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           accountId: row.workspace.accountId,
           subjectId,
           subjectLabel,
-          permissions: row.membership.permissions as Permission[],
+          permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
           principalKind: "human_session",
         });
       }
@@ -2266,7 +2273,7 @@ export async function getWorkspaceGrant(
         accountId: row.workspace.accountId,
         subjectId: row.membership.subjectId,
         ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
-        permissions: row.membership.permissions as Permission[],
+        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
         ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
@@ -4301,6 +4308,81 @@ export class ConnectionDisconnectGenerationError extends Error {
   constructor() {
     super("The disconnect operation belongs to an older connection generation");
     this.name = "ConnectionDisconnectGenerationError";
+  }
+}
+
+export type PersonalGitHubRepositoryPermissions = {
+  pull: boolean;
+  push: boolean;
+  admin: boolean;
+  maintain: boolean;
+  triage: boolean;
+};
+
+export type PersonalGitHubSelectedRepositoryRecord = {
+  repositoryId: string;
+  fullName: string;
+  canonicalUrl: string;
+  defaultBranch: string;
+  visibility: "public" | "private" | "internal";
+  private: boolean;
+  archived: boolean;
+  disabled: boolean;
+  permissions: PersonalGitHubRepositoryPermissions;
+  selectedAccess: "read" | "write";
+  selectionGeneration: number;
+  selectedAt: string;
+  lastVerifiedAt: string;
+};
+
+export type PersonalGitHubRepositorySelectionState = {
+  connectionAuthorityGeneration: number;
+  credentialBindingId: string;
+  providerPrincipalId: string;
+  selectionGeneration: number;
+  repositories: PersonalGitHubSelectedRepositoryRecord[];
+};
+
+export type PersonalGitHubVerifiedRepositoryInput = Omit<
+  PersonalGitHubSelectedRepositoryRecord,
+  "selectionGeneration" | "selectedAt"
+>;
+
+export type PersonalGitHubRepositorySelectionMutationInput = {
+  accountId: string;
+  originWorkspaceId: string;
+  subjectId: string;
+  connectionId: string;
+  expectedConnectionAuthorityGeneration: number;
+  expectedSelectionGeneration: number;
+  idempotencyKey: string;
+  repositories: PersonalGitHubVerifiedRepositoryInput[];
+};
+
+export class PersonalGitHubRepositorySelectionChangedError extends Error {
+  readonly code = "PERSONAL_GITHUB_REPOSITORY_SELECTION_CHANGED";
+
+  constructor() {
+    super("The personal GitHub repository selection changed");
+    this.name = "PersonalGitHubRepositorySelectionChangedError";
+  }
+}
+
+export class PersonalGitHubRepositorySelectionIdempotencyError extends Error {
+  readonly code = "PERSONAL_GITHUB_REPOSITORY_IDEMPOTENCY_KEY_REUSED";
+
+  constructor() {
+    super("The personal GitHub repository idempotency key was reused");
+    this.name = "PersonalGitHubRepositorySelectionIdempotencyError";
+  }
+}
+
+export class PersonalGitHubRepositorySelectionUnavailableError extends Error {
+  readonly code = "PERSONAL_GITHUB_REPOSITORY_SELECTION_UNAVAILABLE";
+
+  constructor() {
+    super("The personal GitHub repository selection is unavailable");
+    this.name = "PersonalGitHubRepositorySelectionUnavailableError";
   }
 }
 
@@ -8283,11 +8365,12 @@ export async function persistProviderOAuthConnection(
             throw new Error("Connection owner no longer has live workspace authority");
           }
           if (membership) {
+            const permissions = normalizeWorkspaceMembershipPermissions(membership.permissions);
             if (
               membership.accountId !== input.accountId ||
               (input.requiredLiveUserPermission &&
-                !membership.permissions.includes(input.requiredLiveUserPermission) &&
-                !membership.permissions.includes("workspace:admin"))
+                !permissions.includes(input.requiredLiveUserPermission) &&
+                !permissions.includes("workspace:admin"))
             ) {
               throw new Error("Connection owner no longer has the required workspace permission");
             }
@@ -8476,6 +8559,128 @@ export async function getConnectionMetadata(
       .limit(1);
     return row ? mapConnectionMetadata(row) : null;
   });
+}
+
+function personalGitHubRepositorySelectionStateFromDatabase(
+  value: unknown,
+): PersonalGitHubRepositorySelectionState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.repositories)) return null;
+  return {
+    connectionAuthorityGeneration: Number(record.connectionAuthorityGeneration),
+    credentialBindingId: String(record.credentialBindingId),
+    providerPrincipalId: String(record.providerPrincipalId),
+    selectionGeneration: Number(record.selectionGeneration),
+    repositories: record.repositories.map((item) => {
+      const repository = item as Record<string, unknown>;
+      return {
+        repositoryId: String(repository.repositoryId),
+        fullName: String(repository.fullName),
+        canonicalUrl: String(repository.canonicalUrl),
+        defaultBranch: String(repository.defaultBranch),
+        visibility: repository.visibility as "public" | "private" | "internal",
+        private: repository.private === true,
+        archived: repository.archived === true,
+        disabled: repository.disabled === true,
+        permissions: repository.permissions as PersonalGitHubRepositoryPermissions,
+        selectedAccess: repository.selectedAccess as "read" | "write",
+        selectionGeneration: Number(repository.selectionGeneration),
+        selectedAt: String(repository.selectedAt),
+        lastVerifiedAt: String(repository.lastVerifiedAt),
+      };
+    }),
+  };
+}
+
+export async function getPersonalGitHubRepositorySelectionState(
+  db: Database,
+  input: {
+    accountId: string;
+    originWorkspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
+): Promise<PersonalGitHubRepositorySelectionState | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.originWorkspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      const rows = await scopedDb.execute(sql<{ state: unknown }>`
+        select get_self_personal_github_repository_selection(
+          ${input.accountId}::uuid,
+          ${input.originWorkspaceId}::uuid,
+          ${input.subjectId},
+          ${input.connectionId}::uuid
+        ) as state
+      `);
+      return personalGitHubRepositorySelectionStateFromDatabase(
+        (rows as unknown as Array<{ state?: unknown }>)[0]?.state,
+      );
+    },
+  );
+}
+
+async function mutatePersonalGitHubRepositorySelections(
+  db: Database,
+  input: PersonalGitHubRepositorySelectionMutationInput,
+  verifyOnly: boolean,
+): Promise<PersonalGitHubRepositorySelectionState> {
+  try {
+    const result = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.originWorkspaceId },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+        const rows = await scopedDb.execute(sql<{ state: unknown }>`
+          select mutate_self_personal_github_repository_selection(
+            ${input.accountId}::uuid,
+            ${input.originWorkspaceId}::uuid,
+            ${input.subjectId},
+            ${input.connectionId}::uuid,
+            ${input.expectedConnectionAuthorityGeneration},
+            ${input.expectedSelectionGeneration},
+            ${input.idempotencyKey},
+            ${JSON.stringify(input.repositories)}::jsonb,
+            ${verifyOnly}
+          ) as state
+        `);
+        return personalGitHubRepositorySelectionStateFromDatabase(
+          (rows as unknown as Array<{ state?: unknown }>)[0]?.state,
+        );
+      },
+    );
+    if (!result) throw new PersonalGitHubRepositorySelectionUnavailableError();
+    return result;
+  } catch (error) {
+    if (
+      error instanceof PersonalGitHubRepositorySelectionUnavailableError ||
+      error instanceof PersonalGitHubRepositorySelectionChangedError ||
+      error instanceof PersonalGitHubRepositorySelectionIdempotencyError
+    ) {
+      throw error;
+    }
+    const state = nestedPostgresSqlState(error);
+    if (state === "23505") throw new PersonalGitHubRepositorySelectionIdempotencyError();
+    if (state === "40001") throw new PersonalGitHubRepositorySelectionChangedError();
+    if (state === "42501") throw new PersonalGitHubRepositorySelectionUnavailableError();
+    throw error;
+  }
+}
+
+export async function replacePersonalGitHubRepositorySelections(
+  db: Database,
+  input: PersonalGitHubRepositorySelectionMutationInput,
+): Promise<PersonalGitHubRepositorySelectionState> {
+  return await mutatePersonalGitHubRepositorySelections(db, input, false);
+}
+
+export async function verifyPersonalGitHubRepositorySelections(
+  db: Database,
+  input: PersonalGitHubRepositorySelectionMutationInput,
+): Promise<PersonalGitHubRepositorySelectionState> {
+  return await mutatePersonalGitHubRepositorySelections(db, input, true);
 }
 
 async function updateConnectionInScope(
@@ -53089,6 +53294,10 @@ function personalConnectionDelegationsForSameSessionSuccessor(
   // grants may be re-admitted under the live DB fences; once remains bound to
   // its original accepted turn and is never copied forward.
   return delegations.filter((delegation) => {
+    // This phase freezes personal GitHub authority only for explicit human/API
+    // work. Goal, child-result, recovery, and other machine-input inheritance
+    // require the later lifecycle's fresh live repository recheck.
+    if (delegation.connectionType === "github_personal") return false;
     const authority = delegation.userDelegation;
     if (!authority) return true;
     if (authority.mode === "once") return false;
@@ -63516,7 +63725,7 @@ function mapWorkspaceMember(row: typeof schema.workspaceMemberships.$inferSelect
     subjectId: row.subjectId,
     subjectLabel: row.subjectLabel,
     role: row.role,
-    permissions: row.permissions as Permission[],
+    permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
     createdAt: row.createdAt.toISOString(),
   };
 }

@@ -8,6 +8,7 @@ import {
   signDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
+  PERSONAL_GITHUB_API_ORIGIN,
   PERSONAL_GITHUB_CREDENTIAL_ROLE,
   PERSONAL_GITHUB_TOKEN_URL,
   PERSONAL_GITHUB_USER_URL,
@@ -127,8 +128,21 @@ async function bearer(
 
 function githubFixture() {
   const tokenRequests: URLSearchParams[] = [];
+  const repositoryRequests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
   let githubUserId = 123456;
   let scopes = "repo";
+  let repositoryUnauthorizedOnce = false;
+  const repository = {
+    id: 987654321,
+    full_name: "Cloudgeni-ai/opengeni",
+    html_url: "https://attacker.example/not-trusted",
+    default_branch: "main",
+    visibility: "private",
+    private: true,
+    archived: false,
+    disabled: false,
+    permissions: { pull: true, push: true, admin: false, maintain: true, triage: true },
+  };
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.href === PERSONAL_GITHUB_TOKEN_URL) {
@@ -152,16 +166,35 @@ function githubFixture() {
         { headers: { "x-oauth-scopes": scopes } },
       );
     }
+    if (url.origin === PERSONAL_GITHUB_API_ORIGIN && url.pathname === "/user/repos") {
+      repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
+      if (repositoryUnauthorizedOnce) {
+        repositoryUnauthorizedOnce = false;
+        return Response.json({ message: "bad credentials" }, { status: 401 });
+      }
+      return Response.json([repository]);
+    }
+    if (
+      url.origin === PERSONAL_GITHUB_API_ORIGIN &&
+      url.pathname === "/repos/Cloudgeni-ai/opengeni"
+    ) {
+      repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
+      return Response.json(repository);
+    }
     return new Response("not found", { status: 404 });
   };
   return {
     fetch,
     tokenRequests,
+    repositoryRequests,
     setGitHubUserId(value: number) {
       githubUserId = value;
     },
     setScopes(value: string) {
       scopes = value;
+    },
+    setRepositoryUnauthorizedOnce() {
+      repositoryUnauthorizedOnce = true;
     },
   };
 }
@@ -207,6 +240,144 @@ async function callback(fixture: ReturnType<typeof githubFixture>, state: string
 }
 
 describe("personal GitHub OAuth", () => {
+  test("forces one credential refresh after a repository API 401", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    const started = await start(fixture, workspace);
+    const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+    expect((await callback(fixture, state)).status).toBe(302);
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    fixture.setRepositoryUnauthorizedOnce();
+    const response = await testApp(fixture).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`,
+      {
+        headers: {
+          authorization: await bearer(workspace),
+          "x-opengeni-access-key": EDGE_ACCESS_KEY,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(fixture.repositoryRequests).toHaveLength(2);
+    expect(fixture.tokenRequests).toHaveLength(2);
+    expect(fixture.tokenRequests[1]!.get("grant_type")).toBe("refresh_token");
+  }, 60_000);
+
+  test("discovers and CAS-selects only serially verified owner repositories", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    const started = await start(fixture, workspace);
+    const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+    expect((await callback(fixture, state)).status).toBe(302);
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(connection).toBeDefined();
+    const basePath = `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`;
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const app = testApp(fixture);
+
+    const listed = await app.request(`${basePath}?limit=50`, { headers });
+    expect(listed.status).toBe(200);
+    const catalog = (await listed.json()) as {
+      repositories: Array<{ repositoryId: string; canonicalUrl: string; selectedAccess: null }>;
+      selection: {
+        connectionAuthorityGeneration: number;
+        selectionGeneration: number;
+        repositories: unknown[];
+      };
+    };
+    expect(catalog.repositories).toEqual([
+      expect.objectContaining({
+        repositoryId: "987654321",
+        canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+        selectedAccess: null,
+      }),
+    ]);
+    expect(catalog.selection).toMatchObject({ selectionGeneration: 0, repositories: [] });
+    expect(fixture.repositoryRequests[0]).toMatchObject({ redirect: "manual" });
+    expect(new URL(fixture.repositoryRequests[0]!.url).searchParams.get("per_page")).toBe("50");
+
+    const replacementBody = JSON.stringify({
+      expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: 0,
+      idempotencyKey: "select-opengeni-1",
+      repositories: [
+        {
+          repositoryId: "987654321",
+          fullName: "Cloudgeni-ai/opengeni",
+          access: "write",
+        },
+      ],
+    });
+    const selected = await app.request(basePath, {
+      method: "PUT",
+      headers,
+      body: replacementBody,
+    });
+    expect(selected.status).toBe(200);
+    const selection = (await selected.json()) as {
+      selectionGeneration: number;
+      repositories: Array<{ repositoryId: string; selectedAccess: string }>;
+    };
+    expect(selection).toMatchObject({
+      selectionGeneration: 1,
+      repositories: [{ repositoryId: "987654321", selectedAccess: "write" }],
+    });
+
+    const replay = await app.request(basePath, {
+      method: "PUT",
+      headers,
+      body: replacementBody,
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()) as { selectionGeneration: number }).toMatchObject({
+      selectionGeneration: 1,
+    });
+
+    const verified = await app.request(`${basePath}/verify`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: selection.selectionGeneration,
+        idempotencyKey: "verify-opengeni-1",
+      }),
+    });
+    expect(verified.status).toBe(200);
+    expect((await verified.json()) as { selectionGeneration: number }).toMatchObject({
+      selectionGeneration: 1,
+    });
+    expect(
+      fixture.repositoryRequests.slice(1).map((request) => new URL(request.url).pathname),
+    ).toEqual([
+      "/repos/Cloudgeni-ai/opengeni",
+      "/repos/Cloudgeni-ai/opengeni",
+      "/repos/Cloudgeni-ai/opengeni",
+    ]);
+
+    const beforeDenied = fixture.repositoryRequests.length;
+    const denied = await app.request(basePath, {
+      headers: { ...headers, authorization: await bearer(workspace, "service") },
+    });
+    expect(denied.status).toBe(422);
+    expect(fixture.repositoryRequests).toHaveLength(beforeDenied);
+  }, 60_000);
+
   test("connects one verified user-owned account with PKCE and encrypted credentials", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

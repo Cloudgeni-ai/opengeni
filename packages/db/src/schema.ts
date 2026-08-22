@@ -1495,6 +1495,173 @@ export const connections = pgTable(
   }),
 );
 
+/**
+ * Monotonic authority head for one personal GitHub connection's selected
+ * repository set. The head is separate from the selected rows so replacing
+ * the set with an empty array still advances durable authority.
+ */
+export const personalGitHubRepositorySelectionHeads = pgTable(
+  "personal_github_repository_selection_heads",
+  {
+    connectionId: uuid("connection_id")
+      .primaryKey()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    originWorkspaceId: uuid("origin_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    providerPrincipalId: text("provider_principal_id").notNull(),
+    credentialBindingId: uuid("credential_binding_id").notNull(),
+    connectionAuthorityGeneration: bigint("connection_authority_generation", {
+      mode: "number",
+    }).notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantConnection: uniqueIndex("personal_github_repository_selection_heads_tenant_uq").on(
+      table.accountId,
+      table.originWorkspaceId,
+      table.ownerSubjectId,
+      table.connectionId,
+    ),
+    owner: index("personal_github_repository_selection_heads_owner_idx").on(
+      table.accountId,
+      table.ownerSubjectId,
+      table.connectionId,
+    ),
+    generationValid: check(
+      "personal_github_repository_selection_heads_generation_chk",
+      sql`${table.connectionAuthorityGeneration} > 0 and ${table.generation} > 0`,
+    ),
+  }),
+);
+
+/** Only explicitly selected repositories are persisted; discovery stays live. */
+export const personalGitHubRepositorySelections = pgTable(
+  "personal_github_repository_selections",
+  {
+    connectionId: uuid("connection_id").notNull(),
+    repositoryId: bigint("repository_id", { mode: "bigint" }).notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    originWorkspaceId: uuid("origin_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    canonicalFullName: text("canonical_full_name").notNull(),
+    canonicalHttpsUri: text("canonical_https_uri").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    visibility: text("visibility").notNull(),
+    private: boolean("private").notNull(),
+    archived: boolean("archived").notNull(),
+    disabled: boolean("disabled").notNull(),
+    permissions: jsonb("permissions").$type<Record<string, boolean>>().notNull(),
+    selectedAccess: text("selected_access").notNull(),
+    selectionGeneration: bigint("selection_generation", {
+      mode: "number",
+    }).notNull(),
+    selectedBySubjectId: text("selected_by_subject_id").notNull(),
+    selectedAt: timestamp("selected_at", { withTimezone: true }).notNull().defaultNow(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({ columns: [table.connectionId, table.repositoryId] }),
+    head: foreignKey({
+      name: "personal_github_repository_selections_head_fk",
+      columns: [table.accountId, table.originWorkspaceId, table.ownerSubjectId, table.connectionId],
+      foreignColumns: [
+        personalGitHubRepositorySelectionHeads.accountId,
+        personalGitHubRepositorySelectionHeads.originWorkspaceId,
+        personalGitHubRepositorySelectionHeads.ownerSubjectId,
+        personalGitHubRepositorySelectionHeads.connectionId,
+      ],
+    }).onDelete("cascade"),
+    tenant: index("personal_github_repository_selections_tenant_idx").on(
+      table.accountId,
+      table.originWorkspaceId,
+      table.connectionId,
+    ),
+    shapeValid: check(
+      "personal_github_repository_selections_shape_chk",
+      sql`${table.repositoryId} > 0
+        and ${table.selectionGeneration} > 0
+        and ${table.selectedAccess} in ('read', 'write')
+        and ${table.visibility} in ('public', 'private', 'internal')
+        and ${table.private} = (${table.visibility} = 'private')
+        and jsonb_typeof(${table.permissions}) = 'object'
+        and ${table.permissions} ?& array['pull','push','admin','maintain','triage']
+        and ${table.permissions} - array['pull','push','admin','maintain','triage']::text[] = '{}'::jsonb
+        and jsonb_typeof(${table.permissions}->'pull') = 'boolean'
+        and jsonb_typeof(${table.permissions}->'push') = 'boolean'
+        and jsonb_typeof(${table.permissions}->'admin') = 'boolean'
+        and jsonb_typeof(${table.permissions}->'maintain') = 'boolean'
+        and jsonb_typeof(${table.permissions}->'triage') = 'boolean'
+        and (${table.permissions}->'pull' = 'true'::jsonb
+          or ${table.permissions}->'push' = 'true'::jsonb
+          or ${table.permissions}->'admin' = 'true'::jsonb
+          or ${table.permissions}->'maintain' = 'true'::jsonb
+          or ${table.permissions}->'triage' = 'true'::jsonb)
+        and (${table.selectedAccess} <> 'write' or (
+          not ${table.archived} and not ${table.disabled}
+          and (${table.permissions}->'push' = 'true'::jsonb
+            or ${table.permissions}->'admin' = 'true'::jsonb
+            or ${table.permissions}->'maintain' = 'true'::jsonb)
+        ))
+        and octet_length(${table.ownerSubjectId}) between 1 and 512
+        and ${table.canonicalFullName} ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$'
+        and octet_length(${table.canonicalFullName}) between 3 and 140
+        and octet_length(${table.defaultBranch}) between 1 and 255`,
+    ),
+  }),
+);
+
+/** Bounded idempotency receipt for an owner-issued full selection replacement. */
+export const personalGitHubRepositorySelectionOperations = pgTable(
+  "personal_github_repository_selection_operations",
+  {
+    connectionId: uuid("connection_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    accountId: uuid("account_id").notNull(),
+    originWorkspaceId: uuid("origin_workspace_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    requestDigest: bytea("request_digest").notNull(),
+    resultingGeneration: bigint("resulting_generation", {
+      mode: "number",
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identity: primaryKey({
+      columns: [table.connectionId, table.idempotencyKey],
+    }),
+    head: foreignKey({
+      name: "personal_github_repository_selection_operations_head_fk",
+      columns: [table.accountId, table.originWorkspaceId, table.ownerSubjectId, table.connectionId],
+      foreignColumns: [
+        personalGitHubRepositorySelectionHeads.accountId,
+        personalGitHubRepositorySelectionHeads.originWorkspaceId,
+        personalGitHubRepositorySelectionHeads.ownerSubjectId,
+        personalGitHubRepositorySelectionHeads.connectionId,
+      ],
+    }).onDelete("cascade"),
+    shapeValid: check(
+      "personal_github_repository_selection_operations_shape_chk",
+      sql`${table.resultingGeneration} > 0
+        and octet_length(${table.idempotencyKey}) between 1 and 200
+        and octet_length(${table.ownerSubjectId}) between 1 and 512
+        and octet_length(${table.requestDigest}) = 32`,
+    ),
+  }),
+);
+
 export const connectionUseOnceConsumptionReceipts = pgTable(
   "connection_use_once_consumption_receipts",
   {
