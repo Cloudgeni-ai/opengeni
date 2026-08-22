@@ -30,7 +30,7 @@ mock.module("@/context", () => ({
   useAppContext: () => context,
 }));
 
-const { CompanyProfilePendingProposals, pendingCompanyProfileProposals } =
+const { CompanyProfileInventory, CompanyProfilePendingProposals, pendingCompanyProfileProposals } =
   await import("./workspace-state");
 
 beforeAll(() => {
@@ -209,6 +209,52 @@ describe("Company profile pending proposals", () => {
       reason: "Activate reviewed company-profile proposal",
     });
     expect(reload).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  test("shares one inventory between the pending card and the manual editor and re-syncs after a conflict", async () => {
+    activateCompanyProfileRevision.mockClear();
+    activateCompanyProfileRevision.mockImplementationOnce(async () => {
+      throw new Error("The active company profile changed in another request");
+    });
+    const reload = mock(async () => undefined);
+    const inventory = { response, reload, loading: false, error: null };
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <>
+          <CompanyProfilePendingProposals
+            workspaceId={workspaceId}
+            canManage
+            inventory={inventory}
+          />
+          <CompanyProfileInventory workspaceId={workspaceId} inventory={inventory} />
+        </>,
+      ),
+    );
+    const text = container.textContent ?? "";
+    // Both surfaces render from the same response: the pending card and the
+    // history list each show the proposal once, and the editor shows the head.
+    expect(text).toContain("Pending proposals");
+    expect(text).toContain("Organization company profile");
+    expect(text).toContain("Mission: Current mission.");
+    expect(text).toContain("Only organization owners and admins can edit or activate");
+
+    const pendingActivate = container.querySelector(
+      '[aria-label="Pending company profile proposals"] button',
+    );
+    expect(pendingActivate?.textContent).toBe("Activate");
+    await act(async () => {
+      pendingActivate!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(activateCompanyProfileRevision).toHaveBeenCalledTimes(1);
+    // A conflict still reloads the single shared inventory so stale CAS values
+    // in either surface are replaced before the next action.
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain(
+      "The active company profile changed in another request",
+    );
     await act(async () => root.unmount());
   });
 

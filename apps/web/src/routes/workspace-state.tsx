@@ -331,13 +331,18 @@ export function CompanyProfileContentView({ profile }: { profile: CompanyProfile
   );
 }
 
-type CompanyProfilePendingProposalsInventory = Pick<
+/**
+ * One route-level company-profile inventory is shared by the pending-proposals
+ * card and the manual editor/history so an activation from either keeps the
+ * other's head and CAS values in sync.
+ */
+export type CompanyProfileInventoryHandle = Pick<
   ReturnType<typeof useCompanyProfileInventory>,
-  "response" | "reload"
+  "response" | "reload" | "loading" | "error"
 >;
 
 export function pendingCompanyProfileProposals(
-  response: CompanyProfilePendingProposalsInventory["response"],
+  response: CompanyProfileInventoryHandle["response"],
 ): CompanyProfileRevision[] {
   if (!response) return [];
   const activated = new Set(
@@ -355,7 +360,7 @@ export function CompanyProfilePendingProposals({
 }: {
   workspaceId: string;
   canManage: boolean;
-  inventory: CompanyProfilePendingProposalsInventory;
+  inventory: Pick<CompanyProfileInventoryHandle, "response" | "reload">;
 }) {
   const { client } = useAppContext();
   const [submitting, setSubmitting] = useState(false);
@@ -374,12 +379,14 @@ export function CompanyProfilePendingProposals({
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
         reason: "Activate reviewed company-profile proposal",
       });
-      await inventory.reload();
     } catch (activationError) {
       setError(
         activationError instanceof Error ? activationError.message : String(activationError),
       );
     } finally {
+      // Reload even on failure so a COMPANY_PROFILE_CONFLICT re-syncs the
+      // shared head and CAS values before the next action.
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -425,10 +432,15 @@ export function CompanyProfilePendingProposals({
   );
 }
 
-export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }) {
+export function CompanyProfileInventory({
+  workspaceId,
+  inventory,
+}: {
+  workspaceId: string;
+  inventory: CompanyProfileInventoryHandle;
+}) {
   const context = useAppContext();
   const { client } = context;
-  const inventory = useCompanyProfileInventory(client, workspaceId);
   const workspaceGrant = context.accessContext.workspaceGrants.find(
     (grant) => grant.workspaceId === workspaceId,
   );
@@ -477,10 +489,10 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
         reason,
       });
-      await inventory.reload();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -496,12 +508,12 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
         reason: "Activate reviewed company-profile proposal",
       });
-      await inventory.reload();
     } catch (activationError) {
       setError(
         activationError instanceof Error ? activationError.message : String(activationError),
       );
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -519,10 +531,10 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: current.activationVersion,
         reason: "Restore a previously active company profile",
       });
-      await inventory.reload();
     } catch (rollbackError) {
       setError(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -1703,7 +1715,7 @@ export function WorkspaceStateRoute({
                     Edit manually and view history
                   </summary>
                   <div className="border-t border-border p-4">
-                    <CompanyProfileInventory workspaceId={workspaceId} />
+                    <CompanyProfileInventory workspaceId={workspaceId} inventory={companyProfile} />
                   </div>
                 </details>
               </div>

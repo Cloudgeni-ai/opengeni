@@ -1,7 +1,6 @@
 import {
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_ENTRY_MAX_COUNT,
-  COMPANY_PROFILE_REASON_MAX_CHARS,
   COMPANY_PROFILE_SCALAR_MAX_CHARS,
   COMPANY_PROFILE_STABLE_KEY_MAX_CHARS,
   CompanyProfileContent,
@@ -126,7 +125,6 @@ export function registerCompanyProfileTools(input: RegisterCompanyProfileToolsIn
         customers: entries,
         goals: entries,
         constraints: entries,
-        reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
       },
     },
     async (request) => {

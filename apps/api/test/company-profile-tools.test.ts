@@ -84,7 +84,6 @@ const fullProfile = {
     { content: "Make the agent brain simple and useful, again." },
   ],
   constraints: [],
-  reason: "The user confirmed the proposed profile.",
 };
 
 describe("company_profile_propose MCP tool", () => {
@@ -154,7 +153,6 @@ describe("company_profile_propose MCP tool", () => {
       customers: [],
       goals: [],
       constraints: [],
-      reason: "Nothing to record.",
     });
     expect(h.authorizations()).toBe(1);
     expect(h.proposals).toEqual([]);
