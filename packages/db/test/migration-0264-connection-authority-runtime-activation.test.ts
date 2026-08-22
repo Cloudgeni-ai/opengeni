@@ -22,10 +22,12 @@ const migrationUrl = new URL(
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationName = "0264_connection_authority_runtime_activation.sql";
-// 0275 replaces the accepted-authority capture installed by 0264, so the
-// synthetic upgrade must withhold it alongside 0264 and replay both through the
-// real filename ledger in dependency order.
+// 0275 replaces the accepted-authority capture installed by 0264, and 0315
+// extends the 0275 ledgers. The synthetic upgrade must withhold both dependents
+// alongside 0264 and replay all three through the real filename ledger in order.
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
+const personalGitHubRepositorySelectionMigrationName =
+  "0315_personal_github_repository_selection.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -70,7 +72,10 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         insert into schema_migrations (name)
-        values (${migrationName}), (${scheduledConnectionAuthorityMigrationName})
+        values
+          (${migrationName}),
+          (${scheduledConnectionAuthorityMigrationName}),
+          (${personalGitHubRepositorySelectionMigrationName})
       `;
       await migrate(blank.databaseUrl);
 
@@ -166,7 +171,11 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         delete from schema_migrations
-        where name in (${migrationName}, ${scheduledConnectionAuthorityMigrationName})
+        where name in (
+          ${migrationName},
+          ${scheduledConnectionAuthorityMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName}
+        )
       `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
 
@@ -207,12 +216,17 @@ describe("migration 0264 connection authority runtime activation", () => {
       await migrate(blank.databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
-        where name in (${migrationName}, ${scheduledConnectionAuthorityMigrationName})
+        where name in (
+          ${migrationName},
+          ${scheduledConnectionAuthorityMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName}
+        )
         order by name
       `;
       expect(receipts.map((receipt) => receipt.name)).toEqual([
         migrationName,
         scheduledConnectionAuthorityMigrationName,
+        personalGitHubRepositorySelectionMigrationName,
       ]);
     } finally {
       await sql.end({ timeout: 1 });
