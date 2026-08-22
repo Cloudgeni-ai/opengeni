@@ -290,6 +290,16 @@ export function githubAppMissingSettings(settings: Settings): string[] {
   return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
 }
 
+export type GitHubAppSigningSettings = Pick<Settings, "githubAppId" | "githubAppPrivateKey">;
+
+function githubAppTokenMissingSettings(settings: GitHubAppSigningSettings): string[] {
+  const required: Record<string, string | undefined> = {
+    OPENGENI_GITHUB_APP_ID: settings.githubAppId,
+    OPENGENI_GITHUB_APP_PRIVATE_KEY: settings.githubAppPrivateKey,
+  };
+  return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
+}
+
 export function buildGitHubAppManifest(input: {
   appName: string;
   baseUrl: string;
@@ -686,6 +696,20 @@ export async function listGitHubAppRepositories(
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
   }
+  return await listGitHubAppRepositoriesWithSigningSettings(settings, input);
+}
+
+/** List repositories for a separately registered App that needs only signing credentials. */
+export async function listGitHubAppRepositoriesWithSigningSettings(
+  settings: GitHubAppSigningSettings,
+  input: {
+    installationIds?: number[];
+  } = {},
+): Promise<GitHubRepository[]> {
+  const missing = githubAppTokenMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
   const allowedInstallations = input.installationIds ? new Set(input.installationIds) : null;
   if (allowedInstallations && allowedInstallations.size === 0) {
     return [];
@@ -743,6 +767,21 @@ export async function createGitHubAppInstallationTokenWithExpiry(
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
   }
+  return await createGitHubAppInstallationTokenWithSigningSettings(settings, input);
+}
+
+/** Mint for a separately registered App without requiring unrelated OAuth settings. */
+export async function createGitHubAppInstallationTokenWithSigningSettings(
+  settings: GitHubAppSigningSettings,
+  input: {
+    installationId: number;
+    repositoryIds: number[];
+  },
+): Promise<GitHubAppInstallationToken> {
+  const missing = githubAppTokenMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
   if (!Array.isArray(input.repositoryIds)) {
     throw new GitHubAppApiError(
       "GitHub installation token mint requires an explicit, unique repository allowlist",
@@ -780,11 +819,11 @@ export function githubAppBotIdentity(settings: Settings): { name: string; email:
   };
 }
 
-async function createGitHubAppJwt(settings: Settings): Promise<string> {
+async function createGitHubAppJwt(settings: GitHubAppSigningSettings): Promise<string> {
   const privateKey = normalizeGitHubAppPrivateKey(settings.githubAppPrivateKey ?? "");
   const appId = settings.githubAppId?.trim();
   if (!appId || !privateKey) {
-    throw new GitHubAppConfigurationError(githubAppMissingSettings(settings));
+    throw new GitHubAppConfigurationError(githubAppTokenMissingSettings(settings));
   }
   const key = await importPKCS8(privateKey, "RS256");
   const now = Math.floor(Date.now() / 1000);

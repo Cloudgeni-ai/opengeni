@@ -80,6 +80,7 @@ import {
   useSlackIntegration,
 } from "@/components/capabilities/use-slack-integration";
 import { PageHeader } from "@/components/common";
+import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
@@ -1851,6 +1852,18 @@ export function CapabilitiesRoute({
               onRuntimeChanged();
             }}
           />
+          {packs.installationFor("pr-review")?.status === "active" ? (
+            <div className="mt-6">
+              <PrReviewSetupCard
+                client={client}
+                workspaceId={workspaceId}
+                canManage={
+                  canManageApiIntegrationInstances &&
+                  hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write")
+                }
+              />
+            </div>
+          ) : null}
         </div>
       </div>
 

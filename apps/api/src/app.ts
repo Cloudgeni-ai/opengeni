@@ -105,6 +105,7 @@ import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
+import { registerPrReviewRoutes } from "./routes/pr-review";
 import { registerPackRoutes } from "./routes/packs";
 import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
@@ -734,6 +735,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
+  registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
@@ -1217,6 +1219,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/billing/entitlements",
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
+    label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",

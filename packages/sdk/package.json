@@ -42,6 +42,10 @@
       "types": "./src/automations.ts",
       "default": "./src/automations.ts"
     },
+    "./pr-review": {
+      "types": "./src/pr-review.ts",
+      "default": "./src/pr-review.ts"
+    },
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"

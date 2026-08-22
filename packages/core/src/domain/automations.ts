@@ -8,6 +8,7 @@ import {
   type AutomationSource,
   type AutomationTrigger,
 } from "@opengeni/contracts";
+import { prReviewAutomationAdapter } from "./pr-review";
 
 export type AutomationAdapterRenderResult = {
   initialMessage: string;
@@ -114,6 +115,7 @@ export const signedJsonAutomationAdapter: AutomationAdapter = {
 
 const adapters = new Map<string, AutomationAdapter>([
   [signedJsonAutomationAdapter.id, signedJsonAutomationAdapter],
+  [prReviewAutomationAdapter.id, prReviewAutomationAdapter],
 ]);
 
 export function registerAutomationAdapter(adapter: AutomationAdapter): void {
