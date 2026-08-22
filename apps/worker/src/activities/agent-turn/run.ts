@@ -74,7 +74,7 @@ import {
 import { selectXaiTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
-import { resolveTurnGitHubRepositoryBindings } from "./github-repository-bindings";
+import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
@@ -877,38 +877,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // set. A Connected Machine receives no platform Git credential, so its
       // resources stay exactly as stored. Resolution never fails the turn;
       // an unusable bound repository stays bare and is reported visibly.
-      const gitHubRepositoryBindings =
-        activeSandboxBackend === "selfhosted"
-          ? null
-          : await waitForTurnOperation(
-              resolveTurnGitHubRepositoryBindings({
-                db,
-                settings: runSettings,
-                workspaceId: input.workspaceId,
-                resources: claimedTurnResources,
-              }).catch((error: unknown) => {
-                observability.warn("GitHub repository binding resolution skipped", {
-                  errorClass: error instanceof Error ? error.name : "Error",
-                  errorCode: "github_repository_binding_resolution_failed",
-                  origin: "worker",
-                });
-                return null;
-              }),
-              cancellationSignal,
-              undefined,
-            );
-      const turnResources = gitHubRepositoryBindings?.resources ?? claimedTurnResources;
-      const runtimeResources =
-        gitHubRepositoryBindings?.apply(claimedRuntimeResources) ?? claimedRuntimeResources;
-      if (gitHubRepositoryBindings && gitHubRepositoryBindings.warnings.length > 0) {
-        await eventing.publish!(
-          gitHubRepositoryBindings.warnings.map((payload) => ({
-            type: "credential.auth_needed" as const,
-            payload,
-          })),
-          true,
-        );
-      }
+      const { turnResources, runtimeResources } = await waitForTurnOperation(
+        applyTurnGitHubRepositoryBindings({
+          db,
+          settings: runSettings,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          activeSandboxBackend,
+          claimedTurnResources,
+          claimedRuntimeResources,
+          publish: async (events) => {
+            await eventing.publish!(events, true);
+          },
+          warn: (message, fields) => observability.warn(message, fields),
+        }),
+        cancellationSignal,
+        undefined,
+      );
 
       const runCredentials = await prepareRunCredentials({
         input,

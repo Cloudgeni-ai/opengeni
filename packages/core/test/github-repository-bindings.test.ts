@@ -66,6 +66,19 @@ describe("GitHub repository coordinates", () => {
     });
   });
 
+  test("accepts www, ssh, and scp-like GitHub forms", () => {
+    for (const uri of [
+      "https://www.github.com/acme/app.git",
+      "ssh://git@github.com/acme/app.git",
+      "ssh://git@github.com/acme/app",
+      "git@github.com:acme/app.git",
+      "git@github.com:acme/app",
+      "git@www.github.com:acme/app.git",
+    ]) {
+      expect(parseGitHubRepositoryCoordinates(uri)).toEqual({ owner: "acme", name: "app" });
+    }
+  });
+
   test("rejects non-GitHub hosts, credentials, queries, and non-repository paths", () => {
     for (const uri of [
       "https://gitlab.com/acme/app.git",
@@ -74,7 +87,10 @@ describe("GitHub repository coordinates", () => {
       "https://user:pw@github.com/acme/app.git",
       "https://github.com/acme/app.git?x=1",
       "https://github.com/acme/app.git#frag",
-      "ssh://git@github.com/acme/app.git",
+      "ssh://someone@github.com/acme/app.git",
+      "ssh://git@gitlab.com/acme/app.git",
+      "git@gitlab.com:acme/app.git",
+      "git@github.com:acme",
       "not a url",
     ]) {
       expect(parseGitHubRepositoryCoordinates(uri)).toBeNull();

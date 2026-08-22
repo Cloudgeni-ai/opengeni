@@ -609,7 +609,12 @@ describe("GitHub App installation repository lookup", () => {
   };
 
   test("mints one server-side installation token per installation and resolves repositories by name", async () => {
-    const requests: Array<{ method: string; url: string; authorization: string | null }> = [];
+    const requests: Array<{
+      method: string;
+      url: string;
+      authorization: string | null;
+      body: string | null;
+    }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
@@ -618,6 +623,7 @@ describe("GitHub App installation repository lookup", () => {
         method: init?.method ?? "GET",
         url,
         authorization: headers.get("authorization"),
+        body: typeof init?.body === "string" ? init.body : null,
       });
       if (url.endsWith("/app/installations/123/access_tokens")) {
         return Response.json(
@@ -657,7 +663,11 @@ describe("GitHub App installation repository lookup", () => {
       await expect(
         lookup({ installationId: 123, owner: "acme", name: "../app" }),
       ).resolves.toBeNull();
-      expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+      const mints = requests.filter((request) => request.method === "POST");
+      expect(mints).toHaveLength(1);
+      // The lookup token is metadata-read only and never repository-scoped; it
+      // exists to read one repository id and is never sent to a sandbox.
+      expect(JSON.parse(mints[0]!.body ?? "{}")).toEqual({ permissions: { metadata: "read" } });
       expect(
         requests
           .filter((request) => request.method === "GET")

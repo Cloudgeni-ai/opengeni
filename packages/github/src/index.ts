@@ -21,6 +21,8 @@ import { SignJWT, importPKCS8 } from "jose";
 const githubApiBase = "https://api.github.com";
 const githubApiVersion = "2022-11-28";
 const githubTokenMintTimeoutMs = 60_000;
+/** Bound for the server-side repository-id lookup at turn start (mint + read). */
+export const githubRepositoryLookupTimeoutMs = 10_000;
 export const stateMaxAgeSeconds = 60 * 60;
 const pkcs8PrivateKeyHeader = `-----BEGIN ${"PRIVATE KEY"}-----`;
 const rsaPrivateKeyHeader = `-----BEGIN ${"RSA PRIVATE KEY"}-----`;
@@ -781,8 +783,15 @@ export function createGitHubAppInstallationRepositoryLookup(
   const installationToken = (installationId: number): Promise<GitHubAppInstallationToken> => {
     let pending = tokens.get(installationId);
     if (!pending) {
+      // Metadata-read only: the lookup needs the repository id, never contents.
+      // Bounded well below the sandbox mint timeout so a slow GitHub cannot
+      // hold turn start; the caller proceeds bare on expiry.
       pending = createGitHubAppJwt(settings).then((jwt) =>
-        createInstallationToken(jwt, { installationId }),
+        createInstallationToken(jwt, {
+          installationId,
+          permissions: { metadata: "read" },
+          timeoutMs: githubRepositoryLookupTimeoutMs,
+        }),
       );
       pending.catch(() => tokens.delete(installationId));
       tokens.set(installationId, pending);
@@ -803,7 +812,7 @@ export function createGitHubAppInstallationRepositoryLookup(
       `${githubApiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
       {
         headers: githubHeaders(token.token),
-        signal: AbortSignal.timeout(githubTokenMintTimeoutMs),
+        signal: AbortSignal.timeout(githubRepositoryLookupTimeoutMs),
       },
     );
     if (response.status === 404) {
@@ -1112,9 +1121,19 @@ async function createInstallationToken(
   input: {
     installationId: number;
     repositoryIds?: number[];
+    /** Narrow the token below the installation's granted permissions. */
+    permissions?: Record<string, "read" | "write">;
+    timeoutMs?: number;
   },
 ): Promise<GitHubAppInstallationToken> {
-  const scoped = input.repositoryIds && input.repositoryIds.length > 0;
+  const body: Record<string, unknown> = {};
+  if (input.repositoryIds && input.repositoryIds.length > 0) {
+    body.repository_ids = input.repositoryIds;
+  }
+  if (input.permissions && Object.keys(input.permissions).length > 0) {
+    body.permissions = input.permissions;
+  }
+  const scoped = Object.keys(body).length > 0;
   const response = await fetch(
     `${githubApiBase}/app/installations/${input.installationId}/access_tokens`,
     {
@@ -1123,8 +1142,8 @@ async function createInstallationToken(
         ...githubHeaders(appJwt),
         ...(scoped ? { "Content-Type": "application/json" } : {}),
       },
-      signal: AbortSignal.timeout(githubTokenMintTimeoutMs),
-      ...(scoped ? { body: JSON.stringify({ repository_ids: input.repositoryIds }) } : {}),
+      signal: AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
+      ...(scoped ? { body: JSON.stringify(body) } : {}),
     },
   );
   if (!response.ok) {

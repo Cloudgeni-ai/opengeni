@@ -24,26 +24,11 @@ export type GitHubRepositoryCoordinates = { owner: string; name: string };
 
 const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u;
 const GITHUB_NAME_PATTERN = /^[A-Za-z0-9._-]+$/u;
+const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
+const GITHUB_SCP_LIKE_PATTERN = /^git@(?:www\.)?github\.com:(.+)$/iu;
 
-/** Parse `https://github.com/<owner>/<repo>[.git][/]` into owner/name, else null. */
-export function parseGitHubRepositoryCoordinates(uri: string): GitHubRepositoryCoordinates | null {
-  let url: URL;
-  try {
-    url = new URL(uri);
-  } catch {
-    return null;
-  }
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.hostname.toLowerCase() !== "github.com" ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  ) {
-    return null;
-  }
-  const segments = url.pathname.split("/").filter(Boolean);
+function coordinatesFromPath(path: string): GitHubRepositoryCoordinates | null {
+  const segments = path.split("/").filter(Boolean);
   if (segments.length !== 2) return null;
   const owner = segments[0]!;
   const name = segments[1]!.replace(/\.git$/u, "");
@@ -51,6 +36,37 @@ export function parseGitHubRepositoryCoordinates(uri: string): GitHubRepositoryC
     return null;
   }
   return { owner, name };
+}
+
+/**
+ * Parse a GitHub repository reference into owner/name, else null. Accepts
+ * `https://github.com/<owner>/<repo>[.git][/]`, `www.github.com`,
+ * `ssh://git@github.com/<owner>/<repo>[.git]`, and the scp-like
+ * `git@github.com:<owner>/<repo>[.git]`.
+ */
+export function parseGitHubRepositoryCoordinates(uri: string): GitHubRepositoryCoordinates | null {
+  const trimmed = uri.trim();
+  const scpLike = GITHUB_SCP_LIKE_PATTERN.exec(trimmed);
+  if (scpLike) {
+    return coordinatesFromPath(scpLike[1]!);
+  }
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (!GITHUB_HOSTS.has(url.hostname.toLowerCase()) || url.search || url.hash) {
+    return null;
+  }
+  if (url.protocol === "https:" || url.protocol === "http:") {
+    if (url.username || url.password) return null;
+  } else if (url.protocol === "ssh:") {
+    if (url.password || (url.username && url.username !== "git")) return null;
+  } else {
+    return null;
+  }
+  return coordinatesFromPath(url.pathname);
 }
 
 export type UnboundGitHubRepositoryResource = {
@@ -155,7 +171,8 @@ export type GitHubRepositoryBindingResolutionResult = {
  * installation's allowlist contains the repository id GitHub reports for that
  * URI through that installation. Every other case leaves the resource bare
  * and reports why, so the caller can surface a warning without ever failing
- * the turn or the session.
+ * the turn or the session. Distinct URIs resolve concurrently, as do the
+ * candidate installations of one owner.
  */
 export async function resolveGitHubRepositoryBindings(input: {
   resources: readonly ResourceRef[];
@@ -164,9 +181,8 @@ export async function resolveGitHubRepositoryBindings(input: {
 }): Promise<GitHubRepositoryBindingResolutionResult> {
   const unbound = unboundGitHubRepositoryResources(input.resources);
   const bindings = new Map<string, GitHubRepositoryBinding>();
-  const resolutions: GitHubRepositoryBindingResolution[] = [];
   if (unbound.length === 0) {
-    return { resources: [...input.resources], bindings, resolutions };
+    return { resources: [...input.resources], bindings, resolutions: [] };
   }
   const candidatesByLogin = new Map<string, GitHubRepositoryBindingCandidate[]>();
   for (const candidate of input.candidates) {
@@ -175,15 +191,25 @@ export async function resolveGitHubRepositoryBindings(input: {
     list.push(candidate);
     candidatesByLogin.set(key, list);
   }
-  const seen = new Set<string>();
+  const distinct = new Map<string, UnboundGitHubRepositoryResource>();
   for (const entry of unbound) {
-    if (seen.has(entry.resource.uri)) continue;
-    seen.add(entry.resource.uri);
-    const installations = candidatesByLogin.get(entry.owner.toLowerCase()) ?? [];
-    const outcome = await resolveOne(entry, installations, input.lookup);
-    resolutions.push({ uri: entry.resource.uri, owner: entry.owner, name: entry.name, outcome });
-    if (outcome.status === "resolved") {
-      bindings.set(entry.resource.uri, outcome.binding);
+    if (!distinct.has(entry.resource.uri)) distinct.set(entry.resource.uri, entry);
+  }
+  const resolutions = await Promise.all(
+    [...distinct.values()].map(async (entry) => ({
+      uri: entry.resource.uri,
+      owner: entry.owner,
+      name: entry.name,
+      outcome: await resolveOne(
+        entry,
+        candidatesByLogin.get(entry.owner.toLowerCase()) ?? [],
+        input.lookup,
+      ),
+    })),
+  );
+  for (const resolution of resolutions) {
+    if (resolution.outcome.status === "resolved") {
+      bindings.set(resolution.uri, resolution.outcome.binding);
     }
   }
   return {
@@ -202,31 +228,34 @@ async function resolveOne(
     return { status: "unbound" };
   }
   const installationIds = installations.map((installation) => installation.installationId);
-  const matches: GitHubRepositoryBinding[] = [];
-  for (const installation of installations) {
-    let found: { id: number } | null;
-    try {
-      found = await lookup({
+  const results = await Promise.allSettled(
+    installations.map(async (installation) => {
+      const found = await lookup({
         installationId: installation.installationId,
         owner: entry.owner,
         name: entry.name,
       });
-    } catch (error) {
-      return {
-        status: "unavailable",
-        installationIds,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-    if (
-      found &&
-      Number.isSafeInteger(found.id) &&
-      found.id > 0 &&
-      installation.repositoryIds.includes(found.id)
-    ) {
-      matches.push({ installationId: installation.installationId, repositoryId: found.id });
-    }
+      return found &&
+        Number.isSafeInteger(found.id) &&
+        found.id > 0 &&
+        installation.repositoryIds.includes(found.id)
+        ? { installationId: installation.installationId, repositoryId: found.id }
+        : null;
+    }),
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) {
+    return {
+      status: "unavailable",
+      installationIds,
+      message: failure.reason instanceof Error ? failure.reason.message : String(failure.reason),
+    };
   }
+  const matches = results.flatMap((result) =>
+    result.status === "fulfilled" && result.value ? [result.value] : [],
+  );
   if (matches.length === 1) {
     return { status: "resolved", binding: matches[0]! };
   }

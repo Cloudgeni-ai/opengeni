@@ -138,15 +138,21 @@ without those ids (an API caller, a session created before bound public
 repositories carried ids, or an agent-spawned child inheriting its parent's
 resources), the turn worker resolves the binding before minting: the owner
 login selects the workspace's auditable installation(s) from Postgres, one
-server-side read supplies GitHub's repository id, and the resource is stamped
-for that turn only when exactly one allowlist holds that id. The allowlist,
-`github_installation_repositories`, stores repository ids rather than names, so
-this resolution cannot be completed from Postgres alone and is therefore
-performed where OpenGeni already talks to GitHub rather than at session create.
-A bound owner whose allowlist does not hold the repository, an ambiguous match
-across two bindings, or a suspended/deleted installation leaves the resource
-bare and posts a visible `credential.auth_needed` warning for `github.com`;
-resolution never fails the turn or the session.
+server-side metadata-read (a `permissions: { metadata: read }` installation
+token that never reaches the sandbox, bounded to 10 seconds) supplies GitHub's
+repository id, and the resource is stamped for that turn only when exactly one
+allowlist holds that id. The allowlist, `github_installation_repositories`,
+stores repository ids rather than names, so this resolution cannot be completed
+from Postgres alone and is therefore performed where OpenGeni already talks to
+GitHub rather than at session create. Results (positive and negative) are
+memoized per worker process for ten minutes keyed by workspace, installation,
+and `owner/name`, so recovered attempts and sibling children do not re-read
+GitHub; failures are not memoized. A bound owner whose allowlist does not hold
+the repository, an ambiguous match across two bindings, or a suspended/deleted
+installation leaves the resource bare and posts a visible
+`credential.auth_needed` warning for `github.com` once per session and URI
+within that window; resolution never fails the turn or the session, and a
+GitHub outage proceeds bare after the bound timeout.
 
 Connected Machines do not receive OpenGeni GitHub App credentials and continue
 to use their machine's ambient Git authentication.
