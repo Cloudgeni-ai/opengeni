@@ -47,7 +47,7 @@ import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import { ApiHttpError } from "./http/api-error";
+import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
@@ -759,7 +759,10 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
-  app.onError((error, c) => {
+  app.onError((rawError, c) => {
+    // One central mapping for every Send/Steer/control route: a bounded
+    // control-prefix wait that expired is a known, retryable, not-applied 503.
+    const error = workspaceControlBusyHttpError(rawError) ?? rawError;
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1013,6 +1016,9 @@ function codexCompactionV2ProviderLockedError(
 export function httpStatusForError(error: unknown): number {
   if (codexCompactionV2ProviderLockedError(error)) {
     return 422;
+  }
+  if (workspaceControlBusyHttpError(error)) {
+    return 503;
   }
   if (error instanceof HTTPException) {
     return error.status;

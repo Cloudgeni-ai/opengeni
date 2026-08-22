@@ -97,7 +97,7 @@ import {
   SessionCreateIdempotencyConflictError,
   PersonalResourceAttachmentAcceptanceError,
   sessionTenancyProductActivated,
-  WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+  workspaceControlRequestLockTimeoutMs,
   WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
@@ -1286,7 +1286,7 @@ export async function postUserMessageTurn(input: {
                   }
                 : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-              controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+              controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             }),
         ),
     );

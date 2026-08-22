@@ -347,16 +347,30 @@ function lockClause(mode: WorkspaceControlLockMode) {
 }
 
 /**
- * Bounded control-row wait for request-scoped API mutations (Send, Steer,
- * queued Steer, Pause/Resume/Cancel, workspace Pause/Resume, realtime sync).
- * A request that cannot enter the workspace control prefix within this bound
- * fails with the typed, retryable `WorkspaceControlBusyError` instead of
- * holding a pooled connection and a snapshot for as long as the HTTP client
- * (or ingress) keeps the socket open. Worker settlement, claims, and event
- * appends never pass a bound: a legitimate wait there must not become a failed
- * settlement.
+ * Default bounded control-prefix wait for request-scoped API mutations (Send,
+ * Steer, queued Steer, Pause/Resume/Cancel, workspace Pause/Resume, realtime
+ * sync). The bound is one budget across every lock step of the admission
+ * (advisory lock, row lock, and the savepoint escalation of a paused branch),
+ * not a per-statement timeout. A request that cannot enter the workspace
+ * control prefix within the budget fails with the typed, retryable
+ * `WorkspaceControlBusyError` before any write instead of holding a pooled
+ * connection and a snapshot for as long as the HTTP client (or ingress) keeps
+ * the socket open. Worker settlement, claims, and event appends never pass a
+ * bound: a legitimate wait there must not become a failed settlement.
+ * Override per deployment with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`.
  */
 export const WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS = 20_000;
+
+/** The request-scoped budget in milliseconds, honoring the deployment override. */
+export function workspaceControlRequestLockTimeoutMs(): number {
+  const raw = process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS?.trim();
+  if (!raw) return WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer");
+  }
+  return parsed;
+}
 
 export class WorkspaceControlBusyError extends Error {
   readonly code = "WORKSPACE_CONTROL_BUSY";
@@ -370,13 +384,34 @@ export class WorkspaceControlBusyError extends Error {
   }
 }
 
+/**
+ * One wall-clock budget shared by every lock step of one control-prefix
+ * acquisition. Each step sets `lock_timeout` to the remaining budget, so the
+ * total wait never exceeds the requested bound even when the advisory lock,
+ * the row lock, and a savepoint escalation each wait in turn.
+ */
+export type WorkspaceControlLockBudget = {
+  readonly totalMs: number;
+  readonly deadlineAt: number;
+};
+
+export function workspaceControlLockBudget(lockTimeoutMs: number): WorkspaceControlLockBudget {
+  if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new Error("Workspace control lockTimeoutMs must be a positive number");
+  }
+  const totalMs = Math.max(1, Math.floor(lockTimeoutMs));
+  return { totalMs, deadlineAt: Date.now() + totalMs };
+}
+
 export type WorkspaceControlLockOptions = {
   /**
-   * Bound the wait for the control prefix (advisory lock plus row lock) in
-   * milliseconds. Omit for worker/lifecycle writers. The previous
-   * `lock_timeout` is restored after the prefix is held.
+   * Bound the whole prefix acquisition in milliseconds. Omit for
+   * worker/lifecycle writers. The previous `lock_timeout` is restored once the
+   * prefix is held.
    */
   lockTimeoutMs?: number;
+  /** Share an already running budget (used by the admission helper). */
+  budget?: WorkspaceControlLockBudget;
 };
 
 function advisoryLockFunction(mode: Exclude<WorkspaceControlLockMode, "none">) {
@@ -385,32 +420,33 @@ function advisoryLockFunction(mode: Exclude<WorkspaceControlLockMode, "none">) {
     : sql.raw("pg_advisory_xact_lock_shared");
 }
 
-async function withBoundedLockWait<T>(
+function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLockBudget | null {
+  if (options.budget) return options.budget;
+  if (options.lockTimeoutMs === undefined) return null;
+  return workspaceControlLockBudget(options.lockTimeoutMs);
+}
+
+/** Run one lock-acquiring statement under the remaining budget. */
+async function boundedLockStep<T>(
   db: Database,
   workspaceId: string,
-  lockTimeoutMs: number | undefined,
-  acquire: () => Promise<T>,
+  budget: WorkspaceControlLockBudget | null,
+  step: () => Promise<T>,
 ): Promise<T> {
-  if (lockTimeoutMs === undefined) return await acquire();
-  if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs <= 0) {
-    throw new Error("Workspace control lockTimeoutMs must be a positive number");
-  }
-  const boundedMs = Math.max(1, Math.floor(lockTimeoutMs));
-  const [prior] = await db.execute<{ value: string }>(
-    sql`select current_setting('lock_timeout') as value`,
+  if (!budget) return await step();
+  const remainingMs = budget.deadlineAt - Date.now();
+  if (remainingMs <= 0) throw new WorkspaceControlBusyError(workspaceId, budget.totalMs);
+  await db.execute(
+    sql`select set_config('lock_timeout', ${`${Math.max(1, Math.floor(remainingMs))}ms`}, true)`,
   );
-  await db.execute(sql`select set_config('lock_timeout', ${`${boundedMs}ms`}, true)`);
-  let result: T;
   try {
-    result = await acquire();
+    return await step();
   } catch (error) {
     if (nestedPostgresSqlState(error) === "55P03") {
-      throw new WorkspaceControlBusyError(workspaceId, boundedMs);
+      throw new WorkspaceControlBusyError(workspaceId, budget.totalMs);
     }
     throw error;
   }
-  await db.execute(sql`select set_config('lock_timeout', ${prior?.value ?? "0"}, true)`);
-  return result;
 }
 
 /**
@@ -443,13 +479,19 @@ export async function lockWorkspaceInferenceControl(
   mode: WorkspaceControlLockMode,
   options: WorkspaceControlLockOptions = {},
 ): Promise<WorkspaceControlRow> {
-  const rows = await withBoundedLockWait(db, workspaceId, options.lockTimeoutMs, async () => {
-    if (mode !== "none") {
-      await db.execute(
+  const budget = lockBudgetFor(options);
+  const [prior] = budget
+    ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
+    : [];
+  if (mode !== "none") {
+    await boundedLockStep(db, workspaceId, budget, () =>
+      db.execute(
         sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
-      );
-    }
-    return await db.execute<WorkspaceControlRow>(sql`
+      ),
+    );
+  }
+  const rows = await boundedLockStep(db, workspaceId, budget, () =>
+    db.execute<WorkspaceControlRow>(sql`
       select
         workspace_id as "workspaceId",
         account_id as "accountId",
@@ -462,8 +504,11 @@ export async function lockWorkspaceInferenceControl(
       from ${schema.workspaceInferenceControls}
       where workspace_id = ${workspaceId}
       ${lockClause(mode)}
-    `);
-  });
+    `),
+  );
+  if (budget) {
+    await db.execute(sql`select set_config('lock_timeout', ${prior?.value ?? "0"}, true)`);
+  }
   const row = rows[0];
   if (!row) {
     throw new SessionControlInvariantError(
@@ -506,8 +551,12 @@ export async function lockWorkspaceInferenceControlForAdmission(
   db: Database,
   input: { workspaceId: string; sessionId: string } & WorkspaceControlLockOptions,
 ): Promise<WorkspaceControlAdmissionLock> {
+  // One budget spans the shared attempt and any escalation to the exclusive
+  // prefix, so the caller's bound is the total wait, not a per-step timeout.
   const lockOptions: WorkspaceControlLockOptions =
-    input.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: input.lockTimeoutMs };
+    input.lockTimeoutMs === undefined
+      ? {}
+      : { budget: workspaceControlLockBudget(input.lockTimeoutMs) };
   await db.execute(sql.raw(`savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
   const shared = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", lockOptions);
   const effective = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {

@@ -628,16 +628,28 @@ HTTP caller gave up and left its backend parked with a pinned snapshot. The
 heavyweight advisory queue is FIFO, so a mutator waits only for the holders that
 preceded it and sharers resume right after it commits. Only genuine control
 mutations (Pause/Resume/Cancel, workspace Pause/Resume, auto-resume, settings
-narrowing, quiescent tree deletion) take the exclusive prefix. Send, Steer,
+narrowing, quiescent tree deletion) take the exclusive prefix. Read projections
+(`getSession`, session lists, discovery) read the control row with lock `none`
+and never join the prefix queue. Send, Steer,
 queued Steer, and realtime ledger sync use
 `lockWorkspaceInferenceControlForAdmission`: the shared prefix while the target
 branch is active (it still excludes every control mutation, so the observed
 state cannot change inside the transaction), escalating to the exclusive prefix
 for a paused branch only after rolling back a savepoint, because an in-place
 upgrade deadlocks as soon as two sharers escalate together. Request-scoped API
-mutations pass `WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS`; exceeding it fails
-with the typed retryable `WorkspaceControlBusyError` (HTTP 503, outcome known)
-before any write. Worker settlement and claims never pass a bound. Generic
+mutations pass `workspaceControlRequestLockTimeoutMs()` (default 20 s, override
+with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`): one wall-clock budget shared
+by every lock step of the admission (advisory lock, row lock, and a savepoint
+escalation), so the total wait never exceeds the bound. Exceeding it fails with
+the typed retryable `WorkspaceControlBusyError` before any write; `app.onError`
+renders it for every route as HTTP 503 with `retryable: true`,
+`outcomeUnknown: false`, and `details.code: WORKSPACE_CONTROL_BUSY`, the MCP
+orchestration envelope reports `<tool>_workspace_busy` with a retry hint, and
+Slack interactions keep the raw error so their classifier retries it. Worker
+settlement and claims never pass a bound. `updateWorkspaceSettings` and
+`deleteSessionTreeIfQuiescent` keep an unbounded exclusive wait, and queue
+move/edit/delete keep an unbounded shared wait: they are rare, and a bound there
+would only trade a slow admin action for a failed one. Generic
 audit/title appends skip the control row but use the same
 workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
 before insert so its turn/attempt FK checks cannot invert against event writers;

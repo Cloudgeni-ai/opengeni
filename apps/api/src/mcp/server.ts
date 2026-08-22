@@ -334,7 +334,12 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
             ? ["conflict", "The target session control state changed; refresh and retry."]
             : typedCode === "IDEMPOTENCY_KEY_REUSED"
               ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
-              : null;
+              : typedCode === "WORKSPACE_CONTROL_BUSY"
+                ? [
+                    "workspace_busy",
+                    "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
+                  ]
+                : null;
   if (knownFailure) {
     return {
       error: {

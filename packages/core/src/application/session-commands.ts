@@ -35,7 +35,7 @@ import {
   serializeEffectiveSessionControl,
   steerAgentSessionInTransaction,
   steerQueuedTurnInTransaction,
-  WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+  workspaceControlRequestLockTimeoutMs,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
@@ -355,7 +355,7 @@ export async function steerAgentSession(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           instruction: input.instruction,
-          controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -410,7 +410,7 @@ export async function controlAgentSessionWorkstream(
           operationKey: input.idempotencyKey,
           action: input.action,
           reason: input.reason ?? null,
-          controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -623,7 +623,7 @@ export async function steerHumanQueuePrompt(
           controlEtag: input.controlEtag ?? null,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
-          controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -670,7 +670,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           action: input.action,
           reason: input.reason ?? null,
           expectedControlEtag: input.expectedControlEtag ?? null,
-          controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -722,7 +722,7 @@ export async function controlHumanWorkspace(
         action: input.action,
         reason: input.reason ?? null,
         expectedRevision: input.expectedRevision ?? null,
-        controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+        controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
       }),
     ),
   );

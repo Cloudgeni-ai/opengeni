@@ -9,6 +9,7 @@ import {
   createSession,
   evaluateSessionControl,
   lockWorkspaceInferenceControl,
+  lockWorkspaceInferenceControlForAdmission,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   submitHumanPromptInTransaction,
@@ -410,6 +411,68 @@ describe("workspace control lock fairness", () => {
       );
       expect(row?.value).toBe("0");
     });
+  });
+
+  test("a nested admission inside an exclusive admission keeps the exclusive prefix", async () => {
+    // Realtime ledger sync on a paused branch escalates to the exclusive prefix
+    // and then re-enters the same admission helper for its delegation Send:
+    // the inner shared attempt is taken and rolled back inside its savepoint
+    // while the outer exclusive prefix stays held for the whole transaction.
+    const { grant, sessions } = await fixture();
+    await controlSession(grant, sessions[0]!, "pause");
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, async (db) => {
+      const outer = await lockWorkspaceInferenceControlForAdmission(db, {
+        workspaceId: grant.workspaceId,
+        sessionId: sessions[0]!,
+      });
+      expect(outer.mode).toBe("update");
+      const inner = await lockWorkspaceInferenceControlForAdmission(db, {
+        workspaceId: grant.workspaceId,
+        sessionId: sessions[0]!,
+      });
+      expect(inner.mode).toBe("update");
+      expect(inner.control.revision).toEqual(outer.control.revision);
+      const probe = await probeControlPrefix(grant.workspaceId);
+      expect(probe.advisoryShared).toBe(false);
+      expect(probe.rowShare).toBe(false);
+    });
+    // Nothing leaked past the transaction.
+    const after = await probeControlPrefix(grant.workspaceId);
+    expect(after.advisoryExclusive).toBe(true);
+    expect(after.rowUpdate).toBe(true);
+  });
+
+  test("the bounded wait is one budget across the advisory and row steps", async () => {
+    const { grant, sessions } = await fixture();
+    const workspaceId = grant.workspaceId;
+    const key = `workspace-control:${workspaceId}`;
+    // Backend A holds the advisory lock exclusively for ~350 ms; backend B
+    // holds the row exclusively for the whole test. A 600 ms budget therefore
+    // spends ~350 ms on the advisory step and must fail on the row step at
+    // roughly 600 ms total, not 350 ms + another full 600 ms.
+    const advisoryHolder = await admin.reserve();
+    const rowHolder = await admin.reserve();
+    try {
+      await rowHolder`begin`;
+      await rowHolder`select 1 from workspace_inference_controls where workspace_id = ${workspaceId} for update`;
+      await advisoryHolder`begin`;
+      await advisoryHolder`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      const releaseAdvisory = Bun.sleep(350).then(async () => {
+        await advisoryHolder`rollback`;
+      });
+      const started = Date.now();
+      await expect(
+        send(grant, sessions[0]!, "budgeted", { controlLockTimeoutMs: 600 }),
+      ).rejects.toBeInstanceOf(WorkspaceControlBusyError);
+      const elapsed = Date.now() - started;
+      await releaseAdvisory;
+      expect(elapsed).toBeGreaterThanOrEqual(500);
+      expect(elapsed).toBeLessThan(950);
+      await rowHolder`rollback`;
+    } finally {
+      advisoryHolder.release();
+      rowHolder.release();
+    }
   });
 
   test("concurrent Sends, Steers, and event appends on one workspace all commit", async () => {

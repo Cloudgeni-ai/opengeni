@@ -63284,8 +63284,14 @@ async function sessionControlProjections(
   sessionIds: string[],
   workspaceControl?: WorkspaceControlRow,
 ): Promise<Map<string, Session["effectiveControl"]>> {
+  // Read projections (GET session, session lists) are not control writers.
+  // Like discovery, they read the control row without joining the writer lock
+  // graph: a projection that took FOR SHARE would queue behind a waiting Pause
+  // under the fair control prefix and would let a burst of reads delay it,
+  // while buying no consistency the separate session-row statement has.
+  // Writers that already hold the prefix pass their locked row through.
   const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
-    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
+    ...(workspaceControl ? { workspaceControl } : { lock: "none" as const }),
   });
   return new Map(
     [...controls].map(([sessionId, control]) => [
