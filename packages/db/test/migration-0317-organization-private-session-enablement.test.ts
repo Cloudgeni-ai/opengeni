@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
@@ -93,6 +93,17 @@ afterAll(async () => {
 }, 180_000);
 
 describe("migration 0317 organization private-session enablement", () => {
+  test("pins private-create authority to the configured data schema", async () => {
+    const source = await readFile(join(migrationsDir, ENABLEMENT_MIGRATION), "utf8");
+    expect(source).toContain("SET search_path FROM CURRENT");
+    expect(source).toContain("DECLARE data_schema text := current_schema();");
+    expect(source).toContain(
+      "ALTER FUNCTION %I.open_private_session_create_capability(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp",
+    );
+    expect(source).not.toContain("SET search_path = pg_catalog, public, pg_temp");
+    expect(source).not.toContain("$user");
+  });
+
   test("personal workspaces are private-ready without organization activation", async () => {
     if (!shared || !client) return;
     const userId = `personal-private-${crypto.randomUUID()}`;
@@ -104,6 +115,10 @@ describe("migration 0317 organization private-session enablement", () => {
     });
     const personalWorkspaceId = provisioned.organizationMemberships[0]?.personalWorkspaceId;
     if (!personalWorkspaceId) throw new Error("personal workspace missing");
+    const personalGrant = provisioned.accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === personalWorkspaceId,
+    );
+    if (!personalGrant) throw new Error("personal workspace grant missing");
     await expect(
       getPrivateSessionCreatePolicy(client.db, {
         workspaceId: personalWorkspaceId,
@@ -113,6 +128,55 @@ describe("migration 0317 organization private-session enablement", () => {
       personalWorkspace: true,
       platformAvailable: false,
       organizationEnabled: false,
+    });
+
+    const createIdempotencyKey = `personal-private-${crypto.randomUUID()}`;
+    const input = {
+      accountId: personalGrant.accountId,
+      workspaceId: personalWorkspaceId,
+      visibility: "user_private" as const,
+      initialMessage: "private without organization activation",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId },
+      subjectId,
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+      createIdempotencyKey,
+    };
+    const created = await createSessionWithIdempotencyKeyResult(client.db, input);
+    const replay = await createSessionWithIdempotencyKeyResult(client.db, input);
+    expect(created).toMatchObject({
+      created: true,
+      denied: false,
+      session: {
+        tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
+      },
+    });
+    expect(replay).toMatchObject({
+      created: false,
+      denied: false,
+      session: {
+        tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
+      },
+    });
+    if (created.denied || replay.denied) throw new Error("personal private create denied");
+    expect(replay.session.id).toBe(created.session.id);
+
+    const [routine] = await shared.admin<
+      Array<{ securityDefiner: boolean; settings: string[] | null }>
+    >`
+      select procedure.prosecdef as "securityDefiner", procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'public'
+        and procedure.proname = 'open_private_session_create_capability'
+        and pg_catalog.oidvectortypes(procedure.proargtypes) = 'uuid, uuid, uuid, text'`;
+    expect(routine).toEqual({
+      securityDefiner: true,
+      settings: ["search_path=pg_catalog, public, pg_temp"],
     });
   });
 

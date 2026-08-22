@@ -521,11 +521,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!projected) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    const projectedWithCreateTenancy = session.tenancy
+      ? { ...projected, tenancy: session.tenancy }
+      : projected;
     const projectedWithPolicy = await withEffectivePolicy(
       deps,
       workspaceId,
       grant.subjectId,
-      projected,
+      projectedWithCreateTenancy,
     );
     return c.json(
       {

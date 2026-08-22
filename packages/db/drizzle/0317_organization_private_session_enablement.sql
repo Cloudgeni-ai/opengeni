@@ -321,7 +321,7 @@ CREATE OR REPLACE FUNCTION open_private_session_create_capability(
   p_actor_subject_id text
 ) RETURNS TABLE (capability_id uuid, owner_membership_id uuid)
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog, public, pg_temp
+SET search_path FROM CURRENT
 AS $body$
 DECLARE
   new_capability_id uuid := gen_random_uuid();
@@ -386,6 +386,16 @@ BEGIN
   RETURN NEXT;
 END
 $body$;
+
+DO $pin_private_session_create$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.open_private_session_create_capability(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+END
+$pin_private_session_create$;
 
 DO $grants$
 BEGIN

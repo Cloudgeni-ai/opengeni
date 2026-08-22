@@ -1018,7 +1018,11 @@ async function finishStartSession(
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
     null;
   return {
-    session: { ...persisted, initialTurnId },
+    session: {
+      ...persisted,
+      ...(session.tenancy ? { tenancy: session.tenancy } : {}),
+      initialTurnId,
+    },
     changed: started.changed,
   };
 }

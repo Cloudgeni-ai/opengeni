@@ -148,6 +148,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   closePrivateSessionCreateCapability,
+  getPrivateSessionCreatePolicy,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
   sessionTenancyProductActivated,
@@ -26693,15 +26694,26 @@ async function createSessionInTransaction(
       subjectId: input.createdBy.subjectId,
     });
   }
-  const tenancyViewer = input.subjectId
-    ? {
-        subjectId: input.subjectId,
-        activated: await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          input.workspaceId,
-        ),
-      }
-    : undefined;
+  let tenancyViewer: { subjectId: string; activated: boolean } | undefined;
+  if (input.subjectId) {
+    let activated = await sessionTenancyProductActivated(
+      tx as unknown as Database,
+      input.workspaceId,
+    );
+    if (
+      !activated &&
+      createRequestedVisibility === "user_private" &&
+      input.createdBy?.kind === "subject" &&
+      input.createdBy.subjectId === input.subjectId
+    ) {
+      const policy = await getPrivateSessionCreatePolicy(tx as unknown as Database, {
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.subjectId,
+      });
+      activated = policy.personalWorkspace || policy.platformAvailable;
+    }
+    tenancyViewer = { subjectId: input.subjectId, activated };
+  }
   const mapCreateResultSession = async (
     row: typeof schema.sessions.$inferSelect,
     mcpServers: SessionMcpServerMetadata[],

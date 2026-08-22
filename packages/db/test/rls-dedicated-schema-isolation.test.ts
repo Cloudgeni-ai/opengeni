@@ -10,6 +10,7 @@ import {
   createApiKey,
   createDb,
   createSession,
+  createSessionWithIdempotencyKeyResult,
   ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
   getOrCreateCompanyProfileSnapshot,
@@ -294,6 +295,78 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+  test("0317 pins private-create authority to the dedicated schema and preserves personal privacy", async () => {
+    if (!available) return;
+    const [routine] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select
+        procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'open_private_session_create_capability'
+        and pg_catalog.oidvectortypes(procedure.proargtypes) = 'uuid, uuid, uuid, text'`;
+    expect(routine).toEqual({
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
+
+    const suffix = crypto.randomUUID();
+    const userId = `dedicated-private-${suffix}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Dedicated private owner",
+    });
+    const personalGrant = access.workspaceGrants.find(
+      (grant) => grant.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!personalGrant) throw new Error("dedicated personal workspace grant missing");
+    const created = await createSessionWithIdempotencyKeyResult(db, {
+      accountId: personalGrant.accountId,
+      workspaceId: personalGrant.workspaceId,
+      visibility: "user_private",
+      initialMessage: "dedicated personal private session",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      model: "dedicated-schema-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `dedicated-private-${suffix}`,
+    });
+    expect(created).toMatchObject({
+      created: true,
+      denied: false,
+      session: {
+        tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
+      },
+    });
+    if (created.denied) throw new Error("dedicated personal private create denied");
+    const [stored] = await admin<Array<{ visibility: string; ownerSubjectId: string | null }>>`
+      select visibility, owner_subject_id as "ownerSubjectId"
+      from ${admin(SCHEMA)}.sessions where id = ${created.session.id}`;
+    expect(stored).toEqual({ visibility: "user_private", ownerSubjectId: subjectId });
+  }, 180_000);
+
   test("runtime identity and every declared tenant table satisfy the exact FORCE-RLS posture", async () => {
     if (!available) return;
     const posture = await assertRuntimeDatabasePosture(db, {
