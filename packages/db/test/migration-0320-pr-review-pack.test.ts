@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migration = await Bun.file(
-  new URL("../drizzle/0317_pr_review_pack.sql", import.meta.url),
+  new URL("../drizzle/0320_pr_review_pack.sql", import.meta.url),
 ).text();
 
 const tables = ["pr_review_app_registrations", "pr_review_repository_bindings"] as const;

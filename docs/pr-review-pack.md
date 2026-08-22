@@ -200,7 +200,7 @@ POST /v1/webhooks/automations/:endpointId
   `packages/db/src/automations.ts`, `apps/api/src/routes/automations.ts`,
   `apps/worker/src/activities/automations.ts`
 - provider registration, binding, and action authority:
-  `packages/db/src/pr-review.ts`, migration `0317_pr_review_pack.sql`
+  `packages/db/src/pr-review.ts`, migration `0320_pr_review_pack.sql`
 - setup HTTP adapter and provider repository verification:
   `apps/api/src/routes/pr-review.ts`,
   `apps/api/src/integrations/pr-review-provider.ts`
