@@ -59,6 +59,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  isHomeSandboxTurnTransitionError,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
   agentRunFailurePayload,
@@ -217,6 +218,56 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       });
     } catch (recoveryError) {
       console.error("sandbox lifecycle recovery failed", safeErrorDiagnostic(recoveryError));
+      throw recoveryError;
+    }
+  }
+  // A managed-home session can start directly on a Connected Machine without
+  // creating or leasing its cloud home. If sandbox_attach/sandbox_swap then
+  // clears the durable pointer to home, the commit is valid but this exact
+  // attempt cannot serve a later home operation. Preserve the completed attach
+  // and every preceding model/tool receipt, close only the unresolved suffix,
+  // and continue the SAME logical turn in a fresh attempt. That next attempt
+  // starts from the now-null pointer and establishes home normally.
+  if (
+    isHomeSandboxTurnTransitionError(error) &&
+    recoveryTurnId &&
+    eventing.publish &&
+    eventing.turnStartedPublished
+  ) {
+    try {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId!,
+        attemptId: input.attemptId,
+        reason: "sandbox_home_route_transition",
+        detail: {
+          code: "home_unavailable_this_turn",
+          effectiveBoundary: "next_attempt",
+        },
+      });
+      if (recovery.action === "stale") {
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return claimedResult({ status: "cancelled" });
+      }
+      if (recovery.action !== "recovering") {
+        throw new Error("Home sandbox route transition could not recover the current turn");
+      }
+      acknowledgeRecoveryQuiescence();
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      return claimedResult({ status: "recovering" });
+    } catch (recoveryError) {
+      console.error(
+        "home sandbox route-transition recovery failed",
+        safeErrorDiagnostic(recoveryError),
+      );
       throw recoveryError;
     }
   }
