@@ -525,6 +525,16 @@ describe("rail session grouping", () => {
   });
 
   test("a summary change during loading remains pending for a follow-up refresh", () => {
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey: undefined,
+        nextKey: "manager:1",
+        loading: true,
+        expanded: true,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: false, refresh: false, markStale: false });
+
     const whileLoading = sessionBranchSummaryDecision({
       previousKey: "manager:1",
       nextKey: "manager:2",

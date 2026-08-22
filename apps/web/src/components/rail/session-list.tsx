@@ -433,6 +433,8 @@ export function SessionList() {
     }
     return [...source.values()];
   }, [attentionOverrides, pinOverrides, serverSessions]);
+  const branchParentsById = useRef<ReadonlyMap<string, Session>>(new Map());
+  branchParentsById.current = new Map(allSessions.map((session) => [session.id, session]));
 
   useEffect(() => {
     setAttentionOverrides(new Map());
@@ -902,6 +904,12 @@ export function SessionList() {
       preserve: readonly Session[] = [],
     ): Promise<void> => {
       const epoch = childLoadEpoch.current;
+      if (!branchSummaryKeys.current.has(parentSessionId)) {
+        const parent = branchParentsById.current.get(parentSessionId);
+        if (parent) {
+          branchSummaryKeys.current.set(parentSessionId, sessionBranchSummaryKey(parent));
+        }
+      }
       childRequestSequence.current += 1;
       const requestId = childRequestSequence.current;
       setChildPages((current) =>
