@@ -10,7 +10,6 @@ import {
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
-  Permission as PermissionSchema,
   SessionGoalSnapshot,
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
@@ -233,6 +232,7 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
   omitOutputOnlyHistoryItemFields,
@@ -394,6 +394,7 @@ export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
+export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
@@ -1251,14 +1252,6 @@ export type BootstrapWorkspaceInput = {
   accountPermissions?: Permission[];
   workspacePermissions?: Permission[];
 };
-
-export function normalizeWorkspaceMembershipPermissions(value: unknown): Permission[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((candidate) => {
-    const parsed = PermissionSchema.safeParse(candidate);
-    return parsed.success ? [parsed.data] : [];
-  });
-}
 
 function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
   if (!Array.isArray(left) || left.length !== right.length) return false;
