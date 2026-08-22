@@ -17,6 +17,15 @@ const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
 });
 
 describe("literal high-trust permissions", () => {
+  test("malformed non-array permission values fail closed at the authorization predicate", () => {
+    const malformedValues = ["workspace:admin", { includes: () => true }, null];
+    for (const malformed of malformedValues) {
+      const permissions = malformed as unknown as AccessGrant["permissions"];
+      expect(hasPermission(permissions, "workspace:read")).toBe(false);
+      expect(hasLiteralPermission(permissions, "workspace:admin")).toBe(false);
+    }
+  });
+
   test("workspace:admin remains an ordinary wildcard but cannot manufacture secrets:read", () => {
     const admin = grant(["workspace:admin"]);
     expect(hasPermission(admin.permissions, "variable-sets:read")).toBe(true);
