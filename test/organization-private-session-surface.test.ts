@@ -26,7 +26,7 @@ describe("organization private-session product surface", () => {
 
   test("keeps Personal workspaces automatic and organization workspaces gated", async () => {
     const migration = await readFile(
-      join(repo, "packages/db/drizzle/0317_organization_private_session_enablement.sql"),
+      join(repo, "packages/db/drizzle/0318_organization_private_session_enablement.sql"),
       "utf8",
     );
     expect(migration).toContain("actor.personal_workspace_id = p_workspace_id");

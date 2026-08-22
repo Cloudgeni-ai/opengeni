@@ -295,7 +295,7 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
-  test("0317 pins private-create authority to the dedicated schema and preserves personal privacy", async () => {
+  test("0318 pins private-create authority to the dedicated schema and preserves personal privacy", async () => {
     if (!available) return;
     const [routine] = await admin<
       Array<{

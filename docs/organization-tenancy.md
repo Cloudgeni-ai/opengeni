@@ -862,7 +862,7 @@ before enabling Only me, explains `not_activated` instead of silently hiding
 the choice, and never sends a restored private draft while that preflight is
 pending or denied.
 
-Migration 0317 separates operator readiness from product enablement. The
+Migration 0318 separates operator readiness from product enablement. The
 version-1 `session_tenancy_activations` row remains the drained, evidence-backed
 operator prerequisite. A distinct FORCE-RLS
 `organization_private_session_settings` row is the owner/admin product decision

@@ -23,7 +23,7 @@ import {
 } from "@opengeni/testing";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const ENABLEMENT_MIGRATION = "0317_organization_private_session_enablement.sql";
+const ENABLEMENT_MIGRATION = "0318_organization_private_session_enablement.sql";
 
 async function migrationFiles(): Promise<string[]> {
   return (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
@@ -79,7 +79,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0317-private-session-enablement");
+  shared = await acquireSharedTestDatabase("migration-0318-private-session-enablement");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL required");
     return;
@@ -92,7 +92,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0317 organization private-session enablement", () => {
+describe("migration 0318 organization private-session enablement", () => {
   test("pins private-create authority to the configured data schema", async () => {
     const source = await readFile(join(migrationsDir, ENABLEMENT_MIGRATION), "utf8");
     expect(source).toContain("SET search_path FROM CURRENT");
@@ -430,7 +430,7 @@ describe("migration 0317 organization private-session enablement", () => {
   }, 180_000);
 });
 
-describe("migration 0317 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
+describe("migration 0318 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {
