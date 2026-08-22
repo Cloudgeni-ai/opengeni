@@ -122,6 +122,8 @@ export type SharedActivityServices = {
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
   connectionCredentials?: ConnectionCredentialsPort | null;
+  /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
+  personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };
 
 /** Control workers own short database and maintenance activities. Document

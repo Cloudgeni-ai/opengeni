@@ -526,6 +526,8 @@ export type {
   SlackReactionChannel,
   SlackReactionChannelListResponse,
   CreateConnectionRequest,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   CreateDocumentBaseRequest,

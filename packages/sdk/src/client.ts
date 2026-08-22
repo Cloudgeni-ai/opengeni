@@ -189,6 +189,8 @@ import type {
   InstallLibrarySkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
@@ -6342,6 +6344,17 @@ export class OpenGeniClient {
   /** Start a Stripe checkout for prepaid credits. */
   async createBillingCheckout(request: CreateCheckoutRequest): Promise<CreateCheckoutResponse> {
     return await this.requestJson<CreateCheckoutResponse>("POST", "/v1/billing/checkout", request);
+  }
+
+  /** Open Stripe's hosted portal for invoices and payment information. */
+  async createBillingPortalSession(
+    request: CreateBillingPortalRequest = {},
+  ): Promise<CreateBillingPortalResponse> {
+    return await this.requestJson<CreateBillingPortalResponse>(
+      "POST",
+      "/v1/billing/portal",
+      request,
+    );
   }
 
   // --- Internals -------------------------------------------------------------

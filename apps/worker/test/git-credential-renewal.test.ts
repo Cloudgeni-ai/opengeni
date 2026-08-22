@@ -34,6 +34,14 @@ describe("host-managed Git credential renewal", () => {
     expect(
       nextGitCredentialRenewalDelay({ github: "2026-07-14T10:04:00.000Z" }, ["github"], now),
     ).toBe(GIT_CREDENTIAL_MIN_REFRESH_MS);
+    expect(
+      nextGitCredentialRenewalDelay(
+        { github: "2026-07-14T10:05:00.000Z" },
+        ["github"],
+        now,
+        60_000,
+      ),
+    ).toBe(4 * 60_000);
   });
 
   test("mints the complete provider set once and submits one validated write", async () => {

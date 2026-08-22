@@ -101,11 +101,32 @@ generation, canonical URI, ref, and access into the accepted turn or task.
 Credential bindings remain selectors, never grants. Missing, stale, mixed-
 account, or widened authority fails closed.
 
-This phase still exposes no token to a sandbox, adds no Git transport, and
-registers no GitHub API tools. Physical provider use must revalidate the frozen
-snapshot immediately before broker access; that broker/runtime work and
-agent-created inheritance, child/goal propagation, and recovery are separately
-audited dependent phases. Agent-created personal GitHub use therefore fails
-closed in this phase instead of silently dropping authority. Until a broker
-consumer lands, selecting and freezing a repository grants no executable
-runtime capability.
+Managed sandboxes consume this authority through OpenGeni's dedicated personal
+GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
+to the exact account, workspace, session/root, turn, active attempt and
+execution generation, connection generation, credential binding, repository
+selection generation, and owner. The bearer contains no repository names,
+URLs, or provider credential. Each stable, credential-free broker route is
+separately HMAC-bound to one repository snapshot and remains unchanged when the
+bearer renews. Git persists the canonical `https://github.com/<owner>/<repo>`
+remote; runtime `insteadOf` configuration redirects only the physical smart-Git
+request to the broker. Initial delivery and renewal stage the bearer through a
+private sandbox editor/file ingress; the token-free lifecycle command only
+atomically moves those bytes into the stable binding file, so the bearer never
+enters command text or process arguments.
+
+The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
+Before every upstream request it revalidates the exact accepted attempt,
+connection/grant generations, current repository selection, live GitHub user
+identity, repository identity, and pull/push permission. Provider OAuth tokens
+are decrypted only at that server boundary. Requests use fixed GitHub hosts,
+no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
+A receive-pack transport failure is outcome-unknown and is never automatically
+replayed. `gh` and other provider CLIs never receive the broker bearer and direct
+the agent to GitHub tools instead. The standalone consumer remains default-off
+with personal GitHub OAuth; GitHub App and Connected Machine credential paths
+are unchanged.
+
+GitHub API tools and agent-created inheritance, child/goal propagation, and
+recovery remain separately audited dependent phases. Agent-created personal
+GitHub use therefore still fails closed instead of silently dropping authority.

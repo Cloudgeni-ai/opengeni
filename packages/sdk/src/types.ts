@@ -2746,6 +2746,7 @@ export type FirstPartyMcpToolName =
   | "sessions_list"
   | "session_get"
   | "session_events"
+  | "session_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -6668,6 +6669,16 @@ export type CreateCheckoutRequest = {
 
 export type CreateCheckoutResponse = {
   checkoutSessionId: string;
+  url: string;
+};
+
+export type CreateBillingPortalRequest = {
+  accountId?: string | undefined;
+  returnUrl?: string | undefined;
+};
+
+export type CreateBillingPortalResponse = {
+  portalSessionId: string;
   url: string;
 };
 

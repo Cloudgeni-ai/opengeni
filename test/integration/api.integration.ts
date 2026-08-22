@@ -1091,8 +1091,10 @@ describe("API component integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         productAccessMode: "managed",
+        billingMode: "stripe",
         betterAuthSecret: "test-better-auth-secret-32-bytes",
         publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
         environmentsEncryptionKey: environmentsTestKey,
       }),
       db: dbClient.db,
@@ -1168,6 +1170,15 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${billingKeyBody.token}` },
     });
     expect(billing.status).toBe(200);
+    const deniedBillingPortal = await app.request("/v1/billing/portal", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${billingKeyBody.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ accountId: context.defaultAccountId }),
+    });
+    expect(deniedBillingPortal.status).toBe(403);
 
     const workspaceOnlyKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
@@ -1185,6 +1196,15 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` },
     });
     expect(deniedBilling.status).toBe(403);
+    const deniedWorkspaceBillingPortal = await app.request("/v1/billing/portal", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${workspaceOnlyKeyBody.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ accountId: context.defaultAccountId }),
+    });
+    expect(deniedWorkspaceBillingPortal.status).toBe(403);
 
     const exactSecret =
       `ordinary source: const fakeToken = "ghp_not_a_credential";\n` +

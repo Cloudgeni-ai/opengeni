@@ -10,6 +10,8 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   AttachViewerResponse as ContractAttachViewerResponse,
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
+  CreateBillingPortalRequest as ContractCreateBillingPortalRequest,
+  CreateBillingPortalResponse as ContractCreateBillingPortalResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
@@ -143,6 +145,8 @@ import type {
   AttachViewerRequest,
   AttachViewerResponse,
   BeginSessionRealtimeRequest,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CreateKnowledgeMemoryRequest,
   FirstPartyMcpToolName,
   KnowledgeMemory,
@@ -257,6 +261,29 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("Stripe billing portal shapes stay in parity", () => {
+    const sdkRequestAcceptsContract = (
+      value: z.infer<typeof ContractCreateBillingPortalRequest>,
+    ): CreateBillingPortalRequest => value;
+    const contractRequestAcceptsSdk = (
+      value: CreateBillingPortalRequest,
+    ): z.input<typeof ContractCreateBillingPortalRequest> => value;
+    const sdkResponseAcceptsContract = (
+      value: z.infer<typeof ContractCreateBillingPortalResponse>,
+    ): CreateBillingPortalResponse => value;
+    const contractResponseAcceptsSdk = (
+      value: CreateBillingPortalResponse,
+    ): z.input<typeof ContractCreateBillingPortalResponse> => value;
+    expect(
+      [
+        sdkRequestAcceptsContract,
+        contractRequestAcceptsSdk,
+        sdkResponseAcceptsContract,
+        contractResponseAcceptsSdk,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+  });
+
   test("personal-resource management request and page shapes stay in parity", () => {
     const request = (
       value: IssueUserResourceGrantRequest,
