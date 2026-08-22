@@ -31,6 +31,14 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  beginSessionBranchRequest,
+  commitSessionBranchPage,
+  failSessionBranchRequest,
+  sessionBranchSummaryKey,
+  sessionBranchSummaryDecision,
+  upsertSessionBranchChild,
+} from "./lib/session-branch-cache";
+import {
   buildPinnedRailSections,
   buildRailForest,
   groupSessionsForRail,
@@ -340,6 +348,278 @@ describe("rail session grouping", () => {
         treeStats: refreshedStats,
       }).treeStats,
     ).toEqual(refreshedStats);
+  });
+
+  test("branch summaries change when the server reports a newly spawned child", () => {
+    const manager = railSession({
+      id: "manager",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 2,
+        runningDescendants: 2,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const next = {
+      ...manager,
+      treeStats: { ...manager.treeStats!, directChildren: 3, totalDescendants: 3 },
+    };
+
+    expect(sessionBranchSummaryKey(next)).not.toBe(sessionBranchSummaryKey(manager));
+    expect(sessionBranchSummaryKey({ ...manager, updatedAt: "2026-06-19T12:00:00.000Z" })).not.toBe(
+      sessionBranchSummaryKey(manager),
+    );
+  });
+
+  test("a loaded branch renders N to N+1 children after poll invalidation without remount", () => {
+    const manager = railSession({
+      id: "manager",
+      updatedAt: "2026-06-19T10:00:00.000Z",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 1,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const workerA = railSession({ id: "worker-a", parentSessionId: manager.id });
+    let pages = commitSessionBranchPage(new Map(), manager.id, {
+      sessions: [workerA],
+      nextCursor: null,
+    });
+    const branchChildren = (parent: Session): string[] => {
+      const forest = buildRailForest([parent, ...pages.get(parent.id)!.sessions], NOW);
+      const roots = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+      return roots
+        .find((node) => node.session.id === parent.id)!
+        .children.map((child) => child.session.id);
+    };
+    expect(branchChildren(manager)).toEqual(["worker-a"]);
+
+    const polledManager = railSession({
+      ...manager,
+      updatedAt: "2026-06-19T10:01:00.000Z",
+      treeStats: { ...manager.treeStats!, directChildren: 2, totalDescendants: 2 },
+    });
+    expect(sessionBranchSummaryKey(polledManager)).not.toBe(sessionBranchSummaryKey(manager));
+    const workerB = railSession({ id: "worker-b", parentSessionId: manager.id });
+    pages = commitSessionBranchPage(pages, manager.id, {
+      sessions: [workerA, workerB],
+      nextCursor: null,
+    });
+
+    expect(branchChildren(polledManager)).toEqual(["worker-b", "worker-a"]);
+  });
+
+  test("an opened child persists in its parent branch and keeps list-only subtree facts", () => {
+    const cached = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const routeProjection = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+    });
+    const pages = new Map([
+      [
+        "manager",
+        {
+          sessions: [cached],
+          nextCursor: null,
+          loading: false,
+          failed: false,
+          stale: false,
+          requestId: null,
+          retryCursor: null,
+        },
+      ],
+    ]);
+
+    const next = upsertSessionBranchChild(pages, routeProjection);
+    expect(next.get("manager")?.sessions).toHaveLength(1);
+    expect(next.get("manager")?.sessions[0]).toMatchObject({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+      treeStats: cached.treeStats,
+    });
+
+    const sibling = railSession({ id: "sibling", parentSessionId: "manager" });
+    const reconciled = commitSessionBranchPage(
+      next,
+      "manager",
+      { sessions: [sibling], nextCursor: null },
+      { preserve: [routeProjection] },
+    );
+    expect(reconciled.get("manager")?.sessions.map((entry) => entry.id)).toEqual([
+      "sibling",
+      "worker",
+    ]);
+  });
+
+  test("page-one invalidation preserves paginated children and an active child", () => {
+    const managerId = "manager-paginated";
+    const workerA = railSession({ id: "worker-a", parentSessionId: managerId });
+    const workerB = railSession({ id: "worker-b", parentSessionId: managerId });
+    const workerC = railSession({ id: "worker-c", parentSessionId: managerId });
+    const active = railSession({ id: "worker-active", parentSessionId: managerId });
+    let pages = commitSessionBranchPage(new Map(), managerId, {
+      sessions: [workerA, workerB],
+      nextCursor: "page-2",
+    });
+    pages = commitSessionBranchPage(
+      pages,
+      managerId,
+      { sessions: [workerC], nextCursor: null },
+      { append: true },
+    );
+    pages = upsertSessionBranchChild(pages, active);
+    pages = beginSessionBranchRequest(pages, managerId, 1);
+
+    const workerNew = railSession({ id: "worker-new", parentSessionId: managerId });
+    const refreshedA = railSession({
+      ...workerA,
+      status: "running",
+      updatedAt: "2026-06-19T12:01:00.000Z",
+    });
+    pages = commitSessionBranchPage(
+      pages,
+      managerId,
+      { sessions: [workerNew, refreshedA], nextCursor: "fresh-page-2" },
+      { requestId: 1 },
+    );
+
+    expect(pages.get(managerId)).toMatchObject({
+      nextCursor: "fresh-page-2",
+      loading: false,
+      failed: false,
+    });
+    expect(pages.get(managerId)?.sessions.map((entry) => entry.id)).toEqual([
+      "worker-new",
+      "worker-a",
+      "worker-b",
+      "worker-c",
+      "worker-active",
+    ]);
+    expect(pages.get(managerId)?.sessions[1]?.status).toBe("running");
+  });
+
+  test("a summary change during loading remains pending for a follow-up refresh", () => {
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey: undefined,
+        nextKey: "manager:1",
+        loading: true,
+        expanded: true,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: false, refresh: false, markStale: false });
+
+    const whileLoading = sessionBranchSummaryDecision({
+      previousKey: "manager:1",
+      nextKey: "manager:2",
+      loading: true,
+      expanded: true,
+      stale: false,
+    });
+    expect(whileLoading).toEqual({ acknowledge: false, refresh: false, markStale: false });
+
+    const afterCompletion = sessionBranchSummaryDecision({
+      previousKey: "manager:1",
+      nextKey: "manager:2",
+      loading: false,
+      expanded: true,
+      stale: false,
+    });
+    expect(afterCompletion).toEqual({ acknowledge: true, refresh: true, markStale: false });
+  });
+
+  test("a failed page-one invalidation retries page one instead of the old continuation", () => {
+    const managerId = "manager-retry";
+    const worker = railSession({ id: "worker", parentSessionId: managerId });
+    let pages = commitSessionBranchPage(new Map(), managerId, {
+      sessions: [worker],
+      nextCursor: "old-page-2",
+    });
+    pages = beginSessionBranchRequest(pages, managerId, 7);
+    pages = failSessionBranchRequest(pages, managerId, 7);
+
+    expect(pages.get(managerId)).toMatchObject({
+      nextCursor: "old-page-2",
+      loading: false,
+      failed: true,
+      stale: false,
+      retryCursor: null,
+    });
+
+    const retryCursor = pages.get(managerId)?.retryCursor ?? undefined;
+    expect(retryCursor).toBeUndefined();
+    pages = beginSessionBranchRequest(pages, managerId, 8, retryCursor);
+    const fresh = railSession({ id: "fresh-worker", parentSessionId: managerId });
+    pages = commitSessionBranchPage(
+      pages,
+      managerId,
+      { sessions: [fresh], nextCursor: "fresh-page-2" },
+      { requestId: 8 },
+    );
+    expect(pages.get(managerId)).toMatchObject({
+      nextCursor: "fresh-page-2",
+      loading: false,
+      failed: false,
+    });
+    expect(pages.get(managerId)?.sessions.map((entry) => entry.id)).toEqual([
+      "fresh-worker",
+      "worker",
+    ]);
+  });
+
+  test("an older same-parent completion cannot overwrite the newer request", () => {
+    const managerId = "manager-fenced";
+    const active = railSession({ id: "active-worker", parentSessionId: managerId });
+    let pages = upsertSessionBranchChild(new Map(), active);
+    pages = beginSessionBranchRequest(pages, managerId, 10);
+    pages = beginSessionBranchRequest(pages, managerId, 11);
+    const newer = railSession({ id: "newer-worker", parentSessionId: managerId });
+    pages = commitSessionBranchPage(
+      pages,
+      managerId,
+      { sessions: [newer], nextCursor: null },
+      { requestId: 11 },
+    );
+    const afterNewer = pages;
+    const older = railSession({ id: "older-worker", parentSessionId: managerId });
+    pages = commitSessionBranchPage(
+      pages,
+      managerId,
+      { sessions: [older], nextCursor: null },
+      { requestId: 10 },
+    );
+
+    expect(pages).toBe(afterNewer);
+    expect(pages.get(managerId)?.sessions.map((entry) => entry.id)).toEqual([
+      "newer-worker",
+      "active-worker",
+    ]);
   });
 
   test("visibleForestRows expands only where the set says so", () => {
