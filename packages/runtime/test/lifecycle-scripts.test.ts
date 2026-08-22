@@ -1087,7 +1087,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       line.includes('if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"'),
     );
     const setHeadIndex = lines.findIndex((line) =>
-      line.includes('git -C "$tmp" remote set-head origin "$ref"'),
+      line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
     );
     const checkoutIndex = lines.findIndex((line) =>
       line.includes('if ! git -C "$tmp" checkout --detach FETCH_HEAD'),
@@ -1098,7 +1098,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     expect(setHeadIndex).toBe(guardIndex + 1);
     expect(lines[setHeadIndex + 1]).toBe("  fi");
     expect(checkoutIndex).toBeGreaterThan(setHeadIndex);
-    // set-head never shares the failure gate with fetch or checkout.
+    // set-head never shares the failure gate with fetch or checkout, and an
+    // unexpected set-head failure after the guard cannot exit the set -e shell.
+    expect(lines[setHeadIndex].trim().endsWith("|| true")).toBe(true);
     expect(lines[fetchIndex]).not.toContain("set-head");
     expect(lines[checkoutIndex]).not.toContain("set-head");
     expect(lines[setHeadIndex]).not.toContain("exit 1");
@@ -1109,7 +1111,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ).toHaveLength(2);
   });
 
-  test("clone by branch sets origin/HEAD; PR ref and commit SHA clone without origin/HEAD (previously set-head failed the clone)", () => {
+  test("clone by branch sets origin/HEAD; PR ref, tag, and commit SHA clone without origin/HEAD (previously set-head failed the clone)", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
       const origin = makeOrigin(root);
@@ -1118,12 +1120,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       }).trim();
       // GitHub-style PR ref outside refs/heads/: fetchable, never remote-tracked.
       execFileSync("git", ["-C", origin, "update-ref", "refs/pull/1/head", sha]);
+      // Lightweight tag: fetched by short name, never under refs/remotes/origin/.
+      execFileSync("git", ["-C", origin, "tag", "v1.0", sha]);
       const home = join(root, "home");
       mkdirSync(home, { recursive: true });
       const env = { HOME: home };
       const cases: { ref: string; expectOriginHead: boolean }[] = [
         { ref: "main", expectOriginHead: true },
         { ref: "pull/1/head", expectOriginHead: false },
+        { ref: "v1.0", expectOriginHead: false },
         { ref: sha, expectOriginHead: false },
       ];
       for (const [index, { ref, expectOriginHead }] of cases.entries()) {

@@ -8942,7 +8942,7 @@ export function repositoryCloneCommand(
     // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
     // must not turn a successful fetch into a failed clone.
     '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null',
+    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
     "  fi",
     '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
     '    rm -rf "$tmp"',
