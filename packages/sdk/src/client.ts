@@ -177,6 +177,11 @@ import type {
   PersonalGitHubDisconnectRequest,
   PersonalGitHubOAuthStartRequest,
   PersonalGitHubOAuthStartResponse,
+  ListPersonalGitHubRepositoriesOptions,
+  ListPersonalGitHubRepositoriesResponse,
+  PersonalGitHubRepositorySelectionState,
+  ReplacePersonalGitHubRepositorySelectionsRequest,
+  VerifyPersonalGitHubRepositorySelectionsRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
@@ -5978,6 +5983,49 @@ export class OpenGeniClient {
       request,
     );
     return response.connection;
+  }
+
+  /** Browse one bounded page of repositories visible to one exact owner connection. */
+  async listPersonalGitHubRepositories(
+    workspaceId: string,
+    connectionId: string,
+    options: ListPersonalGitHubRepositoriesOptions = {},
+  ): Promise<ListPersonalGitHubRepositoriesResponse> {
+    return await this.requestJson<ListPersonalGitHubRepositoriesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/github/repositories`,
+      undefined,
+      {
+        ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  /** Atomically replace the exact owner connection's selected repository set. */
+  async replacePersonalGitHubRepositorySelections(
+    workspaceId: string,
+    connectionId: string,
+    request: ReplacePersonalGitHubRepositorySelectionsRequest,
+  ): Promise<PersonalGitHubRepositorySelectionState> {
+    return await this.requestJson<PersonalGitHubRepositorySelectionState>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/github/repositories`,
+      request,
+    );
+  }
+
+  /** Revalidate every selected repository without accepting provider URLs from the caller. */
+  async verifyPersonalGitHubRepositorySelections(
+    workspaceId: string,
+    connectionId: string,
+    request: VerifyPersonalGitHubRepositorySelectionsRequest,
+  ): Promise<PersonalGitHubRepositorySelectionState> {
+    return await this.requestJson<PersonalGitHubRepositorySelectionState>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/github/repositories/verify`,
+      request,
+    );
   }
 
   /** List the secret-free Slack team -> OpenGeni tenant routing authority. */

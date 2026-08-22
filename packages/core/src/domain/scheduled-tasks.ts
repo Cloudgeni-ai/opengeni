@@ -68,6 +68,7 @@ import {
 } from "./slack-bot";
 import {
   normalizeResources,
+  personalGitHubRepositoryResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
@@ -202,6 +203,7 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           settings: runtimeSettings,
           tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
+          resources: agentConfig.resources,
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAuthorities,
           rejectUnselectedActivatedConnections: true,
@@ -666,6 +668,15 @@ export async function validatedScheduledTaskUpdate(input: {
   );
   if (input.payload.connectionAuthorities === undefined) {
     if (
+      materialExecutionChange &&
+      existingDelegations.some((delegation) => delegation.connectionType === "github_personal")
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
+      });
+    }
+    if (
       existingDelegations.length > 0 &&
       !isDeepStrictEqual(nextAgentConfig.tools, input.existing.agentConfig.tools)
     ) {
@@ -693,6 +704,12 @@ export async function validatedScheduledTaskUpdate(input: {
       }
     }
   } else if (input.payload.connectionAuthorities.length === 0) {
+    if (personalGitHubRepositoryResources(nextAgentConfig.resources).length > 0) {
+      throw new HTTPException(409, {
+        message:
+          "personal GitHub repository resources cannot be retained without connectionAuthorities",
+      });
+    }
     update.personalConnectionDelegations = [];
   } else {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -728,6 +745,7 @@ export async function validatedScheduledTaskUpdate(input: {
       workspaceId: input.grant.workspaceId,
       settings: runtimeSettings,
       tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
+      resources: nextAgentConfig.resources,
       source: personalConnectionDelegationSourceForGrant(input.grant),
       authoritySelections: input.payload.connectionAuthorities,
       rejectUnselectedActivatedConnections: true,
