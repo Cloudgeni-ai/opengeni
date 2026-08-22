@@ -414,7 +414,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   app.post("/v1/integrations/slack/commands", async (c) => {
     const signed = await readSignedSlackRequest(c, deps);
     const form = new URLSearchParams(signed.rawBody);
-    if (form.get("command") !== "/opengeni") {
+    if (form.get("command") !== deps.settings.slackCommand) {
       throw new HTTPException(400, { message: "invalid Slack command" });
     }
     const entry = normalizedFormInteraction(form, "slash_command");

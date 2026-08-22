@@ -193,7 +193,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | --- | --- | --- |
 | First-party: `set_session_title` | Mutation | v1 receipt |
 | First-party: `scheduled_tasks_create`, `scheduled_tasks_update`, `scheduled_tasks_pause`, `scheduled_tasks_resume`, `scheduled_tasks_trigger`, `scheduled_tasks_delete` | Mutation | v1 receipt |
-| First-party: `goal_set`, `goal_update`, `goal_progress`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
+| First-party: `goal_set`, `goal_update`, `goal_progress`, `goal_wait`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
 | First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |
@@ -212,6 +212,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
+| First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |
 | Docs: `list_document_bases` | List | Existing document-base list result |
 | Docs: `search_documents`, `knowledge_search`, `memory_search` | List/read | Existing bounded retrieval result |
 | Docs: `fetch_document_chunk`, `knowledge_fetch` | Read | Explicit chunk read result |

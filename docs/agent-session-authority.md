@@ -2,9 +2,12 @@
 
 A live agent attempt may read, message, and control other sessions in the same
 workspace. Parent/child lineage is not an access deny. First-party session
-tools (`sessions_list`, `session_get`, `session_steer`, pause/resume/cancel)
-are the capability surface; unprompted hijack is an instruction problem, not a
-second lock. Slack-private sessions stay same-root for agents, and
+tools (`sessions_list`, `session_get`, `session_events`, `session_wait`,
+`session_steer`, pause/resume/cancel) are the capability surface; unprompted
+hijack is an instruction problem, not a second lock. `session_wait` authorizes
+every watched target exactly as `session_events` does (`session.events.read`)
+before it subscribes to live fanout; the caller's own session is always an
+allowed self target. Slack-private sessions stay same-root for agents, and
 `user_private` still requires the initiating human as owner — this is not a new
 impersonation path.
 

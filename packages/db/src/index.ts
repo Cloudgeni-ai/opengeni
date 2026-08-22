@@ -20916,6 +20916,7 @@ export async function armCodexCapacityWait(
           reason: "codex_capacity_wait",
           sequence,
           now,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -22170,6 +22171,7 @@ export async function armXaiCapacityWait(
           reason: "xai_capacity_wait",
           sequence,
           now,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -38981,7 +38983,39 @@ async function touchLiveLeaseHolder(
 // HEARTBEAT path): a stale (superseded) owner's lease refresh is rejected so it
 // self-evicts. Also liveness-guarded to warm/warming (C2) so a heartbeat can't
 // wedge a draining lease forever by pushing its grace deadline.
-export async function heartbeatLeaseHolder(
+//
+// CONTRACT (two independent signals, one transaction):
+//   - `holderAlive`: this exact holder row still exists and (for a canonical
+//     `turn-attempt:<uuid>` holder) its attempt is still the active writer. The
+//     row's `last_heartbeat_at` was refreshed, so the dead-worker reap cannot
+//     remove it. This is the ONLY signal that licenses a caller to drop its
+//     in-memory ownership (stop timers, release the holder).
+//   - `leaseExtended`: the lease TTL was refreshed. It is false while the lease is
+//     rotation-fenced, draining, or at another epoch even though the holder is
+//     alive. A false here means "finish orderly work (rotation checkpoint) and
+//     then release"; it never means "the holder is gone". Releasing a live holder
+//     on this signal alone drops the lease to draining under a running turn and
+//     lets the reaper terminate the box it is using.
+// `heartbeatLeaseHolder` keeps its historical boolean (= `leaseExtended`) for
+// callers that only need lease authority; liveness loops must use the status form.
+export type LeaseHolderHeartbeatFence =
+  | "unsupported_kind"
+  | "lease_missing"
+  | "holder_gone"
+  | "epoch"
+  | "liveness"
+  | "rotation_requested";
+
+export type LeaseHolderHeartbeatStatus =
+  | {
+      holderAlive: false;
+      leaseExtended: false;
+      fence: "unsupported_kind" | "lease_missing" | "holder_gone";
+    }
+  | { holderAlive: true; leaseExtended: true; fence: null }
+  | { holderAlive: true; leaseExtended: false; fence: "epoch" | "liveness" | "rotation_requested" };
+
+export async function heartbeatLeaseHolderStatus(
   db: Database,
   input: {
     accountId: string;
@@ -38992,31 +39026,38 @@ export async function heartbeatLeaseHolder(
     leaseTtlMs: number;
     expectedEpoch: number;
   },
-): Promise<boolean> {
-  if (input.kind === "process") return false;
+): Promise<LeaseHolderHeartbeatStatus> {
+  if (input.kind === "process") {
+    return { holderAlive: false, leaseExtended: false, fence: "unsupported_kind" };
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
+      await scopedDb.transaction(async (txRaw): Promise<LeaseHolderHeartbeatStatus> => {
         const tx = txRaw as unknown as Database;
         // Canonical lock order is lease -> holder. The global reaper uses the
         // same order, so a heartbeat reviving a stale holder can never deadlock
         // against stale-holder deletion.
-        const leases = await tx.execute<{ id: string }>(sql`
-          select id from sandbox_leases
+        const leases = await tx.execute<{
+          id: string;
+          lease_epoch: number | string;
+          liveness: SandboxLeaseLiveness;
+          rotation_requested_at: Date | string | null;
+        }>(sql`
+          select id, lease_epoch, liveness, rotation_requested_at from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
         const lease = leases[0];
-        if (!lease) return false;
+        if (!lease) return { holderAlive: false, leaseExtended: false, fence: "lease_missing" };
 
         // Holder liveness and lease authority are separate signals. Even after
         // rotation fences lease extension, the still-running owner can spend
         // minutes checkpointing before it aborts. Keep its holder alive so the
         // dead-worker reaper cannot race that checkpoint and terminate the box.
-        // The guarded lease UPDATE below still returns false, which tells the
+        // The guarded lease UPDATE below still returns no row, which tells the
         // owner to complete orderly rotation and release its holder.
         const holderAlive = await touchLiveLeaseHolder(tx, {
           workspaceId: input.workspaceId,
@@ -39024,7 +39065,10 @@ export async function heartbeatLeaseHolder(
           kind: input.kind,
           holderId: input.holderId,
         });
-        if (!holderAlive) return false; // reaped or no longer the exact active attempt
+        if (!holderAlive) {
+          // reaped or no longer the exact active attempt
+          return { holderAlive: false, leaseExtended: false, fence: "holder_gone" };
+        }
         // Recheck the same fence in the write even though its row lock is held,
         // keeping the mutation independently auditable and future-proof.
         const leaseRows = await tx.execute<{ id: string }>(sql`
@@ -39037,7 +39081,144 @@ export async function heartbeatLeaseHolder(
           and rotation_requested_at is null
         returning id
       `);
-        return leaseRows.length > 0;
+        if (leaseRows.length > 0) return { holderAlive: true, leaseExtended: true, fence: null };
+        if (Number(lease.lease_epoch) !== input.expectedEpoch) {
+          return { holderAlive: true, leaseExtended: false, fence: "epoch" };
+        }
+        if (lease.liveness !== "warm" && lease.liveness !== "warming") {
+          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+        }
+        return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+      }),
+  );
+}
+
+export async function heartbeatLeaseHolder(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    kind: LeaseHolderKind;
+    holderId: string;
+    leaseTtlMs: number;
+    expectedEpoch: number;
+  },
+): Promise<boolean> {
+  return (await heartbeatLeaseHolderStatus(db, input)).leaseExtended;
+}
+
+export type ReinstateTurnLeaseHolderResult =
+  | { status: "present" | "reinstated"; lease: LeaseSnapshot }
+  | {
+      status:
+        | "lease_missing"
+        | "lease_fenced"
+        | "capture_in_progress"
+        | "reaper_held"
+        | "attempt_fenced";
+    };
+
+/**
+ * Defense in depth for the orderly provider-deadline rotation checkpoint: put the
+ * exact canonical turn holder back onto the lease it is still physically using.
+ * The warm capture claim requires exactly this holder, so a holder lost while
+ * the attempt is still the active writer (a stale release, a reap race) would
+ * otherwise silently disable the rotation checkpoint and let the reaper
+ * terminate the box under the running turn.
+ *
+ * Fenced hard: the lease must still be the established epoch and provider
+ * instance, carry no capture/teardown claim and no active reaper hold, and the
+ * attempt must still be the turn's active `claimed`/`running` writer on a
+ * session of this group. A draining lease that passes those fences re-arms to
+ * warm exactly like a late arrival in `acquireLease`; a cold or superseded lease
+ * is never touched. Idempotent: an existing holder is reported `present`.
+ */
+export async function reinstateTurnLeaseHolder(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sessionId: string;
+    attemptId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    leaseTtlMs: number;
+  },
+): Promise<ReinstateTurnLeaseHolderResult> {
+  const holderId = `turn-attempt:${input.attemptId}`;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw): Promise<ReinstateTurnLeaseHolderResult> => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+          select lease.*,
+            (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
+              as reaper_hold_active
+          from sandbox_leases lease
+          where lease.workspace_id = ${input.workspaceId}
+            and lease.sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row) return { status: "lease_missing" };
+        if (
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.instance_id !== input.expectedInstanceId ||
+          (row.liveness !== "warm" && row.liveness !== "draining")
+        ) {
+          return { status: "lease_fenced" };
+        }
+        if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
+          return { status: "capture_in_progress" };
+        }
+        if (row.reaper_hold_active) return { status: "reaper_held" };
+        const live = await tx.execute<{ id: string }>(sql`
+          select attempt.id
+          from session_turn_attempts attempt
+          join session_turns turn
+            on turn.account_id = attempt.account_id
+           and turn.workspace_id = attempt.workspace_id
+           and turn.session_id = attempt.session_id
+           and turn.id = attempt.turn_id
+           and turn.execution_generation = attempt.execution_generation
+           and turn.active_attempt_id = attempt.id
+          join sessions session
+            on session.workspace_id = attempt.workspace_id
+           and session.id = attempt.session_id
+          where attempt.id = ${input.attemptId}
+            and attempt.account_id = ${input.accountId}
+            and attempt.workspace_id = ${input.workspaceId}
+            and attempt.session_id = ${input.sessionId}
+            and attempt.state in ('claimed', 'running')
+            and session.sandbox_group_id = ${input.sandboxGroupId}
+          limit 1
+        `);
+        if (live.length === 0) return { status: "attempt_fenced" };
+        const present = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_lease_holders
+          where lease_id = ${row.id} and kind = 'turn' and holder_id = ${holderId}
+        `);
+        if (present.length > 0) return { status: "present", lease: mapLeaseRow(row) };
+        await upsertLeaseHolder(
+          tx,
+          row.id,
+          input.accountId,
+          input.workspaceId,
+          "turn",
+          holderId,
+          input.sessionId,
+        );
+        const updated = await recomputeAndStampLease(
+          tx,
+          row.id,
+          input.leaseTtlMs,
+          row.liveness === "draining" ? "warm" : null,
+        );
+        return { status: "reinstated", lease: mapLeaseRow(updated) };
       }),
   );
 }
@@ -39980,6 +40161,13 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "attempt_fenced"
       | "holder_fenced"
       | "lease_fenced"
+      // The lease still matches the writer's exact epoch/instance/backend, but
+      // a provider-deadline/operator rotation was requested: new mutations are
+      // fenced only until the current holders checkpoint and the cold
+      // successor is elected. Distinct from `lease_fenced` (a genuine
+      // epoch/instance/backend mismatch) so callers can hand the turn to the
+      // orderly rotation path instead of treating the box as lost.
+      | "rotation_in_progress"
       | "route_fenced"
       | "process_fenced"
       | "capture_in_progress"
@@ -40923,6 +41111,7 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
           const current = await tx.execute<{
             workspace_generation: number | string;
             lease_current: boolean;
+            rotation_pending: boolean;
             holder_current: boolean;
             capture_in_progress: boolean;
           }>(sql`
@@ -40936,6 +41125,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
                 and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
                 and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
               ) as lease_current,
+              (
+                lease.account_id = ${locked.accountId}
+                and lease.liveness = 'warm'
+                and lease.rotation_requested_at is not null
+                and lease.lease_epoch = ${locked.expectedEpoch}
+                and lease.instance_id = ${locked.expectedInstanceId}
+                and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
+                and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
+              ) as rotation_pending,
               (lease.archive_capture_id is not null) as capture_in_progress,
               exists (
                 select 1 from sandbox_lease_holders as holder
@@ -40968,6 +41166,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             throw new SandboxWorkspaceMutationFencedError(
               "capture_in_progress",
               "Workspace mutation is waiting for the exact provider archive capture to settle",
+            );
+          }
+          if (current[0]?.rotation_pending) {
+            // Same epoch/instance/backend, but a rotation was requested: the
+            // box is not lost. Admission reopens on the cold successor once
+            // the current holders checkpoint and release.
+            throw new SandboxWorkspaceMutationFencedError(
+              "rotation_in_progress",
+              "Workspace mutation is waiting for the sandbox rotation to complete",
             );
           }
           throw new SandboxWorkspaceMutationFencedError(
@@ -49639,6 +49846,7 @@ export type SessionGoalContinuationProjection = {
     | "provider_backpressure"
     | "session_cancelled"
     | "system_work_pending"
+    | "held_for_input"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -49764,6 +49972,31 @@ export async function getSessionGoalWithContinuation(
         )
         .limit(1);
 
+      // An agent-declared `goal_wait` hold is current only while its declaring
+      // turn is still the latest finished turn and the deadline is ahead. This
+      // is the same notion the materializer applies under lock.
+      let currentHoldUntil: Date | null = null;
+      if (goal.continuationHoldTurnId && goal.continuationHoldUntil) {
+        const [latestFinishedTurn] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .limit(1);
+        if (
+          latestFinishedTurn?.id === goal.continuationHoldTurnId &&
+          goal.continuationHoldUntil.getTime() > (await transactionNow(tx)).getTime()
+        ) {
+          currentHoldUntil = goal.continuationHoldUntil;
+        }
+      }
+
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
       const base = {
@@ -49831,6 +50064,17 @@ export async function getSessionGoalWithContinuation(
           state: "scheduled",
           reason: "continuation_pending",
           ...base,
+        };
+      } else if (currentHoldUntil) {
+        // The agent asked to wait for child results / external input. The
+        // obligation stays armed (wake > observed) and the delayed workflow
+        // wake fires at the deadline; this is a truthful blocked state, never
+        // a broken invariant.
+        continuation = {
+          state: "blocked",
+          reason: "held_for_input",
+          ...base,
+          nextAttemptAt: currentHoldUntil.toISOString(),
         };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
         continuation = { state: "scheduled", reason: "wake_pending", ...base };
@@ -50139,6 +50383,7 @@ export async function upsertSessionGoal(
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
           continuationWakeRevision: existing.continuationWakeRevision + 1,
+          ...SESSION_GOAL_HOLD_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -50746,6 +50991,7 @@ export async function updateSessionGoal(
         ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
         ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
+        ...SESSION_GOAL_HOLD_CLEARED,
         updatedAt: new Date(),
       })
       .where(
@@ -51098,6 +51344,8 @@ export async function updateSessionGoalWithEvent(
           ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
           version: existing.version + 1,
           objectiveRevision: existing.objectiveRevision + 1,
+          // An applied semantic change supersedes any agent-declared hold.
+          ...SESSION_GOAL_HOLD_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -51170,6 +51418,208 @@ export async function updateSessionGoalWithEvent(
  * revision. The attempt-fenced operation receipt makes a recovered tool call
  * converge on the original event instead of manufacturing progress twice.
  */
+/**
+ * Column set that retires an agent-declared `goal_wait` hold. Spread into every
+ * goal head mutation (status transition, applied semantic revision, replace) so
+ * newer truth never sits behind an older wait.
+ */
+const SESSION_GOAL_HOLD_CLEARED = {
+  continuationHoldTurnId: null,
+  continuationHoldUntil: null,
+  continuationHoldReason: null,
+  continuationHoldSetAt: null,
+} as const;
+
+export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
+export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * The database clock of the current transaction. Hold deadlines are compared
+ * against this rather than the worker's `Date.now()` because the wake-outbox
+ * dispatcher claims rows on Postgres `now()`; one authority avoids clock-skew
+ * re-wake loops right at the deadline.
+ */
+async function transactionNow(tx: Database): Promise<Date> {
+  const rows = await rawRows<{ now: string | Date }>(tx, sql`select now() as now`);
+  const value = rows[0]?.now;
+  if (value === undefined) throw new Error("Failed to read the transaction clock");
+  return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * Agent `goal_wait`: record that the active goal's next continuation should
+ * wait for child results, a message, a human prompt, or the deadline instead of
+ * materializing immediately after the declaring turn ends.
+ *
+ * The hold is bound to the exact caller turn. The materializer honors it only
+ * while that turn is still the latest finished turn and `now < until`; it
+ * never consumes the wake/observed revision ledger. The receipt, goal
+ * mutation, and `goal.held` timeline fact commit under the canonical goal
+ * event-write prefix (control FOR SHARE -> workspace FOR KEY SHARE -> session
+ * FOR NO KEY UPDATE), never a workspace FOR UPDATE. A replacement attempt
+ * replaying the same target-scoped operation key receives the stored result.
+ */
+export async function holdSessionGoalContinuationWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    reason: string;
+    untilSeconds: number;
+    command: {
+      accountId: string;
+      actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+      operationKey: string;
+    };
+  },
+): Promise<{
+  goal: SessionGoal;
+  events: SessionEvent[];
+  operationId: string;
+  replay: boolean;
+  holdTurnId: string;
+  untilAt: string;
+}> {
+  assertSessionGoalFieldBytes(input.reason, SESSION_GOAL_RATIONALE_MAX_BYTES, "goal hold reason");
+  if (!input.reason.trim()) throw new Error("goal hold reason must not be empty");
+  if (
+    !Number.isInteger(input.untilSeconds) ||
+    input.untilSeconds < SESSION_GOAL_HOLD_MIN_SECONDS ||
+    input.untilSeconds > SESSION_GOAL_HOLD_MAX_SECONDS
+  ) {
+    throw new Error(
+      `goal hold untilSeconds must be an integer between ${SESSION_GOAL_HOLD_MIN_SECONDS} and ${SESSION_GOAL_HOLD_MAX_SECONDS}`,
+    );
+  }
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+    withSessionActivitySavepoint(scopedDb, async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const reserved = await reserveSessionCommandReceipt(tx, {
+        accountId: input.command.accountId,
+        workspaceId,
+        actor: input.command.actor,
+        action: "goal.wait",
+        targetSessionId: sessionId,
+        targetTurnId: null,
+        operationKey: input.command.operationKey,
+        canonicalRequestHash: canonicalSessionCommandHash({
+          reason: input.reason,
+          untilSeconds: input.untilSeconds,
+        }),
+        identityScope: "goal_operation",
+      });
+      if (reserved.replay) {
+        const stored = reserved.receipt.result as Record<string, unknown> | null;
+        const parsed = SessionGoalContract.safeParse(stored?.["goal"]);
+        const holdTurnId = typeof stored?.["holdTurnId"] === "string" ? stored["holdTurnId"] : null;
+        const untilAt = typeof stored?.["untilAt"] === "string" ? stored["untilAt"] : null;
+        if (!parsed.success || !holdTurnId || !untilAt) {
+          throw new SessionControlInvariantError(
+            `Goal hold receipt ${reserved.receipt.id} has no valid committed result`,
+          );
+        }
+        return {
+          goal: parsed.data,
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: true,
+          holdTurnId,
+          untilAt,
+        };
+      }
+      await assertAgentCommandAuthorityInTransaction(tx, {
+        workspaceId,
+        actor: input.command.actor,
+        targetSessionId: sessionId,
+        action: "goal",
+      });
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) throw new Error("this session has no goal; use goal_set first");
+      if (existing.status !== "active") {
+        throw new Error("session goal is not active; only an active goal can wait");
+      }
+      const now = new Date();
+      const until = new Date(now.getTime() + input.untilSeconds * 1000);
+      const [updated] = await tx
+        .update(schema.sessionGoals)
+        .set({
+          continuationHoldTurnId: input.command.actor.turnId,
+          continuationHoldUntil: until,
+          continuationHoldReason: input.reason,
+          continuationHoldSetAt: now,
+          updatedAt: now,
+        })
+        .where(eq(schema.sessionGoals.id, existing.id))
+        .returning();
+      if (!updated) throw new Error(`Session goal not found: ${sessionId}`);
+      const goal = mapSessionGoal(updated);
+      const untilAt = until.toISOString();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: input.command.actor.turnId,
+              turnGeneration: input.command.actor.executionGeneration,
+              turnAttemptId: input.command.actor.attemptId,
+              turnAssociation: "current",
+              sequence: session.lastSequence + 1,
+              type: "goal.held",
+              payload: {
+                goalId: goal.id,
+                turnId: input.command.actor.turnId,
+                untilAt,
+                reason: input.reason,
+                actor: "agent",
+              },
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      if (!event) throw new Error("Failed to append goal.held event");
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+        result: { goal, eventId: event.id, holdTurnId: input.command.actor.turnId, untilAt },
+      });
+      return {
+        goal,
+        events: [mapEvent(event)],
+        operationId: reserved.receipt.id,
+        replay: false,
+        holdTurnId: input.command.actor.turnId,
+        untilAt,
+      };
+    }),
+  );
+}
+
 export async function recordSessionGoalProgressWithEvent(
   db: Database,
   workspaceId: string,
@@ -51418,6 +51868,9 @@ export async function setSessionGoalStatus(
         status: input.status,
         version: existing.version + 1,
         updatedAt: new Date(),
+        // Every lifecycle transition is newer truth than an agent-declared
+        // goal_wait hold; a human redirect must never sit behind it.
+        ...SESSION_GOAL_HOLD_CLEARED,
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
@@ -51876,6 +52329,10 @@ export async function evaluateGoalContinuation(
 
 export type MaterializeGoalContinuationResult =
   | { action: "none" | "queue"; events: [] }
+  // An agent-declared `goal_wait` hold is current: no continuation was
+  // materialized, the wake/observed ledger is untouched, and a delayed
+  // workflow wake is armed at the hold deadline.
+  | { action: "held"; events: []; holdTurnId: string; holdUntil: Date }
   | { action: "paused"; events: SessionEvent[] }
   | {
       action: "continue";
@@ -52120,6 +52577,91 @@ export async function materializeGoalContinuation(
         );
         if (capacityWait || xaiCapacityWait) {
           return { action: "none", events: [] } as const;
+        }
+
+        // Pending machine input (a child result, agent message, schedule, ...)
+        // is real model input that the next claim delivers. It wins over a
+        // synthesized continuation and over any agent-declared hold, and it
+        // closes the peek/materialize race because both serialize on the
+        // session lock. Mirror `peekSessionWork`: after a failed context
+        // compaction ordinary pending input is inert until newer truth, so do
+        // not spin the workflow on it here either.
+        const [pendingMachineInput] = await tx
+          .select({ id: schema.sessionSystemUpdates.id })
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+            ),
+          )
+          .limit(1);
+        if (
+          pendingMachineInput &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx,
+            input.workspaceId,
+            input.sessionId,
+            "context_compaction_failed",
+          ))
+        ) {
+          return { action: "queue", events: [] } as const;
+        }
+
+        if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
+          const [latestFinishedTurn] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+            .limit(1);
+          const holdUntil = goalRead.continuationHoldUntil;
+          // Compare against the transaction's database clock: the wake-outbox
+          // dispatcher fires on DB `now()`, so a worker clock ahead of or
+          // behind Postgres cannot re-hold past the deadline or re-wake early.
+          const dbNow = await transactionNow(tx);
+          if (
+            latestFinishedTurn?.id === goalRead.continuationHoldTurnId &&
+            holdUntil.getTime() > dbNow.getTime()
+          ) {
+            // The declaring turn is still the newest finished truth and its
+            // deadline has not passed: leave the obligation armed (the wake
+            // revision stays unconsumed so a crash cannot lose it) and make
+            // sure a delayed workflow wake exists at the deadline. Re-arming on
+            // every idle evaluation is required: an earlier immediate wake
+            // (e.g. a child result) delivered in between advances the
+            // outbox's delivered revision and would otherwise drop the
+            // deadline row; the outbox coalesces an undelivered earlier wake
+            // with `least(next_attempt_at, notBefore)`.
+            await enqueueSessionWorkflowWakeInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+              reason: "goal_hold_deadline",
+              notBefore: holdUntil,
+            });
+            return {
+              action: "held",
+              events: [],
+              holdTurnId: goalRead.continuationHoldTurnId,
+              holdUntil,
+            } as const;
+          }
+          // A newer turn finished after the hold was declared, or the deadline
+          // passed: retire the hold in this same transaction and continue
+          // exactly as before.
+          await tx
+            .update(schema.sessionGoals)
+            .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
+            .where(eq(schema.sessionGoals.id, goalRead.id));
         }
 
         let goalWakeRevision = goalRead.continuationWakeRevision;
@@ -56335,6 +56877,7 @@ export async function settleSessionAttemptInterruptions(
           reason,
           sequence,
           now,
+          preserveInterruptionRows: outcome === "interrupted_recoverable",
         },
       );
       sequence = closedTools.sequence;
@@ -58181,111 +58724,197 @@ function startupMilestoneForEvent(
   return null;
 }
 
+type TurnStartupCheckpoint = Pick<CanonicalTurnStartupMilestoneReceipt, "milestone" | "outcome">;
+
+type TurnStartupLedgerScope = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+};
+
+/**
+ * Claim one startup checkpoint for the turn in `session_turn_startup_milestones`.
+ * Returns true only when this transaction inserted the row, i.e. it is the
+ * canonical inserter of that checkpoint. A durable row from an earlier
+ * transaction (or a pre-ledger sentinel) conflicts, so recovery and replay are
+ * no-ops. The exclusive terminal-failed first_byte outcome is additionally
+ * fenced on ledger state: a provider_dispatch row must exist for the turn and
+ * no completed first_byte row may exist, mirroring the former exists/not-exists
+ * scan over the turn's events. Every probe is a primary-key lookup; the turn's
+ * session_events rows are never re-read.
+ */
+async function claimTurnStartupMilestone(
+  tx: Database,
+  input: TurnStartupLedgerScope & {
+    checkpoint: TurnStartupCheckpoint;
+    event: { id: string; occurredAt: Date };
+  },
+): Promise<boolean> {
+  const { milestone, outcome } = input.checkpoint;
+  const ledger = schema.sessionTurnStartupMilestones;
+  const terminalFailedFence =
+    outcome === "failed"
+      ? sql`
+        exists (
+          select 1 from ${ledger}
+          where ${ledger.workspaceId} = ${input.workspaceId}
+            and ${ledger.turnId} = ${input.turnId}
+            and ${ledger.milestone} = 'provider_dispatch'
+            and ${ledger.outcome} = 'completed'
+        )
+        and not exists (
+          select 1 from ${ledger}
+          where ${ledger.workspaceId} = ${input.workspaceId}
+            and ${ledger.turnId} = ${input.turnId}
+            and ${ledger.milestone} = 'first_byte'
+            and ${ledger.outcome} = 'completed'
+        )`
+      : sql`true`;
+  const claimed = await tx.execute<{ event_id: string }>(sql`
+    insert into ${ledger} (
+      ${sql.identifier("account_id")}, ${sql.identifier("workspace_id")},
+      ${sql.identifier("session_id")}, ${sql.identifier("turn_id")},
+      ${sql.identifier("milestone")}, ${sql.identifier("outcome")},
+      ${sql.identifier("canonical_source")}, ${sql.identifier("event_id")},
+      ${sql.identifier("occurred_at")}
+    )
+    select
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid,
+      ${input.turnId}::uuid, ${milestone}::text, ${outcome}::text, 'inserted_event',
+      ${input.event.id}::uuid, ${input.event.occurredAt.toISOString()}::timestamptz
+    where ${terminalFailedFence}
+    on conflict do nothing
+    returning ${sql.identifier("event_id")} as event_id
+  `);
+  return claimed.length > 0;
+}
+
+/**
+ * A turn whose canonical `turn.started` was durable before any ledger-aware
+ * writer touched it (in flight across the ledger rollout, or claimed by a
+ * pre-ledger worker during the rolling window) already observed, or may have
+ * observed, its startup checkpoints through the former event scan. Re-claiming
+ * them through the ledger would re-observe each checkpoint with a duration equal
+ * to the turn's age, so the turn is sealed once: its queue row becomes a
+ * `pre_ledger_history` sentinel and the remaining completed checkpoints receive
+ * sentinels, after which every later claim conflicts and the terminal-failed
+ * fence stays closed. The check is one bounded index probe for an earlier
+ * current-association `turn.started` row, performed only by the transaction
+ * that first claimed the queue checkpoint, never per model request.
+ */
+async function sealPreLedgerTurnStartupHistory(
+  tx: Database,
+  input: TurnStartupLedgerScope & { queueEvent: { id: string; sequence: number } },
+): Promise<boolean> {
+  const [earlier] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.type, "turn.started"),
+        eq(schema.sessionEvents.turnAssociation, "current"),
+        lt(schema.sessionEvents.sequence, input.queueEvent.sequence),
+      ),
+    )
+    .limit(1);
+  if (!earlier) return false;
+  const ledger = schema.sessionTurnStartupMilestones;
+  await tx
+    .update(ledger)
+    .set({ canonicalSource: "pre_ledger_history", eventId: null, occurredAt: null })
+    .where(
+      and(
+        eq(ledger.workspaceId, input.workspaceId),
+        eq(ledger.turnId, input.turnId),
+        eq(ledger.milestone, "queue"),
+        eq(ledger.outcome, "completed"),
+        eq(ledger.eventId, input.queueEvent.id),
+      ),
+    );
+  await tx
+    .insert(ledger)
+    .values(
+      (["provider_dispatch", "first_byte"] as const).map((milestone) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        milestone,
+        outcome: "completed",
+        canonicalSource: "pre_ledger_history",
+        eventId: null,
+        occurredAt: null,
+      })),
+    )
+    .onConflictDoNothing();
+  return true;
+}
+
 async function canonicalTurnStartupMilestonesForInsertedEvents(
   tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
+  input: TurnStartupLedgerScope & {
     turnCreatedAt: Date;
     inserted: Array<typeof schema.sessionEvents.$inferSelect>;
     terminalTurnFailed: boolean;
   },
 ): Promise<CanonicalTurnStartupMilestoneReceipt[]> {
-  const insertedIds = new Set(input.inserted.map((event) => event.id));
-  const insertedCheckpoints = new Set(
-    input.inserted.flatMap((event) => {
-      const candidate = startupMilestoneForEvent(event);
-      return candidate ? [startupCheckpointKey(candidate)] : [];
-    }),
-  );
-  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
-  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
-    const { milestone, outcome } = checkpoint;
+  // The lowest-sequence inserted event per checkpoint is this transaction's
+  // candidate; a second same-kind event in one batch can never be canonical.
+  const candidates = new Map<string, typeof schema.sessionEvents.$inferSelect>();
+  for (const event of [...input.inserted].sort((a, b) => a.sequence - b.sequence)) {
+    const checkpoint = startupMilestoneForEvent(event);
+    if (!checkpoint) continue;
     // A request-local transport terminal is not a logical startup failure: it
     // may recover, or it may follow a byte during a later tool loop. Only the
     // atomic terminal failed-turn settlement may project the exclusive failed
     // outcome; ordinary append/replay paths keep this flag false.
-    if (outcome === "failed" && !input.terminalTurnFailed) continue;
-    if (!insertedCheckpoints.has(startupCheckpointKey(checkpoint))) continue;
-    const phaseCondition =
-      milestone === "provider_dispatch"
-        ? sql`${schema.sessionEvents.payload} ->> 'phase' = 'started'`
-        : milestone === "first_byte" && outcome === "completed"
-          ? sql`${schema.sessionEvents.payload} ->> 'phase' in ('first_byte', 'first_event')`
-          : milestone === "first_byte"
-            ? and(
-                sql`exists (
-                  select 1
-                  from session_events dispatched
-                  where dispatched.workspace_id = ${schema.sessionEvents.workspaceId}
-                    and dispatched.session_id = ${schema.sessionEvents.sessionId}
-                    and dispatched.turn_id = ${schema.sessionEvents.turnId}
-                    and dispatched.turn_association = 'current'
-                    and dispatched.type = 'agent.model.request'
-                    and dispatched.sequence < ${schema.sessionEvents.sequence}
-                    and dispatched.payload ->> 'phase' = 'started'
-                )`,
-                sql`not exists (
-                  select 1
-                  from session_events responded
-                  where responded.workspace_id = ${schema.sessionEvents.workspaceId}
-                    and responded.session_id = ${schema.sessionEvents.sessionId}
-                    and responded.turn_id = ${schema.sessionEvents.turnId}
-                    and responded.turn_association = 'current'
-                    and responded.type = 'agent.model.request'
-                    and responded.payload ->> 'phase' in ('first_byte', 'first_event')
-                )`,
-              )
-            : undefined;
-    const [canonical] = await tx
-      .select({
-        id: schema.sessionEvents.id,
-        type: schema.sessionEvents.type,
-        payload: schema.sessionEvents.payload,
-        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
-        turnAssociation: schema.sessionEvents.turnAssociation,
-        occurredAt: schema.sessionEvents.occurredAt,
-      })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          eq(schema.sessionEvents.turnId, input.turnId),
-          eq(schema.sessionEvents.turnAssociation, "current"),
-          eq(
-            schema.sessionEvents.type,
-            milestone === "queue"
-              ? "turn.started"
-              : milestone === "first_byte" && outcome === "failed"
-                ? "turn.failed"
-                : "agent.model.request",
-          ),
-          phaseCondition,
-        ),
-      )
-      .orderBy(asc(schema.sessionEvents.sequence))
-      .limit(1);
-    // A durable event from an earlier transaction is already the canonical
-    // checkpoint. Only the transaction that first inserts that checkpoint may
-    // return a metric receipt, which makes ordinary recovery and callback
+    if (checkpoint.outcome === "failed" && !input.terminalTurnFailed) continue;
+    const key = startupCheckpointKey(checkpoint);
+    if (!candidates.has(key)) candidates.set(key, event);
+  }
+  if (candidates.size === 0) return [];
+  const scope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+  };
+  const receipts: CanonicalTurnStartupMilestoneReceipt[] = [];
+  // Checkpoint order matters: completed checkpoints first so the terminal
+  // failed fence observes every completed row of this transaction, and queue
+  // first so a pre-ledger turn is sealed before its later checkpoints claim.
+  for (const checkpoint of TURN_STARTUP_CHECKPOINTS) {
+    const { milestone, outcome } = checkpoint;
+    const candidate = candidates.get(startupCheckpointKey(checkpoint));
+    if (!candidate) continue;
+    // A durable ledger row from an earlier transaction means that checkpoint is
+    // already canonical. Only the transaction that first inserts the checkpoint
+    // may return a metric receipt, which makes ordinary recovery and callback
     // replay no-ops. The consumer's in-memory Prometheus observation happens
     // after COMMIT and remains explicitly at-most-once across a process crash.
-    if (!canonical || !insertedIds.has(canonical.id)) continue;
-    const canonicalCheckpoint = startupMilestoneForEvent(canonical);
+    const claimed = await claimTurnStartupMilestone(tx, {
+      ...scope,
+      checkpoint,
+      event: { id: candidate.id, occurredAt: candidate.occurredAt },
+    });
+    if (!claimed) continue;
     if (
-      !canonicalCheckpoint ||
-      canonicalCheckpoint.milestone !== milestone ||
-      canonicalCheckpoint.outcome !== outcome
+      milestone === "queue" &&
+      (await sealPreLedgerTurnStartupHistory(tx, {
+        ...scope,
+        queueEvent: { id: candidate.id, sequence: candidate.sequence },
+      }))
     ) {
       continue;
     }
     receipts.push({
       milestone,
       outcome,
-      eventId: canonical.id,
-      durationMs: Math.max(0, canonical.occurredAt.getTime() - input.turnCreatedAt.getTime()),
+      eventId: candidate.id,
+      durationMs: Math.max(0, candidate.occurredAt.getTime() - input.turnCreatedAt.getTime()),
     });
   }
   return receipts;
@@ -58808,6 +59437,7 @@ export async function applySessionTurnSettlement(
       const canonicalStartupMilestones = await canonicalTurnStartupMilestonesForInsertedEvents(
         tx as unknown as Database,
         {
+          accountId: session.accountId,
           workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -59142,6 +59772,7 @@ export async function settleCodexCredentialLeaseLoss(
             reason: "codex_credential_lease_loss",
             sequence,
             now,
+            preserveInterruptionRows: input.checkpointDurable,
           },
         );
         sequence = closedTools.sequence;
@@ -59426,6 +60057,7 @@ export async function settleCodexCredentialFailover(
             reason: "codex_credential_failover",
             sequence,
             now,
+            preserveInterruptionRows: true,
           },
         );
         sequence = closedTools.sequence;
@@ -59728,6 +60360,7 @@ export async function requestSessionTurnRecovery(
           reason: input.reason,
           sequence,
           now,
+          preserveInterruptionRows: true,
         },
       );
       sequence = closedTools.sequence;
@@ -59977,6 +60610,7 @@ export async function recoverSessionDispatch(
           reason: "worker_death",
           sequence,
           now,
+          preserveInterruptionRows: redispatches <= input.maxRedispatches,
         },
       );
       sequence = closedTools.sequence;
@@ -62529,6 +63163,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               .returning();
             const canonicalStartupMilestones = fence.allowed
               ? await canonicalTurnStartupMilestonesForInsertedEvents(tx as unknown as Database, {
+                  accountId: session.accountId,
                   workspaceId,
                   sessionId,
                   turnId,
@@ -63079,8 +63714,14 @@ async function sessionControlProjections(
   sessionIds: string[],
   workspaceControl?: WorkspaceControlRow,
 ): Promise<Map<string, Session["effectiveControl"]>> {
+  // Read projections (GET session, session lists) are not control writers.
+  // Like discovery, they read the control row without joining the writer lock
+  // graph: a projection that took FOR SHARE would queue behind a waiting Pause
+  // under the fair control prefix and would let a burst of reads delay it,
+  // while buying no consistency the separate session-row statement has.
+  // Writers that already hold the prefix pass their locked row through.
   const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
-    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
+    ...(workspaceControl ? { workspaceControl } : { lock: "none" as const }),
   });
   return new Map(
     [...controls].map(([sessionId, control]) => [

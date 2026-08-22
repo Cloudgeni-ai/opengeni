@@ -97,6 +97,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
+      personalGitHubCredentials,
       startVideoGenerationWorkflow,
     } = await services();
     const activityContext = currentActivityContext();
@@ -875,6 +876,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability,
         cancellationSignal,
         connectionCredentials,
+        personalGitHubCredentials,
         eventing,
         attempt,
         renewals,

@@ -268,15 +268,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth();
-      // An approval-decision rerun always replays its original trigger:
-      // the decision is applied through the approval resume path reading
-      // the frozen RunState blob (the only representation of a turn
-      // paused mid-flight), so swapping the trigger for a resume notice
-      // could drop the user's decision. Re-applying an already-consumed
-      // approval re-enters at most the single approved step. Every
-      // approval-gated MCP action crosses the durable execution admission
-      // fence before its provider invocation, so a consumed step resumes
-      // as already-executed or outcome-unknown rather than calling MCP again.
+      // An approval-decision rerun always replays its original trigger. The
+      // decision is applied through the exact durable open-suffix receipt and
+      // its paired history, so swapping the trigger for a resume notice could
+      // drop the user's decision. Re-applying an already-consumed approval
+      // re-enters at most the single approved step. Every approval-gated MCP
+      // action crosses the durable execution-admission fence before provider
+      // invocation, so a consumed step resumes as already-executed or
+      // outcome-unknown rather than calling MCP again.
       const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,

@@ -62,6 +62,7 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
+  listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listEnrollments,
   projectEffectiveControlForRelatedAccess,
@@ -84,6 +85,9 @@ import {
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
+  holdSessionGoalContinuationWithEvent,
+  SESSION_GOAL_HOLD_MAX_SECONDS,
+  SESSION_GOAL_HOLD_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -207,6 +211,14 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import {
+  SESSION_WAIT_DEFAULT_SECONDS,
+  SESSION_WAIT_EVENT_TYPES,
+  SESSION_WAIT_EVENTS_PER_TARGET,
+  SESSION_WAIT_MAX_SECONDS,
+  SESSION_WAIT_MAX_TARGETS,
+  waitForSessionChanges,
+} from "./session-wait";
 import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
@@ -325,7 +337,12 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
             ? ["conflict", "The target session control state changed; refresh and retry."]
             : typedCode === "IDEMPOTENCY_KEY_REUSED"
               ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
-              : null;
+              : typedCode === "WORKSPACE_CONTROL_BUSY"
+                ? [
+                    "workspace_busy",
+                    "The workspace is busy applying other session commands; nothing was applied. Retry the same call shortly.",
+                  ]
+                : null;
   if (knownFailure) {
     return {
       error: {
@@ -367,6 +384,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -433,6 +451,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
   session_events: { allOf: ["sessions:read"] },
+  // Blocking wait inside a running turn: the live attempt's own session is the
+  // self target, so the tool exists only for session-scoped grants.
+  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
@@ -2639,6 +2660,64 @@ function registerGoalTools(
   );
 
   server.registerTool(
+    "goal_wait",
+    {
+      description:
+        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+      inputSchema: {
+        reason: goalRationale,
+        untilSeconds: z4
+          .number()
+          .int()
+          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
+          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+        idempotencyKey: z4.string().uuid().optional(),
+      },
+    },
+    async ({ reason, untilSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      const context = exactAgentCommandContext(grant, sessionId);
+      // Without a caller-supplied key the operation is idempotent per (goal
+      // target, turn, exact arguments): a replacement attempt replaying the
+      // same call receives the stored result instead of re-stamping the hold,
+      // while a genuinely new same-turn wait (different reason/deadline) is a
+      // new operation whose later hold wins.
+      const operationKey =
+        idempotencyKey ??
+        `goal-wait:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, untilSeconds }))
+          .digest("hex")
+          .slice(0, 32)}`;
+      const { goal, events, operationId, replay, untilAt } =
+        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+          reason,
+          untilSeconds,
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey,
+          },
+        });
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({
+        status: "held",
+        goalId: goal.id,
+        untilAt,
+        operationId,
+        replay,
+        nextAction:
+          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+      });
+    },
+  );
+
+  server.registerTool(
     "goal_complete",
     {
       description:
@@ -4092,6 +4171,99 @@ function registerWorkspaceOrchestrationTools(
             sourceTruncatedBy: dbPage.truncatedBy,
             after: after ?? 0,
             before: before ?? null,
+          }),
+        );
+      },
+    );
+
+    server.registerTool(
+      "session_wait",
+      {
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        inputSchema: {
+          targets: z4
+            .array(
+              z4.object({
+                sessionId: z4.string().uuid(),
+                afterSequence: z4.number().int().nonnegative(),
+              }),
+            )
+            .min(1)
+            .max(SESSION_WAIT_MAX_TARGETS),
+          includeOwnPendingUpdates: z4
+            .boolean()
+            .optional()
+            .describe(
+              "Also return when your own session has pending machine input (default true).",
+            ),
+          maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
+        },
+      },
+      async ({ targets, includeOwnPendingUpdates, maxWaitSeconds }, extra) => {
+        const distinct = new Set(targets.map((target) => target.sessionId));
+        if (distinct.size !== targets.length) {
+          throw new Error("session_wait targets must name distinct sessions");
+        }
+        // Authorize and resolve every target exactly as session_events does,
+        // before any live-fanout subscription exists for it.
+        for (const target of targets) {
+          await authorizeFirstPartySession(deps, grant, target.sessionId, "session.events.read");
+          await requireSession(deps.db, grant.workspaceId, target.sessionId);
+        }
+        const ownSessionId = includeOwnPendingUpdates === false ? null : callerSessionId;
+        // The API serves one transport per POST, so the worker's MCP cancel
+        // notification never reaches this handler; the route binds the HTTP
+        // request's abort to transport.close() (mcp/request-abort.ts), which
+        // aborts `extra.signal` when the worker drops the call on Steer/Pause.
+        // The deadline bounds the wait regardless. Direct handler invocation
+        // (tests) may pass no extra at all.
+        const signal: AbortSignal | undefined = extra?.signal;
+        const workspaceId = grant.workspaceId;
+        // A NATS subscription is live fanout only; the durable session_events
+        // read below is the authority. Bun.serve idleTimeout (255 s) and the
+        // 60 s MCP client request timeout both exceed the 50 s cap.
+        return json(
+          await waitForSessionChanges({
+            targets,
+            ownSessionId,
+            maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+            signal,
+            source: {
+              reauthorizeTargets: async (sessionIds) => {
+                for (const targetSessionId of sessionIds) {
+                  await authorizeFirstPartySession(
+                    deps,
+                    grant,
+                    targetSessionId,
+                    "session.events.read",
+                  );
+                }
+              },
+              readTargetEvents: async (target) => {
+                const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
+                  after: target.afterSequence,
+                  direction: "after",
+                  limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                  payloadMode: "full",
+                  includeTypes: SESSION_WAIT_EVENT_TYPES,
+                  maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+                });
+                return { events: page.events, hasMore: page.hasMore };
+              },
+              readOwnPendingUpdateKinds:
+                ownSessionId === null
+                  ? null
+                  : async () =>
+                      (
+                        await listOutstandingSessionSystemUpdates(
+                          deps.db,
+                          workspaceId,
+                          ownSessionId,
+                        )
+                      ).map((update) => update.kind),
+              subscribe: (targetSessionId, onEvents) =>
+                deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+            },
           }),
         );
       },

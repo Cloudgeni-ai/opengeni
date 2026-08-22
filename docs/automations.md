@@ -45,7 +45,7 @@ Canonical implementation:
 
 - contracts: `packages/contracts/src/index.ts`
 - adapters and accepted execution: `packages/core/src/domain/automations.ts`
-- persistence: `packages/db/src/automations.ts`, `packages/db/src/schema.ts`, migration `0317_event_triggered_automations.sql`
+- persistence: `packages/db/src/automations.ts`, `packages/db/src/schema.ts`, migration `0319_event_triggered_automations.sql`
 - HTTP: `apps/api/src/routes/automations.ts`
 - orchestration: `apps/worker/src/workflows/automations.ts`, `apps/worker/src/activities/automations.ts`
 - optional client: `@opengeni/sdk/automations`

@@ -115,6 +115,19 @@ describe("Slack reaction summon workspace settings", () => {
       "https://app.opengeni.ai/v1/integrations/slack/events",
     );
 
+    const staging = buildOpenGeniSlackBotManifest("https://staging.app.opengeni.ai", {
+      appName: "OpenGeni Staging",
+      slashCommand: "/opengeni-staging",
+      shortcutName: "Open in OpenGeni Staging",
+    });
+    expect(staging.display_information.name).toBe("OpenGeni Staging");
+    expect(staging.features.bot_user.display_name).toBe("OpenGeni");
+    expect(staging.features.slash_commands[0]!.command).toBe("/opengeni-staging");
+    expect(staging.features.shortcuts[0]!.name).toBe("Open in OpenGeni Staging");
+    expect(staging.settings.interactivity.request_url).toBe(
+      "https://staging.app.opengeni.ai/v1/integrations/slack/interactions",
+    );
+
     const selfHosted = buildOpenGeniSlackBotManifest("https://opengeni.example.test/");
     expect(selfHosted.oauth_config.redirect_urls).toEqual([
       "https://opengeni.example.test/v1/integrations/oauth/callback",
@@ -126,5 +139,10 @@ describe("Slack reaction summon workspace settings", () => {
     expect(() => buildOpenGeniSlackBotManifest("http://opengeni.example.test")).toThrow(
       "credential-free HTTPS",
     );
+    expect(() =>
+      buildOpenGeniSlackBotManifest("https://opengeni.example.test", {
+        slashCommand: "/OpenGeni",
+      }),
+    ).toThrow("slash command");
   });
 });

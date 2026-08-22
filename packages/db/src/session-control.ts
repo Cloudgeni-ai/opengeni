@@ -9,6 +9,7 @@ import {
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
@@ -345,25 +346,169 @@ function lockClause(mode: WorkspaceControlLockMode) {
   return mode === "update" ? sql.raw("for update") : sql.raw("for share");
 }
 
+/**
+ * Default bounded control-prefix wait for request-scoped API mutations (Send,
+ * Steer, queued Steer, Pause/Resume/Cancel, workspace Pause/Resume, realtime
+ * sync). The bound is one budget across every lock step of the admission
+ * (advisory lock, row lock, and the savepoint escalation of a paused branch),
+ * not a per-statement timeout. A request that cannot enter the workspace
+ * control prefix within the budget fails with the typed, retryable
+ * `WorkspaceControlBusyError` before any write instead of holding a pooled
+ * connection and a snapshot for as long as the HTTP client (or ingress) keeps
+ * the socket open. Worker settlement, claims, and event appends never pass a
+ * bound: a legitimate wait there must not become a failed settlement.
+ * Override per deployment with `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`.
+ */
+export const WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS = 20_000;
+
+/** The request-scoped budget in milliseconds, honoring the deployment override. */
+export function workspaceControlRequestLockTimeoutMs(): number {
+  const raw = process.env.OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS?.trim();
+  if (!raw) return WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer");
+  }
+  return parsed;
+}
+
+export class WorkspaceControlBusyError extends Error {
+  readonly code = "WORKSPACE_CONTROL_BUSY";
+
+  constructor(
+    readonly workspaceId: string,
+    readonly lockTimeoutMs: number,
+  ) {
+    super("The workspace control row is busy; retry shortly");
+    this.name = "WorkspaceControlBusyError";
+  }
+}
+
+/**
+ * One wall-clock budget shared by every lock step of one control-prefix
+ * acquisition. Each step sets `lock_timeout` to the remaining budget, so the
+ * total wait never exceeds the requested bound even when the advisory lock,
+ * the row lock, and a savepoint escalation each wait in turn.
+ */
+export type WorkspaceControlLockBudget = {
+  readonly totalMs: number;
+  readonly deadlineAt: number;
+};
+
+export function workspaceControlLockBudget(lockTimeoutMs: number): WorkspaceControlLockBudget {
+  if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new Error("Workspace control lockTimeoutMs must be a positive number");
+  }
+  const totalMs = Math.max(1, Math.floor(lockTimeoutMs));
+  return { totalMs, deadlineAt: Date.now() + totalMs };
+}
+
+export type WorkspaceControlLockOptions = {
+  /**
+   * Bound the whole prefix acquisition in milliseconds. Omit for
+   * worker/lifecycle writers. The previous `lock_timeout` is restored once the
+   * prefix is held.
+   */
+  lockTimeoutMs?: number;
+  /** Share an already running budget (used by the admission helper). */
+  budget?: WorkspaceControlLockBudget;
+};
+
+function advisoryLockFunction(mode: Exclude<WorkspaceControlLockMode, "none">) {
+  return mode === "update"
+    ? sql.raw("pg_advisory_xact_lock")
+    : sql.raw("pg_advisory_xact_lock_shared");
+}
+
+function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLockBudget | null {
+  if (options.budget) return options.budget;
+  if (options.lockTimeoutMs === undefined) return null;
+  return workspaceControlLockBudget(options.lockTimeoutMs);
+}
+
+/** Run one lock-acquiring statement under the remaining budget. */
+async function boundedLockStep<T>(
+  db: Database,
+  workspaceId: string,
+  budget: WorkspaceControlLockBudget | null,
+  step: () => Promise<T>,
+): Promise<T> {
+  if (!budget) return await step();
+  const remainingMs = budget.deadlineAt - Date.now();
+  if (remainingMs <= 0) throw new WorkspaceControlBusyError(workspaceId, budget.totalMs);
+  await db.execute(
+    sql`select set_config('lock_timeout', ${`${Math.max(1, Math.floor(remainingMs))}ms`}, true)`,
+  );
+  try {
+    return await step();
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "55P03") {
+      throw new WorkspaceControlBusyError(workspaceId, budget.totalMs);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Lock the mandatory workspace inference-control row.
+ *
+ * `share` and `update` first take a transaction-scoped advisory lock on
+ * `hashtextextended('workspace-control:<workspace id>', 0)` in the matching
+ * mode and only then the row lock. The advisory lock is what makes the prefix
+ * fair: PostgreSQL row locks let a new FOR SHARE requester join a share-locked
+ * tuple without queueing behind an already waiting FOR UPDATE, so under
+ * continuous share traffic (claims, settlement, appends across many sessions)
+ * a genuine control mutation can starve indefinitely. Heavyweight locks have a
+ * FIFO wait queue: a shared request conflicts with a waiting exclusive request
+ * and queues behind it, so a mutator waits only for the holders that preceded
+ * it, and sharers keep flowing between mutations. The row lock is retained
+ * unchanged for FK/consistency semantics and for SQL-function writers that
+ * lock the row directly (session-create triggers and capability functions).
+ *
+ * Invariant: a transaction that locks this row through any other path (a
+ * SECURITY DEFINER function, a trigger, raw SQL) must already hold the prefix
+ * through this helper or must never call this helper afterwards for the same
+ * workspace. Requesting the advisory lock after holding the row lock can
+ * deadlock against a mutator that holds the advisory lock and waits for the
+ * row. Every current SQL-function locker either runs in its own transaction or
+ * runs after this helper in the same transaction.
+ */
 export async function lockWorkspaceInferenceControl(
   db: Database,
   workspaceId: string,
   mode: WorkspaceControlLockMode,
+  options: WorkspaceControlLockOptions = {},
 ): Promise<WorkspaceControlRow> {
-  const rows = await db.execute<WorkspaceControlRow>(sql`
-    select
-      workspace_id as "workspaceId",
-      account_id as "accountId",
-      revision,
-      workspace_state as "workspaceState",
-      workspace_pause_revision as "workspacePauseRevision",
-      reason,
-      changed_by as "changedBy",
-      changed_at as "changedAt"
-    from ${schema.workspaceInferenceControls}
-    where workspace_id = ${workspaceId}
-    ${lockClause(mode)}
-  `);
+  const budget = lockBudgetFor(options);
+  const [prior] = budget
+    ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
+    : [];
+  if (mode !== "none") {
+    await boundedLockStep(db, workspaceId, budget, () =>
+      db.execute(
+        sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
+      ),
+    );
+  }
+  const rows = await boundedLockStep(db, workspaceId, budget, () =>
+    db.execute<WorkspaceControlRow>(sql`
+      select
+        workspace_id as "workspaceId",
+        account_id as "accountId",
+        revision,
+        workspace_state as "workspaceState",
+        workspace_pause_revision as "workspacePauseRevision",
+        reason,
+        changed_by as "changedBy",
+        changed_at as "changedAt"
+      from ${schema.workspaceInferenceControls}
+      where workspace_id = ${workspaceId}
+      ${lockClause(mode)}
+    `),
+  );
+  if (budget) {
+    await db.execute(sql`select set_config('lock_timeout', ${prior?.value ?? "0"}, true)`);
+  }
   const row = rows[0];
   if (!row) {
     throw new SessionControlInvariantError(
@@ -371,6 +516,62 @@ export async function lockWorkspaceInferenceControl(
     );
   }
   return row;
+}
+
+export type WorkspaceControlAdmissionLock = {
+  control: WorkspaceControlRow;
+  mode: "share" | "update";
+};
+
+const WORKSPACE_CONTROL_ADMISSION_SAVEPOINT = "opengeni_workspace_control_admission";
+
+/**
+ * Lock the workspace control prefix for an admission that mutates the control
+ * row only when it must auto-resume a paused branch: Send, Steer, queued
+ * Steer, and realtime ledger delegation.
+ *
+ * The common case (the target branch is active) holds only `FOR SHARE`. That
+ * still excludes every control mutation (Pause/Resume/Cancel, workspace
+ * control, auto-resume all take `FOR UPDATE`), so the effective state observed
+ * here cannot change for the rest of the transaction, while other Sends,
+ * Steers, claims, and event appends on the workspace proceed concurrently.
+ *
+ * When the branch is paused the admission must advance the workspace control
+ * revision, so it needs `FOR UPDATE`. Upgrading in place would deadlock as soon
+ * as two sharers decide to upgrade together (each waits for the other's share
+ * lock), so the shared prefix is taken inside a savepoint and rolled back
+ * before the exclusive prefix is requested: PostgreSQL releases row locks and
+ * transaction-level advisory locks acquired inside a rolled-back savepoint, so
+ * the exclusive request queues normally behind other holders.
+ *
+ * Callers that already hold the prefix exclusively (for example a realtime
+ * sync that admitted a delegation) simply observe their own stronger lock.
+ */
+export async function lockWorkspaceInferenceControlForAdmission(
+  db: Database,
+  input: { workspaceId: string; sessionId: string } & WorkspaceControlLockOptions,
+): Promise<WorkspaceControlAdmissionLock> {
+  // One budget spans the shared attempt and any escalation to the exclusive
+  // prefix, so the caller's bound is the total wait, not a per-step timeout.
+  const lockOptions: WorkspaceControlLockOptions =
+    input.lockTimeoutMs === undefined
+      ? {}
+      : { budget: workspaceControlLockBudget(input.lockTimeoutMs) };
+  await db.execute(sql.raw(`savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
+  const shared = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", lockOptions);
+  const effective = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+    workspaceControl: shared,
+  });
+  if (effective.state === "active") {
+    await db.execute(sql.raw(`release savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
+    return { control: shared, mode: "share" };
+  }
+  await db.execute(sql.raw(`rollback to savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
+  await db.execute(sql.raw(`release savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
+  return {
+    control: await lockWorkspaceInferenceControl(db, input.workspaceId, "update", lockOptions),
+    mode: "update",
+  };
 }
 
 export type SessionEventWriteLockInput = {
@@ -399,11 +600,18 @@ export type SessionEventWriteLocks = {
 /**
  * Establish the one canonical lock prefix for every `session_events` writer:
  *
- *   workspace_inference_controls (when control-aware)
+ *   workspace-control advisory lock + workspace_inference_controls row
+ *     (when control-aware; see `lockWorkspaceInferenceControl`)
  *     -> actual workspaces row FOR KEY SHARE
  *     -> session rows FOR NO KEY UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
+ *
+ * Control-aware writers that do not mutate the control row take it `share`;
+ * only genuine control mutations (Pause/Resume/Cancel, workspace control,
+ * auto-resume, settings narrowing, quiescent tree deletion) take `update`.
+ * Send/Steer admission decides between the two through
+ * `lockWorkspaceInferenceControlForAdmission`.
  *
  * `FOR KEY SHARE` is deliberate. Event inserts need the workspace key to remain
  * stable for their FK, but they do not mutate the workspace. The old generic
@@ -1492,7 +1700,7 @@ export async function reserveSessionCommandReceipt(
   if (
     identityScope === "goal_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      !["goal.update", "goal.progress"].includes(input.action) ||
+      !["goal.update", "goal.progress", "goal.wait"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
@@ -2465,9 +2673,15 @@ export async function mutateSessionControlInTransaction(
     action: "pause" | "resume" | "cancel";
     reason?: string | null;
     expectedControlEtag?: string | null;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<SessionControlMutationResult> {
-  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   const cancellationSubtree =
     input.action === "cancel"
       ? await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)
@@ -2781,6 +2995,13 @@ export async function autoResumeSessionBranchInTransaction(
     actor: string;
     reason: "human_send" | "human_steer" | "service_send" | "service_steer" | "agent_steer";
     observedControlEtag?: string | null;
+    /**
+     * The admission prefix the caller already holds. A `share` admission
+     * proves the branch was active under a lock that excludes every control
+     * mutation, so it never needs to resume; only an `update` admission may
+     * advance the workspace revision here.
+     */
+    admission?: WorkspaceControlAdmissionLock;
   },
 ): Promise<{
   revision: number;
@@ -2788,10 +3009,12 @@ export async function autoResumeSessionBranchInTransaction(
   changed: boolean;
   workspaceControlEventId: string | null;
 }> {
-  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const workspace =
+    input.admission?.control ??
+    (await lockWorkspaceInferenceControl(db, input.workspaceId, "update"));
   await assertSessionBranchIsNotCancelled(db, input.workspaceId, input.sessionId);
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
-    lock: "share",
+    workspaceControl: workspace,
   });
   if (input.observedControlEtag && input.observedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
@@ -2803,6 +3026,13 @@ export async function autoResumeSessionBranchInTransaction(
       changed: false,
       workspaceControlEventId: null,
     };
+  }
+  if (input.admission?.mode === "share") {
+    // Impossible by construction: the shared prefix observed an active branch
+    // and excludes every control mutation until this transaction ends.
+    throw new SessionControlInvariantError(
+      `Session ${input.sessionId} became paused under a shared workspace control lock`,
+    );
   }
   const revision = nextRevision(workspace);
   await advanceWorkspaceRevision(db, input.workspaceId, revision);
@@ -2865,9 +3095,15 @@ export async function mutateWorkspaceControlInTransaction(
     action: "pause" | "resume";
     reason?: string | null;
     expectedRevision?: number | null;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<WorkspaceControlMutationResult> {
-  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   const currentRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
   const hash = canonicalSessionCommandHash({
     action: input.action,

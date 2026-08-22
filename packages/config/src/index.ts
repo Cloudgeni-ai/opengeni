@@ -386,6 +386,11 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  slackCommand: z
+    .string()
+    .trim()
+    .regex(/^\/[a-z0-9_-]{1,31}$/u)
+    .default("/opengeni"),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
   googleDriveSyncMaxItems: z.coerce.number().int().positive().max(10_000).default(500),
@@ -2241,6 +2246,7 @@ export function getSettings(): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     googleDriveSyncMaxItems: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS"),

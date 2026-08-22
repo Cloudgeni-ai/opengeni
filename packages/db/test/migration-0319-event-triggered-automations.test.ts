@@ -14,10 +14,10 @@ const tenantTables = [
   "automation_run_event_links",
 ] as const;
 
-describe("migration 0317 event-triggered automations", () => {
+describe("migration 0319 event-triggered automations", () => {
   test("pins authentication, occurrence idempotency, authority, and RLS boundaries", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0317_event_triggered_automations.sql", import.meta.url),
+      new URL("../drizzle/0319_event_triggered_automations.sql", import.meta.url),
     ).text();
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(source).toContain("automation_sources_endpoint_uq");

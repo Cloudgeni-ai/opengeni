@@ -606,6 +606,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
       if (continuation.action === "continue" || continuation.action === "queue") continue;
+      // `none`, `paused`, and `held` all close this run below. A held goal keeps
+      // its durable obligation armed; the delayed wake-outbox row at the hold
+      // deadline, pending machine input, a human prompt, or any producer's
+      // signalWithStart restarts the workflow.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;

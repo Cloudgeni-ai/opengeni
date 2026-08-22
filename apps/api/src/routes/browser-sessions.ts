@@ -480,6 +480,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                       await ensureHeadedBrowserDisplayStack(
                         placement.session,
                         preparedSession.headless,
+                        linkedComputer !== null,
                       );
                       return await client.createSession({
                         browserSessionId: preparedSession.id,
@@ -2430,6 +2431,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   await ensureHeadedBrowserDisplayStack(
                     placement.session,
                     prepared.session.headless,
+                    linkedComputer !== null,
                   );
                   return await client.createSession({
                     browserSessionId,
@@ -3148,7 +3150,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       placement: placement.placement,
     });
     try {
-      await ensureHeadedBrowserDisplayStack(placement.session, record.session.headless);
+      await ensureHeadedBrowserDisplayStack(
+        placement.session,
+        record.session.headless,
+        linkedComputer !== null,
+      );
       await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
@@ -3372,12 +3378,20 @@ function assertCreateReplay(
 async function ensureHeadedBrowserDisplayStack(
   session: BrowserControlPlacementSession,
   headless: boolean,
+  linkedComputer: boolean,
 ): Promise<void> {
-  if (headless) return;
+  if (!browserNeedsStandaloneDisplayStack({ headless, linkedComputer })) return;
   if (typeof session.exec !== "function" && typeof session.execCommand !== "function") return;
   await ensureDisplayStack(session, {
     telemetryContext: { callerKind: "viewer" },
   });
+}
+
+export function browserNeedsStandaloneDisplayStack(input: {
+  headless: boolean;
+  linkedComputer: boolean;
+}): boolean {
+  return !input.headless && !input.linkedComputer;
 }
 
 async function ensureLinkedComputerController(
