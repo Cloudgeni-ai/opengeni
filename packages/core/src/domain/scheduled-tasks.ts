@@ -68,6 +68,7 @@ import {
 } from "./slack-bot";
 import {
   normalizeResources,
+  personalGitHubRepositoryResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
@@ -666,6 +667,18 @@ export async function validatedScheduledTaskUpdate(input: {
     input.existing.id,
   );
   if (input.payload.connectionAuthorities === undefined) {
+    if (
+      existingDelegations.some((delegation) => delegation.connectionType === "github_personal") &&
+      !isDeepStrictEqual(
+        personalGitHubRepositoryResources(nextAgentConfig.resources),
+        personalGitHubRepositoryResources(input.existing.agentConfig.resources),
+      )
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "changing personal GitHub repository resources requires explicit connectionAuthorities",
+      });
+    }
     if (
       existingDelegations.length > 0 &&
       !isDeepStrictEqual(nextAgentConfig.tools, input.existing.agentConfig.tools)

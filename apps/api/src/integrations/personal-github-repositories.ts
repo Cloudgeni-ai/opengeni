@@ -14,12 +14,18 @@ import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
-import { readResponseJsonBounded } from "@opengeni/network";
+import { readResponseTextBounded } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import JSONBig from "json-bigint";
 
 const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
 const GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES = 1024 * 1024;
+const personalGitHubProviderJsonParser = JSONBig({
+  storeAsString: true,
+  protoAction: "error",
+  constructorAction: "error",
+});
 
 export type PersonalGitHubRepositoryConnection = NonNullable<
   Awaited<ReturnType<typeof getConnectionMetadata>>
@@ -264,14 +270,21 @@ async function personalGitHubProviderJson(
     throw new PersonalGitHubRepositoryProviderError("provider_unavailable");
   }
   try {
-    return await readResponseJsonBounded(
-      response,
-      GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES,
-      repositoryLookup ? "GitHub repository response" : "GitHub repositories response",
+    return parsePersonalGitHubProviderJson(
+      await readResponseTextBounded(
+        response,
+        GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES,
+        repositoryLookup ? "GitHub repository response" : "GitHub repositories response",
+      ),
     );
   } catch {
     throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
   }
+}
+
+/** Keep provider integer lexemes exact before repository IDs become bigint-backed strings. */
+export function parsePersonalGitHubProviderJson(value: string): unknown {
+  return personalGitHubProviderJsonParser.parse(value) as unknown;
 }
 
 async function personalGitHubProviderFetch(
@@ -378,7 +391,7 @@ export function personalGitHubRepositoryCanWrite(
   return permissions.push || permissions.maintain || permissions.admin;
 }
 
-function parsePersonalGitHubRepository(value: unknown): PersonalGitHubRepositoryContract {
+export function parsePersonalGitHubRepository(value: unknown): PersonalGitHubRepositoryContract {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
   }

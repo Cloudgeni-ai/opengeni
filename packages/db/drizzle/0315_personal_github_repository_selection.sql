@@ -613,7 +613,10 @@ ALTER TABLE scheduled_task_connection_authority_snapshots
     AND grant_context = session_visibility
     AND session_visibility IN ('user_private', 'workspace_shared')
     AND cardinality(selection_sources) > 0
-  );
+  ) NOT VALID;
+
+ALTER TABLE scheduled_task_connection_authority_snapshots
+  VALIDATE CONSTRAINT scheduled_task_connection_authority_shape_chk;
 
 ALTER TABLE scheduled_task_run_connection_authority_snapshots
   DROP CONSTRAINT scheduled_run_connection_authority_shape_chk,
@@ -632,4 +635,7 @@ ALTER TABLE scheduled_task_run_connection_authority_snapshots
     AND grant_context = session_visibility
     AND session_visibility IN ('user_private', 'workspace_shared')
     AND cardinality(selection_sources) > 0
-  );
+  ) NOT VALID;
+
+ALTER TABLE scheduled_task_run_connection_authority_snapshots
+  VALIDATE CONSTRAINT scheduled_run_connection_authority_shape_chk;

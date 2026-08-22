@@ -128,6 +128,9 @@ describe("migration 0315 personal GitHub repository selection", () => {
     expect(source).toContain("scheduled_task_connection_authority_shape_chk");
     expect(source).toContain("scheduled_run_connection_authority_shape_chk");
     expect(source.match(/connection_type IN \('mcp', 'github_personal'\)/gu)).toHaveLength(2);
+    expect(source.match(/\) NOT VALID;/gu)).toHaveLength(2);
+    expect(source).toContain("VALIDATE CONSTRAINT scheduled_task_connection_authority_shape_chk");
+    expect(source).toContain("VALIDATE CONSTRAINT scheduled_run_connection_authority_shape_chk");
   });
 
   test("keeps bigint repository IDs exact and advances only authority-relevant generations", async () => {

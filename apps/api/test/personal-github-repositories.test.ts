@@ -3,12 +3,34 @@ import { describe, expect, test } from "bun:test";
 import {
   personalGitHubRepositoryCanRead,
   personalGitHubRepositoryCanWrite,
+  parsePersonalGitHubProviderJson,
+  parsePersonalGitHubRepository,
   requirePersonalGitHubRepositoryConnection,
 } from "../src/integrations/personal-github-repositories";
 
 const none = { pull: false, triage: false, push: false, maintain: false, admin: false };
 
 describe("personal GitHub repository capabilities", () => {
+  test("keeps a numeric GitHub repository ID exact above the JavaScript safe range", () => {
+    const payload = parsePersonalGitHubProviderJson(`{
+      "id": 9007199254740993123,
+      "full_name": "octocat/private-repository",
+      "default_branch": "main",
+      "visibility": "private",
+      "private": true,
+      "archived": false,
+      "disabled": false,
+      "permissions": {
+        "pull": true,
+        "push": true,
+        "admin": false,
+        "maintain": false,
+        "triage": false
+      }
+    }`);
+    expect(parsePersonalGitHubRepository(payload).repositoryId).toBe("9007199254740993123");
+  });
+
   test("fails before database or provider use when the deployment flag is off", async () => {
     let databaseUsed = false;
     await expect(

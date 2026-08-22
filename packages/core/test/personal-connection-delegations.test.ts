@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, testSettings } from "@opengeni/testing";
 import postgres from "postgres";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
@@ -32,6 +32,7 @@ import {
   personalConnectionDelegationsFromVisibleConnections,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
+import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
 
 const personalServer = {
   id: "linear",
@@ -602,6 +603,29 @@ describe("personal MCP connection delegation", () => {
         from scheduled_tasks where id = ${task.id}
       `;
       expect(persistedTask?.delegations).toEqual(frozen);
+
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: {
+            agentConfig: {
+              ...task.agentConfig,
+              resources: [{ ...resource, access: "read" }],
+            },
+          },
+          toolsProvided: true,
+        }),
+      ).rejects.toThrow(
+        "changing personal GitHub repository resources requires explicit connectionAuthorities",
+      );
 
       await replacePersonalGitHubRepositorySelections(client.db, {
         accountId: originGrant.accountId,
