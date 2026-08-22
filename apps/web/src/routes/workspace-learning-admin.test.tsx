@@ -199,6 +199,63 @@ describe("Learning & autonomy", () => {
     }
   });
 
+  test("saves a fresh workspace with no head, no overrides, and version 0", async () => {
+    getHistory.mockResolvedValueOnce({
+      ...history,
+      head: null,
+      revisions: [],
+      policyEvents: [],
+      decisions: [],
+      activations: [],
+      undos: [],
+    });
+    createRevision.mockClear();
+    activateRevision.mockClear();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      expect(container.querySelector<HTMLInputElement>('input[value="off"]')?.checked).toBe(true);
+
+      const reviewFirst = container.querySelector<HTMLInputElement>('input[value="suggest"]');
+      await act(async () => {
+        reviewFirst!.click();
+      });
+      const save = [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Save learning mode"),
+      );
+      await act(async () => {
+        save!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(createRevision).toHaveBeenCalledTimes(1);
+      expect(createRevision).toHaveBeenCalledWith(
+        workspaceId,
+        expect.objectContaining({
+          workspaceMode: "suggest",
+          sourceOverrides: [],
+          supersedesRevisionId: null,
+        }),
+      );
+      expect(activateRevision).toHaveBeenCalledTimes(1);
+      expect(activateRevision).toHaveBeenCalledWith(
+        workspaceId,
+        expect.any(String),
+        expect.objectContaining({
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+        }),
+      );
+      expect(container.textContent).toContain("Learning mode saved.");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   test("shows the admin-access note and disables saving without workspace:admin", async () => {
     const previousGrants = context.accessContext.workspaceGrants;
     context.accessContext.workspaceGrants = [{ workspaceId, permissions: ["workspace:read"] }];
